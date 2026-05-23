@@ -139,8 +139,14 @@ fn handle_client(cfd): i64 {
                 store8(&one, db & 0xFF);
                 send_buf(cfd, &one, 1);
             }
-            # EV_SB: subneg payload available — option-specific
-            # handling lands at the LINEMODE/NAWS bite.
+            if (ev == EV_SB) {
+                # NAWS / TERMINAL_TYPE / etc. payloads get parsed
+                # into TelnetState fields here. A follow-up call to
+                # telnet_handle_sb may also queue replies (e.g. a
+                # second TT SEND) — the next loop iteration's
+                # tx-buf drain flushes them.
+                telnet_handle_sb(ts);
+            }
             i = i + 1;
         }
     }

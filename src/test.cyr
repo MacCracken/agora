@@ -405,6 +405,150 @@ fn t14_announce_then_will_silent(): i64 {
     return 0;
 }
 
+# T15a: NAWS subneg parses into term_cols / term_rows.
+# Payload: IAC SB NAWS 0x00 0x50 0x00 0x18 IAC SE  → 80×24 (classic VT)
+fn t16_naws_parse(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x50);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x18);
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev != EV_SB) {
+        test_fail("t16_naws_parse", "expected EV_SB");
+        return 1;
+    }
+    telnet_handle_sb(ts);
+    if (telnet_term_cols(ts) != 0x50) {
+        test_fail("t16_naws_parse", "term_cols should be 80");
+        return 1;
+    }
+    if (telnet_term_rows(ts) != 0x18) {
+        test_fail("t16_naws_parse", "term_rows should be 24");
+        return 1;
+    }
+    test_pass("t16_naws_parse");
+    return 0;
+}
+
+# T17: NAWS with width=255 needs IAC IAC escaping in the payload —
+# parser unescapes back to literal 0xFF.
+# Payload: IAC SB NAWS 0x00 IAC IAC 0x00 0x18 IAC SE  → 255×24
+fn t17_naws_iac_escape(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, IAC);   # escaped → literal 0xFF
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x18);
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SE);
+    telnet_handle_sb(ts);
+    if (telnet_term_cols(ts) != 255) {
+        test_fail("t17_naws_iac_escape", "term_cols should be 255");
+        return 1;
+    }
+    if (telnet_term_rows(ts) != 0x18) {
+        test_fail("t17_naws_iac_escape", "term_rows should be 24");
+        return 1;
+    }
+    test_pass("t17_naws_iac_escape");
+    return 0;
+}
+
+# T18: TERMINAL_TYPE IS payload stored as ASCII into term_type buffer.
+# Payload: IAC SB TT IS X T E R M IAC SE  → "XTERM"
+fn t18_terminal_type_is(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_TERMINAL_TYPE);
+    telnet_feed(ts, TT_IS);
+    telnet_feed(ts, 0x58);  # 'X'
+    telnet_feed(ts, 0x54);  # 'T'
+    telnet_feed(ts, 0x45);  # 'E'
+    telnet_feed(ts, 0x52);  # 'R'
+    telnet_feed(ts, 0x4D);  # 'M'
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SE);
+    telnet_handle_sb(ts);
+
+    var tt = telnet_term_type(ts);
+    var ttlen = telnet_term_type_len(ts);
+    if (ttlen != 5) {
+        test_fail("t18_terminal_type_is", "term_type_len should be 5");
+        return 1;
+    }
+    if ((load8(tt + 0) & 0xFF) != 0x58) { test_fail("t18_terminal_type_is", "byte 0"); return 1; }
+    if ((load8(tt + 1) & 0xFF) != 0x54) { test_fail("t18_terminal_type_is", "byte 1"); return 1; }
+    if ((load8(tt + 2) & 0xFF) != 0x45) { test_fail("t18_terminal_type_is", "byte 2"); return 1; }
+    if ((load8(tt + 3) & 0xFF) != 0x52) { test_fail("t18_terminal_type_is", "byte 3"); return 1; }
+    if ((load8(tt + 4) & 0xFF) != 0x4D) { test_fail("t18_terminal_type_is", "byte 4"); return 1; }
+    test_pass("t18_terminal_type_is");
+    return 0;
+}
+
+# T19: peer WILL TT → us-side him-TT lands Q_YES → ts_on_him_yes emits
+# the 6-byte SEND request: IAC SB TT SEND IAC SE. Verified after the
+# announce salvo so him-TT enters from Q_WANTYES.
+fn t19_will_tt_emits_send(): i64 {
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+    telnet_tx_consume(ts);
+
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_TERMINAL_TYPE);
+
+    var len = telnet_tx_len(ts);
+    if (len != 6) {
+        test_fail("t19_will_tt_emits_send", "expected 6-byte SEND request");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    if ((load8(buf + 0) & 0xFF) != IAC)               { test_fail("t19_will_tt_emits_send", "byte 0"); return 1; }
+    if ((load8(buf + 1) & 0xFF) != SB)                { test_fail("t19_will_tt_emits_send", "byte 1"); return 1; }
+    if ((load8(buf + 2) & 0xFF) != OPT_TERMINAL_TYPE) { test_fail("t19_will_tt_emits_send", "byte 2"); return 1; }
+    if ((load8(buf + 3) & 0xFF) != TT_SEND)           { test_fail("t19_will_tt_emits_send", "byte 3"); return 1; }
+    if ((load8(buf + 4) & 0xFF) != IAC)               { test_fail("t19_will_tt_emits_send", "byte 4"); return 1; }
+    if ((load8(buf + 5) & 0xFF) != SE)                { test_fail("t19_will_tt_emits_send", "byte 5"); return 1; }
+    if (opt_him(ts, OPT_TERMINAL_TYPE) != Q_YES) {
+        test_fail("t19_will_tt_emits_send", "him-TT should be Q_YES");
+        return 1;
+    }
+    test_pass("t19_will_tt_emits_send");
+    return 0;
+}
+
+# T20: NAWS with wrong payload length (3 bytes instead of 4) is
+# silently dropped — defense in depth, malformed peers don't move
+# our state.
+fn t20_naws_malformed_dropped(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x50);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SE);
+    telnet_handle_sb(ts);
+    if (telnet_term_cols(ts) != 0) {
+        test_fail("t20_naws_malformed_dropped", "term_cols should stay 0");
+        return 1;
+    }
+    test_pass("t20_naws_malformed_dropped");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -445,6 +589,11 @@ fn main(): i64 {
     t13_untracked_option_refused();
     t14_announce_then_will_silent();
     t15_tx_consume_resets();
+    t16_naws_parse();
+    t17_naws_iac_escape();
+    t18_terminal_type_is();
+    t19_will_tt_emits_send();
+    t20_naws_malformed_dropped();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

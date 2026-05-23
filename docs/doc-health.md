@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (v0.1.0 + M1 second-bite — initial scaffold + doc-tree adoption per first-party-documentation.md; updated for M1 Q-method bite) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (v0.1.0 + M1 third-bite — initial scaffold + doc-tree adoption per first-party-documentation.md; updated through M1 NAWS/TT subneg parsing) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,7 +39,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** v0.1.0 scaffold + [Unreleased] entries for M1 first-bite (cross-platform telnet listener) + M1 second-bite (RFC 1143 Q-method). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** v0.1.0 scaffold + [Unreleased] entries for M1 first-bite (cross-platform telnet listener) + M1 second-bite (RFC 1143 Q-method) + M1 third-bite (NAWS / TT subneg parsing). |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
@@ -56,7 +56,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** Tracks both M1 bites — binary 43,216 → 56,064 → 59,280 B; test count 0 → 10 → 15; remaining-bites list trimmed (Q-method + slowloris struck; NAWS/TT subneg + LINEMODE + bench remain). |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** Tracks three M1 bites — binary 43,216 → 56,064 → 59,280 → 61,152 B; test count 0 → 10 → 15 → 20; remaining-bites list now just LINEMODE + bench harness. |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).

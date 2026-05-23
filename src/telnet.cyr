@@ -100,7 +100,25 @@ enum TS {
     TS_OPT_US    = 72;    # pointer to 256-byte us-side option state (RFC 1143 Q)
     TS_OPT_HIM   = 80;    # pointer to 256-byte him-side option state
 
-    TS_SIZE      = 88;    # total struct size for alloc()
+    TS_TERM_COLS = 88;    # window width  (NAWS, RFC 1073); 0 until peer reports
+    TS_TERM_ROWS = 96;    # window height (NAWS); 0 until peer reports
+    TS_TERM_TYPE = 104;   # pointer to 256-byte ASCII terminal-type buffer
+    TS_TERM_TLEN = 112;   # actual length (bytes) of term_type string
+
+    TS_SIZE      = 120;   # total struct size for alloc()
+}
+
+# Per-connection terminal-type buffer cap. Real values are short
+# (XTERM-256COLOR ≈ 14 chars; ANSI ≈ 4; VT100 ≈ 5) — 256 is a
+# generous ceiling that also caps subneg overrun.
+enum TermCap {
+    TERM_TYPE_CAP = 256;
+}
+
+# TERMINAL_TYPE subneg sub-commands (RFC 1091 § 2)
+enum TermTT {
+    TT_IS   = 0;
+    TT_SEND = 1;
 }
 
 # === RFC 1143 Q-method option state (per option, per side) ===
@@ -141,8 +159,10 @@ fn telnet_state_new(): i64 {
     var sb = alloc(SB_BUF_CAP);
     var ou = alloc(256);
     var oh = alloc(256);
+    var tt = alloc(TERM_TYPE_CAP);
     memset(ou, 0, 256);
     memset(oh, 0, 256);
+    memset(tt, 0, TERM_TYPE_CAP);
 
     store64(ts + TS_STATE,    ST_DATA);
     store64(ts + TS_VERB,     0);
@@ -159,8 +179,20 @@ fn telnet_state_new(): i64 {
     store64(ts + TS_OPT_US,  ou);
     store64(ts + TS_OPT_HIM, oh);
 
+    store64(ts + TS_TERM_COLS, 0);
+    store64(ts + TS_TERM_ROWS, 0);
+    store64(ts + TS_TERM_TYPE, tt);
+    store64(ts + TS_TERM_TLEN, 0);
+
     return ts;
 }
+
+# === Terminal capabilities (populated by EV_SB handling) ===
+
+fn telnet_term_cols(ts): i64 { return load64(ts + TS_TERM_COLS); }
+fn telnet_term_rows(ts): i64 { return load64(ts + TS_TERM_ROWS); }
+fn telnet_term_type(ts): i64 { return load64(ts + TS_TERM_TYPE); }
+fn telnet_term_type_len(ts): i64 { return load64(ts + TS_TERM_TLEN); }
 
 # === Per-option Q-state accessors ===
 
@@ -318,6 +350,7 @@ fn telnet_handle_negotiation(ts, verb, opt): i64 {
             if (opt_pref_him(opt) != 0) {
                 opt_set_him(ts, opt, Q_YES);
                 ts_emit_iac3(ts, DO, opt);
+                ts_on_him_yes(ts, opt);
             } else {
                 ts_emit_iac3(ts, DONT, opt);
             }
@@ -325,6 +358,7 @@ fn telnet_handle_negotiation(ts, verb, opt): i64 {
         }
         if (sh == Q_WANTYES) {
             opt_set_him(ts, opt, Q_YES);
+            ts_on_him_yes(ts, opt);
             # no reply — we previously asked; this is the confirmation
             return 0;
         }
@@ -490,6 +524,73 @@ fn telnet_feed(ts, b): i64 {
     # Unreachable in well-formed code; defensive return.
     store64(ts + TS_STATE, ST_DATA);
     return EV_NONE;
+}
+
+# Emit the 6-byte "please send your terminal type" request:
+#   IAC SB TERMINAL_TYPE SEND IAC SE
+# Called when him-TERMINAL_TYPE first transitions to Q_YES.
+fn ts_emit_tt_send(ts): i64 {
+    ts_tx_push(ts, IAC);
+    ts_tx_push(ts, SB);
+    ts_tx_push(ts, OPT_TERMINAL_TYPE);
+    ts_tx_push(ts, TT_SEND);
+    ts_tx_push(ts, IAC);
+    ts_tx_push(ts, SE);
+    return 0;
+}
+
+# Hook for "him-state just entered Q_YES" — currently only TT
+# uses it (to prompt the peer for its name). Add more options here
+# as M1 grows (e.g. CHARSET, NEW_ENVIRON).
+fn ts_on_him_yes(ts, opt): i64 {
+    if (opt == OPT_TERMINAL_TYPE) { ts_emit_tt_send(ts); }
+    return 0;
+}
+
+# Handle a completed subnegotiation (telnet_feed returned EV_SB).
+# sb_buf[0] holds the option code; sb_buf[1..sb_len] holds the
+# payload. Dispatches by option code; unknown subnegs are
+# silently dropped (defense in depth — RFC 855 § Subnegotiation).
+#
+# Supported options:
+#   NAWS           4-byte payload: w_hi w_lo h_hi h_lo (RFC 1073)
+#   TERMINAL_TYPE  IS / SEND framing (RFC 1091)
+fn telnet_handle_sb(ts): i64 {
+    var buf = telnet_sb_buf(ts);
+    var len = telnet_sb_len(ts);
+    if (len < 1) { return 0; }
+    var opt = load8(buf) & 0xFF;
+
+    if (opt == OPT_NAWS) {
+        # RFC 1073: payload is exactly 4 bytes (width MSB, width LSB,
+        # height MSB, height LSB), both 16-bit big-endian. Reject any
+        # other length — malformed peers don't get to set our state.
+        if (len != 5) { return 0; }
+        var w = ((load8(buf + 1) & 0xFF) << 8) | (load8(buf + 2) & 0xFF);
+        var h = ((load8(buf + 3) & 0xFF) << 8) | (load8(buf + 4) & 0xFF);
+        store64(ts + TS_TERM_COLS, w);
+        store64(ts + TS_TERM_ROWS, h);
+        return 0;
+    }
+
+    if (opt == OPT_TERMINAL_TYPE) {
+        # RFC 1091: payload starts with sub-command (IS=0 or SEND=1),
+        # followed by the ASCII type string when sub-command is IS.
+        # We only consume IS — SEND is a server-side request, peers
+        # sending us SEND is out of spec (we ignore).
+        if (len < 2) { return 0; }
+        var sub = load8(buf + 1) & 0xFF;
+        if (sub != TT_IS) { return 0; }
+        var payload_len = len - 2;
+        if (payload_len > TERM_TYPE_CAP) { payload_len = TERM_TYPE_CAP; }
+        var tt = load64(ts + TS_TERM_TYPE);
+        memcpy(tt, buf + 2, payload_len);
+        store64(ts + TS_TERM_TLEN, payload_len);
+        return 0;
+    }
+
+    # Other subnegs (LINEMODE, STATUS IS, etc.) — ignore for now.
+    return 0;
 }
 
 # Emit the server-side preferred-options salvo. Called once per
