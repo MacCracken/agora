@@ -4,6 +4,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M6-B: account primitives in `src/account.cyr` (2026-05-23)
+
+- **`src/account.cyr`** (~230 LOC) — per-user identity primitives per ADR 0006:
+  - `compute_fingerprint(pk_buf, out_buf)` — `hex(sha256(pk))[0:16]` via sigil's `sha256` + inline hex encoder. Writes 16 lowercase hex chars + NUL.
+  - `handle_valid(name)` — same alphabet as `board_name_valid` (lowercase ASCII / digits / `-` / `_`, first char letter or digit, 1-32 bytes) but different reserved set (`anonymous`, `system`, `admin`).
+  - `build_users_dir(store, out_buf)` / `build_user_dir(store, fp16, out_buf)` / `build_user_file(store, fp16, file_name, out_buf)` — path builders mirroring `board_path` / `build_post_path` shape.
+  - `account_dir_ensure(store, fp16)` — mkdir `<store>` + `<store>/.users` + `<store>/.users/<fp16>` (EEXIST as success at every level).
+  - `account_register(store, pk_buf, handle, fp_out)` — writes `public_key.bin` (32 bytes raw) + `handle` (UTF-8 + LF) + `created.iso8601` (chrono now + LF). Computes fp from pk; caller pre-checks handle uniqueness via `account_resolve_handle`.
+  - `account_lookup_pubkey(store, fp16, pk_out)` — reads `public_key.bin` into pk_out.
+  - `account_lookup_handle(store, fp16, out_buf, out_max)` — reads `handle` file, strips trailing CR/LF (flag-driven trim per CLAUDE.md no-`break`-with-`var` rule), NUL-terminates.
+  - `account_resolve_handle(store, handle, fp_out)` — O(n) scan of `<store>/.users/`, returns 1 + writes fingerprint on match, 0 on not-found. Same scan-on-read shape as `replies_to` (ADR 0005).
+- **`cyrius.cyml [deps].stdlib`** — added `sigil` (bundled 3.1.1 from the cyrius 6.0.1 snapshot; ed25519 + sha256 + hex are the surface we consume) and `freelist` (`fl_alloc` / `fl_free` are sigil's `sha256_init` / `sha256_finalize` heap-ctx primitives). 16 modules at 0.5.0 → 18 at this bite.
+- **Tests grew 49 → 56**: `t50_compute_fingerprint_known_pk` (sha256(zeros32) prefix == `66687aadf862bd77`), `t51_compute_fingerprint_deterministic` (two calls on same pk match), `t52_handle_valid_accepts` (canonical alphabet incl. 32-char ceiling), `t53_handle_valid_rejects` (NUL ptr, empty, reserved set, uppercase, dot, slash, leading dash/underscore, space, 33-char overflow), `t54_build_users_dir_shape` / `t55_build_user_dir_shape` / `t56_build_user_file_shape` (path formats verbatim with NUL terminators).
+- **Note on bundled sigil version**: state.md cited sigil 3.4.3 (the standalone repo's tip) as the gate target; the cyrius 6.0.1 toolchain snapshot bundles 3.1.1, which provides the same Ed25519 + SHA-256 + hex surface we need for M6. Updated state.md gate row to reflect the bundled version.
+- **Binary growth**: `build/agora` 140,160 B (0.5.0) → 332,552 B (this bite). +192 KB for sigil + freelist; ~165 KB of that is unreachable-but-NOPed (PQC / keccak / hashmap_fast / thread paths sigil declares but we never call). Real binary strip is a v1.x close-out concern per state.md. Net cost for actually-used code: ~27 KB for ed25519 + sha256 + hex + account.cyr.
+- **Sigil-imported warnings**: build emits ~25 "undefined function" warnings for sigil's PQC + keccak + hashmap_fast + thread call sites; all are unreachable from the agora-side call graph (ed25519_sign / ed25519_verify / sha256 / hex_encode are the only sigil entry points we invoke). Documented here so future bites don't re-investigate.
+
+### Added — M6-A: ADR 0006 — identity model (2026-05-23)
+
+- **[ADR 0006](docs/adr/0006-identity-model.md)** — opens the M6 cycle. Captures six load-bearing decisions: (A) sigil Ed25519 as the identity primitive; (X) `<store>/.users/<fp16>/` per-user directory (public_key.bin + handle + created.iso8601); (p) challenge/response wire flow (server emits 32-byte nonce, client signs `"agora-login:" + nonce_hex`, server verifies via `ed25519_verify` against the registered pubkey); (P1) anon-read + auth-post default; `From: <handle> <fp16>` header on authenticated posts (missing From == anonymous, backwards-compat with M5 posts); CLI gains `agora whoami` + `agora keygen` + `agora register` + `agora post --as` with `~/.agora/key` as the default keyfile location.
+- Rejects five alternatives with concrete reasoning: ML-DSA-65 at first cut (gated behind `-D SIGIL_PQC`, 1.2 KB sigs), password hashes (cleartext-on-wire over telnet has no defensible flow), fully sigil-managed account store (per-deployment user lists scatter across home dirs), `users.cyml` sidecar (two-file invariant — anti-pattern rejected at every prior ADR layer), federated identity at M6 (v2.x pillar 1, requires content-addressing graduation to be coherent).
+- Fingerprint: `hex(sha256(public_key))[0:16]` — 64 bits, comfortable at ~10s of users per deployment; lengthening to 32 hex chars is a non-breaking forward-compatible change if a future deployment needs it.
+- Per-board posting policy ships in M6-F: per-board `.policy` file (one of `open` / `known` / `admin`), per-board `.admins` for the admin mode. Missing `.policy` defaults to `open` (any authenticated user can post).
+- No code in this bite — ADR-only. Subsequent bites (M6-B through M6-F) implement the decisions.
+
 ## [0.5.0] — 2026-05-23 (M5 close — boards + threads)
 
 agora is now a **multi-board threaded BBS over telnet**. The full M5 cycle ships: six bites + four ADRs landed between 0.4.0 and 0.5.0. Single-board posting (0.4.0) becomes multi-board threaded conversation (0.5.0) without any user-visible data migration — the 0.4.0 flat-root layout is the implicit "main" board.

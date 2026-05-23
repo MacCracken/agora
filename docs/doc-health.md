@@ -21,12 +21,12 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | 10 | Refreshed at 0.5.0 ship + post-ship cleanup. |
+| ✅ **Fresh / touched in current cycle** | 10 | Refreshed at 0.5.0 ship + post-ship cleanup; ADR 0006 landed at M6 cycle-open. |
 | 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` both predate M5 and read as 0.1.0-era. Earned but deferred; lands at M6 close or when a downstream first reads them. |
 | 🟠 **Read-through outstanding** | 0 | None. |
-| 🔵 **Probably evergreen** | 5 | All five ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading). |
+| 🔵 **Probably evergreen** | 6 | All six ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model). |
 | 📦 **Archive — frozen by design** | 0 | None. |
-| ❓ **Open strategic question** | 1 | What does the M6 identity model look like? Resolves into ADR 0006 in the M6 cycle (storage location for user metadata, sigil-challenge wire flow, From-header semantics, per-board permission shape). |
+| ❓ **Open strategic question** | 0 | M6 identity model resolved by ADR 0006 (2026-05-23). Next open question opens with the 0.7.0 security-sweep cycle. |
 
 Numbers exact post-0.5.0; rolls up from the per-tier tables below.
 
@@ -67,7 +67,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 ## Tier 3 — ADRs (`docs/adr/`)
 
-5 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
+6 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
@@ -78,8 +78,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0003-rfc-822-post-headers.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-D** — RFC-822-shaped headers (Subject + Date) followed by blank line + body. Rejects JSON / CYML / TSV alternatives. Backwards-compatible with M5-A/B/C headerless posts via uppercase-first-byte sniffer. |
 | `0004-board-layout.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-E** — flat-root = "main", subdirs = named boards. Free backwards-compat with 0.4.0 stores. Modal current-board UI for telnet, `--board <name>` flag for CLI. Auto-create on first post. Rejects all-subdirs migration + sidecar index + per-port-board UI. |
 | `0005-threading-via-reply-to.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-F** — `Reply-To: <id>` header (same-board, ID-only); scan-on-read enumeration; RFC 5322 § 3.6.5 Re: subject prefix (no double). Rejects deep-threading via In-Reply-To+References, sidecar reply index, and cross-board values. |
-
-**Open question** — ADR 0006 (identity model) is the next decision, sketched in `state.md`'s in-flight slot for M6 → 0.6.0. Covers storage location for user metadata, sigil-challenge wire flow, From-header semantics, per-board permission shape.
+| `0006-identity-model.md` | 2026-05-23 | 🔵 Evergreen | **New at M6 cycle-open** — sigil Ed25519 as identity primitive; `<store>/.users/<fp16>/` per-user directory; challenge/response wire flow (server nonce → client Ed25519 sig); anon-read + auth-post default; `From: <handle> <fp16>` header; `~/.agora/key` for the keyfile. Rejects ML-DSA at first cut, password hashes, sigil-managed account store, users.cyml sidecar, and federated/WoT identity (deferred to v2.x pillar 1). |
 
 ---
 

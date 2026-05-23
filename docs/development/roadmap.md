@@ -28,15 +28,17 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 ### M6 — user accounts + auth → 0.6.0
 
-**sigil** 3.4.2 ✅ is the identity primitive. Per-board posting permissions, login flow, `whoami`. Out of scope: federated identity, web-of-trust (those are v2.x pillar 1 — see [`roadmap-future.md`](roadmap-future.md)).
+**sigil** 3.4.3 ✅ is the identity primitive. Per-board posting permissions, login flow, `whoami`. Out of scope: federated identity, web-of-trust (those are v2.x pillar 1 — see [`roadmap-future.md`](roadmap-future.md)).
 
-The first bite is an ADR for the identity model (probably 0006): how the user-side keypair maps to a session, where account metadata lives on disk (own subtree or sigil-managed), what `login` looks like over telnet (challenge / response), what `whoami` reports. Sketch:
+**M6-A landed 2026-05-23** — [ADR 0006 — identity model](../adr/0006-identity-model.md) captures: sigil Ed25519 primitive, `<store>/.users/<fp16>/` per-user dir, challenge/response wire flow (server 32-byte nonce → client signs `"agora-login:" + nonce_hex`), anon-read + auth-post default, `From: <handle> <fp16>` post header, `~/.agora/key` keyfile.
 
-- Wire flow: `login` command → server sends challenge → client signs with sigil key → server verifies fingerprint → session now bound to that identity
-- Storage: `<store>/.users/<fingerprint>` per-user metadata? or fully owned by sigil?
-- Per-board policy: open-post (default), known-only, admin-only — operator-config per board, not per-user-pair-board (that's M6+ polish)
-- Subject for posts gains a `From: <handle>` header (sketch — ADR 0006 finalizes)
-- CLI: `agora whoami` (decoded from sigil fingerprint), `agora post` learns `--as <handle>` for testing
+**Remaining bites**:
+
+- **M6-B** — `src/account.cyr` primitives (fingerprint, build_user_path, register, lookup by fp / by handle)
+- **M6-C** — telnet `login` + challenge/response (new `MODE_LOGIN_AWAIT_SIG`, ed25519_verify, 30 s deadline)
+- **M6-D** — `whoami` (telnet + CLI)
+- **M6-E** — `From:` header on posts; CLI `--as <handle>`
+- **M6-F** — per-board posting policy (`.policy` + `.admins`)
 
 ---
 

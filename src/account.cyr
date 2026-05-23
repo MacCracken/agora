@@ -1,0 +1,302 @@
+# account.cyr — per-user identity primitives (M6-B, ADR 0006).
+#
+# Storage layout (per ADR 0006 § Specifics):
+#
+#   <store>/.users/<fp16>/
+#     public_key.bin     # 32 raw bytes (Ed25519 pubkey)
+#     handle             # UTF-8 handle, no trailing CR/LF
+#     created.iso8601    # iso8601 timestamp at registration
+#
+# The dot-prefix `.users/` dodges board_name_valid (which rejects
+# leading-dot names) and parse_post_id (which rejects non-`.txt`
+# suffixes) — same precedent as `.lock` from ADR 0004.
+#
+# Server holds only public keys. Secret keys live in the user's
+# keyfile (default `~/.agora/key`) and never touch the server —
+# lost the keyfile = lost the identity, by design (see ADR 0006
+# § Consequences / Negative).
+#
+# Cross-platform: piggybacks on board.cyr's syscall + permission
+# constants (SYS_MKDIR, PERM_DIR, PERM_FILE) and lib/io.cyr for
+# file_open / file_read_all / file_write / file_close. lib/fs.cyr's
+# dir_list backs the handle scan.
+
+# === Constants ===
+
+enum AccountCap {
+    ACCOUNT_PK_BYTES        = 32;    # Ed25519 public key
+    ACCOUNT_SK_BYTES        = 64;    # Ed25519 secret_key (seed || pk)
+    ACCOUNT_SEED_BYTES      = 32;    # Ed25519 seed (first half of SK)
+    ACCOUNT_SIG_BYTES       = 64;    # Ed25519 signature
+    ACCOUNT_FP_HEX_BYTES    = 16;    # fingerprint = 16 lowercase hex chars
+    ACCOUNT_FP_BUF_BYTES    = 17;    # +1 for NUL terminator
+    ACCOUNT_HANDLE_MAX      = 32;    # handle string max bytes (UTF-8)
+    ACCOUNT_HANDLE_BUF      = 33;    # +1 for NUL terminator
+    ACCOUNT_NONCE_BYTES     = 32;    # random nonce raw byte count
+    ACCOUNT_NONCE_HEX_BYTES = 64;    # nonce hex-encoded length
+    ACCOUNT_NONCE_BUF_BYTES = 65;    # +1 for NUL
+    ACCOUNT_SCAN_MAX        = 1024;  # max users enumerated per scan
+}
+
+# === Fingerprint computation ===
+#
+# fp = first 8 bytes of sha256(public_key), hex-encoded as 16
+# lowercase chars. 64 bits of fingerprint — comfortable at ~10s of
+# users per deployment (ADR 0006 § Consequences). Extension to 32
+# hex chars is non-breaking forward-compat.
+#
+# Writes ACCOUNT_FP_HEX_BYTES (=16) lowercase hex chars + NUL into
+# `out_buf`. Caller must provide ≥ ACCOUNT_FP_BUF_BYTES bytes.
+fn compute_fingerprint(pk_buf, out_buf): i64 {
+    var digest[32];
+    sha256(pk_buf, ACCOUNT_PK_BYTES, &digest);
+    var i = 0;
+    while (i < 8) {
+        var b = load8((&digest) + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(out_buf + i * 2, 48 + hi); }
+        else         { store8(out_buf + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out_buf + i * 2 + 1, 48 + lo); }
+        else         { store8(out_buf + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out_buf + ACCOUNT_FP_HEX_BYTES, 0);
+    return ACCOUNT_FP_HEX_BYTES;
+}
+
+# === Handle validation ===
+#
+# Per ADR 0006: same alphabet as board names — lowercase ASCII +
+# digits + `-` + `_`, first char letter or digit, 1-32 bytes — but
+# different reserved set: `anonymous`, `system`, `admin` are
+# reserved (those are display labels for unauthenticated /
+# server-generated / per-board-admin lines, not user handles).
+#
+# Returns 1 if valid, 0 if invalid.
+fn handle_valid(name): i64 {
+    if (name == 0) { return 0; }
+    var len = strlen(name);
+    if (len < 1)                  { return 0; }
+    if (len > ACCOUNT_HANDLE_MAX) { return 0; }
+
+    # Reserved handles
+    if (streq(name, "anonymous") != 0) { return 0; }
+    if (streq(name, "system")    != 0) { return 0; }
+    if (streq(name, "admin")     != 0) { return 0; }
+
+    # First byte: lowercase letter or digit
+    var c0 = load8(name) & 0xFF;
+    var c0_ok = 0;
+    if (c0 >= 97) { if (c0 <= 122) { c0_ok = 1; } }   # a-z
+    if (c0 >= 48) { if (c0 <= 57)  { c0_ok = 1; } }   # 0-9
+    if (c0_ok == 0) { return 0; }
+
+    # Rest: a-z, 0-9, '-', '_'
+    var i = 1;
+    while (i < len) {
+        var c = load8(name + i) & 0xFF;
+        var ok = 0;
+        if (c >= 97) { if (c <= 122) { ok = 1; } }
+        if (c >= 48) { if (c <= 57)  { ok = 1; } }
+        if (c == 45) { ok = 1; }                       # '-'
+        if (c == 95) { ok = 1; }                       # '_'
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# === Path resolution ===
+#
+# Writes `<store>/.users` (NUL-terminated) into out_buf. Returns
+# length excluding NUL. out_buf must be ≥ PATH_MAX_BYTES.
+fn build_users_dir(store, out_buf): i64 {
+    var slen = strlen(store);
+    memcpy(out_buf, store, slen);
+    var pos = slen;
+    store8(out_buf + pos, 47); pos = pos + 1;             # '/'
+    memcpy(out_buf + pos, ".users", 6); pos = pos + 6;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# Writes `<store>/.users/<fp16>` (NUL-terminated) into out_buf.
+# Returns length excluding NUL.
+fn build_user_dir(store, fp16, out_buf): i64 {
+    var pos = build_users_dir(store, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;             # '/'
+    var flen = strlen(fp16);
+    memcpy(out_buf + pos, fp16, flen); pos = pos + flen;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# Writes `<store>/.users/<fp16>/<file_name>` (NUL-terminated) into
+# out_buf. `file_name` is one of "public_key.bin" / "handle" /
+# "created.iso8601" per ADR 0006. Returns length excluding NUL.
+fn build_user_file(store, fp16, file_name, out_buf): i64 {
+    var pos = build_user_dir(store, fp16, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;             # '/'
+    var nlen = strlen(file_name);
+    memcpy(out_buf + pos, file_name, nlen); pos = pos + nlen;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# === Directory ensure ===
+#
+# mkdir <store> + <store>/.users + <store>/.users/<fp16>.
+# Treats EEXIST (-17 on Linux) as success at every level. Returns
+# 0 on success, negative errno on failure.
+fn account_dir_ensure(store, fp16): i64 {
+    var rc = store_ensure(store);
+    if (rc != 0) { return rc; }
+
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_users_dir(store, path_buf);
+    rc = store_ensure(path_buf);
+    if (rc != 0) { return rc; }
+
+    build_user_dir(store, fp16, path_buf);
+    return store_ensure(path_buf);
+}
+
+# === Registration ===
+#
+# Writes the three per-user files for (pk, handle):
+#   public_key.bin    32 raw bytes
+#   handle            <handle string> + LF
+#   created.iso8601   chrono.iso8601_now() + LF
+#
+# Computes the fingerprint from pk and writes it into fp_out (which
+# must be ≥ ACCOUNT_FP_BUF_BYTES). Returns 0 on success, negative
+# on failure (mkdir / open / write errors). Does NOT validate
+# handle uniqueness — caller (M6 register CLI / wire flow) must
+# pre-check via account_resolve_handle.
+fn account_register(store, pk_buf, handle, fp_out): i64 {
+    compute_fingerprint(pk_buf, fp_out);
+
+    var rc = account_dir_ensure(store, fp_out);
+    if (rc != 0) { return rc; }
+
+    var path_buf = alloc(PATH_MAX_BYTES);
+
+    # public_key.bin — 32 raw bytes
+    build_user_file(store, fp_out, "public_key.bin", path_buf);
+    var fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var n = file_write(fd, pk_buf, ACCOUNT_PK_BYTES);
+    file_close(fd);
+    if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
+
+    # handle — UTF-8 bytes + LF
+    build_user_file(store, fp_out, "handle", path_buf);
+    fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var hlen = strlen(handle);
+    if (file_write(fd, handle, hlen) != hlen) { file_close(fd); return 0 - 1; }
+    var lf[1];
+    store8(&lf, 10);
+    file_write(fd, &lf, 1);
+    file_close(fd);
+
+    # created.iso8601 — chrono now + LF
+    build_user_file(store, fp_out, "created.iso8601", path_buf);
+    fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var iso = iso8601_now();
+    var ilen = strlen(iso);
+    if (file_write(fd, iso, ilen) != ilen) { file_close(fd); return 0 - 1; }
+    file_write(fd, &lf, 1);
+    file_close(fd);
+
+    return 0;
+}
+
+# === Lookups ===
+#
+# Read the 32-byte public key for (store, fp16) into pk_out.
+# Returns 0 on success, negative on file-not-found / read error.
+fn account_lookup_pubkey(store, fp16, pk_out): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_user_file(store, fp16, "public_key.bin", path_buf);
+    var n = file_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);
+    if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
+    return 0;
+}
+
+# Read the handle for (store, fp16) into out_buf, strip trailing
+# CR/LF, NUL-terminate. Returns handle length (excluding NUL), or
+# -1 on file-not-found / read error. out_buf must be ≥
+# ACCOUNT_HANDLE_BUF.
+fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_user_file(store, fp16, "handle", path_buf);
+    var raw[34];
+    memset(&raw, 0, 34);
+    var read_cap = ACCOUNT_HANDLE_MAX + 2;
+    var n = file_read_all(path_buf, &raw, read_cap);
+    if (n < 0) { return 0 - 1; }
+    # Trim trailing CR/LF via flag + continue (CLAUDE.md: no `break`
+    # in while loops with `var` declarations).
+    var trimming = 1;
+    while (trimming == 1) {
+        if (n <= 0) { trimming = 0; continue; }
+        var last = load8((&raw) + n - 1) & 0xFF;
+        if (last == 10) { n = n - 1; continue; }
+        if (last == 13) { n = n - 1; continue; }
+        trimming = 0;
+    }
+    var copy_len = n;
+    if (copy_len > out_max - 1) { copy_len = out_max - 1; }
+    if (copy_len > 0) { memcpy(out_buf, &raw, copy_len); }
+    store8(out_buf + copy_len, 0);
+    return copy_len;
+}
+
+# Scan `<store>/.users/` for a user whose `handle` file equals
+# `handle`. On match, writes the per-user fingerprint into fp_out
+# (NUL-terminated; must be ≥ ACCOUNT_FP_BUF_BYTES) and returns 1.
+# Returns 0 if no match. Returns negative on directory-list error
+# (treated as not-found for caller convenience).
+#
+# O(n) in the number of registered users — same scan-on-read shape
+# as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
+# future bite may add a `<store>/.users/.by-handle/<handle> → <fp>`
+# symlink index if a real deployment hits the scale.
+fn account_resolve_handle(store, handle, fp_out): i64 {
+    var users_path = alloc(PATH_MAX_BYTES);
+    build_users_dir(store, users_path);
+
+    var entries = dir_list(str_from(users_path));
+    if (entries == 0) { return 0; }
+    var n = vec_len(entries);
+    if (n > ACCOUNT_SCAN_MAX) { n = ACCOUNT_SCAN_MAX; }
+
+    var handle_buf = alloc(ACCOUNT_HANDLE_BUF);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        var entry_str = vec_get(entries, i);
+        var entry = str_data(entry_str);
+        # Entry must look like a 16-char hex fingerprint. Quick
+        # length check — skip dotfiles + index sidecars + anything
+        # not the right shape.
+        var elen = strlen(entry);
+        if (elen == ACCOUNT_FP_HEX_BYTES) {
+            if (found == 0) {
+                var hlen = account_lookup_handle(store, entry, handle_buf, ACCOUNT_HANDLE_BUF);
+                if (hlen > 0) {
+                    if (streq(handle_buf, handle) != 0) {
+                        memcpy(fp_out, entry, elen);
+                        store8(fp_out + elen, 0);
+                        found = 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}

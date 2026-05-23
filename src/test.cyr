@@ -9,6 +9,7 @@
 
 include "src/telnet.cyr"
 include "src/board.cyr"
+include "src/account.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -1104,6 +1105,147 @@ fn t15_tx_consume_resets(): i64 {
     return 0;
 }
 
+# === M6-B account primitive tests ===
+
+# T50: compute_fingerprint of an all-zero 32-byte pubkey matches the
+# known sha256(zeros32) prefix. SHA-256 of 32 zero bytes is
+# 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925;
+# first 8 bytes hex = "66687aadf862bd77".
+fn t50_compute_fingerprint_known_pk(): i64 {
+    var pk[32];
+    memset(&pk, 0, 32);
+    var fp[17];
+    compute_fingerprint(&pk, &fp);
+    var expected = "66687aadf862bd77";
+    var exp_len = strlen(expected);
+    if (memeq(&fp, expected, exp_len) == 0) {
+        test_fail("t50_compute_fingerprint_known_pk", "fp bytes mismatch");
+        return 1;
+    }
+    if ((load8((&fp) + ACCOUNT_FP_HEX_BYTES) & 0xFF) != 0) {
+        test_fail("t50_compute_fingerprint_known_pk", "missing NUL terminator");
+        return 1;
+    }
+    test_pass("t50_compute_fingerprint_known_pk");
+    return 0;
+}
+
+# T51: compute_fingerprint is deterministic — same pk in twice yields
+# the same 16-hex fp. Catches accidental non-determinism (e.g. if
+# someone wires in a timestamp / nonce / heap-pointer dependency).
+fn t51_compute_fingerprint_deterministic(): i64 {
+    var pk[32];
+    var i = 0;
+    while (i < 32) { store8((&pk) + i, i + 1); i = i + 1; }
+    var fp1[17];
+    var fp2[17];
+    compute_fingerprint(&pk, &fp1);
+    compute_fingerprint(&pk, &fp2);
+    if (memeq(&fp1, &fp2, ACCOUNT_FP_HEX_BYTES) == 0) {
+        test_fail("t51_compute_fingerprint_deterministic", "two calls differ");
+        return 1;
+    }
+    test_pass("t51_compute_fingerprint_deterministic");
+    return 0;
+}
+
+# T52: handle_valid accepts the canonical alphabet — lowercase letters,
+# digits, dashes, underscores. First char letter or digit.
+fn t52_handle_valid_accepts(): i64 {
+    if (handle_valid("alice")           != 1) { test_fail("t52", "alice");        return 1; }
+    if (handle_valid("bob")             != 1) { test_fail("t52", "bob");          return 1; }
+    if (handle_valid("op_1")            != 1) { test_fail("t52", "op_1");         return 1; }
+    if (handle_valid("the-mole")        != 1) { test_fail("t52", "the-mole");     return 1; }
+    if (handle_valid("a")               != 1) { test_fail("t52", "single char");  return 1; }
+    if (handle_valid("9")               != 1) { test_fail("t52", "single digit"); return 1; }
+    if (handle_valid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != 1) { test_fail("t52", "32 char"); return 1; }
+    test_pass("t52_handle_valid_accepts");
+    return 0;
+}
+
+# T53: handle_valid rejects what ADR 0006 says it should.
+fn t53_handle_valid_rejects(): i64 {
+    if (handle_valid(0)                  != 0) { test_fail("t53", "NUL pointer");       return 1; }
+    if (handle_valid("")                 != 0) { test_fail("t53", "empty");             return 1; }
+    if (handle_valid("anonymous")        != 0) { test_fail("t53", "reserved anon");     return 1; }
+    if (handle_valid("system")           != 0) { test_fail("t53", "reserved system");   return 1; }
+    if (handle_valid("admin")            != 0) { test_fail("t53", "reserved admin");    return 1; }
+    if (handle_valid("Alice")            != 0) { test_fail("t53", "uppercase A");       return 1; }
+    if (handle_valid("a.b")              != 0) { test_fail("t53", "dot");               return 1; }
+    if (handle_valid("a/b")              != 0) { test_fail("t53", "slash");             return 1; }
+    if (handle_valid("-foo")             != 0) { test_fail("t53", "leading dash");      return 1; }
+    if (handle_valid("_foo")             != 0) { test_fail("t53", "leading underscore");return 1; }
+    if (handle_valid("a b")              != 0) { test_fail("t53", "space");             return 1; }
+    if (handle_valid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != 0) { test_fail("t53", "33 char"); return 1; }
+    test_pass("t53_handle_valid_rejects");
+    return 0;
+}
+
+# T54: build_users_dir produces `<store>/.users` with NUL.
+fn t54_build_users_dir_shape(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = build_users_dir("/var/agora", buf);
+    var expected = "/var/agora/.users";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t54_build_users_dir_shape", "length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t54_build_users_dir_shape", "byte mismatch");
+        return 1;
+    }
+    if ((load8(buf + len) & 0xFF) != 0) {
+        test_fail("t54_build_users_dir_shape", "missing NUL");
+        return 1;
+    }
+    test_pass("t54_build_users_dir_shape");
+    return 0;
+}
+
+# T55: build_user_dir produces `<store>/.users/<fp>` with NUL.
+fn t55_build_user_dir_shape(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = build_user_dir("/var/agora", "deadbeef12345678", buf);
+    var expected = "/var/agora/.users/deadbeef12345678";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t55_build_user_dir_shape", "length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t55_build_user_dir_shape", "byte mismatch");
+        return 1;
+    }
+    test_pass("t55_build_user_dir_shape");
+    return 0;
+}
+
+# T56: build_user_file produces `<store>/.users/<fp>/<name>` for the
+# three canonical files (public_key.bin, handle, created.iso8601).
+fn t56_build_user_file_shape(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = build_user_file("/var/agora", "deadbeef12345678", "public_key.bin", buf);
+    var expected = "/var/agora/.users/deadbeef12345678/public_key.bin";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t56_build_user_file_shape", "pk length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t56_build_user_file_shape", "pk byte mismatch");
+        return 1;
+    }
+    var len2 = build_user_file("/var/agora", "deadbeef12345678", "handle", buf);
+    var expected2 = "/var/agora/.users/deadbeef12345678/handle";
+    if (memeq(buf, expected2, strlen(expected2)) == 0) {
+        test_fail("t56_build_user_file_shape", "handle byte mismatch");
+        return 1;
+    }
+    test_pass("t56_build_user_file_shape");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1159,6 +1301,13 @@ fn main(): i64 {
     t47_post_reply_to_extracts_id();
     t48_post_reply_to_missing_returns_zero();
     t49_format_with_reply_to_header();
+    t50_compute_fingerprint_known_pk();
+    t51_compute_fingerprint_deterministic();
+    t52_handle_valid_accepts();
+    t53_handle_valid_rejects();
+    t54_build_users_dir_shape();
+    t55_build_user_dir_shape();
+    t56_build_user_file_shape();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
