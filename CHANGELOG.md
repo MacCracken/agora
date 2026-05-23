@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M2-A: bannermanor MOTD on connect (2026-05-23)
+
+- **Connection MOTD upgraded** from a plaintext `agora 0.2.0 — telnet BBS` line to a bannermanor-rendered ASCII-art `AGORA` banner (block font, 5×5) followed by the version line and the input-prompt help. Pre-rendered via `bnrmr "AGORA"` and embedded as a string constant in `src/main.cyr` — no runtime subprocess shellout, no dep on `bnrmr` being installed at runtime, no per-connection latency for re-rendering static content.
+- **Provenance documented in code** — the embed site carries a comment block citing bannermanor v1.0.0 (frozen CLI surface) and the regeneration recipe (`bnrmr "AGORA"`) so future label / version / banner-text changes are reproducible. `#` bytes inside the string use `\x23` escapes to dodge cyrius's line-comment lexer.
+- **Binary delta**: 70,960 → 71,120 B (+160 B for the ~470-byte rendered banner string).
+- **End-to-end smoke**: python TCP client receives the 12-byte announce IAC salvo as before, followed by the multi-line banner; existing 24-test parser conformance suite still green.
+- M2's second bite (ANSI color via darshana SGR + cursor positioning + NAWS-aware width) waits on darshana ≥ 1.0 (currently 0.5.3).
+
 ## [0.2.0] — 2026-05-23 (M1 close: cross-platform telnet listener)
 
 Multi-bite M1 cycle landed end-to-end: RFC 854 IAC parser + RFC 1143 Q-method option negotiation + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE + RFC 1184 LINEMODE, all wire-conformant via paired python TCP client smoke. Cross-platform via `lib/net.cyr` (Linux x86_64 + aarch64 today; macOS / Windows / AGNOS as the stdlib gains backends — see [ADR 0001](docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md)). 24 tests passing; 5-benchmark parser baseline captured in [`BENCHMARKS.md`](BENCHMARKS.md). Binary 43,216 B (v0.1.0 scaffold) → 70,960 B at 0.2.0 close.

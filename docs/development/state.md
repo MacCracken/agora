@@ -56,12 +56,15 @@ End-to-end handshake via python TCP client wire-conformant: announce → peer ag
 
 Gate state (per [`roadmap.md`](roadmap.md)):
 
-- **bannermanor** 1.0.0 ✅ — ready to consume for ASCII MOTD banners.
+- **bannermanor** 1.0.0 ✅ — consumed at M2-A (operator-side `bnrmr "AGORA"` rendered into an embedded string constant).
 - **darshana** 0.5.3 ❌ — needs ≥ 1.0.0 stable for ANSI escape sequences (color, cursor positioning). Likely waiting on darshana's own 1.0 cut.
 
-**Likely first M2 bite**: bannermanor MOTD on connect, replacing the current plaintext "agora 0.1.0 — telnet BBS (M1 protocol smoke)" string. bannermanor consumption is the path with the gate met today.
+**M2-A landed 2026-05-23**: bannermanor MOTD on connect. Pre-rendered "AGORA" block-font banner embedded as a string constant; provenance comment in `src/main.cyr` documents the regeneration recipe. No runtime dep on the `bnrmr` binary; no per-connection subprocess shellout. Binary 70,960 → 71,120 B (+160 B). 24 tests still green.
 
-**Second bite gated on darshana 1.0**: ANSI-colored prompt + basic cursor positioning for menu redraws (NAWS-aware via the term_cols/term_rows already captured by M1's subneg parser — first concrete consumer of the NAWS data).
+**Remaining bites for M2 close**:
+
+- **M2-B** — ANSI-colored prompt + basic cursor positioning. Gated on darshana ≥ 1.0. First concrete consumer of the `term_cols` / `term_rows` captured by M1's NAWS subneg parser.
+- **M2-C** (optional) — operator-overridable MOTD via `agora serve --motd <path>`. Pulls the embedded fallback out into a default-when-flag-absent path. Lands if/when operator demand surfaces.
 
 ## Recent shipped
 

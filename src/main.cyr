@@ -97,9 +97,23 @@ fn handle_client(cfd): i64 {
         telnet_tx_consume(ts);
     }
 
-    # Banner. RFC 854 doesn't require CR-LF before negotiation, but
-    # most clients are friendlier when the first bytes are printable.
-    var banner = "agora 0.2.0 — telnet BBS\r\nType anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
+    # MOTD: bannermanor-rendered ASCII banner + version + prompt.
+    # The ASCII art was generated once via `bnrmr "AGORA"` (block
+    # font, 5×5) and embedded as a string constant — operator-side
+    # pre-rendering rather than runtime subprocess shellout, so
+    # there's no per-connection latency and no runtime dep on the
+    # bnrmr binary being installed.
+    #
+    # To regenerate (e.g. when the version label or the banner text
+    # itself changes): `bnrmr "AGORA"` in any shell with bannermanor
+    # installed, copy the 5 lines below the comment, and prepend
+    # each with a backslash-escaped CR-LF (telnet wire protocol
+    # mandates CRLF, RFC 854 § Network Virtual Terminal).
+    #
+    # M2-A consumes bannermanor v1.0.0 (frozen CLI surface).
+    # M2-B (gated on darshana ≥ 1.0) will wrap each line in ANSI
+    # color via darshana SGR primitives.
+    var banner = "\r\n \x23\x23\x23   \x23\x23\x23\x23  \x23\x23\x23  \x23\x23\x23\x23   \x23\x23\x23 \r\n\x23   \x23 \x23     \x23   \x23 \x23   \x23 \x23   \x23\r\n\x23\x23\x23\x23\x23 \x23  \x23\x23 \x23   \x23 \x23\x23\x23\x23  \x23\x23\x23\x23\x23\r\n\x23   \x23 \x23   \x23 \x23   \x23 \x23  \x23  \x23   \x23\r\n\x23   \x23  \x23\x23\x23\x23  \x23\x23\x23  \x23   \x23 \x23   \x23\r\n\r\n  agora 0.2.0 — telnet BBS\r\n  Type anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
     send_buf(cfd, banner, strlen(banner));
 
     # Allocate the recv buffer once.
