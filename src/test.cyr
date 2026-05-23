@@ -735,7 +735,12 @@ fn t30_sort_i64_asc_basic(): i64 {
     store64(arr + 6 * 8, 8);
     store64(arr + 7 * 8, 4);
     sort_i64_asc(arr, 8);
-    var expected[8];
+    # NB: `var buf[N]` is N **bytes** in cyrius (per CLAUDE.md
+    # Cyrius Conventions). 8 i64s = 64 bytes. Earlier drafts of this
+    # test used `var expected[8]` and got 56-byte stack overruns
+    # that the layout silently tolerated — fixed during the 0.4.0
+    # closeout security re-scan.
+    var expected[64];
     store64(&expected + 0 * 8, 1);
     store64(&expected + 1 * 8, 2);
     store64(&expected + 2 * 8, 3);

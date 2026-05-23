@@ -16,8 +16,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.3.0` (2026-05-23) |
-| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 in progress** — ADRs 0002 + 0003 + M5-A/B/C/H/D/G landed 2026-05-23: post storage, telnet command interpreter, sorted listing, input filter, RFC-822 headers, store-write lock. **agora is a working BBS with metadata, sane UX, ingress security, and concurrent-writer correctness.** Remaining M5 bites: E (boards), F (threads). |
+| **Released** | `0.4.0` (2026-05-23) |
+| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 partial (0.4.0)** — ADRs 0002 + 0003 + M5-A/B/C/H/D/G shipped 2026-05-23. **agora is a working single-board BBS over telnet with post metadata, sane UX, ingress security, and concurrent-writer correctness.** Deferred to a later release: M5-E (boards), M5-F (threads). |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -67,7 +67,8 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 ## Recent shipped
 
-- **0.3.0** (2026-05-23) — M2 close: ANSI BBS aesthetic. 3-bite cycle (bannermanor MOTD, darshana SGR colors, `--motd` operator override). 24 tests still green; 85,544 B (+14.6 KB from M1 close, most DCE-eligible). bannermanor patched 1.0.1 the same day for ecosystem alignment on darshana 0.5.3. See [`CHANGELOG.md`](../../CHANGELOG.md#030--2026-05-23-m2-close-ansi-bbs-aesthetic).
+- **0.4.0** (2026-05-23) — M5 partial: post persistence. 6-bite cycle (M5-A storage primitives, M5-B in-session command interpreter, M5-C sorted listing, M5-D RFC-822 headers, M5-G store-write flock, M5-H ingress input filter) + 2 ADRs (0002 one-file-per-post, 0003 RFC-822 headers). 38 tests; 129,096 B (+43.5 KB from M2 close, mostly DCE-eligible). **agora is a working single-board BBS over telnet.** See [`CHANGELOG.md`](../../CHANGELOG.md#040--2026-05-23-m5-partial--post-persistence-with-metadata--concurrent-writer-correctness).
+- **0.3.0** (2026-05-23) — M2 close: ANSI BBS aesthetic. 3-bite cycle (bannermanor MOTD, darshana SGR colors, `--motd` operator override). 24 tests still green; 85,544 B (+14.6 KB from M1 close, most DCE-eligible). bannermanor patched 1.0.1 the same day for ecosystem alignment on darshana 0.5.3.
 - **0.2.0** (2026-05-23) — M1 close: cross-platform telnet listener. 5-bite cycle (IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness). 24 tests; 70,960 B; first parser baseline at 10 ns/byte hot path.
 - **0.1.0** (2026-05-23) — Scaffold ship. argv dispatch + boot banner + 6 stub verbs. 43,216 B binary.
 

@@ -67,7 +67,7 @@ var g_store_buf = "./agora-data";
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.3.0 — M2 ANSI BBS aesthetic");
+    println("v0.4.0 — M5 post persistence");
     return 0;
 }
 
@@ -377,7 +377,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 0.3.0 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 0.4.0 — telnet BBS\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -842,7 +842,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.3.0");
+    println("agora 0.4.0");
     return 0;
 }
 

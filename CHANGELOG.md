@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-23 (M5 partial — post persistence with metadata + concurrent-writer correctness)
+
+agora is now a **working BBS over telnet**. Six bites landed across the M5 cycle: post storage primitives (M5-A), in-session command interpreter (M5-B), sorted listing (M5-C), RFC-822 headers per [ADR 0003](docs/adr/0003-rfc-822-post-headers.md) (M5-D), per-store flock (M5-G), and ingress input filter (M5-H). Two ADRs land: 0002 (one file per post, monotonic IDs) and 0003 (RFC-822 headers). 38 tests; 129,096 B; bench baseline unchanged. **M5 is partial** — boards (M5-E) and threads (M5-F) defer to a later release. Single-board single-thread BBS is the 0.4.0 shipping shape.
+
+### Changed
+
+- `print_banner` / `cmd_version` / connection MOTD / `render_motd` version line bumped to 0.4.0.
+- `cyrius.cyml [deps].stdlib` grew `str` + `fs` (M5-A: storage primitives) + `chrono` (M5-D: ISO-8601 Date header). 13 stdlib modules at 0.3.0 → 16 at 0.4.0; darshana git dep unchanged at pin 0.5.3.
+- **Closeout note**: security re-scan surfaced a latent stack-overrun in `t30_sort_i64_asc_basic` — `var expected[8]` allocated 8 bytes but stored 8 i64s (64 bytes). The layout silently tolerated the overrun on this host; fixed to `var expected[64]` with a comment citing the CLAUDE.md "buffer is N **bytes**, not N entries" rule. No production code affected.
+
 ### Added — M5-G: per-store flock for the post-claim critical section (2026-05-23)
 
 - **New primitives in `src/board.cyr`**:
