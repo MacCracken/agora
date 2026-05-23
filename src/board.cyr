@@ -194,6 +194,216 @@ fn post_read(store, id, out_buf, out_cap): i64 {
     return file_read_all(path_buf, out_buf, out_cap);
 }
 
+# === RFC 822-shaped headers (ADR 0003) ===
+
+# Per-post max for hand-typed subjects. Conservative; tighter than
+# POST_MAX_BYTES since subjects are single-line UI strings.
+enum HeaderCap {
+    SUBJECT_MAX_BYTES = 256;
+}
+
+# Locate the start of the body within a post file. Returns 0 if the
+# file has no headers (whole file is body — M5-A/B/C backwards-
+# compat), else the byte offset past the blank line that terminates
+# the header block.
+#
+# Sniffer: first byte must be ASCII uppercase letter (A-Z, 65-90)
+# for headers to be present. Body-starting-with-`Subject:` (no
+# leading uppercase by coincidence) is therefore safe to leave
+# headerless. The blank-line terminator is `\n\n` or `\r\n\r\n`;
+# mixed line endings inside the header block are tolerated.
+fn post_body_offset(buf, len): i64 {
+    if (len == 0) { return 0; }
+    var c0 = load8(buf) & 0xFF;
+    if (c0 < 65) { return 0; }
+    if (c0 > 90) { return 0; }
+
+    var i = 0;
+    var body_off = 0;
+    var done = 0;
+    while (done == 0) {
+        if (i + 1 >= len) {
+            done = 1;
+            continue;
+        }
+        # `\n\n`
+        if ((load8(buf + i) & 0xFF) == 10) {
+            if ((load8(buf + i + 1) & 0xFF) == 10) {
+                body_off = i + 2;
+                done = 1;
+                continue;
+            }
+        }
+        # `\r\n\r\n`
+        if (i + 3 < len) {
+            if ((load8(buf + i) & 0xFF) == 13) {
+                if ((load8(buf + i + 1) & 0xFF) == 10) {
+                    if ((load8(buf + i + 2) & 0xFF) == 13) {
+                        if ((load8(buf + i + 3) & 0xFF) == 10) {
+                            body_off = i + 4;
+                            done = 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return body_off;
+}
+
+# Look for a `Name: value\r\n` (or `Name: value\n`) line in the
+# header block. Copies the value into out_buf and returns its length.
+# Returns -1 if not found, 0 if found with an empty value.
+#
+# Match is byte-for-byte on the name + `:` + optional space. Header
+# block is the region from buf[0] up to `post_body_offset(buf, len)`;
+# if the file has no headers (body_off == 0), the lookup falls
+# through to -1 immediately.
+fn header_get(buf, len, name, out_buf, out_max): i64 {
+    var body_off = post_body_offset(buf, len);
+    if (body_off == 0) { return 0 - 1; }
+    var nlen = strlen(name);
+
+    var i = 0;
+    var found = 0 - 1;
+    var fval_start = 0;
+    var fval_end = 0;
+
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= body_off) { scanning = 0; continue; }
+        if (i + nlen + 1 >= body_off) { scanning = 0; continue; }
+        # Match `name:` at start of line (line-start is either i==0
+        # or the byte before is `\n`)
+        var at_line_start = 0;
+        if (i == 0) { at_line_start = 1; }
+        else {
+            if ((load8(buf + i - 1) & 0xFF) == 10) { at_line_start = 1; }
+        }
+        if (at_line_start != 0) {
+            if (memeq(buf + i, name, nlen) == 1) {
+                if ((load8(buf + i + nlen) & 0xFF) == 58) {  # ':'
+                    var vs = i + nlen + 1;
+                    # Skip a single optional space
+                    if (vs < body_off) {
+                        if ((load8(buf + vs) & 0xFF) == 32) { vs = vs + 1; }
+                    }
+                    # Read until \r or \n
+                    var ve = vs;
+                    var eat = 1;
+                    while (eat == 1) {
+                        if (ve >= body_off) { eat = 0; }
+                        else {
+                            var b = load8(buf + ve) & 0xFF;
+                            if (b == 13) { eat = 0; }
+                            else { if (b == 10) { eat = 0; }
+                                   else         { ve = ve + 1; } }
+                        }
+                    }
+                    found = 1;
+                    fval_start = vs;
+                    fval_end = ve;
+                    scanning = 0;
+                    continue;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if (found < 0) { return 0 - 1; }
+    var vlen = fval_end - fval_start;
+    if (vlen > out_max) { vlen = out_max; }
+    if (vlen > 0) {
+        memcpy(out_buf, buf + fval_start, vlen);
+    }
+    return vlen;
+}
+
+# Compose a post file with Subject + Date headers + blank line + body.
+# Writes into out_buf at offset 0; returns total bytes written, or
+# -1 if it wouldn't fit in out_cap.
+#
+# Subject may be empty (NUL string or strlen == 0) — `Subject:` is
+# still emitted with a blank value so the file still has a valid
+# header block (and `header_get` returns 0-length rather than -1).
+fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
+    var pos = 0;
+    var slen = 0;
+    if (subject != 0) { slen = strlen(subject); }
+    if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
+
+    # Worst-case header block: 9 + slen + 2 + 6 + 20 + 2 + 2 = 41 + slen
+    if (pos + 9 + slen + 32 + body_len > out_cap) { return 0 - 1; }
+
+    # "Subject: "
+    memcpy(out_buf + pos, "Subject: ", 9); pos = pos + 9;
+    if (slen > 0) { memcpy(out_buf + pos, subject, slen); pos = pos + slen; }
+    store8(out_buf + pos, 13); pos = pos + 1;
+    store8(out_buf + pos, 10); pos = pos + 1;
+
+    # "Date: <iso8601>\r\n"
+    memcpy(out_buf + pos, "Date: ", 6); pos = pos + 6;
+    var iso = iso8601_now();
+    var ilen = strlen(iso);
+    memcpy(out_buf + pos, iso, ilen); pos = pos + ilen;
+    store8(out_buf + pos, 13); pos = pos + 1;
+    store8(out_buf + pos, 10); pos = pos + 1;
+
+    # Blank line — header/body separator
+    store8(out_buf + pos, 13); pos = pos + 1;
+    store8(out_buf + pos, 10); pos = pos + 1;
+
+    # Body
+    if (body_len > 0) {
+        memcpy(out_buf + pos, body, body_len);
+        pos = pos + body_len;
+    }
+    return pos;
+}
+
+# post_new with a Subject header (ADR 0003). Formats Subject + Date +
+# body into a temporary buffer, then writes the result via the same
+# EXCL-claim path as post_new. Returns the assigned ID or -1.
+fn post_new_with_subject(store, subject, body, body_len): i64 {
+    if (body_len <= 0) { return 0 - 1; }
+    if (body_len > POST_MAX_BYTES) { return 0 - 1; }
+
+    var rc = store_ensure(store);
+    if (rc != 0) { return 0 - 1; }
+
+    # Worst-case file = headers + body. Headers are ~50 B; body
+    # up to POST_MAX_BYTES. POST_MAX_BYTES + 1 KB is comfortable.
+    var fcap = POST_MAX_BYTES + 1024;
+    var fbuf = alloc(fcap);
+    var flen = post_format_with_subject(subject, body, body_len, fbuf, fcap);
+    if (flen < 0) { return 0 - 1; }
+
+    var id = post_max_id(store) + 1;
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_post_path(store, id, path_buf);
+
+    var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var n = file_write(fd, fbuf, flen);
+    file_close(fd);
+    if (n != flen) { return 0 - 1; }
+    return id;
+}
+
+# Convenience for `list` display — extract Subject from a post file's
+# in-memory buffer. Returns the byte length copied into out_buf, or
+# 0 if the post has no Subject header (headerless post or missing
+# field). Never returns negative; caller can always render the
+# empty case.
+fn post_subject(buf, len, out_buf, out_max): i64 {
+    var n = header_get(buf, len, "Subject", out_buf, out_max);
+    if (n < 0) { return 0; }
+    return n;
+}
+
 # Insertion sort an i64 array in place. O(n²); used by post_list
 # to deliver IDs in ascending order. Insertion sort is appropriate
 # for the v1.0 BBS scale — DIRENT_ID_MAX is 4,096 and post counts

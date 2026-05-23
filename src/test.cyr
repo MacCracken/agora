@@ -792,6 +792,95 @@ fn t32_input_byte_ok_filters_nul_esc(): i64 {
     return 0;
 }
 
+# T33: post_body_offset returns 0 (no headers) for content that
+# doesn't start with an ASCII uppercase letter. Backwards-compat
+# with M5-A/B/C posts (plaintext, no headers).
+fn t33_post_body_offset_headerless(): i64 {
+    var body = "just a plain body, no headers";
+    var off = post_body_offset(body, strlen(body));
+    if (off != 0) {
+        test_fail("t33_post_body_offset_headerless", "expected 0 (headerless)");
+        return 1;
+    }
+    test_pass("t33_post_body_offset_headerless");
+    return 0;
+}
+
+# T34: post_body_offset finds the body after CRLF CRLF.
+# Header block is `Subject: foo\r\nDate: bar\r\n\r\n` → body starts
+# at offset of the byte after the second CRLF.
+fn t34_post_body_offset_crlf(): i64 {
+    var content = "Subject: hi\r\nDate: 2026\r\n\r\nbody";
+    var off = post_body_offset(content, strlen(content));
+    # Header block is "Subject: hi\r\nDate: 2026\r\n\r\n" = 27 bytes
+    if (off != 27) {
+        test_fail("t34_post_body_offset_crlf", "wrong body offset");
+        return 1;
+    }
+    test_pass("t34_post_body_offset_crlf");
+    return 0;
+}
+
+# T35: post_body_offset accepts LF-only (non-NVT) separators too.
+fn t35_post_body_offset_lf(): i64 {
+    var content = "Subject: hi\nDate: 2026\n\nbody";
+    var off = post_body_offset(content, strlen(content));
+    # Header block is "Subject: hi\nDate: 2026\n\n" = 24 bytes
+    if (off != 24) {
+        test_fail("t35_post_body_offset_lf", "wrong body offset (LF)");
+        return 1;
+    }
+    test_pass("t35_post_body_offset_lf");
+    return 0;
+}
+
+# T36: header_get extracts a Subject value from a well-formed
+# header block, including the "skip optional single space after :"
+# behavior.
+fn t36_header_get_subject(): i64 {
+    var content = "Subject: hello world\r\nDate: 2026-01-01T00:00:00Z\r\n\r\nbody";
+    var out_buf = alloc(64);
+    var n = header_get(content, strlen(content), "Subject", out_buf, 64);
+    if (n != 11) {
+        test_fail("t36_header_get_subject", "wrong length");
+        return 1;
+    }
+    var expected = "hello world";
+    if (memeq(out_buf, expected, 11) != 1) {
+        test_fail("t36_header_get_subject", "byte mismatch");
+        return 1;
+    }
+    test_pass("t36_header_get_subject");
+    return 0;
+}
+
+# T37: header_get returns -1 when the header is absent.
+fn t37_header_get_missing(): i64 {
+    var content = "Subject: hi\r\nDate: 2026\r\n\r\nbody";
+    var out_buf = alloc(64);
+    var n = header_get(content, strlen(content), "From", out_buf, 64);
+    if (n != (0 - 1)) {
+        test_fail("t37_header_get_missing", "expected -1");
+        return 1;
+    }
+    test_pass("t37_header_get_missing");
+    return 0;
+}
+
+# T38: post_subject returns 0 (not -1) on headerless content —
+# `list` always renders the bare ID and shows empty subject.
+fn t38_post_subject_headerless_returns_zero(): i64 {
+    var content = "plain body, no headers";
+    var out_buf = alloc(64);
+    var n = post_subject(content, strlen(content), out_buf, 64);
+    if (n != 0) {
+        test_fail("t38_post_subject_headerless_returns_zero", "expected 0");
+        return 1;
+    }
+    test_pass("t38_post_subject_headerless_returns_zero");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -849,6 +938,12 @@ fn main(): i64 {
     t30_sort_i64_asc_basic();
     t31_sort_i64_asc_empty_and_single();
     t32_input_byte_ok_filters_nul_esc();
+    t33_post_body_offset_headerless();
+    t34_post_body_offset_crlf();
+    t35_post_body_offset_lf();
+    t36_header_get_subject();
+    t37_header_get_missing();
+    t38_post_subject_headerless_returns_zero();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

@@ -17,7 +17,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 | Field | Value |
 |---|---|
 | **Released** | `0.3.0` (2026-05-23) |
-| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 in progress** — ADR 0002 + M5-A/B/C/H landed 2026-05-23: post storage, telnet command interpreter, sorted listing, input filter. **agora is a working BBS over the wire, with sane UX + ingress security.** Remaining M5 bites: D (headers, likely own ADR), E (boards), F (threads), G (lock). |
+| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 in progress** — ADRs 0002 + 0003 + M5-A/B/C/H/D landed 2026-05-23: post storage, telnet command interpreter, sorted listing, input filter, RFC-822 headers. **agora is a working BBS over the wire with Subject/Date metadata, sane UX, and ingress security.** Remaining M5 bites: E (boards), F (threads), G (lock). |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 116,904 B at M5-H (116,232 M5-B; 109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-C + M5-H land flat (~672 B for sort + filter). | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 128,352 B at M5-D (116,904 M5-H; 116,232 M5-B; 109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-D adds +11.4 KB for chrono + header primitives. | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
@@ -34,7 +34,7 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **32 tests passing** at M5-H — 24 M1 IAC/Q-method/subneg/LINEMODE conformance tests + 5 M5-A board-storage tests + 2 M5-C sort tests + 1 M5-H input-filter test. Pure functions only — full storage round-trip + wire integration verified via Python TCP-client smoke, not test.cyr. |
+| `src/test.cyr` | **38 tests passing** at M5-D — 24 M1 conformance + 5 M5-A board-storage + 2 M5-C sort + 1 M5-H input-filter + 6 M5-D header tests (`post_body_offset` headerless/CRLF/LF, `header_get` Subject/missing, `post_subject` normalization). Full wire integration verified via Python TCP-client smoke. |
 | `benches/bench_telnet.bcyr` | **5 benchmarks** — see [`/BENCHMARKS.md`](../../BENCHMARKS.md). Hot path 10 ns/byte (plain) → 132 ns (4-option announce salvo). |
 | `cyrius audit` | clean (build + lint pass; tests green; first bench baseline captured at M1 close) |
 
@@ -56,11 +56,12 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 **M5-H landed 2026-05-23**: input filter on post bodies — `input_byte_ok` drops NUL (cstring-tooling poison) and ESC (terminal-control injection in stored posts read by other users). Lives at the storage-policy layer in `src/board.cyr`; enforced at ingress in `handle_client`. One new test plus wire-smoke proves a malicious post containing `\x1b[31m` and `\x00` lands on disk with the dangerous bytes stripped.
 
+**M5-D landed 2026-05-23**: RFC-822-shaped headers per [ADR 0003](../adr/0003-rfc-822-post-headers.md). Each post file gets `Subject: ...\r\nDate: ISO-8601\r\n\r\n<body>`. New `post_body_offset` + `header_get` + `post_subject` primitives in `board.cyr`. Wire flow grew `MODE_POSTING_SUBJECT` between `MODE_COMMAND` and `MODE_POSTING` — typing `post` prompts `Subject:` first. `list` shows `<id>  <subject>`; `read` shows `Subject: ...\r\n\r\n<body>`. CLI `agora post` grew `--subject <text>` flag. Backwards compatible with M5-A/B/C headerless posts (sniffer rejects non-uppercase first bytes, falls back to whole-file-is-body). **Plus a session-buffer corruption bug fix**: paired LF after CR was being appended to the line buffer at position 0 (broke every command after the first). 38 tests; binary 128,352 B.
+
 **Remaining bites for M5 close**:
 
-- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Deferred per ADR 0002 until we know what fields the wire-level post flow needs. Will likely take its own ADR (header set, encoding, parsing rules).
 - **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`). UI question: how does the user pick a board (per-session `cd`, per-command flag, separate connection per board)?
-- **M5-F** — Threads (post-replies-to-post linkage). Depends on M5-D for a `Reply-To` header field.
+- **M5-F** — Threads (post-replies-to-post linkage). M5-D unblocks via the `Reply-To` header field.
 - **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness. EXCL guarantees no corruption today; lock adds the "don't lose a post to ID-race" invariant.
 
 ## Recent shipped

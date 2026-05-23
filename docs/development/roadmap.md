@@ -15,7 +15,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
 | **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
 | **M2** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | closed 2026-05-23 at 0.3.0 — three bites: M2-A/B/C. See [`state.md`](state.md#recently-closed). M2-D (NAWS width clamp) deferred as optional polish. |
-| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A/B/C/H landed 2026-05-23** — ADR 0002 + `src/board.cyr` (one-file-per-post) + CLI verbs + in-session command interpreter + sorted listing + ingress input filter (NUL / ESC drop). **agora is a working BBS over the wire with sane UX and security.** Linux today via `lib/io.cyr` + `lib/fs.cyr`. Remaining bites: D (headers, likely own ADR), E (boards), F (threads), G (lock). |
+| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A/B/C/H/D landed 2026-05-23** — ADRs 0002 + 0003, `src/board.cyr`, CLI verbs, telnet command interpreter, sorted listing, ingress input filter, RFC-822 headers (Subject + Date). **agora is a working BBS over the wire with post metadata, sane UX, and security.** Linux today via `lib/io.cyr` + `lib/fs.cyr`. Remaining bites: E (boards), F (threads), G (lock). |
 | M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ — gated on M5 post bodies existing first |
 | M4 | Stored-file deltas + compression | sankoch 2.2.6 ✅ — gated on M5 |
 | M6 | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — naturally follows M5 |
@@ -101,8 +101,9 @@ The previously-open questions resolved into [ADR 0002](../adr/0002-one-file-per-
 
 **M5-H landed 0.3.0+**: input filter — `input_byte_ok` drops NUL + ESC from incoming post bodies at ingress in `handle_client`. Threat-modelled inline (cstring-truncation downstream + terminal-control injection in stored posts read by other users). One unit test + wire smoke.
 
+**M5-D landed 0.3.0+** ([ADR 0003](../adr/0003-rfc-822-post-headers.md)): RFC-822-shaped headers. Each post file gets `Subject: ...\r\nDate: ISO-8601-UTC\r\n\r\n<body>`. New `MODE_POSTING_SUBJECT` session state prompts `Subject:` first; `list` shows `<id>  <subject>`; `read` shows `Subject: ...` then body. CLI `agora post` grew `--subject <text>` flag. Backwards-compatible with M5-A/B/C headerless posts. 6 new tests; bug-fix for paired-LF-after-CR appending to line buffer at offset 0.
+
 **Remaining bites for M5 close**:
-- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Header set picked once the wire-level post flow is real. Will likely take its own ADR.
 - **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`). Includes UI surface question (per-session `cd`? per-command flag? separate connection per board?).
 - **M5-F** — Threads (post-replies-to-post linkage). Depends on M5-D for a `Reply-To` header.
 - **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness. EXCL guarantees no corruption today; lock adds "don't lose a post to ID-race".

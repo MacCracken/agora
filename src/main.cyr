@@ -39,14 +39,15 @@ enum AgoraDefaults {
     LINE_BUF_CAP      = 4096;
 }
 
-# M5-B session modes. Drives the per-byte dispatch in handle_client:
-#   MODE_COMMAND  — interpret each completed line as a command
-#                   (list / read / post / help / quit / ...)
-#   MODE_POSTING  — accumulate lines into the post body; commit
-#                   when we see a line that is exactly "."
+# M5-B/D session modes. Drives the per-byte dispatch in handle_client:
+#   MODE_COMMAND          — interpret each completed line as a command
+#   MODE_POSTING_SUBJECT  — M5-D: capture the Subject line, then move to body
+#   MODE_POSTING          — accumulate lines into the post body; commit
+#                           when we see a line that is exactly "."
 enum SessMode {
-    MODE_COMMAND = 0;
-    MODE_POSTING = 1;
+    MODE_COMMAND         = 0;
+    MODE_POSTING_SUBJECT = 1;
+    MODE_POSTING         = 2;
 }
 
 # Operator-supplied MOTD, loaded once in cmd_serve before the
@@ -83,9 +84,11 @@ fn print_help(): i64 {
     println("                 --store sets the post-storage root for the");
     println("                 in-session post/list/read commands —");
     println("                 default ./agora-data/, same as the CLI verbs)");
-    println("  post [--store <path>]");
+    println("  post [--store <path>] [--subject <text>]");
     println("                 read stdin → new post → print assigned ID");
-    println("                 (default store ./agora-data/)");
+    println("                 (default store ./agora-data/; subject is");
+    println("                 written as an RFC-822-shaped header per");
+    println("                 ADR 0003. Empty subject is allowed.)");
     println("  list [--store <path>]");
     println("                 list post IDs in the store");
     println("  read <id> [--store <path>]");
@@ -223,11 +226,28 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
         if (count == 0) {
             send_str(cfd, "(no posts)\r\n");
         } else {
+            # Preallocate a per-iteration scratch buffer for the
+            # whole post file (read once to extract Subject), and a
+            # subject-extract buffer. Subject lookup is O(file)
+            # which is negligible at the v1.0 BBS scale.
+            var fbuf = alloc(POST_MAX_BYTES + 1024);
+            var sbuf = alloc(SUBJECT_MAX_BYTES);
             var idx = 0;
             while (idx < count) {
+                var id = load64(ids + idx * 8);
+                # ID right-aligned-ish: emit the integer then 2 spaces
                 var idbuf[24];
-                var idlen = fmt_int_buf(load64(ids + idx * 8), &idbuf);
+                var idlen = fmt_int_buf(id, &idbuf);
                 send_buf(cfd, &idbuf, idlen);
+                send_str(cfd, "  ");
+                # Subject (or empty for headerless / no-Subject posts)
+                var flen = post_read(g_store_buf, id, fbuf, POST_MAX_BYTES + 1024);
+                if (flen > 0) {
+                    var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+                    if (slen > 0) {
+                        send_buf(cfd, sbuf, slen);
+                    }
+                }
                 send_str(cfd, "\r\n");
                 idx = idx + 1;
             }
@@ -241,24 +261,38 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
             send_str(cfd, "usage: read <id>\r\n");
             return MODE_COMMAND;
         }
-        var body = alloc(POST_MAX_BYTES);
-        var blen = post_read(g_store_buf, id, body, POST_MAX_BYTES);
-        if (blen <= 0) {
+        var fbuf = alloc(POST_MAX_BYTES + 1024);
+        var flen = post_read(g_store_buf, id, fbuf, POST_MAX_BYTES + 1024);
+        if (flen <= 0) {
             send_str(cfd, "post not found\r\n");
             return MODE_COMMAND;
         }
-        send_buf(cfd, body, blen);
-        # Trailing newline guarantee — operator-supplied post bodies
-        # may or may not end in CRLF.
-        if ((load8(body + blen - 1) & 0xFF) != 10) {
-            send_str(cfd, "\r\n");
+
+        # M5-D: surface Subject before the body so the reader knows
+        # what they're looking at. Headerless (M5-A/B/C) posts skip
+        # this — body_off == 0 and post_subject returns 0 length.
+        var sbuf = alloc(SUBJECT_MAX_BYTES);
+        var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+        if (slen > 0) {
+            send_str(cfd, "Subject: ");
+            send_buf(cfd, sbuf, slen);
+            send_str(cfd, "\r\n\r\n");
+        }
+
+        var body_off = post_body_offset(fbuf, flen);
+        var body_len = flen - body_off;
+        if (body_len > 0) {
+            send_buf(cfd, fbuf + body_off, body_len);
+            if ((load8(fbuf + body_off + body_len - 1) & 0xFF) != 10) {
+                send_str(cfd, "\r\n");
+            }
         }
         return MODE_COMMAND;
     }
 
     if (line_has_prefix(line, len, "post") != 0) {
-        send_str(cfd, "Compose post. End with '.' on a line by itself.\r\n");
-        return MODE_POSTING;
+        send_str(cfd, "Subject: ");
+        return MODE_POSTING_SUBJECT;
     }
 
     if (line_has_prefix(line, len, "quit") != 0) {
@@ -281,14 +315,16 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
     return MODE_COMMAND;
 }
 
-# Finalize a post-compose flow: write the accumulated body, send
-# the assigned ID (or an error). Caller resets post_pos afterward.
-fn session_finalize_post(cfd, body, body_len): i64 {
+# Finalize a post-compose flow: write the accumulated body + subject,
+# send the assigned ID (or an error). The `subject` argument is a
+# NUL-terminated cstring built up by the MODE_POSTING_SUBJECT phase;
+# pass 0 for headerless / legacy post.
+fn session_finalize_post(cfd, subject, body, body_len): i64 {
     if (body_len <= 0) {
         send_str(cfd, "(empty post discarded)\r\n");
         return 0;
     }
-    var id = post_new(g_store_buf, body, body_len);
+    var id = post_new_with_subject(g_store_buf, subject, body, body_len);
     if (id < 0) {
         send_str(cfd, "post failed (storage error)\r\n");
         return 0;
@@ -401,6 +437,10 @@ fn handle_client(cfd): i64 {
     var line_pos = 0;
     var post    = alloc(POST_MAX_BYTES);
     var post_pos = 0;
+    # M5-D: subject buffer is a separate slab. NUL-terminated when
+    # finalized so we can pass it as cstring to post_new_with_subject.
+    var subject = alloc(SUBJECT_MAX_BYTES + 1);
+    var subject_len = 0;
     var mode    = MODE_COMMAND;
     var last_cr = 0;
     var quit    = alloc(8);
@@ -446,34 +486,66 @@ fn handle_client(cfd): i64 {
                     i = i + 1;
                     continue;
                 }
-                # === CR / LF: line terminator dispatch ===
-                var is_cr = 0;
-                var is_lf = 0;
-                if (db == 13) { is_cr = 1; }
-                if (db == 10) { is_lf = 1; }
-                if (is_cr != 0) {
-                    last_cr = 1;
+                # === EOL detection: CR is canonical; LF after CR is
+                # silently absorbed (consumed-here, NOT passed on to
+                # the printable-byte branch — would otherwise land at
+                # line[0] and corrupt the next command); lone LF also
+                # terminates (Unix clients). `eol == 1` means current
+                # byte completed a line; `consumed == 1` means current
+                # byte is the paired LF after CR — drop it entirely.
+                var eol = 0;
+                var consumed = 0;
+                if (db == 13) { eol = 1; last_cr = 1; }
+                else { if (db == 10) {
+                    if (last_cr != 0) { last_cr = 0; consumed = 1; }
+                    else              { eol = 1; }
+                } else { last_cr = 0; } }
+
+                if (consumed != 0) {
+                    i = i + 1;
+                    continue;
+                }
+
+                if (eol != 0) {
                     send_str(cfd, "\r\n");
-                    # Process the line in the current mode
+                    # Mode-aware line dispatch.
                     if (mode == MODE_COMMAND) {
                         mode = session_execute(cfd, line, line_pos, quit);
                         line_pos = 0;
                         if (mode == MODE_COMMAND) {
                             if (load64(quit) == 0) { send_str(cfd, "> "); }
                         }
-                    } else {
-                        # MODE_POSTING: check if line is exactly "."
+                    }
+                    else { if (mode == MODE_POSTING_SUBJECT) {
+                        # M5-D: capture the typed Subject line, then
+                        # transition into MODE_POSTING for the body.
+                        subject_len = line_pos;
+                        if (subject_len > SUBJECT_MAX_BYTES) {
+                            subject_len = SUBJECT_MAX_BYTES;
+                        }
+                        if (subject_len > 0) {
+                            memcpy(subject, line, subject_len);
+                        }
+                        store8(subject + subject_len, 0);
+                        line_pos = 0;
+                        send_str(cfd, "Compose post. End with '.' on a line by itself.\r\n");
+                        mode = MODE_POSTING;
+                    }
+                    else {
+                        # MODE_POSTING: '.' alone ends + commits.
                         if (line_pos == 1) {
                             if ((load8(line) & 0xFF) == 46) {
-                                session_finalize_post(cfd, post, post_pos);
+                                session_finalize_post(cfd, subject, post, post_pos);
                                 post_pos = 0;
+                                subject_len = 0;
+                                store8(subject, 0);
                                 line_pos = 0;
                                 mode = MODE_COMMAND;
                                 send_str(cfd, "> ");
                                 i = i + 1; continue;
                             }
                         }
-                        # Otherwise append line + CRLF to post body
+                        # Otherwise append line + CRLF to post body.
                         if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
                             memcpy(post + post_pos, line, line_pos);
                             post_pos = post_pos + line_pos;
@@ -481,49 +553,15 @@ fn handle_client(cfd): i64 {
                             store8(post + post_pos, 10); post_pos = post_pos + 1;
                         }
                         line_pos = 0;
-                    }
-                } else { if (is_lf != 0) {
-                    if (last_cr != 0) {
-                        # Paired LF after CR — silently absorbed.
-                        last_cr = 0;
-                    } else {
-                        # Lone LF: treat as line terminator (Unix clients).
-                        send_str(cfd, "\r\n");
-                        if (mode == MODE_COMMAND) {
-                            mode = session_execute(cfd, line, line_pos, quit);
-                            line_pos = 0;
-                            if (mode == MODE_COMMAND) {
-                                if (load64(quit) == 0) { send_str(cfd, "> "); }
-                            }
-                        } else {
-                            if (line_pos == 1) {
-                                if ((load8(line) & 0xFF) == 46) {
-                                    session_finalize_post(cfd, post, post_pos);
-                                    post_pos = 0;
-                                    line_pos = 0;
-                                    mode = MODE_COMMAND;
-                                    send_str(cfd, "> ");
-                                    i = i + 1; continue;
-                                }
-                            }
-                            if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
-                                memcpy(post + post_pos, line, line_pos);
-                                post_pos = post_pos + line_pos;
-                                store8(post + post_pos, 13); post_pos = post_pos + 1;
-                                store8(post + post_pos, 10); post_pos = post_pos + 1;
-                            }
-                            line_pos = 0;
-                        }
-                    }
+                    } }
                 } else {
                     # === Printable byte: echo + append to line ===
-                    last_cr = 0;
                     if (line_pos < LINE_BUF_CAP - 1) {
                         store8(line + line_pos, db);
                         line_pos = line_pos + 1;
                         echo_byte(cfd, db);
                     }
-                } }
+                }
             }
             i = i + 1;
         }
@@ -685,11 +723,31 @@ fn first_positional_after_verb(): i64 {
     return 0;
 }
 
-# `agora post` — read stdin → write a new post → print assigned ID.
-# Up to POST_MAX_BYTES (64 KB) of body. Returns 0 + id on success,
-# 1 on no-input / write failure.
+# Walk argv looking for --subject <text>. Returns the text cstring
+# if found, else 0 (null). M5-D adds this to the CLI for piped /
+# scripted post creation; the in-session telnet flow uses the
+# Subject prompt instead.
+fn parse_subject_flag(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--subject") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `agora post [--subject "..."]` — read stdin → write a new post →
+# print assigned ID. Up to POST_MAX_BYTES (64 KB) of body. Returns
+# 0 + id on success, 1 on no-input / write failure.
 fn cmd_post(): i64 {
     var store = parse_store(DEFAULT_STORE);
+    var subject = parse_subject_flag();
     var body = alloc(POST_MAX_BYTES);
     var total = 0;
     var rgo = 1;
@@ -703,7 +761,7 @@ fn cmd_post(): i64 {
         println("agora post: no input on stdin (pipe in post body)");
         return 1;
     }
-    var id = post_new(store, body, total);
+    var id = post_new_with_subject(store, subject, body, total);
     if (id < 0) {
         println("agora post: failed to write post");
         return 1;
@@ -713,7 +771,9 @@ fn cmd_post(): i64 {
     return 0;
 }
 
-# `agora list` — print every post ID in the store, one per line.
+# `agora list` — print `<id>  <subject>` per post (M5-D). Subject
+# is empty for headerless / no-Subject posts; the bare ID still
+# prints. Reads each post file once (negligible cost at v1.0 scale).
 fn cmd_list(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var ids = alloc(DIRENT_ID_MAX * 8);
@@ -722,16 +782,27 @@ fn cmd_list(): i64 {
         println("agora list: no posts");
         return 0;
     }
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var sbuf = alloc(SUBJECT_MAX_BYTES);
     var i = 0;
     while (i < count) {
-        print_num(load64(ids + i * 8));
+        var id = load64(ids + i * 8);
+        print_num(id);
+        sys_write(1, "  ", 2);
+        var flen = post_read(store, id, fbuf, POST_MAX_BYTES + 1024);
+        if (flen > 0) {
+            var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+            if (slen > 0) { sys_write(1, sbuf, slen); }
+        }
         println("");
         i = i + 1;
     }
     return 0;
 }
 
-# `agora read <id>` — print one post body to stdout.
+# `agora read <id>` — print one post body to stdout (M5-D: headers
+# stripped). Subject is shown as a one-line prefix; headerless
+# legacy posts skip the prefix.
 fn cmd_read(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var id_arg = first_positional_after_verb();
@@ -744,13 +815,24 @@ fn cmd_read(): i64 {
         println("agora read: invalid post ID");
         return 2;
     }
-    var body = alloc(POST_MAX_BYTES);
-    var len = post_read(store, id, body, POST_MAX_BYTES);
-    if (len <= 0) {
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var flen = post_read(store, id, fbuf, POST_MAX_BYTES + 1024);
+    if (flen <= 0) {
         println("agora read: post not found");
         return 1;
     }
-    sys_write(1, body, len);
+    var sbuf = alloc(SUBJECT_MAX_BYTES);
+    var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+    if (slen > 0) {
+        sys_write(1, "Subject: ", 9);
+        sys_write(1, sbuf, slen);
+        sys_write(1, "\n\n", 2);
+    }
+    var body_off = post_body_offset(fbuf, flen);
+    var body_len = flen - body_off;
+    if (body_len > 0) {
+        sys_write(1, fbuf + body_off, body_len);
+    }
     return 0;
 }
 

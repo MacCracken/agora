@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — ADR 0003 + M5-D: RFC-822-shaped post headers (Subject + Date) (2026-05-23)
+
+- **[ADR 0003](docs/adr/0003-rfc-822-post-headers.md)** — captures the header-format decision: per-post file gets `Subject: <single-line>\r\n` + `Date: <ISO-8601-UTC>\r\n\r\n` block, then body. Rejects three alternatives (JSON, CYML front matter, TSV) with concrete reasoning. Backwards-compat with M5-A/B/C headerless posts is built into the parser (first byte not ASCII uppercase → treat whole file as body).
+- **`src/board.cyr` additions** (~180 LOC):
+  - `post_body_offset(buf, len)` — returns 0 (no headers) or offset past the blank line that terminates headers. Handles `\r\n\r\n` AND `\n\n` separators (mixed line endings tolerated within headers).
+  - `header_get(buf, len, name, out, max)` — finds `Name: value` at start of any line in the header block; skips optional single space after `:`; returns value length copied or `-1` if not found.
+  - `post_format_with_subject(subject, body, body_len, out, cap)` — composes `Subject: <s>\r\nDate: <iso8601_now>\r\n\r\n<body>`.
+  - `post_new_with_subject(store, subject, body, body_len)` — formats + writes via the same EXCL-claim path as the M5-A `post_new`. Empty subject is allowed (writes `Subject: \r\n` so `header_get` returns 0-length instead of `-1`).
+  - `post_subject(buf, len, out, max)` — convenience: `header_get` "Subject" but normalize the missing-header case to 0 (so `list` always renders an empty subject row instead of an error).
+- **Wire integration in `src/main.cyr`**:
+  - New session mode `MODE_POSTING_SUBJECT` between `MODE_COMMAND` and `MODE_POSTING`. Typing `post` now prompts `Subject: ` first; the next line is captured into a per-connection subject buffer; then the `Compose post.` prompt + body capture continues unchanged.
+  - In-session `list` now shows `<id>  <subject>` per row (was bare `<id>`).
+  - In-session `read <id>` now shows `Subject: ...\r\n\r\n<body>` (was raw file content).
+  - CLI `agora post` grew `--subject <text>` flag (and an empty default).
+  - CLI `agora list` and `agora read` updated for the same body-only / subject-prefix behavior as the wire.
+- **`stdlib` deps** grew `chrono` for `iso8601_now` (Date header generation).
+- **Fixed a session-buffer corruption bug surfaced during M5-D smoke**: when the EOL-paired LF arrived after CR, the previous code path fell through to the printable-byte branch and appended the LF to the line buffer at position 0 — corrupting every subsequent command's first byte. Added explicit `consumed` flag in the EOL detection that drops paired-LF entirely instead. Two-list-in-a-row reproduces the original bug; now passes clean.
+- **Tests grew 32 → 38** — six new tests: `t33_post_body_offset_headerless` (sniffer-rejects-lowercase-start), `t34_post_body_offset_crlf` (CRLF blank-line separator), `t35_post_body_offset_lf` (LF-only separator), `t36_header_get_subject` (extract Subject value), `t37_header_get_missing` (absent header returns -1), `t38_post_subject_headerless_returns_zero` (normalization for `list` UX).
+- **End-to-end CLI + telnet smoke** — CLI `post --subject "Hello"` + `list` shows `1  Hello`; `read 1` shows `Subject: Hello\n\nbody`. Telnet `post` prompts `Subject: `, captures the line, transitions to body capture, period-ends, writes file with both headers. Headerless legacy file dropped manually into the store renders as `4  ` (no subject) in `list` and prints body verbatim under `read`.
+- **Binary delta**: 116,904 B (M5-H close) → 128,352 B (+11.4 KB for `lib/chrono.cyr` + header primitives + new session mode + CLI flag).
+
 ### Added — M5-C: sorted post listing (2026-05-23)
 
 - **`post_list` now returns IDs in ascending order**. M5-A/B returned directory-iteration order which is non-deterministic and unfriendly to the `list` UX (and to anyone diff-checking output across runs).
