@@ -1343,6 +1343,76 @@ fn t61_parse_auth_sig_no_space(): i64 {
     return 0;
 }
 
+# === M6-D keyfile / seed-to-pk ===
+
+# Helper: parse 2 hex chars into a byte. Returns 0..255 or -1 on
+# non-hex. Used to load RFC 8032 test vectors as inline literals.
+fn t_hex2(c1, c2): i64 {
+    var hi = 0 - 1;
+    if (c1 >= 48) { if (c1 <= 57)  { hi = c1 - 48; } }
+    if (c1 >= 97) { if (c1 <= 102) { hi = c1 - 87; } }
+    if (c1 >= 65) { if (c1 <= 70)  { hi = c1 - 55; } }
+    var lo = 0 - 1;
+    if (c2 >= 48) { if (c2 <= 57)  { lo = c2 - 48; } }
+    if (c2 >= 97) { if (c2 <= 102) { lo = c2 - 87; } }
+    if (c2 >= 65) { if (c2 <= 70)  { lo = c2 - 55; } }
+    if (hi < 0) { return 0 - 1; }
+    if (lo < 0) { return 0 - 1; }
+    return (hi << 4) | lo;
+}
+
+# Decode a hex cstring into raw bytes. Assumes the input length is
+# 2*expect_len. Writes expect_len bytes to out_buf. Returns
+# expect_len on success, -1 on malformed.
+fn t_hex_load(hex_str, expect_len, out_buf): i64 {
+    var i = 0;
+    while (i < expect_len) {
+        var c1 = load8(hex_str + i * 2)     & 0xFF;
+        var c2 = load8(hex_str + i * 2 + 1) & 0xFF;
+        var b = t_hex2(c1, c2);
+        if (b < 0) { return 0 - 1; }
+        store8(out_buf + i, b);
+        i = i + 1;
+    }
+    return expect_len;
+}
+
+# T62: seed_to_pk derives the RFC 8032 test-vector-1 pubkey from
+# the RFC 8032 test-vector-1 seed.
+#   seed: 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+#   pk:   d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+fn t62_seed_to_pk_rfc8032_v1(): i64 {
+    var seed[32];
+    t_hex_load("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 32, &seed);
+    var pk[32];
+    seed_to_pk(&seed, &pk);
+    var expected[32];
+    t_hex_load("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", 32, &expected);
+    if (memeq(&pk, &expected, 32) == 0) {
+        test_fail("t62_seed_to_pk_rfc8032_v1", "derived pk mismatch");
+        return 1;
+    }
+    test_pass("t62_seed_to_pk_rfc8032_v1");
+    return 0;
+}
+
+# T63: fingerprint of the RFC 8032 v1 pubkey is stable.
+fn t63_fingerprint_of_rfc8032_v1_pk(): i64 {
+    var pk[32];
+    t_hex_load("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", 32, &pk);
+    var fp[17];
+    compute_fingerprint(&pk, &fp);
+    # First 8 bytes of sha256(pk) = 21fe31dfa154a261
+    # (computed externally: sha256(hex-decoded RFC 8032 v1 pk))
+    var expected = "21fe31dfa154a261";
+    if (memeq(&fp, expected, 16) == 0) {
+        test_fail("t63_fingerprint_of_rfc8032_v1_pk", "fp mismatch");
+        return 1;
+    }
+    test_pass("t63_fingerprint_of_rfc8032_v1_pk");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1410,6 +1480,8 @@ fn main(): i64 {
     t59_parse_auth_sig_valid();
     t60_parse_auth_sig_rejects();
     t61_parse_auth_sig_no_space();
+    t62_seed_to_pk_rfc8032_v1();
+    t63_fingerprint_of_rfc8032_v1_pk();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

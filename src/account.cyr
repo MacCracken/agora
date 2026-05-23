@@ -36,6 +36,7 @@ enum AccountCap {
     ACCOUNT_NONCE_HEX_BYTES = 64;    # nonce hex-encoded length
     ACCOUNT_NONCE_BUF_BYTES = 65;    # +1 for NUL
     ACCOUNT_SCAN_MAX        = 1024;  # max users enumerated per scan
+    ACCOUNT_PERM_KEYFILE    = 0x180; # rw- --- ---  (0o600) for secret-key files
 }
 
 # === Fingerprint computation ===
@@ -265,6 +266,73 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 # as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
 # future bite may add a `<store>/.users/.by-handle/<handle> → <fp>`
 # symlink index if a real deployment hits the scale.
+# === Keyfile primitives (M6-D, ADR 0006) ===
+#
+# Keyfile is 32 raw bytes — the Ed25519 seed. sigil's
+# ed25519_keypair(seed, sk_out, pk_out) derives the 64-byte sk
+# (= seed||pk) and 32-byte pk from the seed on every load. The
+# secret never crosses the wire.
+
+# Read the 32-byte seed from a keyfile into seed_out. Returns 0 on
+# success, -1 on missing file / wrong size / read error.
+fn keyfile_load_seed(path, seed_out): i64 {
+    var n = file_read_all(path, seed_out, ACCOUNT_SEED_BYTES);
+    if (n != ACCOUNT_SEED_BYTES) { return 0 - 1; }
+    return 0;
+}
+
+# Derive the 32-byte public key from a 32-byte seed via sigil's
+# ed25519_keypair. Writes pk into pk_out (32 bytes). Returns 0.
+fn seed_to_pk(seed_buf, pk_out): i64 {
+    var sk[64];
+    ed25519_keypair(seed_buf, &sk, pk_out);
+    return 0;
+}
+
+# Convenience: keyfile path → fingerprint. Reads seed, derives pk,
+# computes fp. Returns 0 on success (writes fp_out), -1 on keyfile
+# error. fp_out must be ≥ ACCOUNT_FP_BUF_BYTES.
+fn keyfile_to_fingerprint(path, fp_out): i64 {
+    var seed[32];
+    if (keyfile_load_seed(path, &seed) != 0) { return 0 - 1; }
+    var pk[32];
+    seed_to_pk(&seed, &pk);
+    compute_fingerprint(&pk, fp_out);
+    return 0;
+}
+
+# Write a freshly-generated 32-byte seed to `path` with O_CREAT |
+# O_EXCL + mode 0o600. Refuses to overwrite (-1 on EEXIST). Returns
+# 0 on success, -1 on entropy / file / write error.
+fn keyfile_generate(path): i64 {
+    var seed[32];
+    if (nonce_random_into(&seed, ACCOUNT_SEED_BYTES) != 0) { return 0 - 1; }
+    # O_WRONLY | O_CREAT | O_EXCL with mode 0o600 = PERM_KEYFILE
+    var fd = file_open(path, O_WRONLY | O_CREAT | BO_EXCL, ACCOUNT_PERM_KEYFILE);
+    if (fd < 0) { return 0 - 1; }
+    var n = file_write(fd, &seed, ACCOUNT_SEED_BYTES);
+    file_close(fd);
+    if (n != ACCOUNT_SEED_BYTES) { return 0 - 1; }
+    return 0;
+}
+
+# Internal: read `want` bytes from /dev/urandom into out_buf. Same
+# shape as nonce_random but with a caller-chosen byte count (so the
+# keygen path can share the entropy reader with the login-flow
+# nonce reader). Returns 0 on success, -1 on entropy failure.
+fn nonce_random_into(out_buf, want): i64 {
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var got = 0;
+    while (got < want) {
+        var n = file_read(fd, out_buf + got, want - got);
+        if (n <= 0) { file_close(fd); return 0 - 1; }
+        got = got + n;
+    }
+    file_close(fd);
+    return 0;
+}
+
 # === Login flow primitives (M6-C, ADR 0006) ===
 #
 # Domain-separation prefix for the challenge signature input. See
@@ -283,16 +351,7 @@ enum AccountLogin {
 # short read). Same /dev/urandom shape sigil's generate_keypair
 # uses internally.
 fn nonce_random(out_buf): i64 {
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0 - 1; }
-    var got = 0;
-    while (got < ACCOUNT_NONCE_BYTES) {
-        var n = file_read(fd, out_buf + got, ACCOUNT_NONCE_BYTES - got);
-        if (n <= 0) { file_close(fd); return 0 - 1; }
-        got = got + n;
-    }
-    file_close(fd);
-    return 0;
+    return nonce_random_into(out_buf, ACCOUNT_NONCE_BYTES);
 }
 
 # Hex-encode the 32 raw nonce bytes from in_buf into out_buf as 64

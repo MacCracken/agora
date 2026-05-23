@@ -95,9 +95,10 @@ Reply-To: <id>           (optional, ADR 0005)
 
 **Key file format**:
 - `~/.agora/key` default, override via `--key <path>` flag on any verb that needs a key.
-- Format: 96 bytes raw — 32-byte seed || 64-byte secret_key (the same `secret_key` shape sigil's `ed25519_keypair` returns). No header, no checksum, no PEM — keep it dead-simple, secret material never touches the wire.
-- File mode 0600 enforced at write time; warn-and-abort if the file is world / group readable at read time.
-- `agora keygen` writes a new keyfile; refuses to overwrite an existing one.
+- Format: **32 bytes raw — the Ed25519 seed**. The seed is the minimum canonical form; `sigil`'s `ed25519_keypair(seed, sk_out, pk_out)` derives the 64-byte secret_key and 32-byte pubkey from it on load. No header, no checksum, no PEM — keep it dead-simple, secret material never touches the wire.
+- File mode 0600 enforced at write time (`fchmod` after `O_CREAT | O_EXCL`); a read-time mode check warns when the file is world / group readable but does not abort (operator-discretion warning, not a hard gate — protects against accidental over-share without blocking valid use under unusual umasks).
+- `agora keygen` writes a new keyfile; refuses to overwrite an existing one (`O_EXCL`).
+- (M6-D first-cut stores only the seed. An earlier draft of this ADR specified "96 bytes — seed || sk" but that duplicates the seed bytes inside sk; the cleaner 32-byte-seed-only shape lands at first-cut.)
 
 **CLI surface**:
 - `agora keygen [--key <path>] [--handle <handle>]` — generates a fresh Ed25519 keypair via sigil, writes the keyfile, prints `created <handle> <fp16>`. With `--handle`, also writes `<store>/.users/<fp>/` registration (requires `--store`); without `--handle`, key exists but isn't registered with any agora deployment.

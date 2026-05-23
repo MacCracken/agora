@@ -121,7 +121,14 @@ fn print_help(): i64 {
     println("                 list post IDs in the chosen board");
     println("  read <id> [--store <path>] [--board <name>]");
     println("                 print a post body to stdout by ID");
-    println("  whoami         show current user (M6+: real impl)");
+    println("  keygen [--key <path>]");
+    println("                 generate a fresh Ed25519 keyfile (32-byte seed,");
+    println("                 mode 0600; default ~/.agora/key; refuses overwrite)");
+    println("  register --handle <h> [--key <path>] [--store <path>]");
+    println("                 register the keyfile's pubkey under <h> in the store");
+    println("  whoami [--key <path>] [--store <path>]");
+    println("                 print '<handle?> <fp16>' for the keyfile's identity");
+    println("                 (handle from a --store lookup; fp from the keyfile alone)");
     println("  version        print version string");
     println("  help           show this message");
     println("");
@@ -264,6 +271,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
+        send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -532,6 +540,21 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_buf(cfd, g_login_nonce, ACCOUNT_NONCE_HEX_BYTES);
         send_str(cfd, "\r\nreply with: auth: <128-hex-ed25519-sig over \"agora-login:\" + challenge>\r\n");
         return MODE_LOGIN_AWAIT_SIG;
+    }
+
+    # M6-D: `whoami` — print bound identity or "anonymous".
+    if (line_has_prefix(line, len, "whoami") != 0) {
+        if ((load8(g_session_fp) & 0xFF) == 0) {
+            send_str(cfd, "anonymous\r\n");
+        } else {
+            if ((load8(g_session_handle) & 0xFF) != 0) {
+                send_str(cfd, g_session_handle);
+                send_str(cfd, " ");
+            }
+            send_str(cfd, g_session_fp);
+            send_str(cfd, "\r\n");
+        }
+        return MODE_COMMAND;
     }
 
     if (line_has_prefix(line, len, "quit") != 0) {
@@ -1054,8 +1077,9 @@ fn parse_board(): i64 {
 
 # Walk argv looking for the first non-flag positional after the verb.
 # Skips any `--<flag> <value>` pair (so all our two-arg flags —
-# `--store`, `--board`, `--subject`, `--motd` — don't shadow the
-# positional). Returns 0 if no positional found.
+# `--store`, `--board`, `--subject`, `--motd`, `--reply-to`,
+# `--key`, `--handle`, `--as` — don't shadow the positional).
+# Returns 0 if no positional found.
 fn first_positional_after_verb(): i64 {
     args_init();
     var n = argc();
@@ -1236,9 +1260,173 @@ fn cmd_read(): i64 {
     return 0;
 }
 
+# M6-D CLI helpers. parse_key_flag / parse_handle_flag mirror the
+# parse_store / parse_subject_flag shape.
+fn parse_key_flag(default_path): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--key") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return default_path;
+        }
+        i = i + 1;
+    }
+    return default_path;
+}
+
+fn parse_handle_flag(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--handle") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Default keyfile path: `$HOME/.agora/key` if HOME is set, else
+# `./agora.key` in cwd. ADR 0006 § Specifics — the keyfile is the
+# user's secret, kept under their home by default.
+fn default_key_path(): i64 {
+    var home = getenv("HOME");
+    if (home == 0) { return "./agora.key"; }
+    var hlen = strlen(home);
+    var out = alloc(hlen + 16);
+    memcpy(out, home, hlen);
+    memcpy(out + hlen, "/.agora/key", 11);
+    store8(out + hlen + 11, 0);
+    return out;
+}
+
+# Ensure the parent directory of `path` exists (one-level mkdir).
+# Used by cmd_keygen so the default `~/.agora/key` works without
+# the operator pre-creating `~/.agora/`. EEXIST treated as success;
+# leading-path-component absence still surfaces via the subsequent
+# file_open in keyfile_generate.
+fn ensure_parent_dir(path): i64 {
+    var len = strlen(path);
+    var i = len - 1;
+    var sentinel = 0;
+    while (i > 0) {
+        if (sentinel == 0) {
+            if ((load8(path + i) & 0xFF) == 47) {   # '/'
+                sentinel = i;
+                i = 0;
+                continue;
+            }
+        }
+        i = i - 1;
+    }
+    if (sentinel == 0) { return 0; }   # no parent (relative bare name)
+    var parent = alloc(sentinel + 1);
+    memcpy(parent, path, sentinel);
+    store8(parent + sentinel, 0);
+    return store_ensure(parent);
+}
+
+# `agora keygen [--key <path>]` — generate a fresh Ed25519 seed,
+# write to `<path>` (default `~/.agora/key`) with mode 0o600,
+# refuse to overwrite. Prints the resulting fingerprint.
+fn cmd_keygen(): i64 {
+    var path = parse_key_flag(default_key_path());
+    ensure_parent_dir(path);
+    if (keyfile_generate(path) != 0) {
+        println("agora keygen: failed to write keyfile (path exists, or open/write/entropy error)");
+        return 1;
+    }
+    var fp_buf = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (keyfile_to_fingerprint(path, fp_buf) != 0) {
+        println("agora keygen: wrote keyfile but could not derive fingerprint");
+        return 1;
+    }
+    sys_write(1, "wrote keyfile ", 14);
+    sys_write(1, path, strlen(path));
+    sys_write(1, " (fp ", 5);
+    sys_write(1, fp_buf, ACCOUNT_FP_HEX_BYTES);
+    sys_write(1, ")\n", 2);
+    return 0;
+}
+
+# `agora register --handle <h> [--key <path>] [--store <path>]` —
+# load the keyfile, derive the pubkey + fingerprint, refuse if the
+# handle is invalid or already taken, register under the chosen
+# store. The server-side handle lookup is O(n) (M6-B scan).
+fn cmd_register(): i64 {
+    var handle = parse_handle_flag();
+    if (handle == 0) {
+        println("agora register: --handle <handle> is required");
+        return 2;
+    }
+    if (handle_valid(handle) == 0) {
+        println("agora register: invalid handle (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not anonymous/system/admin)");
+        return 2;
+    }
+    var path = parse_key_flag(default_key_path());
+    var store = parse_store(DEFAULT_STORE);
+
+    var seed = alloc(ACCOUNT_SEED_BYTES);
+    if (keyfile_load_seed(path, seed) != 0) {
+        println("agora register: could not read keyfile (run 'agora keygen' first or pass --key <path>)");
+        return 1;
+    }
+    var pk = alloc(ACCOUNT_PK_BYTES);
+    seed_to_pk(seed, pk);
+
+    # Refuse if the handle is taken (different fp).
+    var found_fp = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (account_resolve_handle(store, handle, found_fp) == 1) {
+        # Compute our own fp; if same, idempotent re-register OK;
+        # if different, handle is squatted by someone else.
+        var our_fp = alloc(ACCOUNT_FP_BUF_BYTES);
+        compute_fingerprint(pk, our_fp);
+        if (streq(found_fp, our_fp) == 0) {
+            println("agora register: handle already registered to a different fingerprint");
+            return 1;
+        }
+    }
+
+    var fp_out = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (account_register(store, pk, handle, fp_out) != 0) {
+        println("agora register: write failed (mkdir / open / write error)");
+        return 1;
+    }
+    sys_write(1, "registered ", 11);
+    sys_write(1, handle, strlen(handle));
+    sys_write(1, " ", 1);
+    sys_write(1, fp_out, ACCOUNT_FP_HEX_BYTES);
+    sys_write(1, "\n", 1);
+    return 0;
+}
+
+# `agora whoami [--key <path>] [--store <path>]` — decode the
+# keyfile, derive the fingerprint, optionally look up the handle in
+# the store. Prints `<handle?> <fp16>` or just `<fp16>`. Returns 1
+# if the keyfile cannot be read.
 fn cmd_whoami(): i64 {
-    println("agora whoami: M6 stub — user accounts not implemented yet.");
-    return 1;
+    var path = parse_key_flag(default_key_path());
+    var store = parse_store(DEFAULT_STORE);
+    var fp_buf = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (keyfile_to_fingerprint(path, fp_buf) != 0) {
+        println("agora whoami: no keyfile (run 'agora keygen' or pass --key <path>)");
+        return 1;
+    }
+    var handle_buf = alloc(ACCOUNT_HANDLE_BUF);
+    var hlen = account_lookup_handle(store, fp_buf, handle_buf, ACCOUNT_HANDLE_BUF);
+    if (hlen > 0) {
+        sys_write(1, handle_buf, hlen);
+        sys_write(1, " ", 1);
+    }
+    sys_write(1, fp_buf, ACCOUNT_FP_HEX_BYTES);
+    sys_write(1, "\n", 1);
+    return 0;
 }
 
 fn cmd_version(): i64 {
@@ -1264,7 +1452,9 @@ fn main(): i64 {
     if (streq(verb, "post") != 0) { return cmd_post(); }
     if (streq(verb, "list") != 0) { return cmd_list(); }
     if (streq(verb, "read") != 0) { return cmd_read(); }
-    if (streq(verb, "whoami") != 0) { return cmd_whoami(); }
+    if (streq(verb, "whoami")   != 0) { return cmd_whoami(); }
+    if (streq(verb, "keygen")   != 0) { return cmd_keygen(); }
+    if (streq(verb, "register") != 0) { return cmd_register(); }
     println("agora: unknown command");
     print_help();
     return 2;

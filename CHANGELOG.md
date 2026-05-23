@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M6-D: keygen / register / whoami (CLI + telnet) (2026-05-23)
+
+- **New CLI verbs**:
+  - **`agora keygen [--key <path>]`** — generates a fresh 32-byte Ed25519 seed via `/dev/urandom`, writes to `<path>` (default `$HOME/.agora/key`, fallback `./agora.key`) with `O_CREAT | O_EXCL` and mode `0o600`. Refuses to overwrite. Auto-mkdir's the parent (`ensure_parent_dir`). Prints `wrote keyfile <path> (fp <fp16>)`.
+  - **`agora register --handle <h> [--key <path>] [--store <path>]`** — loads the keyfile seed, derives the pubkey via `seed_to_pk` (sigil `ed25519_keypair`), validates the handle (lowercase + digit alphabet, 1-32 bytes, not `anonymous`/`system`/`admin`), checks via `account_resolve_handle` that the handle isn't squatted by a different fingerprint (idempotent re-register OK if same fp), then `account_register`. Prints `registered <handle> <fp16>`.
+  - **`agora whoami [--key <path>] [--store <path>]`** — decodes the keyfile, derives the fingerprint, optionally looks up the handle in `<store>`. Prints `<handle?> <fp16>` (handle omitted when no `--store` or no registration). Returns 1 if the keyfile cannot be read.
+- **New telnet command** `whoami` in `session_execute` — prints `<handle> <fp16>` for an authenticated session, or `anonymous` for an unauthenticated one. Help text updated.
+- **New account-side primitives in `src/account.cyr`**:
+  - `keyfile_load_seed(path, seed_out)` — reads exactly 32 bytes; -1 on missing / wrong-size / read error.
+  - `seed_to_pk(seed_buf, pk_out)` — wraps sigil's `ed25519_keypair`, writes only the 32-byte pubkey (caller doesn't usually need the sk).
+  - `keyfile_to_fingerprint(path, fp_out)` — convenience: keyfile path → 16-hex fingerprint.
+  - `keyfile_generate(path)` — `nonce_random_into` → 32-byte seed → `O_WRONLY|O_CREAT|O_EXCL` write with mode `0o600`. Refuses to overwrite existing files.
+  - `nonce_random_into(out, want)` — generalized `/dev/urandom` reader; `nonce_random` now wraps this with `want = ACCOUNT_NONCE_BYTES`.
+- **New constants** in `AccountCap` / `AccountLogin` / etc.: `ACCOUNT_PERM_KEYFILE = 0x180` (0o600).
+- **ADR 0006 update** — keyfile format clarified to **32 bytes (raw seed)** instead of the original "96 bytes — seed || sk" sketch. sk is derived on load via `ed25519_keypair`; the seed is the minimum canonical form (also what `ssh-keygen -t ed25519` stores internally). Backwards-compat note added.
+- **Tests grew 61 → 63**: `t62_seed_to_pk_rfc8032_v1` (RFC 8032 test-vector-1: seed `9d61b19d…7f60` → pubkey `d75a9801…511a`), `t63_fingerprint_of_rfc8032_v1_pk` (fp = `21fe31dfa154a261`). Added inline `t_hex2` / `t_hex_load` helpers so test files can carry hex-literal vectors without depending on `hex_decode`.
+- **End-to-end smoke** — 8 CLI cases + 3 telnet whoami cases:
+  1. `keygen` writes a 32-byte file mode 0600.
+  2. `keygen` again refuses to overwrite (rc 1).
+  3. `whoami --key <path>` (no `--store`) prints just the fingerprint.
+  4. `register --handle alice --store /tmp/m6d_store` writes `.users/<fp>/` with all three files.
+  5. `whoami --key <path> --store /tmp/m6d_store` prints `alice <fp>`.
+  6. `register` again with same key+handle is idempotent (rc 0, same fp).
+  7. `register --handle Bad-Caps` rejected (rc 2, invalid).
+  8. `register --handle admin` rejected (rc 2, reserved).
+  9. Telnet `whoami` from anonymous session → `anonymous\r\n`.
+  10. `login alice` + auth round-trip (re-using openssl pkeyutl pipeline from M6-C, with the 32-byte seed wrapped in the standard Ed25519 PrivateKeyInfo DER prefix to feed openssl: `30 2e 02 01 00 30 05 06 03 2b 65 70 04 22 04 20 || seed`) → `welcome, alice`.
+  11. Telnet `whoami` post-login → `alice <fp16>\r\n`. **PASS.**
+- **Binary growth**: 351,248 B (M6-C) → 366,080 B (this bite, +14.8 KB for the three new CLI verbs + helpers + getenv path).
+- **`default_key_path` honors `$HOME`** via `lib/io.cyr`'s `getenv` (reads `/proc/self/environ`); falls back to `./agora.key` if unset. Operators on macOS / non-Linux platforms with HOME set still resolve via the standard fallback once `getenv` lands on those platforms.
+
 ### Added — M6-C: telnet `login` + challenge/response wire flow (2026-05-23)
 
 - **New session mode `MODE_LOGIN_AWAIT_SIG = 3`** in `src/main.cyr` — parked-challenge state between `login <handle>` and the client's `auth: <hex>` reply.
