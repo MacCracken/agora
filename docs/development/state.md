@@ -16,8 +16,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.4.0` (2026-05-23) |
-| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + M5 partial (0.4.0) + **M5 close ready** — ADRs 0004 + 0005 + M5-E + M5-F landed 2026-05-23: agora is now a **multi-board threaded BBS over telnet**. Next release tag = 0.5.0 (M5 close). Release plan: 0.6 M6 sigil auth, 0.7 security sweep + CVE research, 0.8 v1 hardening, 1.0 ship on archaemenid iron. |
+| **Released** | `0.5.0` (2026-05-23) |
+| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + M5 partial (0.4.0) + **M5 closed at 0.5.0** — agora is a **multi-board threaded BBS over telnet**. Six M5 bites + four ADRs (0002, 0003, 0004, 0005) shipped 2026-05-23. Release plan: 0.6 M6 sigil auth, 0.7 security sweep + CVE research, 0.8 v1 hardening, 1.0 ship on archaemenid iron. |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -68,7 +68,8 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 ## Recent shipped
 
-- **0.4.0** (2026-05-23) — M5 partial: post persistence. 6-bite cycle (M5-A storage primitives, M5-B in-session command interpreter, M5-C sorted listing, M5-D RFC-822 headers, M5-G store-write flock, M5-H ingress input filter) + 2 ADRs (0002 one-file-per-post, 0003 RFC-822 headers). 38 tests; 129,096 B (+43.5 KB from M2 close, mostly DCE-eligible). **agora is a working single-board BBS over telnet.** See [`CHANGELOG.md`](../../CHANGELOG.md#040--2026-05-23-m5-partial--post-persistence-with-metadata--concurrent-writer-correctness).
+- **0.5.0** (2026-05-23) — M5 close: boards + threads. 2 new bites (M5-E boards, M5-F threading) + 2 new ADRs (0004 board layout, 0005 Reply-To threading). 49 tests; 140,152 B (+11 KB from 0.4.0). **agora is a multi-board threaded BBS over telnet.** See [`CHANGELOG.md`](../../CHANGELOG.md#050--2026-05-23-m5-close--boards--threads).
+- **0.4.0** (2026-05-23) — M5 partial: post persistence. 6-bite cycle + 2 ADRs (0002 one-file-per-post, 0003 RFC-822 headers). 38 tests; 129,096 B. **agora is a working single-board BBS over telnet.**
 - **0.3.0** (2026-05-23) — M2 close: ANSI BBS aesthetic. 3-bite cycle (bannermanor MOTD, darshana SGR colors, `--motd` operator override). 24 tests still green; 85,544 B (+14.6 KB from M1 close, most DCE-eligible). bannermanor patched 1.0.1 the same day for ecosystem alignment on darshana 0.5.3.
 - **0.2.0** (2026-05-23) — M1 close: cross-platform telnet listener. 5-bite cycle (IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness). 24 tests; 70,960 B; first parser baseline at 10 ns/byte hot path.
 - **0.1.0** (2026-05-23) — Scaffold ship. argv dispatch + boot banner + 6 stub verbs. 43,216 B binary.

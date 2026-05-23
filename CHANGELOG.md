@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-23 (M5 close — boards + threads)
+
+agora is now a **multi-board threaded BBS over telnet**. The full M5 cycle ships: six bites + four ADRs landed between 0.4.0 and 0.5.0. Single-board posting (0.4.0) becomes multi-board threaded conversation (0.5.0) without any user-visible data migration — the 0.4.0 flat-root layout is the implicit "main" board.
+
+### Bites + ADRs in this release
+
+- **M5-E (boards)** + [ADR 0004](docs/adr/0004-board-layout.md) — flat-root = "main", subdirs = named. Telnet `boards` / `enter <name>` / `leave` + CLI `--board <name>`. Per-board ID counter + lockfile.
+- **M5-F (threads)** + [ADR 0005](docs/adr/0005-threading-via-reply-to.md) — `Reply-To: <id>` header, same-board, scan-on-read. Telnet `reply <id>` (auto Re: subject) + `read <id>` shows `Replies: N, M, ...`. CLI `--reply-to <id>`.
+
+### Changed
+
+- `print_banner` / `cmd_version` / `render_motd` version line bumped to 0.5.0.
+- `cyrius.cyml [deps].stdlib` unchanged at 16 modules (M5-E/F added no new deps).
+
+### Verified
+
+- 49/49 tests pass from a clean build.
+- Bench baseline (telnet/plain_byte 11 ns, telnet/subneg_naws 107 ns) consistent with 0.4.0 — M5-E/F is content-layer work, doesn't touch the IAC parser hot path.
+- Security re-scan: board name validator + Reply-To parser bound external input; scan-on-read replies enumeration bounded by `DIRENT_ID_MAX`; no command injection; no orphans.
+- End-to-end smoke (CLI + telnet): post + reply chain; on-disk file shows Reply-To header; `read 1` shows `Replies: 2, 3`; `reply 1` derives Re: subject and writes Reply-To.
+
 ### Added — ADR 0005 + M5-F: threading via Reply-To (2026-05-23) — **M5 close**
 
 This bite closes M5. agora is now a **multi-board threaded BBS over telnet** — the post storage cycle that opened with ADR 0002 / M5-A / 0.4.0 reaches feature completeness with same-board reply linkage. Next release tag will be **0.5.0** (M5 close + roadmap restructure documented under 0.4.0).
