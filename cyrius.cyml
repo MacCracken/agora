@@ -16,7 +16,7 @@ output = "agora"
 # landed the cross-platform telnet listener on lib/net.cyr; M2 is the
 # ANSI BBS aesthetic — M2-A consumes bannermanor (rendered offline),
 # M2-B consumes darshana for SGR / cursor primitives (git dep below).
-stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "result", "tagged", "vec", "fnptr", "bench", "str", "fs", "chrono", "sigil", "freelist"]
+stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "result", "tagged", "vec", "fnptr", "bench", "str", "fs", "chrono", "sigil", "freelist", "bigint", "ct"]
 
 [deps.darshana]
 # SGR / cursor primitives for ANSI BBS aesthetic at M2-B. The

@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M6-C: telnet `login` + challenge/response wire flow (2026-05-23)
+
+- **New session mode `MODE_LOGIN_AWAIT_SIG = 3`** in `src/main.cyr` — parked-challenge state between `login <handle>` and the client's `auth: <hex>` reply.
+- **Per-session globals**: `g_session_fp` / `g_session_handle` (bound identity, empty cstring = anonymous); `g_login_fp` / `g_login_nonce` (parked challenge state, cleared on every auth attempt + session start). Allocated per-connection in `handle_client`, mirrors the single-tracking caveat documented on `g_reply_to`.
+- **`login <handle>` command** in `session_execute`:
+  - Resolve `<handle>` → fingerprint via `account_resolve_handle` (M6-B). Unknown handle → "unknown user", session stays anonymous.
+  - Generate 32-byte random nonce via `/dev/urandom` (`nonce_random` in account.cyr).
+  - Hex-encode nonce (`nonce_to_hex`); send `challenge: <64-hex>\r\n` + reply-format hint.
+  - Park `(fp, nonce_hex)` in `g_login_fp` / `g_login_nonce`; return `MODE_LOGIN_AWAIT_SIG`.
+- **`MODE_LOGIN_AWAIT_SIG` branch in `handle_client`** (eol-dispatch chain):
+  - `parse_auth_sig(line, line_pos, sig_raw)` extracts 64-byte sig from `auth: <128-hex>` (tolerates the optional single space after colon).
+  - `account_lookup_pubkey(store, g_login_fp, pk_buf)` fetches the 32-byte registered pubkey.
+  - `format_challenge_msg(g_login_nonce, msg)` writes the 76-byte signed payload (`"agora-login:" + nonce_hex`, ADR 0006's domain-separation prefix).
+  - `ed25519_verify(pk, msg, 76, sig)` decides pass/fail.
+  - Pass: bind `g_session_fp` + `g_session_handle` from the parked fp + lookup, send `welcome, <handle>`, return to `MODE_COMMAND`.
+  - Fail (malformed auth / pubkey lookup error / signature mismatch): clear parked state, send specific failure message, return to `MODE_COMMAND` anonymous.
+  - **Single-use nonce**: `g_login_nonce` cleared on every auth attempt, pass or fail.
+- **New account-side primitives in `src/account.cyr`**:
+  - `nonce_random(out_buf)` — 32 bytes from `/dev/urandom` (entropy failure returns -1, mirrors sigil's `generate_keypair` shape).
+  - `nonce_to_hex(in_buf, out_buf)` — 32 raw bytes → 64 hex chars + NUL.
+  - `format_challenge_msg(nonce_hex, out_buf)` — `"agora-login:" + nonce_hex` (76 bytes, NOT NUL-terminated; caller passes length to `ed25519_*`).
+  - `parse_auth_sig(line, line_len, sig_out)` — validates `auth:` prefix + optional space + exact 128-hex chars + hex-decode; returns 64 on success, -1 on malformed.
+  - New constants: `LOGIN_PREFIX_LEN = 12`, `LOGIN_MSG_LEN = 76`.
+- **`cyrius.cyml [deps].stdlib`** — added `bigint` + `ct` (sigil's Ed25519 verify needs the u256 + constant-time primitives from bigint/ct.cyr; without them the verify call hit unimplemented-function SIGILL at runtime). 18 modules at M6-B → 20 at this bite.
+- **Tests grew 56 → 61**: `t57_nonce_to_hex_known` (input bytes 0x00..0x1F → expected hex), `t58_format_challenge_msg` (prefix + nonce tail), `t59_parse_auth_sig_valid` (128-hex round-trip), `t60_parse_auth_sig_rejects` (NUL ptr / empty / too short / wrong prefix / 127 hex / non-hex char), `t61_parse_auth_sig_no_space` (tolerates `auth:00...` without space).
+- **End-to-end smoke (CLI + openssl + python)**:
+  1. `openssl genpkey -algorithm ed25519` → 32-byte raw pubkey extracted from DER output.
+  2. Fingerprint = `sha256(pk)[:8]` hex; pre-registered `<store>/.users/<fp>/{public_key.bin, handle, created.iso8601}`.
+  3. Connect → `login alice` → server emits `challenge: <64-hex>\r\n`.
+  4. Client signs `"agora-login:" + nonce_hex` via `openssl pkeyutl -sign -rawin`.
+  5. Send `auth: <128-hex>\r\n` → server replies `welcome, alice\r\n> `. **PASS.**
+  - Failure paths verified: `login nobody` → `unknown user`; `auth: <128-hex of wrong sig>` → `login failed (signature)`.
+- **Sigil interop**: openssl 3.x's pure-Ed25519 sign output (`-rawin`) verifies cleanly with sigil's `ed25519_verify` — confirms both implement RFC 8032 PureEdDSA correctly.
+- **Help text** updated to document `login <handle>`.
+- **Binary growth**: 332,552 B (M6-B) → 351,248 B (this bite). +18.6 KB for the login dispatch path + bigint/ct surface that sigil's ed25519_verify call chain pulls in.
+- **Deferred to a polish follow-up**: 30 s deadline on the parked challenge. Today's `sock_set_recv_timeout(60s)` slowloris defense kills idle sockets, which incidentally drops any stale parked nonce — the explicit deadline is hardening, not correctness.
+
 ### Added — M6-B: account primitives in `src/account.cyr` (2026-05-23)
 
 - **`src/account.cyr`** (~230 LOC) — per-user identity primitives per ADR 0006:

@@ -1246,6 +1246,103 @@ fn t56_build_user_file_shape(): i64 {
     return 0;
 }
 
+# === M6-C login-flow pure helpers ===
+
+# T57: nonce_to_hex encodes 32 raw bytes into 64 lowercase hex chars + NUL.
+# Input: bytes 0x00..0x1F → expected first chars "000102...1f".
+fn t57_nonce_to_hex_known(): i64 {
+    var raw[32];
+    var i = 0;
+    while (i < 32) { store8((&raw) + i, i); i = i + 1; }
+    var hex[65];
+    nonce_to_hex(&raw, &hex);
+    var expected = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    if (memeq(&hex, expected, 64) == 0) {
+        test_fail("t57_nonce_to_hex_known", "hex bytes mismatch");
+        return 1;
+    }
+    if ((load8((&hex) + 64) & 0xFF) != 0) {
+        test_fail("t57_nonce_to_hex_known", "missing NUL terminator");
+        return 1;
+    }
+    test_pass("t57_nonce_to_hex_known");
+    return 0;
+}
+
+# T58: format_challenge_msg writes "agora-login:" + nonce_hex (76 bytes).
+fn t58_format_challenge_msg(): i64 {
+    var nonce_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var msg[76];
+    var n = format_challenge_msg(nonce_hex, &msg);
+    if (n != LOGIN_MSG_LEN) {
+        test_fail("t58_format_challenge_msg", "wrong length");
+        return 1;
+    }
+    if (memeq(&msg, "agora-login:", LOGIN_PREFIX_LEN) == 0) {
+        test_fail("t58_format_challenge_msg", "missing prefix");
+        return 1;
+    }
+    if (memeq((&msg) + LOGIN_PREFIX_LEN, nonce_hex, 64) == 0) {
+        test_fail("t58_format_challenge_msg", "nonce tail mismatch");
+        return 1;
+    }
+    test_pass("t58_format_challenge_msg");
+    return 0;
+}
+
+# T59: parse_auth_sig extracts a 64-byte signature from a well-formed line.
+fn t59_parse_auth_sig_valid(): i64 {
+    # 128 hex chars = 64 bytes
+    var line = "auth: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var line_len = strlen(line);
+    var sig[64];
+    var n = parse_auth_sig(line, line_len, &sig);
+    if (n != ACCOUNT_SIG_BYTES) {
+        test_fail("t59_parse_auth_sig_valid", "wrong length");
+        return 1;
+    }
+    # First byte should be 0x01 (from "01" at start of hex).
+    if ((load8(&sig) & 0xFF) != 0x01) {
+        test_fail("t59_parse_auth_sig_valid", "first byte mismatch");
+        return 1;
+    }
+    test_pass("t59_parse_auth_sig_valid");
+    return 0;
+}
+
+# T60: parse_auth_sig rejects malformed input.
+fn t60_parse_auth_sig_rejects(): i64 {
+    var sig[64];
+    # Empty / too-short / wrong-prefix / wrong-length / non-hex
+    if (parse_auth_sig(0, 0, &sig) >= 0)                         { test_fail("t60", "NUL ptr");      return 1; }
+    if (parse_auth_sig("", 0, &sig) >= 0)                        { test_fail("t60", "empty");        return 1; }
+    if (parse_auth_sig("hi", 2, &sig) >= 0)                      { test_fail("t60", "too short");    return 1; }
+    if (parse_auth_sig("not-auth", 8, &sig) >= 0)                { test_fail("t60", "wrong prefix"); return 1; }
+    if (parse_auth_sig("auth: 00", 8, &sig) >= 0)                { test_fail("t60", "too short hex");return 1; }
+    # 127 hex chars (one short of 128)
+    var short127 = "auth: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde";
+    if (parse_auth_sig(short127, strlen(short127), &sig) >= 0)   { test_fail("t60", "127 hex");      return 1; }
+    # 128 chars but with a non-hex 'z'
+    var nonhex  = "auth: z123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    if (parse_auth_sig(nonhex, strlen(nonhex), &sig) >= 0)       { test_fail("t60", "non-hex char"); return 1; }
+    test_pass("t60_parse_auth_sig_rejects");
+    return 0;
+}
+
+# T61: parse_auth_sig tolerates optional single space after colon
+# (both "auth:00..." and "auth: 00..." should work).
+fn t61_parse_auth_sig_no_space(): i64 {
+    var line = "auth:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var sig[64];
+    var n = parse_auth_sig(line, strlen(line), &sig);
+    if (n != ACCOUNT_SIG_BYTES) {
+        test_fail("t61_parse_auth_sig_no_space", "should accept no-space form");
+        return 1;
+    }
+    test_pass("t61_parse_auth_sig_no_space");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1308,6 +1405,11 @@ fn main(): i64 {
     t54_build_users_dir_shape();
     t55_build_user_dir_shape();
     t56_build_user_file_shape();
+    t57_nonce_to_hex_known();
+    t58_format_challenge_msg();
+    t59_parse_auth_sig_valid();
+    t60_parse_auth_sig_rejects();
+    t61_parse_auth_sig_no_space();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

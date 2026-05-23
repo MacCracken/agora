@@ -265,6 +265,93 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 # as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
 # future bite may add a `<store>/.users/.by-handle/<handle> → <fp>`
 # symlink index if a real deployment hits the scale.
+# === Login flow primitives (M6-C, ADR 0006) ===
+#
+# Domain-separation prefix for the challenge signature input. See
+# ADR 0006 § Specifics — prevents the user's keypair being tricked
+# into signing payloads for other protocols. 12 bytes literal.
+#
+# Challenge message = "agora-login:" + nonce_hex (64 chars) = 76 bytes.
+
+enum AccountLogin {
+    LOGIN_PREFIX_LEN  = 12;       # strlen("agora-login:")
+    LOGIN_MSG_LEN     = 76;       # 12 + 64-hex nonce
+}
+
+# Read ACCOUNT_NONCE_BYTES (=32) raw bytes from /dev/urandom into
+# out_buf. Returns 0 on success, -1 on entropy failure (open or
+# short read). Same /dev/urandom shape sigil's generate_keypair
+# uses internally.
+fn nonce_random(out_buf): i64 {
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var got = 0;
+    while (got < ACCOUNT_NONCE_BYTES) {
+        var n = file_read(fd, out_buf + got, ACCOUNT_NONCE_BYTES - got);
+        if (n <= 0) { file_close(fd); return 0 - 1; }
+        got = got + n;
+    }
+    file_close(fd);
+    return 0;
+}
+
+# Hex-encode the 32 raw nonce bytes from in_buf into out_buf as 64
+# lowercase hex chars + NUL. out_buf must be ≥ ACCOUNT_NONCE_BUF_BYTES.
+# Returns ACCOUNT_NONCE_HEX_BYTES (=64).
+fn nonce_to_hex(in_buf, out_buf): i64 {
+    var i = 0;
+    while (i < ACCOUNT_NONCE_BYTES) {
+        var b = load8(in_buf + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(out_buf + i * 2, 48 + hi); }
+        else         { store8(out_buf + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out_buf + i * 2 + 1, 48 + lo); }
+        else         { store8(out_buf + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out_buf + ACCOUNT_NONCE_HEX_BYTES, 0);
+    return ACCOUNT_NONCE_HEX_BYTES;
+}
+
+# Compose the signed-message payload for the login challenge:
+# `"agora-login:" + nonce_hex` (76 bytes, NOT NUL-terminated — the
+# caller passes the byte length to ed25519_sign / ed25519_verify).
+# nonce_hex is the 64-char hex-encoded nonce from nonce_to_hex.
+# Writes LOGIN_MSG_LEN bytes into out_buf; returns LOGIN_MSG_LEN.
+fn format_challenge_msg(nonce_hex, out_buf): i64 {
+    memcpy(out_buf, "agora-login:", LOGIN_PREFIX_LEN);
+    memcpy(out_buf + LOGIN_PREFIX_LEN, nonce_hex, ACCOUNT_NONCE_HEX_BYTES);
+    return LOGIN_MSG_LEN;
+}
+
+# Parse an `auth: <128-hex>` line into the raw 64-byte signature.
+# Tolerates leading "auth:" or "auth: " (one optional space). Returns
+# the byte length copied into sig_out (= ACCOUNT_SIG_BYTES on success)
+# or -1 on malformed input (wrong prefix / wrong hex length / non-hex
+# chars). sig_out must be ≥ ACCOUNT_SIG_BYTES.
+fn parse_auth_sig(line, line_len, sig_out): i64 {
+    if (line == 0)   { return 0 - 1; }
+    if (line_len < 5) { return 0 - 1; }
+    if ((load8(line + 0) & 0xFF) != 97)  { return 0 - 1; }  # 'a'
+    if ((load8(line + 1) & 0xFF) != 117) { return 0 - 1; }  # 'u'
+    if ((load8(line + 2) & 0xFF) != 116) { return 0 - 1; }  # 't'
+    if ((load8(line + 3) & 0xFF) != 104) { return 0 - 1; }  # 'h'
+    if ((load8(line + 4) & 0xFF) != 58)  { return 0 - 1; }  # ':'
+    var off = 5;
+    if (off < line_len) {
+        if ((load8(line + off) & 0xFF) == 32) { off = off + 1; }
+    }
+    var hex_len = line_len - off;
+    var want_hex = ACCOUNT_SIG_BYTES * 2;       # 128
+    if (hex_len != want_hex) { return 0 - 1; }
+    if (hex_is_valid(line + off, hex_len) == 0) { return 0 - 1; }
+    var raw = hex_decode(line + off, hex_len);
+    if (raw == 0) { return 0 - 1; }
+    memcpy(sig_out, raw, ACCOUNT_SIG_BYTES);
+    return ACCOUNT_SIG_BYTES;
+}
+
 fn account_resolve_handle(store, handle, fp_out): i64 {
     var users_path = alloc(PATH_MAX_BYTES);
     build_users_dir(store, users_path);
