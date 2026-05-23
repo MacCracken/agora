@@ -1,0 +1,100 @@
+# agora — main entry point.
+#
+# v0.1.0 scaffold: argv dispatch + boot banner + no-op stubs for the
+# verbs the real BBS will grow into. No kernel-side wire activity yet
+# — that lands when agnos 1.32.2 closes the DHCP gate and tcp_listen
+# on iron is end-to-end validated.
+#
+# Roadmap shape (per cyrius.cyml deps comment block):
+#   M0 (0.1.0)  argv dispatch + banner + stub verbs               ← THIS
+#   M1          telnet listener (RFC 854) + LINEMODE (RFC 1184)
+#   M2          ANSI BBS aesthetic (darshana + bannermanor)
+#   M3          inline-image post bodies (kii)
+#   M4          stored-file deltas (sankoch compression)
+#   M5          post persistence (gated on agnos 1.33.x ext4 WRITE)
+#   M6          user accounts + auth (sigil-backed)
+#   1.0.0       all six milestones green, multi-user telnet BBS
+
+fn print_banner(): i64 {
+    println("agora — BBS for AGNOS");
+    println("v0.1.0 scaffold");
+    return 0;
+}
+
+fn print_help(): i64 {
+    print_banner();
+    println("");
+    println("USAGE: agora <command>");
+    println("");
+    println("COMMANDS (M0 stubs):");
+    println("  serve       start telnet listener (M1+: real impl)");
+    println("  post        create a new post (M5+: real impl)");
+    println("  list        list recent posts (M5+: real impl)");
+    println("  read <id>   read a post by ID (M5+: real impl)");
+    println("  whoami      show current user (M6+: real impl)");
+    println("  version     print version string");
+    println("  help        show this message");
+    println("");
+    println("EXIT CODES:");
+    println("  0  success");
+    println("  1  command-specific failure");
+    println("  2  bad usage (unknown command / arg)");
+    return 0;
+}
+
+fn cmd_serve(): i64 {
+    println("agora serve: M1 stub — telnet listener not implemented yet.");
+    println("Will consume kernel tcp_listen(23) once agnos 1.32.2 closes.");
+    return 1;
+}
+
+fn cmd_post(): i64 {
+    println("agora post: M5 stub — post persistence gated on agnos 1.33.x ext4 WRITE.");
+    return 1;
+}
+
+fn cmd_list(): i64 {
+    println("agora list: M5 stub — no posts yet (storage not implemented).");
+    return 1;
+}
+
+fn cmd_read(): i64 {
+    println("agora read: M5 stub — no posts yet (storage not implemented).");
+    return 1;
+}
+
+fn cmd_whoami(): i64 {
+    println("agora whoami: M6 stub — user accounts not implemented yet.");
+    return 1;
+}
+
+fn cmd_version(): i64 {
+    println("agora 0.1.0");
+    return 0;
+}
+
+fn main(): i64 {
+    args_init();
+    var n = argc();
+    if (n < 2) {
+        print_help();
+        return 2;
+    }
+    var verb = argv(1);
+    if (streq(verb, "help") != 0) { return print_help(); }
+    if (streq(verb, "--help") != 0) { return print_help(); }
+    if (streq(verb, "-h") != 0) { return print_help(); }
+    if (streq(verb, "version") != 0) { return cmd_version(); }
+    if (streq(verb, "--version") != 0) { return cmd_version(); }
+    if (streq(verb, "serve") != 0) { return cmd_serve(); }
+    if (streq(verb, "post") != 0) { return cmd_post(); }
+    if (streq(verb, "list") != 0) { return cmd_list(); }
+    if (streq(verb, "read") != 0) { return cmd_read(); }
+    if (streq(verb, "whoami") != 0) { return cmd_whoami(); }
+    println("agora: unknown command");
+    print_help();
+    return 2;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,4 @@
+build/
+cyrius.lock
+*.o
+*.tmp

@@ -1,0 +1,25 @@
+[package]
+name = "agora"
+version = "${file:VERSION}"
+description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.0.1"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "agora"
+
+[deps]
+# Pre-1.0 stdlib surface. v0.1.0 (M0) is the boot-to-banner scaffold —
+# argv dispatch + telnet listener stub. Real protocol code (RFC 854
+# Telnet + RFC 1184 LINEMODE) lands at M1+; post storage is gated on
+# agnos 1.33.x ext4 WRITE.
+stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args"]
+
+# AGNOS first-party deps deferred until needed:
+#   - darshana (ANSI escapes — ANSI BBS aesthetic at M2+)
+#   - kii (image → ASCII for MOTD banners + post inline-images at M3+)
+#   - bannermanor (FIGlet ASCII banners at M2+)
+#   - sankoch (lossless compression for stored-file deltas at M4+)
