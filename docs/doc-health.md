@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (0.4.0 released; ADRs 0004 + 0005 + M5-E + M5-F landed = M5 close; agora is a multi-board threaded BBS; next tag 0.5.0) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (post-0.5.0 ship — M5 closed; pre-handoff cleanup of roadmap + state.md; next cycle is M6 → 0.6.0 sigil-backed auth) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -15,22 +15,22 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (v0.1.0 doc-tree adoption)
+## At a glance — 2026-05-23 inventory (post-0.5.0)
 
-**~14 markdown files** across the repo (+2 since v0.1.0: `roadmap-future.md` at M1 fourth-bite closeout + `/BENCHMARKS.md` at M1 close). First-party doc tree scaffolded today; everything fresh by construction. **CI/release workflows** added at 0.2.0 close (`.github/workflows/ci.yml` + `release.yml`) per kii / bannermanor reference shape — not docs but file-tree state worth noting here. Bucket counts:
+**~17 markdown files** across the doc tree (+3 since v0.1.0: `roadmap-future.md`, `/BENCHMARKS.md`, three new ADRs 0003 / 0004 / 0005). Doc-tree cleanup pre-handoff: roadmap.md rewritten lean (release-tag table + actionable in-flight + backlog), state.md gained a **Next-session boot guide** for fresh agent reboots. **CI/release workflows** in place since 0.2.0. Bucket counts:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | 14 | Whole tree written or refreshed at v0.1.0 doc-adoption pass + `roadmap-future.md` (M1 fourth-bite) + `/BENCHMARKS.md` (M1 close). |
-| 🟡 **Stale — refresh in place** | 0 | None — repo too young for drift. |
+| ✅ **Fresh / touched in current cycle** | 10 | Refreshed at 0.5.0 ship + post-ship cleanup. |
+| 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` both predate M5 and read as 0.1.0-era. Earned but deferred; lands at M6 close or when a downstream first reads them. |
 | 🟠 **Read-through outstanding** | 0 | None. |
-| 🔵 **Probably evergreen** | 1 | ADR 0001 (cross-platform listener decoupled from AGNOS) — load-bearing principle for M1+. |
+| 🔵 **Probably evergreen** | 5 | All five ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading). |
 | 📦 **Archive — frozen by design** | 0 | None. |
-| ❓ **Open strategic question** | 1 | When does M5's persistence layer earn its own ADR? Default: when the on-disk layout decision is made (one-file-per-post vs. one-file-per-thread + offset index). |
+| ❓ **Open strategic question** | 1 | What does the M6 identity model look like? Resolves into ADR 0006 in the M6 cycle (storage location for user metadata, sigil-challenge wire flow, From-header semantics, per-board permission shape). |
 
-Numbers exact at v0.1.0; rolls up from the per-tier tables below.
+Numbers exact post-0.5.0; rolls up from the per-tier tables below.
 
-**Why scaffolded now**: at v0.1.0 the surface is small enough that a doc-health pass is trivial; setting the convention early means no retroactive sweep is needed when the tree grows past the ~30-doc earn-threshold. Adopted from cyrius doc-health pattern (2026-05-19 reference) per the [user direction on 2026-05-23](#) (this session) — same shape as cyrius, scaled down for agora's stage.
+**Cleanup pass 2026-05-23**: roadmap.md trimmed 156 → 91 lines (removed bite-by-bite prose for closed cycles, which lives in CHANGELOG); state.md restructured to lead with the **Next-session boot guide** + M6 sketch (so a fresh agent boot picks up cleanly without re-deriving context). doc-health.md tier tables refreshed for the post-0.5.0 shape.
 
 ---
 
@@ -39,14 +39,14 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [0.4.0] M5 partial + [Unreleased] ADRs 0004 + 0005, M5-E boards + M5-F threading = M5 close (next tag 0.5.0). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [0.4.0] M5 partial + [0.5.0] M5 close. [Unreleased] empty — next bite opens M6 cycle. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 close)** — first parser baseline (5 microbenchmarks via `lib/bench.cyr`). Hand-maintained; `scripts/bench-history.sh` auto-gen pattern is the v1.x close-out goal. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.1.0`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `0.5.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list reflects current src surface. |
 
 ---
@@ -57,8 +57,8 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.4.0 shipped; M5 close ready to tag 0.5.0 — ADRs 0004 + 0005, M5-E (boards) + M5-F (threading) landed 2026-05-23; 49 tests; 140,152 B. Release plan: 0.6 auth, 0.7 security sweep + CVE research, 0.8 hardening, 1.0 ship. |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. Now points at `roadmap-future.md` for post-v1.0 directions. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.5.0 shipped (M5 closed). 49 tests; 140,160 B. **Restructured 2026-05-23 post-ship**: now leads with a "Next-session boot guide" + M6 sketch for fresh-agent handoff. Recent-shipped reduced to release-line summaries; per-bite narrative kept in CHANGELOG. |
+| `roadmap.md` | 2026-05-23 | ✅ Fresh | **Trimmed 156 → 91 lines 2026-05-23 post-ship**: closed-cycle bite-by-bite prose removed (lives in CHANGELOG); now leads with the release-tag table + M6 in-progress + backlog. Release plan: 0.6 auth → 0.7 security sweep → 0.8 hardening → 1.0 ship. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -67,7 +67,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 ## Tier 3 — ADRs (`docs/adr/`)
 
-1 ADR. Re-read pass per minor closeout; ADRs document decisions, not status.
+5 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
@@ -79,7 +79,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0004-board-layout.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-E** — flat-root = "main", subdirs = named boards. Free backwards-compat with 0.4.0 stores. Modal current-board UI for telnet, `--board <name>` flag for CLI. Auto-create on first post. Rejects all-subdirs migration + sidecar index + per-port-board UI. |
 | `0005-threading-via-reply-to.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-F** — `Reply-To: <id>` header (same-board, ID-only); scan-on-read enumeration; RFC 5322 § 3.6.5 Re: subject prefix (no double). Rejects deep-threading via In-Reply-To+References, sidecar reply index, and cross-board values. |
 
-**Open question** — none open. Next decision likely lands when M5's on-disk layout is chosen (one file per post vs. one file per thread).
+**Open question** — ADR 0006 (identity model) is the next decision, sketched in `state.md`'s in-flight slot for M6 → 0.6.0. Covers storage location for user metadata, sigil-challenge wire flow, From-header semantics, per-board permission shape.
 
 ---
 
@@ -87,7 +87,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` (index) | 2026-05-23 | ✅ Fresh | Empty index — first note lands at M1 when the IAC parser has an invariant worth capturing (e.g., partial-IAC buffering across `recv()` calls). |
+| `README.md` (index) | 2026-05-23 | ✅ Fresh | Empty index. Candidate first note from M5-D experience: paired-LF-after-CR session-buffer corruption (caught in M5-D smoke, fixed via the `consumed` flag in `handle_client`'s EOL detection). Worth capturing as a "this is non-obvious from the code alone" architecture note if M6 work touches the same byte-dispatch surface. |
 
 ---
 
@@ -95,7 +95,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `getting-started.md` | 2026-05-23 | ✅ Fresh | Build / run / smoke for the v0.1.0 scaffold. Refresh at M1 when `serve` becomes real. |
+| `getting-started.md` | 2026-05-23 | 🟡 Stale | Last refresh predates M5 — still talks about the 0.1.0 stub `serve` verb. Needs a rewrite covering: build, `cyrius test`, `./build/agora serve 2323`, post / list / read / reply via telnet + CLI. Earned-but-deferred; lands at the M6 close (0.6.0) or as a standalone bite when an external contributor first reads it. |
 
 ---
 
@@ -103,7 +103,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `README.md` | 2026-05-23 | ✅ Fresh | Placeholder. First runnable example earns its slot at M1 (telnet client smoke against agora). |
+| `README.md` | 2026-05-23 | 🟡 Stale | Placeholder text predates M5; says "first example at M1". M5 close is the natural point to add a runnable Python TCP-client smoke (the same pattern that's been verifying every release in this session). Earned-but-deferred; lands when a downstream first asks how to script agora. |
 
 ---
 
@@ -140,9 +140,10 @@ Items that are *scheduled* doc decisions, not stale state. Surfaced here so they
 | # | Commitment | Trigger | Source | Notes |
 |---|---|---|---|---|
 | 1 | **State.md refresh per release** — `docs/development/state.md` bumped at every tag with new version / size / in-flight slot. | Every release | `CLAUDE.md` "Closeout Pass" §9 | Manual until a release post-hook lands. |
-| 2 | **First architecture note at M1 close** — capture the partial-IAC-across-`recv()` buffering invariant when the parser lands. | M1 close | This file (Tier 4) | One-time; archive note here on completion. |
-| 3 | **First security audit before M6 ship** — full review of input validation across the IAC parser + post-storage path. File in `docs/audit/YYYY-MM-DD-audit.md`. | Before M6 release | `CLAUDE.md` "Security Hardening" | Telnet is adversarial-by-default — any internet-reachable user can send arbitrary IAC sequences. |
+| 2 | **getting-started.md + examples/ rewrite** — bring both up to the 0.5.0 multi-board threaded BBS shape; add a runnable Python TCP-client smoke as the first example. | M6 close (0.6.0) or first external-contributor read, whichever comes first | This file (Tier 5 + Tier 6) | Deferred 2026-05-23 post-ship; not blocking M6 work. |
+| 3 | **Pre-1.0 security audit (0.7.0)** — full review of input validation across the IAC parser + post-storage path + auth surface. File in `docs/audit/YYYY-MM-DD-audit.md`. Web research on telnet/BBS CVEs (CVE-2020-10188, CVE-2011-4862, Mastodon/Matrix vulnerabilities). | 0.7.0 cycle (per release plan) | `CLAUDE.md` "Security Hardening" + roadmap.md release plan | Telnet is adversarial-by-default — any internet-reachable user can send arbitrary IAC sequences + posts. Audit surface widens at M6 (auth) and again at M5+ if any cross-board features land post-1.0. |
+| 4 | **First architecture note** — candidate: paired-LF-after-CR session-buffer corruption fix from M5-D as a "non-obvious from code" invariant for future maintainers of the byte dispatch. | Next M6 bite that touches `handle_client`'s EOL handling, or M6 close | This file (Tier 4) | One-time; archive note here on completion. |
 
 ---
 
-*Initial scaffold: 2026-05-23 (v0.1.0) — pattern adopted from cyrius/docs/doc-health.md per first-party-documentation.md § Development Docs. Refresh in place when docs are touched.*
+*Initial scaffold: 2026-05-23 (v0.1.0) — pattern adopted from cyrius/docs/doc-health.md per first-party-documentation.md § Development Docs. Refreshed at every release; cleanup sweep at 0.5.0 post-ship.*
