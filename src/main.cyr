@@ -1,19 +1,29 @@
 # agora — main entry point.
 #
-# v0.1.0 scaffold: argv dispatch + boot banner + no-op stubs for the
-# verbs the real BBS will grow into. No kernel-side wire activity yet
-# — that lands when agnos 1.32.2 closes the DHCP gate and tcp_listen
-# on iron is end-to-end validated.
+# argv dispatch + boot banner + per-verb command handlers. The serve
+# verb drives the M1 telnet listener via lib/net.cyr (Linux today;
+# macOS / Windows / AGNOS follow as the stdlib gains backends — see
+# docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md).
 #
-# Roadmap shape (per cyrius.cyml deps comment block):
-#   M0 (0.1.0)  argv dispatch + banner + stub verbs               ← THIS
-#   M1          telnet listener (RFC 854) + LINEMODE (RFC 1184)
-#   M2          ANSI BBS aesthetic (darshana + bannermanor)
-#   M3          inline-image post bodies (kii)
-#   M4          stored-file deltas (sankoch compression)
-#   M5          post persistence (gated on agnos 1.33.x ext4 WRITE)
-#   M6          user accounts + auth (sigil-backed)
-#   1.0.0       all six milestones green, multi-user telnet BBS
+# Roadmap shape (docs/development/roadmap.md):
+#   M0 (0.1.0) ✅  argv dispatch + banner + stub verbs
+#   M1 ← active   telnet listener (RFC 854) + LINEMODE (RFC 1184)
+#   M2            ANSI BBS aesthetic (darshana + bannermanor)
+#   M3            inline-image post bodies (kii)
+#   M4            stored-file deltas (sankoch compression)
+#   M5            post persistence
+#   M6            user accounts + auth (sigil-backed)
+#   1.0.0         all six milestones green, multi-user telnet BBS
+
+include "src/telnet.cyr"
+
+# Default port. 23 is the IANA-assigned telnet port but requires
+# root on Linux for bind. Override via `agora serve <port>`.
+enum AgoraDefaults {
+    DEFAULT_PORT      = 2323;
+    LISTEN_BACKLOG    = 16;
+    RECV_BUF_BYTES    = 4096;
+}
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
@@ -24,16 +34,16 @@ fn print_banner(): i64 {
 fn print_help(): i64 {
     print_banner();
     println("");
-    println("USAGE: agora <command>");
+    println("USAGE: agora <command> [args]");
     println("");
-    println("COMMANDS (M0 stubs):");
-    println("  serve       start telnet listener (M1+: real impl)");
-    println("  post        create a new post (M5+: real impl)");
-    println("  list        list recent posts (M5+: real impl)");
-    println("  read <id>   read a post by ID (M5+: real impl)");
-    println("  whoami      show current user (M6+: real impl)");
-    println("  version     print version string");
-    println("  help        show this message");
+    println("COMMANDS:");
+    println("  serve [port]   start telnet listener (default port 2323)");
+    println("  post           create a new post (M5+: real impl)");
+    println("  list           list recent posts (M5+: real impl)");
+    println("  read <id>      read a post by ID (M5+: real impl)");
+    println("  whoami         show current user (M6+: real impl)");
+    println("  version        print version string");
+    println("  help           show this message");
     println("");
     println("EXIT CODES:");
     println("  0  success");
@@ -42,14 +52,145 @@ fn print_help(): i64 {
     return 0;
 }
 
-fn cmd_serve(): i64 {
-    println("agora serve: M1 stub — telnet listener not implemented yet.");
-    println("Will consume kernel tcp_listen(23) once agnos 1.32.2 closes.");
+# Send a literal byte buffer to a connected client. Returns 0 on
+# success, 1 on partial-write or socket error (caller closes conn).
+fn send_buf(cfd, buf, len): i64 {
+    var off = 0;
+    var done = 0;
+    while (off < len) {
+        if (done != 0) { continue; }
+        var n = sys_write(cfd, buf + off, len - off);
+        if (n <= 0) { done = 1; continue; }
+        off = off + n;
+    }
+    if (off == len) { return 0; }
     return 1;
 }
 
+# Serve one connection. Sends a banner, then runs an IAC-aware
+# read/echo loop until the peer disconnects or sends a graceful close.
+#
+# M1 first-bite shape: refuse all options, echo each data byte back
+# (server-side echo so the client sees what it types when the client
+# itself has WILL ECHO off). Posts / boards / sessions land later;
+# this proves the wire works.
+fn handle_client(cfd): i64 {
+    # Per-connection telnet state.
+    var ts = telnet_state_new();
+
+    # Banner. RFC 854 doesn't require CR-LF before negotiation, but
+    # most clients are friendlier when the first bytes are printable.
+    var banner = "agora 0.1.0 — telnet BBS (M1 protocol smoke)\r\nType anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
+    send_buf(cfd, banner, strlen(banner));
+
+    # Allocate the recv buffer once.
+    var rxbuf = alloc(RECV_BUF_BYTES);
+    var done = 0;
+
+    while (done == 0) {
+        var n = sys_read(cfd, rxbuf, RECV_BUF_BYTES);
+        if (n <= 0) {
+            done = 1;
+            continue;
+        }
+
+        # Feed each byte through the IAC state machine. IAC responses
+        # (e.g. WONT/DONT for refused options) are drained BEFORE the
+        # next data byte's echo so on-wire ordering matches RFC 854 —
+        # the peer sees option replies in the same temporal sequence
+        # they were elicited. Naive echo policy for M1; line discipline
+        # / LINEMODE land in follow-ups.
+        var i = 0;
+        while (i < n) {
+            var b = load8(rxbuf + i) & 0xFF;
+            var ev = telnet_feed(ts, b);
+
+            var tx_len = telnet_tx_len(ts);
+            if (tx_len > 0) {
+                send_buf(cfd, telnet_tx_buf(ts), tx_len);
+                telnet_tx_consume(ts);
+            }
+
+            if (ev == EV_DATA) {
+                var db = telnet_data_byte(ts);
+                var one[1];
+                store8(&one, db & 0xFF);
+                send_buf(cfd, &one, 1);
+            }
+            # EV_SB: subneg payload available — option-specific
+            # handling lands at the LINEMODE/NAWS bite.
+            i = i + 1;
+        }
+    }
+
+    sock_close(cfd);
+    return 0;
+}
+
+# Spin up the listener and run the accept loop. Returns 0 if the
+# loop exits cleanly (signal — not yet wired), 1 on bind/listen
+# failure.
+fn cmd_serve_on(port): i64 {
+    println("agora serve: opening telnet listener");
+
+    var sr = tcp_socket();
+    if (is_ok(sr) == 0) {
+        println("agora serve: tcp_socket() failed");
+        return 1;
+    }
+    var sfd = result_unwrap(sr);
+
+    sock_reuse(sfd);
+
+    var br = sock_bind(sfd, INADDR_ANY(), port);
+    if (is_ok(br) == 0) {
+        println("agora serve: sock_bind() failed");
+        sock_close(sfd);
+        return 1;
+    }
+
+    var lr = sock_listen(sfd, LISTEN_BACKLOG);
+    if (is_ok(lr) == 0) {
+        println("agora serve: sock_listen() failed");
+        sock_close(sfd);
+        return 1;
+    }
+
+    println("agora serve: listening (port printed below)");
+    print_num(port);
+    println("");
+    println("agora serve: waiting for connections (Ctrl+C to exit)");
+
+    var stop = 0;
+    while (stop == 0) {
+        var ar = sock_accept(sfd);
+        if (is_ok(ar) == 0) {
+            # Transient accept errors should not kill the loop;
+            # bail only on signal handling which we don't have yet.
+            continue;
+        }
+        var cfd = result_unwrap(ar);
+        handle_client(cfd);
+    }
+
+    sock_close(sfd);
+    return 0;
+}
+
+fn cmd_serve(): i64 {
+    args_init();
+    var n = argc();
+    var port = DEFAULT_PORT;
+    if (n >= 3) {
+        var arg = argv(2);
+        var p = atoi(arg);
+        if (p > 0) { port = p; }
+    }
+    return cmd_serve_on(port);
+}
+
 fn cmd_post(): i64 {
-    println("agora post: M5 stub — post persistence gated on agnos 1.33.x ext4 WRITE.");
+    println("agora post: M5 stub — post persistence not implemented yet.");
     return 1;
 }
 
@@ -74,6 +215,7 @@ fn cmd_version(): i64 {
 }
 
 fn main(): i64 {
+    alloc_init();
     args_init();
     var n = argc();
     if (n < 2) {

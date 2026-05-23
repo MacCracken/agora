@@ -2,7 +2,7 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: v0.1.0 scaffold — argv dispatch + stub verbs. Waiting on agnos 1.32.2 to close the DHCP gate + iron-validate `tcp_listen` end-to-end; real protocol code lands at M1.
+**Status**: v0.1.0 scaffold shipped — argv dispatch + stub verbs. **M1 in progress**: cross-platform telnet listener on cyrius `lib/net.cyr` (Linux today; macOS / Windows / AGNOS follow). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md).
 
 ## Etymology
 
@@ -18,16 +18,7 @@ The naming convention adds a **Greek lane** to the AGNOS ecosystem (previously S
 
 ## Roadmap
 
-| Milestone | Scope | Gates |
-|---|---|---|
-| **M0 (0.1.0)** ← THIS | argv dispatch + boot banner + stub verbs | none (scaffold-only) |
-| M1 | Telnet listener (RFC 854) + LINEMODE (RFC 1184) | agnos 1.32.2 closes (`tcp_listen(23)` on iron) |
-| M2 | ANSI BBS aesthetic (color, cursor positioning, banners) | darshana stable + bannermanor stable |
-| M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 (✅ available 2026-05-23) |
-| M4 | Stored-file deltas + compression | sankoch stable |
-| M5 | Post persistence (boards / threads / messages) | **agnos 1.33.x ext4 WRITE** (Phase 1-5 read-only currently lands as of agnos 1.31.5) |
-| M6 | User accounts + auth | sigil-backed identity primitives |
-| **1.0.0** | All six milestones green, multi-user telnet BBS on iron | M0-M6 + iron validation on archaemenid LAN |
+Full milestone table + sub-bites + v1.0 criteria in [`docs/development/roadmap.md`](docs/development/roadmap.md). Current state — M0 (0.1.0) shipped 2026-05-23; **M1 in progress**: cross-platform telnet listener (RFC 854 + LINEMODE 1184) on `lib/net.cyr`. Decoupled from the AGNOS kernel — Linux today, AGNOS becomes one target among many as `lib/net.cyr` grows platform backends ([ADR 0001](docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
 
 ## Build
 
@@ -44,13 +35,26 @@ Cyrius toolchain pinned to 6.0.1 in `cyrius.cyml` (see [[project_cyrius_5x_6x_bo
 agora binary
 ├── src/main.cyr            argv dispatch
 ├── src/telnet.cyr (M1)     RFC 854 + RFC 1184 wire protocol
-├── src/board.cyr (M5)      post / thread storage (ext4-backed)
+├── src/board.cyr (M5)      post / thread storage
 ├── src/ansi.cyr (M2)       darshana consumer (BBS color/cursor)
 ├── src/banner.cyr (M2)     bannermanor consumer (ASCII MOTD)
 ├── src/image.cyr (M3)      kii consumer (inline image posts)
 ├── src/auth.cyr (M6)       sigil-backed user accounts
 └── src/test.cyr            test harness
 ```
+
+## Docs
+
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — milestones, sub-bites, v1.0 criteria.
+- [`docs/development/state.md`](docs/development/state.md) — current version, binary size, in-flight slot. Refreshed every release.
+- [`docs/doc-health.md`](docs/doc-health.md) — fresh / stale / archive ledger across the whole doc tree.
+- [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
+- [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
+- [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
+- [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.
+- [`CLAUDE.md`](CLAUDE.md) — durable rules for agent sessions.
+
+Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md).
 
 ## Companion project
 

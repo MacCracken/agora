@@ -1,0 +1,328 @@
+# telnet.cyr — RFC 854 Telnet wire protocol + RFC 1184 LINEMODE state machine.
+#
+# Pure parsing / encoding — no socket I/O. The state machine consumes a
+# byte at a time from the wire and emits one of three signals to the
+# caller: data byte ready, no-op (byte consumed by IAC machine), or
+# response pending (a reply belongs back on the wire).
+#
+# RFC 854: https://datatracker.ietf.org/doc/html/rfc854
+# RFC 1184: https://datatracker.ietf.org/doc/html/rfc1184 (LINEMODE)
+# RFC 1143: https://datatracker.ietf.org/doc/html/rfc1143 (Q method for
+#           option negotiation — avoids endless WILL/WONT loops)
+#
+# M1 first-bite scope: the IAC parser handles every shape from RFC 854
+# correctly (bytes-don't-corrupt-the-stream invariant). Option negotiation
+# uses the naive-refuse pattern — every DO replies WONT, every WILL
+# replies DONT. That's enough for any standards-conformant telnet
+# client to connect, see a banner, and send keystrokes. Real LINEMODE
+# negotiation lands in a follow-up bite.
+
+# === RFC 854 § 11.2 command byte values ===
+
+enum TelCmd {
+    IAC  = 255;
+    DONT = 254;
+    DO   = 253;
+    WONT = 252;
+    WILL = 251;
+    SB   = 250;
+    GA   = 249;
+    EL   = 248;
+    EC   = 247;
+    AYT  = 246;
+    AO   = 245;
+    IP   = 244;
+    BRK  = 243;
+    DM   = 242;
+    NOP  = 241;
+    SE   = 240;
+}
+
+# === Common option codes (subset; complete list in IANA registry) ===
+
+enum TelOpt {
+    OPT_ECHO              = 1;
+    OPT_SUPPRESS_GO_AHEAD = 3;
+    OPT_STATUS            = 5;
+    OPT_TIMING_MARK       = 6;
+    OPT_TERMINAL_TYPE     = 24;
+    OPT_NAWS              = 31;
+    OPT_TERMINAL_SPEED    = 32;
+    OPT_LINEMODE          = 34;
+}
+
+# === Parser states (RFC 854 § 11.2 IAC dispatch) ===
+#
+#   ST_DATA    : default — copy bytes through as data
+#   ST_IAC     : just saw IAC; next byte is a command
+#   ST_OPT     : just saw IAC + (DO|DONT|WILL|WONT); next byte is option code
+#   ST_SB      : inside subnegotiation; accumulating
+#   ST_SB_IAC  : inside subneg, just saw IAC; next byte is SE or escaped IAC
+
+enum TelState {
+    ST_DATA   = 0;
+    ST_IAC    = 1;
+    ST_OPT    = 2;
+    ST_SB     = 3;
+    ST_SB_IAC = 4;
+}
+
+# === Feed return codes ===
+#
+# Returned by telnet_feed(). Caller dispatches on the value.
+
+enum TelEvent {
+    EV_NONE = 0;   # Byte consumed by IAC machine; no application data.
+    EV_DATA = 1;   # Application data byte ready in TS_DATA_OUT field.
+    EV_SB   = 2;   # Subnegotiation complete; sb_buf[0..sb_len] holds it.
+}
+
+# === TelnetState layout (every field i64, all offsets in bytes) ===
+#
+# Struct fields are placed manually so that subneg / response buffers
+# can live alongside their length / capacity. Caller allocates the
+# whole struct once per connection via telnet_state_new() and frees
+# at connection close.
+
+enum TS {
+    TS_STATE     = 0;     # parser state (TelState enum)
+    TS_VERB      = 8;     # last DO/DONT/WILL/WONT seen (waiting for option)
+    TS_DATA_OUT  = 16;    # last data byte emitted (when feed returns EV_DATA)
+
+    TS_TX_BUF    = 24;    # pointer to caller-allocated response buffer
+    TS_TX_CAP    = 32;    # capacity (bytes) of tx_buf
+    TS_TX_LEN    = 40;    # bytes currently queued in tx_buf
+
+    TS_SB_BUF    = 48;    # pointer to subneg accumulator
+    TS_SB_CAP    = 56;    # capacity (bytes)
+    TS_SB_LEN    = 64;    # bytes currently accumulated
+
+    TS_SIZE      = 72;    # total struct size for alloc()
+}
+
+# Minimum capacities — tuned to RFC requirements:
+#   tx_buf: bursts of IAC responses on connect (~6 options * 3 bytes = 18,
+#           plus SB-style replies for NAWS, TERMINAL_TYPE; 256 is comfortable)
+#   sb_buf: longest legitimate subnegotiation. TERMINAL_TYPE IS reply
+#           can be ~40 bytes; LINEMODE SLC table is ~120 bytes; 512 is
+#           comfortable.
+enum TelCap {
+    TX_BUF_CAP = 256;
+    SB_BUF_CAP = 512;
+}
+
+# Allocate + initialize a fresh TelnetState. Caller owns the memory.
+fn telnet_state_new(): i64 {
+    var ts = alloc(TS_SIZE);
+    var tx = alloc(TX_BUF_CAP);
+    var sb = alloc(SB_BUF_CAP);
+
+    store64(ts + TS_STATE,    ST_DATA);
+    store64(ts + TS_VERB,     0);
+    store64(ts + TS_DATA_OUT, 0);
+
+    store64(ts + TS_TX_BUF, tx);
+    store64(ts + TS_TX_CAP, TX_BUF_CAP);
+    store64(ts + TS_TX_LEN, 0);
+
+    store64(ts + TS_SB_BUF, sb);
+    store64(ts + TS_SB_CAP, SB_BUF_CAP);
+    store64(ts + TS_SB_LEN, 0);
+
+    return ts;
+}
+
+# Push one byte onto the response buffer. Silently drops if full —
+# tx_buf overflow means the peer sent enough commands at once to
+# exhaust 256 bytes of replies, which is hostile-shape traffic.
+fn ts_tx_push(ts, b): i64 {
+    var len = load64(ts + TS_TX_LEN);
+    var cap = load64(ts + TS_TX_CAP);
+    if (len >= cap) { return 0; }
+    var buf = load64(ts + TS_TX_BUF);
+    store8(buf + len, b & 0xFF);
+    store64(ts + TS_TX_LEN, len + 1);
+    return 1;
+}
+
+# Push one byte onto the subneg accumulator.
+fn ts_sb_push(ts, b): i64 {
+    var len = load64(ts + TS_SB_LEN);
+    var cap = load64(ts + TS_SB_CAP);
+    if (len >= cap) { return 0; }
+    var buf = load64(ts + TS_SB_BUF);
+    store8(buf + len, b & 0xFF);
+    store64(ts + TS_SB_LEN, len + 1);
+    return 1;
+}
+
+# Reset subneg accumulator after a subneg completes / aborts.
+fn ts_sb_reset(ts): i64 {
+    store64(ts + TS_SB_LEN, 0);
+    return 0;
+}
+
+# Reset tx buffer after caller drains it onto the wire.
+fn telnet_tx_consume(ts): i64 {
+    store64(ts + TS_TX_LEN, 0);
+    return 0;
+}
+
+# Read pending response bytes — caller writes ts.tx_buf[0..tx_len]
+# onto the socket, then calls telnet_tx_consume().
+fn telnet_tx_buf(ts): i64 { return load64(ts + TS_TX_BUF); }
+fn telnet_tx_len(ts): i64 { return load64(ts + TS_TX_LEN); }
+
+# Read subneg payload — caller inspects ts.sb_buf[0..sb_len] when
+# telnet_feed() returns EV_SB. First byte of sb_buf is the option
+# code; remaining bytes are the subneg payload (excluding IAC SB
+# and IAC SE framing).
+fn telnet_sb_buf(ts): i64 { return load64(ts + TS_SB_BUF); }
+fn telnet_sb_len(ts): i64 { return load64(ts + TS_SB_LEN); }
+
+# Read the last emitted data byte (only valid when feed returned EV_DATA).
+fn telnet_data_byte(ts): i64 { return load64(ts + TS_DATA_OUT); }
+
+# Compose a 3-byte IAC response: IAC <verb> <opt>. Used for refusing
+# options under the naive-refuse pattern (every DO -> WONT, every WILL
+# -> DONT). Refuse-by-default means we never accidentally agree to
+# options we don't implement.
+fn telnet_respond_refuse(ts, verb, opt): i64 {
+    ts_tx_push(ts, IAC);
+    if (verb == DO) {
+        ts_tx_push(ts, WONT);
+    } else {
+        # WILL / WONT / DONT all refused-by-symmetry. Defensive: any
+        # verb we don't handle gets a DONT reply per RFC 1143's
+        # "be conservative in what you send" guidance.
+        ts_tx_push(ts, DONT);
+    }
+    ts_tx_push(ts, opt & 0xFF);
+    return 0;
+}
+
+# Feed one byte from the wire. Returns one of TelEvent values:
+#   EV_NONE  : byte was consumed by the IAC state machine
+#   EV_DATA  : a real application data byte is available via telnet_data_byte()
+#   EV_SB    : a subnegotiation has completed; payload in sb_buf[0..sb_len]
+#              with sb_buf[0] = option code
+#
+# After every call, the caller MUST check telnet_tx_len() — if > 0,
+# write telnet_tx_buf()[0..tx_len] back onto the wire and then call
+# telnet_tx_consume() to clear the buffer.
+fn telnet_feed(ts, b): i64 {
+    var state = load64(ts + TS_STATE);
+    b = b & 0xFF;
+
+    if (state == ST_DATA) {
+        if (b == IAC) {
+            store64(ts + TS_STATE, ST_IAC);
+            return EV_NONE;
+        }
+        # Plain data byte — copy to output.
+        store64(ts + TS_DATA_OUT, b);
+        return EV_DATA;
+    }
+
+    if (state == ST_IAC) {
+        # We just saw IAC; b is a command byte.
+        if (b == IAC) {
+            # Escaped data byte: literal 0xFF.
+            store64(ts + TS_STATE,    ST_DATA);
+            store64(ts + TS_DATA_OUT, 0xFF);
+            return EV_DATA;
+        }
+        if (b == DO) {
+            store64(ts + TS_STATE, ST_OPT);
+            store64(ts + TS_VERB,  DO);
+            return EV_NONE;
+        }
+        if (b == DONT) {
+            store64(ts + TS_STATE, ST_OPT);
+            store64(ts + TS_VERB,  DONT);
+            return EV_NONE;
+        }
+        if (b == WILL) {
+            store64(ts + TS_STATE, ST_OPT);
+            store64(ts + TS_VERB,  WILL);
+            return EV_NONE;
+        }
+        if (b == WONT) {
+            store64(ts + TS_STATE, ST_OPT);
+            store64(ts + TS_VERB,  WONT);
+            return EV_NONE;
+        }
+        if (b == SB) {
+            ts_sb_reset(ts);
+            store64(ts + TS_STATE, ST_SB);
+            return EV_NONE;
+        }
+        # Single-byte commands (NOP, AYT, IP, AO, EC, EL, BRK, DM,
+        # GA, SE-out-of-context) — consume and return to DATA. No
+        # response generated (AYT could but defer to follow-up bite).
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    if (state == ST_OPT) {
+        # We just saw IAC <verb>; b is the option code.
+        var verb = load64(ts + TS_VERB);
+        telnet_respond_refuse(ts, verb, b);
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    if (state == ST_SB) {
+        if (b == IAC) {
+            store64(ts + TS_STATE, ST_SB_IAC);
+            return EV_NONE;
+        }
+        ts_sb_push(ts, b);
+        return EV_NONE;
+    }
+
+    if (state == ST_SB_IAC) {
+        if (b == SE) {
+            # Subnegotiation complete.
+            store64(ts + TS_STATE, ST_DATA);
+            return EV_SB;
+        }
+        if (b == IAC) {
+            # Escaped IAC inside SB.
+            ts_sb_push(ts, IAC);
+            store64(ts + TS_STATE, ST_SB);
+            return EV_NONE;
+        }
+        # Malformed (RFC 855 § Discussion: implementations differ on
+        # whether to abort or recover). We abort the subneg cleanly:
+        # drop accumulated bytes, return to DATA. Hostile clients
+        # can't pin us in SB_IAC.
+        ts_sb_reset(ts);
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    # Unreachable in well-formed code; defensive return.
+    store64(ts + TS_STATE, ST_DATA);
+    return EV_NONE;
+}
+
+# Emit the server-side "preferred options" opening salvo. Called once
+# per connection just after accept. The Q method (RFC 1143) lets us
+# announce our preferences without driving WILL/WONT loops.
+#
+# M1 first-bite policy: refuse-by-default for option negotiation. We
+# announce nothing on connect — the client's first move drives the
+# conversation, and we WONT/DONT everything. A follow-up bite will
+# upgrade this to:
+#
+#   IAC WILL SUPPRESS_GO_AHEAD   (modern char-at-a-time mode)
+#   IAC WILL ECHO                (server echoes input)
+#   IAC DO   NAWS                (window size for future redraw)
+#   IAC DO   TERMINAL_TYPE       (so we know what we're talking to)
+#
+# Right now we send nothing — the connection is usable as a raw
+# byte pipe, which is enough for the M1 banner test.
+fn telnet_announce(ts): i64 {
+    return 0;
+}

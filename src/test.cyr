@@ -1,0 +1,319 @@
+# test.cyr — unit tests for the telnet protocol module.
+#
+# Pure-parser tests — no socket, no kernel. Every test feeds a
+# byte sequence into a TelnetState, then asserts on the emitted
+# events + queued IAC responses + accumulated subneg payload.
+#
+# Run with: cyrius test src/test.cyr
+# CI gate: exit 0 on full pass; non-zero on first failure.
+
+include "src/telnet.cyr"
+
+var test_count = 0;
+var fail_count = 0;
+
+fn test_pass(name): i64 {
+    test_count = test_count + 1;
+    syscall(1, 1, "PASS: ", 6);
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn test_fail(name, why): i64 {
+    test_count = test_count + 1;
+    fail_count = fail_count + 1;
+    syscall(1, 2, "FAIL: ", 6);
+    syscall(1, 2, name, strlen(name));
+    syscall(1, 2, " — ", 4);
+    syscall(1, 2, why, strlen(why));
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Helper: feed a byte and assert the event matches expected.
+fn expect_event(ts, b, want_event, name): i64 {
+    var got = telnet_feed(ts, b);
+    if (got == want_event) { return 0; }
+    test_fail(name, "wrong event from telnet_feed");
+    return 1;
+}
+
+# === Tests ===
+
+# T1: plain data bytes pass through as EV_DATA with byte value preserved.
+fn t01_plain_data(): i64 {
+    var ts = telnet_state_new();
+    var ev = telnet_feed(ts, 0x41);
+    if (ev != EV_DATA) {
+        test_fail("t01_plain_data", "expected EV_DATA");
+        return 1;
+    }
+    var b = telnet_data_byte(ts);
+    if (b != 0x41) {
+        test_fail("t01_plain_data", "wrong data byte");
+        return 1;
+    }
+    test_pass("t01_plain_data");
+    return 0;
+}
+
+# T2: IAC IAC emits a literal 0xFF data byte (RFC 854 § Network Virtual Terminal).
+fn t02_iac_iac_literal(): i64 {
+    var ts = telnet_state_new();
+    var ev1 = telnet_feed(ts, IAC);
+    if (ev1 != EV_NONE) {
+        test_fail("t02_iac_iac_literal", "first IAC should be EV_NONE");
+        return 1;
+    }
+    var ev2 = telnet_feed(ts, IAC);
+    if (ev2 != EV_DATA) {
+        test_fail("t02_iac_iac_literal", "IAC IAC should emit data");
+        return 1;
+    }
+    var b = telnet_data_byte(ts);
+    if (b != 0xFF) {
+        test_fail("t02_iac_iac_literal", "data byte should be 0xFF");
+        return 1;
+    }
+    test_pass("t02_iac_iac_literal");
+    return 0;
+}
+
+# T3: IAC WILL ECHO triggers IAC DONT ECHO response (naive refuse).
+fn t03_will_echo_refused(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_ECHO);
+
+    var len = telnet_tx_len(ts);
+    if (len != 3) {
+        test_fail("t03_will_echo_refused", "tx_len should be 3");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    var b0 = load8(buf) & 0xFF;
+    var b1 = load8(buf + 1) & 0xFF;
+    var b2 = load8(buf + 2) & 0xFF;
+    if (b0 != IAC) {
+        test_fail("t03_will_echo_refused", "byte 0 should be IAC");
+        return 1;
+    }
+    if (b1 != DONT) {
+        test_fail("t03_will_echo_refused", "byte 1 should be DONT");
+        return 1;
+    }
+    if (b2 != OPT_ECHO) {
+        test_fail("t03_will_echo_refused", "byte 2 should be OPT_ECHO");
+        return 1;
+    }
+    test_pass("t03_will_echo_refused");
+    return 0;
+}
+
+# T4: IAC DO SUPPRESS_GO_AHEAD triggers IAC WONT SUPPRESS_GO_AHEAD response.
+fn t04_do_sga_refused(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, DO);
+    telnet_feed(ts, OPT_SUPPRESS_GO_AHEAD);
+
+    var len = telnet_tx_len(ts);
+    if (len != 3) {
+        test_fail("t04_do_sga_refused", "tx_len should be 3");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    var b1 = load8(buf + 1) & 0xFF;
+    if (b1 != WONT) {
+        test_fail("t04_do_sga_refused", "verb should be WONT for DO");
+        return 1;
+    }
+    test_pass("t04_do_sga_refused");
+    return 0;
+}
+
+# T5: IAC NOP is a single-byte command — consumed silently, no data, no response.
+fn t05_nop_consumed(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, NOP);
+    if (ev != EV_NONE) {
+        test_fail("t05_nop_consumed", "NOP should be EV_NONE");
+        return 1;
+    }
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t05_nop_consumed", "NOP should not queue a response");
+        return 1;
+    }
+    test_pass("t05_nop_consumed");
+    return 0;
+}
+
+# T6: subnegotiation collects payload between IAC SB ... IAC SE, returns EV_SB.
+fn t06_subneg_basic(): i64 {
+    var ts = telnet_state_new();
+    # IAC SB TERMINAL_TYPE 0x00 'V' 'T' '1' '0' '0' IAC SE
+    # (canonical TERMINAL_TYPE IS response shape)
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_TERMINAL_TYPE);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x56);  # 'V'
+    telnet_feed(ts, 0x54);  # 'T'
+    telnet_feed(ts, 0x31);  # '1'
+    telnet_feed(ts, 0x30);  # '0'
+    telnet_feed(ts, 0x30);  # '0'
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev != EV_SB) {
+        test_fail("t06_subneg_basic", "expected EV_SB at terminator");
+        return 1;
+    }
+    var len = telnet_sb_len(ts);
+    if (len != 7) {
+        test_fail("t06_subneg_basic", "sb_len should be 7");
+        return 1;
+    }
+    var buf = telnet_sb_buf(ts);
+    if ((load8(buf) & 0xFF) != OPT_TERMINAL_TYPE) {
+        test_fail("t06_subneg_basic", "first sb byte should be option code");
+        return 1;
+    }
+    test_pass("t06_subneg_basic");
+    return 0;
+}
+
+# T7: escaped IAC inside subneg (IAC IAC) is accumulated as literal 0xFF.
+fn t07_subneg_escaped_iac(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_STATUS);
+    telnet_feed(ts, 0x42);  # 'B'
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, IAC);   # escaped → literal 0xFF in sb_buf
+    telnet_feed(ts, 0x43);  # 'C'
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev != EV_SB) {
+        test_fail("t07_subneg_escaped_iac", "expected EV_SB");
+        return 1;
+    }
+    var buf = telnet_sb_buf(ts);
+    var len = telnet_sb_len(ts);
+    if (len != 4) {
+        test_fail("t07_subneg_escaped_iac", "sb_len should be 4");
+        return 1;
+    }
+    if ((load8(buf + 2) & 0xFF) != 0xFF) {
+        test_fail("t07_subneg_escaped_iac", "byte 2 should be literal 0xFF");
+        return 1;
+    }
+    test_pass("t07_subneg_escaped_iac");
+    return 0;
+}
+
+# T8: data-IAC-data sequence (IAC DO ECHO sandwiched between 'X' and 'Y')
+# emits exactly two data bytes and queues one 3-byte response.
+fn t08_mixed_data_iac(): i64 {
+    var ts = telnet_state_new();
+    var data_count = 0;
+
+    var ev1 = telnet_feed(ts, 0x58);  # 'X'
+    if (ev1 == EV_DATA) { data_count = data_count + 1; }
+
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, DO);
+    telnet_feed(ts, OPT_ECHO);
+
+    var ev2 = telnet_feed(ts, 0x59);  # 'Y'
+    if (ev2 == EV_DATA) { data_count = data_count + 1; }
+
+    if (data_count != 2) {
+        test_fail("t08_mixed_data_iac", "should emit exactly 2 data bytes");
+        return 1;
+    }
+    if (telnet_tx_len(ts) != 3) {
+        test_fail("t08_mixed_data_iac", "should queue 3-byte IAC response");
+        return 1;
+    }
+    test_pass("t08_mixed_data_iac");
+    return 0;
+}
+
+# T9: malformed IAC inside SB (IAC followed by non-SE non-IAC) aborts the
+# subneg cleanly without pinning the parser in SB_IAC state.
+fn t09_subneg_malformed_recovers(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_STATUS);
+    telnet_feed(ts, 0x42);
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, NOP);   # malformed — NOP isn't valid after IAC inside SB
+
+    # After recovery, a plain byte should come through as data.
+    var ev = telnet_feed(ts, 0x5A);  # 'Z'
+    if (ev != EV_DATA) {
+        test_fail("t09_subneg_malformed_recovers", "parser should recover to DATA state");
+        return 1;
+    }
+    if ((telnet_data_byte(ts) & 0xFF) != 0x5A) {
+        test_fail("t09_subneg_malformed_recovers", "wrong data byte after recovery");
+        return 1;
+    }
+    test_pass("t09_subneg_malformed_recovers");
+    return 0;
+}
+
+# T10: tx_buf drain / consume cycle resets length to 0.
+fn t10_tx_consume_resets(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_ECHO);
+    if (telnet_tx_len(ts) != 3) {
+        test_fail("t10_tx_consume_resets", "expected tx_len 3 before consume");
+        return 1;
+    }
+    telnet_tx_consume(ts);
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t10_tx_consume_resets", "tx_len should be 0 after consume");
+        return 1;
+    }
+    test_pass("t10_tx_consume_resets");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    syscall(1, 1, "agora telnet tests — RFC 854 + RFC 1184 IAC parser\n", 52);
+    syscall(1, 1, "------------------------------------------------------\n", 56);
+
+    t01_plain_data();
+    t02_iac_iac_literal();
+    t03_will_echo_refused();
+    t04_do_sga_refused();
+    t05_nop_consumed();
+    t06_subneg_basic();
+    t07_subneg_escaped_iac();
+    t08_mixed_data_iac();
+    t09_subneg_malformed_recovers();
+    t10_tx_consume_resets();
+
+    syscall(1, 1, "------------------------------------------------------\n", 56);
+    syscall(1, 1, "tests: ", 7);
+    fmt_int(test_count);
+    syscall(1, 1, "  failures: ", 12);
+    fmt_int(fail_count);
+    syscall(1, 1, "\n", 1);
+
+    if (fail_count > 0) { return 1; }
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
