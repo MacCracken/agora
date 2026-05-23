@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — Post-v1.0 roadmap: v2.x sovereignty pillars (2026-05-23)
+
+- **`docs/development/roadmap-future.md`** — new file consolidating six unpinned design directions for the v2.x sovereignty layer:
+  1. **Identity continuity across nodes** — Ed25519 keypair as portable identity (Nostr-shaped, sigil-backed); replaces per-node accounts with global fingerprints. Graduates from v1.0 M6 sigil-backed auth.
+  2. **Content-addressed storage** — posts keyed by `blake3(canonical(post))`; mirror anywhere without breaking links; citations integrity-checkable. Layered onto v1.0 M5 persistence.
+  3. **Threat-level node policy** — mirror the SecureYeoman threat-level vocabulary (`hobbyist` / `journalist` / `activist` / `enterprise`) and apply it to network exposure. Same binary, different config.
+  4. **Federation by interest, not platform** — topic-shaped federation (FidoNet echomail / Usenet / Matrix-rooms heritage); nodes carry topics, not "your account on this server."
+  5. **Self-distribution baked-in** — every node carries AGNOS / SecureYeoman / marketplace installers; the network is the distribution channel. Block-resistance compounds with deployment count.
+  6. **Offline-tolerant store-and-forward** — durable outbox + sync-on-connect + sneakernet-friendly export/import; FidoNet/UUCP-shape; works where ActivityPub silently fails (rural, censored, sanctioned, air-gapped).
+- Cross-linked from `roadmap.md` ("Post-v1.0 Directions" section), `docs/doc-health.md` (Tier 2 row + bucket count), and this CHANGELOG.
+- Pattern adopted from [cyrius/docs/development/roadmap-future.md](https://github.com/MacCracken/cyrius/blob/main/docs/development/roadmap-future.md): unpinned items, pull-forward triggers documented per pillar, no calendar commitment.
+
 ### Added — M1 fourth-bite: RFC 1184 LINEMODE (2026-05-23)
 
 - **LINEMODE promoted to tracked** — `opt_pref_him(OPT_LINEMODE)` now returns 1. Peer's `WILL LINEMODE` lands him-state on `Q_YES` via the `Q_NO → Q_YES` transition; server replies `IAC DO LINEMODE` (3 bytes) and immediately follows with the MODE-establishment request (7 bytes) for a total 10-byte burst.

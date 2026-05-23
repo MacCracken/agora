@@ -113,9 +113,14 @@ A release qualifies for 1.0 when:
 
 ---
 
+## Post-v1.0 Directions
+
+Six pillars for the v2.x sovereignty layer — identity continuity (sigil-portable Ed25519), content-addressed storage, threat-level node policy (SecureYeoman vocabulary), federation by interest (topics, not platforms), self-distribution baked into the protocol, and offline-tolerant store-and-forward. Consolidated from a 2026-05-23 design session and detailed in [`roadmap-future.md`](roadmap-future.md). Items are **unpinned** — they pull forward into a numbered minor when consumer pressure or operator demand surfaces, not on a calendar.
+
 ## Cross-references
 
 - [`docs/development/state.md`](state.md) — live state snapshot (current version, binary size, in-flight slot).
+- [`docs/development/roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars (post-v1.0, unpinned).
 - [`docs/adr/`](../adr/) — decisions made along the way.
 - [`docs/architecture/`](../architecture/) — non-obvious invariants the code relies on.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

@@ -17,11 +17,11 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ## At a glance — 2026-05-23 inventory (v0.1.0 doc-tree adoption)
 
-**~12 markdown files** across the repo. First-party doc tree scaffolded today; everything fresh by construction. Bucket counts:
+**~13 markdown files** across the repo (+1 since v0.1.0 for `roadmap-future.md` at M1 fourth-bite closeout). First-party doc tree scaffolded today; everything fresh by construction. Bucket counts:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | 12 | Whole tree written or refreshed at v0.1.0 doc-adoption pass. |
+| ✅ **Fresh / touched in current cycle** | 13 | Whole tree written or refreshed at v0.1.0 doc-adoption pass + `roadmap-future.md` added at M1 fourth-bite closeout. |
 | 🟡 **Stale — refresh in place** | 0 | None — repo too young for drift. |
 | 🟠 **Read-through outstanding** | 0 | None. |
 | 🔵 **Probably evergreen** | 1 | ADR 0001 (cross-platform listener decoupled from AGNOS) — load-bearing principle for M1+. |
@@ -57,7 +57,8 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** Tracks four M1 bites — binary 43,216 → 56,064 → 59,280 → 61,152 → 62,176 B; test count 0 → 10 → 15 → 20 → 24; only bench harness remains before M1 close. |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. |
+| `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. Now points at `roadmap-future.md` for post-v1.0 directions. |
+| `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
 
