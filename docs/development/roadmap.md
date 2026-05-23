@@ -14,7 +14,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 |---|---|---|
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
 | **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
-| **M2** ← in progress | ANSI BBS aesthetic (color, cursor positioning, banners) | bannermanor 1.0.0 ✅ / darshana stable (0.5.3 pre-1.0; needs 1.0.0) |
+| **M2** ← in progress | ANSI BBS aesthetic (color, cursor positioning, banners) | bannermanor 1.0.1 ✅ / darshana 0.5.3 ✅ (pinned git dep — functionality is the gate, not the version label) |
 | M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ (available 2026-05-23) |
 | M4 | Stored-file deltas + compression | sankoch ≥ 2.2 ✅ (currently 2.2.6) |
 | M5 | Post persistence (boards / threads / messages) | filesystem write target — Linux today; AGNOS gated on 1.33.x ext4 WRITE |
@@ -52,12 +52,20 @@ End-to-end smoke via python TCP client runs the full handshake (announce → pee
 
 ### M2 — ANSI BBS aesthetic
 
-- **darshana** (ANSI escape sequences — color, cursor positioning) currently at 0.5.3; needs 1.0.0 stable before consumption.
-- **bannermanor** (FIGlet-style ASCII banners) at 1.0.0 ✅ — ready to consume.
+- **bannermanor** 1.0.1 ✅ — consumed at M2-A (operator-side `bnrmr "AGORA"` rendered into an embedded string constant; bannermanor patched 1.0.0 → 1.0.1 for ecosystem alignment on 2026-05-23).
+- **darshana** 0.5.3 ✅ — consumed at M2-B as a pinned git dep. The functional SGR/cursor surface we need (the `_buf` primitives — `tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_fg_rgb_buf`, ...) exists at 0.5.3; the original "needs ≥ 1.0" framing was a version-label restriction, not a functionality one.
 
 Scope at this milestone: MOTD banner on connect, ANSI-colored prompt, basic cursor positioning for menu redraws. Single-color ANSI before 256-color/truecolor.
 
-**Likely first M2 bite**: bannermanor MOTD on connect, replacing the current plaintext "agora 0.1.0 — telnet BBS (M1 protocol smoke)" string. bannermanor's gate is met today; darshana's isn't, so the ANSI-colored prompt / cursor positioning bites wait. The NAWS data captured at M1 (`term_cols` / `term_rows`) becomes M2's first concrete consumer — banner width-aware downscale, prompt redraw on resize.
+**Landed** at 0.2.0+ (un-tagged toward 0.3.0):
+
+- **M2-A** (bannermanor): `bnrmr "AGORA"` block-font banner embedded in `src/main.cyr` as a string constant. Replaced the v0.2.0 plaintext one-line MOTD.
+- **M2-B** (darshana): `render_motd(buf)` runs at connection time, wraps the banner lines in cyan (SGR 36), the version line in yellow (SGR 33), and the prompt in default fg via `tty_sgr_buf` / `tty_sgr_reset_buf`. Buffer-targeted primitives flush to the telnet socket in one `send_buf` call.
+
+**Optional follow-ups before M3** (lands when demand surfaces, not blocking):
+
+- **M2-C** — `agora serve --motd <path>` operator override. Pulls the embedded fallback out into a default-when-flag-absent path.
+- **M2-D** — NAWS-aware width clamping. First concrete consumer of `term_cols` / `term_rows` from M1's subneg parser. Earned when banners wider than 80 columns enter the default set, or when a consumer reports rendering on narrow terminals.
 
 ---
 

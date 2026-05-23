@@ -12,13 +12,26 @@ test = "src/test.cyr"
 output = "agora"
 
 [deps]
-# Pre-1.0 stdlib surface. M0 (0.1.0) shipped the boot-to-banner
-# scaffold — argv dispatch + stub verbs. M1 (in progress) adds
-# the cross-platform telnet listener built on lib/net.cyr socket
-# primitives — Linux today, macOS / Windows / AGNOS follow as
-# lib/net.cyr grows backends. See docs/adr/0001-*.md for the
-# cross-platform decision; post storage lands at M5+.
+# Pre-1.0 stdlib surface. M0 (0.1.0) scaffolded the binary; M1 (0.2.0)
+# landed the cross-platform telnet listener on lib/net.cyr; M2 is the
+# ANSI BBS aesthetic — M2-A consumes bannermanor (rendered offline),
+# M2-B consumes darshana for SGR / cursor primitives (git dep below).
 stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "result", "tagged", "vec", "fnptr", "bench"]
+
+[deps.darshana]
+# SGR / cursor primitives for ANSI BBS aesthetic at M2-B. The
+# `_buf` variants (tty_sgr_buf / tty_sgr_reset_buf / tty_fg_rgb_buf
+# / tty_fg_256_buf) are what we need — they compose ANSI escapes
+# into a caller-provided buffer instead of writing to fd 1, so the
+# rendered bytes go out over the telnet socket via send_buf.
+#
+# Pinned at 0.5.3 (current tip) — pre-1.0 by version label but the
+# functional surface we need (added at v0.5.3 for anuenue M6) is
+# stable. Bannermanor pins darshana at 0.3.5 for the same reason;
+# both will re-pin at darshana 1.0 when the API surface freezes.
+git = "https://github.com/MacCracken/darshana.git"
+tag = "0.5.3"
+modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:
 #   - darshana (ANSI escapes — ANSI BBS aesthetic at M2+)

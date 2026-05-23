@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 70,960 B at M1 close (62,176 fourth-bite; 61,152 third; 59,280 second; 56,064 first; 43,216 v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 84,488 B at M2-B (71,120 M2-A; 70,960 M1 close; 43,216 v0.1.0 scaffold). M2-B's +13 KB is the `lib/darshana.cyr` surface; most is DCE-eligible. | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
@@ -56,15 +56,17 @@ End-to-end handshake via python TCP client wire-conformant: announce → peer ag
 
 Gate state (per [`roadmap.md`](roadmap.md)):
 
-- **bannermanor** 1.0.0 ✅ — consumed at M2-A (operator-side `bnrmr "AGORA"` rendered into an embedded string constant).
-- **darshana** 0.5.3 ❌ — needs ≥ 1.0.0 stable for ANSI escape sequences (color, cursor positioning). Likely waiting on darshana's own 1.0 cut.
+- **bannermanor** 1.0.1 ✅ — consumed at M2-A (operator-side `bnrmr "AGORA"` rendered into an embedded string constant). Patched to 1.0.1 in lock-step with darshana 0.5.3 alignment (2026-05-23).
+- **darshana** 0.5.3 ✅ — consumed at M2-B as a git dep (`tag = "0.5.3"`). The 0.5.x `_buf` SGR primitives are functionally what M2 needs; the original "needs ≥ 1.0" gate was a version-label restriction, not a functionality one.
 
-**M2-A landed 2026-05-23**: bannermanor MOTD on connect. Pre-rendered "AGORA" block-font banner embedded as a string constant; provenance comment in `src/main.cyr` documents the regeneration recipe. No runtime dep on the `bnrmr` binary; no per-connection subprocess shellout. Binary 70,960 → 71,120 B (+160 B). 24 tests still green.
+**M2-A landed 2026-05-23**: bannermanor MOTD on connect. Pre-rendered "AGORA" block-font banner embedded as a string constant; provenance comment in `src/main.cyr` documents the regeneration recipe.
 
-**Remaining bites for M2 close**:
+**M2-B landed 2026-05-23**: darshana SGR-colored MOTD. `render_motd(buf)` composes the bannermanor banner with cyan-wrapped art lines + yellow-wrapped version line + default-fg prompt via `tty_sgr_buf` / `tty_sgr_reset_buf`. Wire smoke confirms 4 ESC sequences flow alongside the data bytes. Bannermanor 1.0.0 → 1.0.1 ecosystem-aligned to the same darshana 0.5.3 pin the same day.
 
-- **M2-B** — ANSI-colored prompt + basic cursor positioning. Gated on darshana ≥ 1.0. First concrete consumer of the `term_cols` / `term_rows` captured by M1's NAWS subneg parser.
-- **M2-C** (optional) — operator-overridable MOTD via `agora serve --motd <path>`. Pulls the embedded fallback out into a default-when-flag-absent path. Lands if/when operator demand surfaces.
+**Remaining M2 work** (both optional — M2 functionally closes on coloring; these are operator-ergonomics polish):
+
+- **M2-C** — operator-overridable MOTD via `agora serve --motd <path>`. Pulls the embedded fallback out into a default-when-flag-absent path. Lands if/when operator demand surfaces.
+- **M2-D** — NAWS-aware width clamping. First concrete consumer of `term_cols` / `term_rows` from M1's subneg parser. Lands when banners wider than 80 columns are added to the default set, OR when a consumer reports rendering on a 40-column terminal.
 
 ## Recent shipped
 

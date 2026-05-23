@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M2-B: darshana SGR-colored MOTD (2026-05-23)
+
+- **`[deps.darshana]`** — added to `cyrius.cyml` as a git dep pinned at `0.5.3`. Functional surface (`tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_fg_rgb_buf`, cursor primitives) is present at 0.5.3 even though darshana itself is pre-1.0 — the "needs ≥ 1.0" gate in the original roadmap was a version-label restriction, not a functionality one. Bannermanor 1.0.1 re-pinned to the same `0.5.3` the same day so every AGNOS consumer of darshana is on one version.
+- **`render_motd(buf)`** — new function in `src/main.cyr` that composes the bannermanor-derived AGORA banner with darshana SGR coloring directly into a caller-allocated 1 KB buffer. The `_buf` variants (`tty_sgr_buf` / `tty_sgr_reset_buf`) target a buffer instead of fd 1, which is exactly what we need to send bytes back over the telnet socket via `send_buf`.
+- **Color scheme**:
+  - AGORA ASCII banner (5 lines) — cyan (`SGR 36`)
+  - Version line ("agora 0.2.0 — telnet BBS") — yellow (`SGR 33`)
+  - Prompt line ("Type anything; Ctrl+] then 'quit' to exit.") — default fg
+- **`handle_client`** — static `banner` string variable replaced with a `motd = alloc(1024); render_motd(motd); send_buf(...)` pattern. Per-connection allocation is one `alloc` + one render pass + one `send_buf` — sub-microsecond on this host; immaterial vs the human-paced BBS workload.
+- **Wire smoke** — python TCP client receives the 12-byte announce salvo followed by 4 ANSI ESC sequences (cyan-on, reset, yellow-on, reset) wrapping the banner content. Real telnet clients render the AGORA in cyan and the version in yellow.
+- **Binary delta**: 71,120 → 84,488 B (+13,368 B for `lib/darshana.cyr` consumption surface; 248 unreachable fns / 32,371 B DCE-eligible, most of the darshana surface we don't call yet — gets reclaimed when the v1.x close-out adds strip + DCE-aware emit).
+- 24-test parser conformance still green — `render_motd` is content-layer code that doesn't touch the IAC state machine.
+- **Remaining M2 work**: M2-C (`--motd <path>` operator override) is optional, lands when operator demand surfaces. NAWS-aware reflow (using `term_cols` / `term_rows` from M1 to clamp banner width) is a natural M2-D when consumer tooling needs it.
+
 ### Added — M2-A: bannermanor MOTD on connect (2026-05-23)
 
 - **Connection MOTD upgraded** from a plaintext `agora 0.2.0 — telnet BBS` line to a bannermanor-rendered ASCII-art `AGORA` banner (block font, 5×5) followed by the version line and the input-prompt help. Pre-rendered via `bnrmr "AGORA"` and embedded as a string constant in `src/main.cyr` — no runtime subprocess shellout, no dep on `bnrmr` being installed at runtime, no per-connection latency for re-rendering static content.

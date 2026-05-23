@@ -15,6 +15,7 @@
 #   M6            user accounts + auth (sigil-backed)
 #   1.0.0         all six milestones green, multi-user telnet BBS
 
+include "lib/darshana.cyr"
 include "src/telnet.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
@@ -71,6 +72,64 @@ fn send_buf(cfd, buf, len): i64 {
     return 1;
 }
 
+# Copy a cstring (NUL-terminated) into `buf` at `pos`. Returns new
+# pos. Used by render_motd to splice literal MOTD-text segments
+# between SGR escape runs.
+fn motd_emit_cstr(buf, pos, s): i64 {
+    var n = strlen(s);
+    memcpy(buf + pos, s, n);
+    return pos + n;
+}
+
+# Render the colored MOTD into a caller-allocated buffer. Returns
+# the number of bytes written. The AGORA banner is wrapped in cyan
+# (SGR 36), the version line in yellow (SGR 33), the prompt line
+# uses default fg with a reset terminator.
+#
+# Buffer must be ≥ 1024 bytes. Rendered length at 0.2.x is ~580 B
+# (banner ~470 + SGR overhead ~50 + version + prompt ~60); the
+# 1024 ceiling leaves headroom for the next bite's color tweaks
+# without re-tuning the alloc.
+#
+# The AGORA banner art was generated once via `bnrmr "AGORA"`
+# (block font, 5×5, bannermanor v1.0.0). The `#` bytes use `\x23`
+# escapes to dodge cyrius's line-comment lexer. SGR primitives are
+# darshana 0.5.3's `tty_sgr_buf` / `tty_sgr_reset_buf` — the `_buf`
+# variants compose into a buffer rather than writing to fd 1, which
+# is exactly what we need to send bytes back over the telnet socket.
+fn render_motd(buf): i64 {
+    var pos = 0;
+    # Leading CRLF gives the client a clean line after the IAC announce.
+    store8(buf + pos, 13); pos = pos + 1;  # \r
+    store8(buf + pos, 10); pos = pos + 1;  # \n
+
+    # Cyan-wrapped 5-line AGORA banner. Each line ends CRLF; the
+    # opening SGR sticks for all five lines, closed by reset after
+    # line 5. (Some terminals reset SGR on \n — most don't; the
+    # explicit close-after-line-5 keeps the spec.)
+    pos = tty_sgr_buf(buf, pos, 36);
+    pos = motd_emit_cstr(buf, pos, " \x23\x23\x23   \x23\x23\x23\x23  \x23\x23\x23  \x23\x23\x23\x23   \x23\x23\x23 \r\n");
+    pos = motd_emit_cstr(buf, pos, "\x23   \x23 \x23     \x23   \x23 \x23   \x23 \x23   \x23\r\n");
+    pos = motd_emit_cstr(buf, pos, "\x23\x23\x23\x23\x23 \x23  \x23\x23 \x23   \x23 \x23\x23\x23\x23  \x23\x23\x23\x23\x23\r\n");
+    pos = motd_emit_cstr(buf, pos, "\x23   \x23 \x23   \x23 \x23   \x23 \x23  \x23  \x23   \x23\r\n");
+    pos = motd_emit_cstr(buf, pos, "\x23   \x23  \x23\x23\x23\x23  \x23\x23\x23  \x23   \x23 \x23   \x23\r\n");
+    pos = tty_sgr_reset_buf(buf, pos);
+
+    # Blank line between banner and metadata.
+    store8(buf + pos, 13); pos = pos + 1;
+    store8(buf + pos, 10); pos = pos + 1;
+
+    # Yellow version line.
+    pos = tty_sgr_buf(buf, pos, 33);
+    pos = motd_emit_cstr(buf, pos, "  agora 0.2.0 — telnet BBS\r\n");
+    pos = tty_sgr_reset_buf(buf, pos);
+
+    # Default-color prompt + closing blank line.
+    pos = motd_emit_cstr(buf, pos, "  Type anything; Ctrl+] then 'quit' to exit.\r\n\r\n");
+
+    return pos;
+}
+
 # Serve one connection. Sends a banner, then runs an IAC-aware
 # read/echo loop until the peer disconnects or sends a graceful close.
 #
@@ -97,24 +156,14 @@ fn handle_client(cfd): i64 {
         telnet_tx_consume(ts);
     }
 
-    # MOTD: bannermanor-rendered ASCII banner + version + prompt.
-    # The ASCII art was generated once via `bnrmr "AGORA"` (block
-    # font, 5×5) and embedded as a string constant — operator-side
-    # pre-rendering rather than runtime subprocess shellout, so
-    # there's no per-connection latency and no runtime dep on the
-    # bnrmr binary being installed.
-    #
-    # To regenerate (e.g. when the version label or the banner text
-    # itself changes): `bnrmr "AGORA"` in any shell with bannermanor
-    # installed, copy the 5 lines below the comment, and prepend
-    # each with a backslash-escaped CR-LF (telnet wire protocol
-    # mandates CRLF, RFC 854 § Network Virtual Terminal).
-    #
-    # M2-A consumes bannermanor v1.0.0 (frozen CLI surface).
-    # M2-B (gated on darshana ≥ 1.0) will wrap each line in ANSI
-    # color via darshana SGR primitives.
-    var banner = "\r\n \x23\x23\x23   \x23\x23\x23\x23  \x23\x23\x23  \x23\x23\x23\x23   \x23\x23\x23 \r\n\x23   \x23 \x23     \x23   \x23 \x23   \x23 \x23   \x23\r\n\x23\x23\x23\x23\x23 \x23  \x23\x23 \x23   \x23 \x23\x23\x23\x23  \x23\x23\x23\x23\x23\r\n\x23   \x23 \x23   \x23 \x23   \x23 \x23  \x23  \x23   \x23\r\n\x23   \x23  \x23\x23\x23\x23  \x23\x23\x23  \x23   \x23 \x23   \x23\r\n\r\n  agora 0.2.0 — telnet BBS\r\n  Type anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
-    send_buf(cfd, banner, strlen(banner));
+    # MOTD: render the bannermanor-derived ASCII banner with darshana
+    # SGR coloring. See `render_motd` above for the full provenance
+    # (banner from `bnrmr "AGORA"`; colors via darshana 0.5.3 `_buf`
+    # primitives). Buffer is 1 KB — comfortable for the ~600-byte
+    # rendered output with headroom for color tweaks.
+    var motd = alloc(1024);
+    var motd_len = render_motd(motd);
+    send_buf(cfd, motd, motd_len);
 
     # Allocate the recv buffer once.
     var rxbuf = alloc(RECV_BUF_BYTES);
