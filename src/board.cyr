@@ -451,23 +451,24 @@ fn header_get(buf, len, name, out_buf, out_max): i64 {
     return vlen;
 }
 
-# Compose a post file with Subject + Date headers + blank line + body.
-# Writes into out_buf at offset 0; returns total bytes written, or
-# -1 if it wouldn't fit in out_cap.
+# Compose a post file with Subject + Date + optional Reply-To
+# headers + blank line + body. Writes into out_buf at offset 0;
+# returns total bytes written, or -1 if it wouldn't fit in out_cap.
 #
-# Subject may be empty (NUL string or strlen == 0) — `Subject:` is
-# still emitted with a blank value so the file still has a valid
-# header block (and `header_get` returns 0-length rather than -1).
-fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
+# Subject may be empty (NUL string or strlen == 0). `reply_to == 0`
+# means "regular post, no Reply-To header"; `reply_to > 0` writes
+# the header line per ADR 0005.
+fn post_format_with_headers(subject, reply_to, body, body_len, out_buf, out_cap): i64 {
     var pos = 0;
     var slen = 0;
     if (subject != 0) { slen = strlen(subject); }
     if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
 
-    # Worst-case header block: 9 + slen + 2 + 6 + 20 + 2 + 2 = 41 + slen
-    if (pos + 9 + slen + 32 + body_len > out_cap) { return 0 - 1; }
+    # Worst-case header overhead: Subject 9+slen+2, Date 6+20+2,
+    # Reply-To 10+24+2 (24 = max digits of int64), blank 2. ~80 + slen.
+    if (pos + 9 + slen + 80 + body_len > out_cap) { return 0 - 1; }
 
-    # "Subject: "
+    # "Subject: <subject>\r\n"
     memcpy(out_buf + pos, "Subject: ", 9); pos = pos + 9;
     if (slen > 0) { memcpy(out_buf + pos, subject, slen); pos = pos + slen; }
     store8(out_buf + pos, 13); pos = pos + 1;
@@ -481,6 +482,16 @@ fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
     store8(out_buf + pos, 13); pos = pos + 1;
     store8(out_buf + pos, 10); pos = pos + 1;
 
+    # "Reply-To: <id>\r\n"  (M5-F / ADR 0005, only if reply_to > 0)
+    if (reply_to > 0) {
+        memcpy(out_buf + pos, "Reply-To: ", 10); pos = pos + 10;
+        var idbuf[24];
+        var idlen = fmt_int_buf(reply_to, &idbuf);
+        memcpy(out_buf + pos, &idbuf, idlen); pos = pos + idlen;
+        store8(out_buf + pos, 13); pos = pos + 1;
+        store8(out_buf + pos, 10); pos = pos + 1;
+    }
+
     # Blank line — header/body separator
     store8(out_buf + pos, 13); pos = pos + 1;
     store8(out_buf + pos, 10); pos = pos + 1;
@@ -493,23 +504,33 @@ fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
     return pos;
 }
 
+# Backwards-compat alias for M5-D callers (no Reply-To).
+fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
+    return post_format_with_headers(subject, 0, body, body_len, out_buf, out_cap);
+}
+
 # post_new with a Subject header (ADR 0003). Formats Subject + Date +
 # body into a temporary buffer, then writes the result via the same
 # EXCL-claim path as post_new. Returns the assigned ID or -1.
 # **M5-G**: format happens outside the lock (pure per-call work);
 # claim+write is inside.
 fn post_new_with_subject(store, board, subject, body, body_len): i64 {
+    return post_new_with_subject_reply(store, board, subject, 0, body, body_len);
+}
+
+# Write a new post with Subject + (optional) Reply-To. Same EXCL +
+# flock semantics as M5-G's `post_new_with_subject`; the format
+# call grows one header field when reply_to > 0.
+fn post_new_with_subject_reply(store, board, subject, reply_to, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
 
     var rc = board_ensure(store, board);
     if (rc != 0) { return 0 - 1; }
 
-    # Format outside the lock — no shared state, no cross-process
-    # dependencies; shortens the critical section.
     var fcap = POST_MAX_BYTES + 1024;
     var fbuf = alloc(fcap);
-    var flen = post_format_with_subject(subject, body, body_len, fbuf, fcap);
+    var flen = post_format_with_headers(subject, reply_to, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
     var lock_fd = store_lock_acquire(store, board);
@@ -537,6 +558,103 @@ fn post_subject(buf, len, out_buf, out_max): i64 {
     var n = header_get(buf, len, "Subject", out_buf, out_max);
     if (n < 0) { return 0; }
     return n;
+}
+
+# === M5-F threading helpers (ADR 0005) ===
+
+# Extract the Reply-To parent ID from a post file buffer. Returns
+# the parent ID (positive integer), or 0 if the post has no
+# Reply-To header / has an unparseable value / is headerless.
+fn post_reply_to(buf, len): i64 {
+    var raw[24];
+    var n = header_get(buf, len, "Reply-To", &raw, 24);
+    if (n <= 0) { return 0; }
+    # Parse integer from raw[0..n]. atoi expects NUL-termination;
+    # store one past last digit, then atoi.
+    if (n >= 24) { n = 23; }
+    store8(&raw + n, 0);
+    var id = atoi(&raw);
+    if (id <= 0) { return 0; }
+    return id;
+}
+
+# Find every reply (in `board`) whose Reply-To header equals
+# `parent_id`. Writes child IDs (sorted ascending) into out_ids;
+# returns count. O(n) in the board's post count per ADR 0005.
+fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
+    var ids = alloc(DIRENT_ID_MAX * 8);
+    var count = post_list(store, board, ids, DIRENT_ID_MAX);
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var out_count = 0;
+    var i = 0;
+    while (i < count) {
+        if (out_count >= max_ids) { i = count; continue; }
+        var id = load64(ids + i * 8);
+        var flen = post_read(store, board, id, fbuf, POST_MAX_BYTES + 1024);
+        if (flen > 0) {
+            if (post_reply_to(fbuf, flen) == parent_id) {
+                store64(out_ids + out_count * 8, id);
+                out_count = out_count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    # post_list already returns sorted; replies preserve that order.
+    return out_count;
+}
+
+# Apply RFC 5322 § 3.6.5 "Re:" subject prefix rules:
+#   - if `parent_subject` starts with "Re: " (case-insensitive),
+#     return parent_subject verbatim
+#   - else return "Re: " + parent_subject
+#
+# Writes result into out_buf as NUL-terminated; returns length
+# (excluding NUL).
+fn subject_reply_prefix(parent_subject, parent_len, out_buf, out_max): i64 {
+    var has_re = 0;
+    if (parent_len >= 4) {
+        var b0 = load8(parent_subject) & 0xFF;
+        var b1 = load8(parent_subject + 1) & 0xFF;
+        var b2 = load8(parent_subject + 2) & 0xFF;
+        var b3 = load8(parent_subject + 3) & 0xFF;
+        # "Re: " — either R (0x52) or r (0x72) for first byte;
+        # E (0x45) or e (0x65) for second; ':' (0x3A); ' ' (0x20).
+        var is_r = 0;
+        if (b0 == 82) { is_r = 1; }
+        if (b0 == 114) { is_r = 1; }
+        var is_e = 0;
+        if (b1 == 69) { is_e = 1; }
+        if (b1 == 101) { is_e = 1; }
+        if (is_r != 0) {
+            if (is_e != 0) {
+                if (b2 == 58) {
+                    if (b3 == 32) {
+                        has_re = 1;
+                    }
+                }
+            }
+        }
+    }
+    var pos = 0;
+    if (has_re == 0) {
+        if (pos + 4 + parent_len + 1 > out_max) {
+            # Truncate: ensure we always NUL-terminate
+            parent_len = out_max - 5;
+            if (parent_len < 0) { parent_len = 0; }
+        }
+        memcpy(out_buf + pos, "Re: ", 4); pos = pos + 4;
+    } else {
+        if (pos + parent_len + 1 > out_max) {
+            parent_len = out_max - 1;
+            if (parent_len < 0) { parent_len = 0; }
+        }
+    }
+    if (parent_len > 0) {
+        memcpy(out_buf + pos, parent_subject, parent_len);
+        pos = pos + parent_len;
+    }
+    store8(out_buf + pos, 0);
+    return pos;
 }
 
 # Insertion sort an i64 array in place. O(n²); used by post_list

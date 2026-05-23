@@ -16,7 +16,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **M1 (0.2.0)** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | shipped 2026-05-23 — five bites |
 | **M2 (0.3.0)** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | shipped 2026-05-23 — three bites |
 | **M5 partial (0.4.0)** ✅ | Single-board post persistence (ADRs 0002/0003 — storage primitives + RFC-822 headers + per-store flock + ingress filter) | shipped 2026-05-23 — six bites + two ADRs |
-| **M5 close (0.5.0)** ← in progress | Boards + threads — M5-E (ADR 0004 boards) **landed 2026-05-23**; M5-F (threads) remaining. agora becomes a multi-board BBS with reply-linkage. |
+| **M5 close (0.5.0)** ← ready to tag | Boards + threads — ADRs 0004 + 0005, M5-E + M5-F **landed 2026-05-23**. agora is a multi-board threaded BBS over telnet. |
 | **M6 (0.6.0)** | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — login flow, `whoami`, per-board posting permissions |
 | **Security sweep (0.7.0)** | External CVE / 0-day research + code audit | walk every input boundary, every IAC sequence path, every storage write; web-research known telnet/BBS CVEs (CVE-2020-10188, CVE-2011-4862, modern Mastodon/Matrix vulns); file `docs/audit/2026-MM-DD-pre-1.0-audit.md` |
 | **Hardening + v1 lockdown (0.8.0)** | All audit findings closed, ABI freeze, doc-pass, perf bench re-run, downstream verification | last patch before 1.0.0; everything in the 1.0 set has shipped at least once at this release |

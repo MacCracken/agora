@@ -19,3 +19,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0002 | [One file per post for the M5 storage layout](0002-one-file-per-post-storage.md) | Accepted (2026-05-23) |
 | 0003 | [RFC-822-shaped post headers (Subject + Date)](0003-rfc-822-post-headers.md) | Accepted (2026-05-23) |
 | 0004 | [Board layout: flat-root = main, subdirs = named](0004-board-layout.md) | Accepted (2026-05-23) |
+| 0005 | [Threading via Reply-To header](0005-threading-via-reply-to.md) | Accepted (2026-05-23) |

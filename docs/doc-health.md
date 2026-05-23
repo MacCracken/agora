@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (0.4.0 released; ADR 0004 + M5-E landed; agora is a multi-board BBS; release plan: 0.5.0/0.6.0/0.7.0/0.8.0/1.0.0) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (0.4.0 released; ADRs 0004 + 0005 + M5-E + M5-F landed = M5 close; agora is a multi-board threaded BBS; next tag 0.5.0) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,7 +39,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [0.4.0] M5 partial (storage/headers/lock) + [Unreleased] ADR 0004 + M5-E boards. |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [0.4.0] M5 partial + [Unreleased] ADRs 0004 + 0005, M5-E boards + M5-F threading = M5 close (next tag 0.5.0). |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 close)** — first parser baseline (5 microbenchmarks via `lib/bench.cyr`). Hand-maintained; `scripts/bench-history.sh` auto-gen pattern is the v1.x close-out goal. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
@@ -57,7 +57,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.4.0 (M5 partial) shipped; M5 close cycle in flight — ADR 0004 + M5-E landed 2026-05-23 (boards: flat-root=main, subdirs=named, telnet boards/enter/leave + CLI --board); 43 tests; 135,064 B. Remaining: M5-F (threads) → 0.5.0. Release plan reorganized: 0.6 auth, 0.7 security sweep, 0.8 hardening, 1.0 ship. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.4.0 shipped; M5 close ready to tag 0.5.0 — ADRs 0004 + 0005, M5-E (boards) + M5-F (threading) landed 2026-05-23; 49 tests; 140,152 B. Release plan: 0.6 auth, 0.7 security sweep + CVE research, 0.8 hardening, 1.0 ship. |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. Now points at `roadmap-future.md` for post-v1.0 directions. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
@@ -77,6 +77,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0002-one-file-per-post-storage.md` | 2026-05-23 | 🔵 Evergreen | **New at M5 cycle-open** — one file per post (`<store>/<id>.txt`, monotonic IDs, plaintext bodies). Rejects offset-index + WAL alternatives. Strict-prefix shape for the v2.x content-addressed graduation (pillar 2). |
 | `0003-rfc-822-post-headers.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-D** — RFC-822-shaped headers (Subject + Date) followed by blank line + body. Rejects JSON / CYML / TSV alternatives. Backwards-compatible with M5-A/B/C headerless posts via uppercase-first-byte sniffer. |
 | `0004-board-layout.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-E** — flat-root = "main", subdirs = named boards. Free backwards-compat with 0.4.0 stores. Modal current-board UI for telnet, `--board <name>` flag for CLI. Auto-create on first post. Rejects all-subdirs migration + sidecar index + per-port-board UI. |
+| `0005-threading-via-reply-to.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-F** — `Reply-To: <id>` header (same-board, ID-only); scan-on-read enumeration; RFC 5322 § 3.6.5 Re: subject prefix (no double). Rejects deep-threading via In-Reply-To+References, sidecar reply index, and cross-board values. |
 
 **Open question** — none open. Next decision likely lands when M5's on-disk layout is chosen (one file per post vs. one file per thread).
 

@@ -65,6 +65,15 @@ var g_motd_len = 0;
 # handle_client reads this without threading through args.
 var g_store_buf = "./agora-data";
 
+# M5-F: per-session reply state. `reply <id>` writes these and
+# handle_client reads them when finalizing the post. NB: at v0.5.0
+# the accept loop single-tracks, so these are effectively
+# per-session even though they're global slots. A future
+# concurrent-accept refactor pulls them into per-session locals.
+var g_reply_to          = 0;           # 0 = regular post, >0 = parent id
+var g_reply_subject     = 0;           # alloc'd lazily on first use
+var g_reply_subject_len = 0;
+
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
     println("v0.4.0 — M5 post persistence");
@@ -84,11 +93,12 @@ fn print_help(): i64 {
     println("                 --store sets the post-storage root for the");
     println("                 in-session post/list/read commands —");
     println("                 default ./agora-data/, same as the CLI verbs)");
-    println("  post [--store <path>] [--board <name>] [--subject <text>]");
+    println("  post [--store <path>] [--board <name>] [--subject <text>] [--reply-to <id>]");
     println("                 read stdin → new post → print assigned ID");
     println("                 (default store ./agora-data/, board 'main';");
     println("                 named boards live at <store>/<name>/. Subject");
-    println("                 is written as an RFC-822 header per ADR 0003.)");
+    println("                 is written as an RFC-822 header per ADR 0003;");
+    println("                 --reply-to writes a Reply-To header per ADR 0005.)");
     println("  list [--store <path>] [--board <name>]");
     println("                 list post IDs in the chosen board");
     println("  read <id> [--store <path>] [--board <name>]");
@@ -232,8 +242,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  enter <name>    switch to a named board (auto-creates)\r\n");
         send_str(cfd, "  leave           return to main\r\n");
         send_str(cfd, "  list            list post IDs in the current board\r\n");
-        send_str(cfd, "  read <id>       read a post by ID\r\n");
+        send_str(cfd, "  read <id>       read a post by ID (with reply list)\r\n");
         send_str(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
+        send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -389,12 +400,70 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 send_str(cfd, "\r\n");
             }
         }
+
+        # M5-F: list child reply IDs (one-deep). Enumerated by
+        # scanning the board for posts with Reply-To: <id>.
+        var rbuf = alloc(DIRENT_ID_MAX * 8);
+        var rcount = replies_to(g_store_buf, current_board, id, rbuf, DIRENT_ID_MAX);
+        if (rcount > 0) {
+            send_str(cfd, "\r\nReplies: ");
+            var ri = 0;
+            while (ri < rcount) {
+                if (ri > 0) { send_str(cfd, ", "); }
+                var rid_buf[24];
+                var rid_len = fmt_int_buf(load64(rbuf + ri * 8), &rid_buf);
+                send_buf(cfd, &rid_buf, rid_len);
+                ri = ri + 1;
+            }
+            send_str(cfd, "\r\n");
+        }
         return MODE_COMMAND;
     }
 
     if (line_has_prefix(line, len, "post") != 0) {
         send_str(cfd, "Subject: ");
         return MODE_POSTING_SUBJECT;
+    }
+
+    # M5-F: `reply <id>` — compose a reply to parent post <id> in
+    # the current board. Computes Re-prefixed subject from parent,
+    # skips Subject prompt, transitions straight to MODE_POSTING.
+    # The session's `reply_to_out` global slot is set here and read
+    # by handle_client when finalizing the post.
+    if (line_has_prefix(line, len, "reply") != 0) {
+        var parent_id = line_parse_int(line, 5, len);
+        if (parent_id < 0) {
+            send_str(cfd, "usage: reply <id>\r\n");
+            return MODE_COMMAND;
+        }
+        var fbuf = alloc(POST_MAX_BYTES + 1024);
+        var flen = post_read(g_store_buf, current_board, parent_id, fbuf, POST_MAX_BYTES + 1024);
+        if (flen <= 0) {
+            send_str(cfd, "reply: parent post not found\r\n");
+            return MODE_COMMAND;
+        }
+        # Build derived Re: subject — copy into the session's subject
+        # buffer via the `current_board` trick: we expose the slot
+        # through globals (set_reply_state below).
+        var parent_sub = alloc(SUBJECT_MAX_BYTES);
+        var ps_len = post_subject(fbuf, flen, parent_sub, SUBJECT_MAX_BYTES);
+        var derived = alloc(SUBJECT_MAX_BYTES + 8);
+        subject_reply_prefix(parent_sub, ps_len, derived, SUBJECT_MAX_BYTES + 8);
+        # Park the derived subject + parent_id in globals — they're
+        # picked up by handle_client at the next MODE_POSTING '.' commit.
+        g_reply_to = parent_id;
+        var dlen = strlen(derived);
+        if (g_reply_subject == 0) {
+            g_reply_subject = alloc(SUBJECT_MAX_BYTES + 8);
+        }
+        memcpy(g_reply_subject, derived, dlen);
+        store8(g_reply_subject + dlen, 0);
+        g_reply_subject_len = dlen;
+        send_str(cfd, "Subject: ");
+        send_buf(cfd, derived, dlen);
+        send_str(cfd, "\r\n");
+        send_str(cfd, "Compose reply. End with '.' on a line by itself.\r\n");
+        return MODE_POSTING;
     }
 
     if (line_has_prefix(line, len, "quit") != 0) {
@@ -419,14 +488,27 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 
 # Finalize a post-compose flow: write the accumulated body + subject
 # into the session's current_board, send the assigned ID (or an error).
+#
+# M5-F: if `g_reply_to != 0`, this is a reply — use the derived
+# subject from `g_reply_subject` (computed by the `reply <id>`
+# command) and write a Reply-To header. Reset g_reply_to after the
+# commit so the next plain `post` doesn't accidentally reuse the
+# previous reply parent.
 fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
     if (body_len <= 0) {
         send_str(cfd, "(empty post discarded)\r\n");
+        g_reply_to = 0;
         return 0;
     }
-    var id = post_new_with_subject(g_store_buf, current_board, subject, body, body_len);
+    var id = 0 - 1;
+    if (g_reply_to > 0) {
+        id = post_new_with_subject_reply(g_store_buf, current_board, g_reply_subject, g_reply_to, body, body_len);
+    } else {
+        id = post_new_with_subject(g_store_buf, current_board, subject, body, body_len);
+    }
     if (id < 0) {
         send_str(cfd, "post failed (storage error)\r\n");
+        g_reply_to = 0;
         return 0;
     }
     send_str(cfd, "posted as #");
@@ -434,6 +516,7 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
     var idlen = fmt_int_buf(id, &idbuf);
     send_buf(cfd, &idbuf, idlen);
     send_str(cfd, "\r\n");
+    g_reply_to = 0;
     return 0;
 }
 
@@ -873,6 +956,27 @@ fn parse_subject_flag(): i64 {
     return 0;
 }
 
+# M5-F: walk argv looking for --reply-to <id>. Returns the parsed
+# parent ID (positive integer), or 0 if absent / unparseable.
+fn parse_reply_to_flag(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--reply-to") != 0) {
+            if (i + 1 < n) {
+                var v = atoi(argv(i + 1));
+                if (v > 0) { return v; }
+                return 0;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # `agora post [--subject "..."]` — read stdin → write a new post →
 # print assigned ID. Up to POST_MAX_BYTES (64 KB) of body. Returns
 # 0 + id on success, 1 on no-input / write failure.
@@ -880,11 +984,29 @@ fn cmd_post(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var board = parse_board();
     var subject = parse_subject_flag();
+    var reply_to = parse_reply_to_flag();
     # M5-E: validate the board name unless it's the default "main".
     if (streq(board, "main") == 0) {
         if (board_name_valid(board) == 0) {
             println("agora post: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
             return 2;
+        }
+    }
+    # M5-F: if --reply-to was given without --subject, auto-derive
+    # `Re: <parent-subject>` so the CLI matches the wire-side reply
+    # flow. Subject explicitly passed via --subject wins over the
+    # derived one (operator can still override).
+    if (reply_to > 0) {
+        if (subject == 0) {
+            var pfbuf = alloc(POST_MAX_BYTES + 1024);
+            var pflen = post_read(store, board, reply_to, pfbuf, POST_MAX_BYTES + 1024);
+            if (pflen > 0) {
+                var psub = alloc(SUBJECT_MAX_BYTES);
+                var pslen = post_subject(pfbuf, pflen, psub, SUBJECT_MAX_BYTES);
+                var dsub = alloc(SUBJECT_MAX_BYTES + 8);
+                subject_reply_prefix(psub, pslen, dsub, SUBJECT_MAX_BYTES + 8);
+                subject = dsub;
+            }
         }
     }
     var body = alloc(POST_MAX_BYTES);
@@ -900,7 +1022,7 @@ fn cmd_post(): i64 {
         println("agora post: no input on stdin (pipe in post body)");
         return 1;
     }
-    var id = post_new_with_subject(store, board, subject, body, total);
+    var id = post_new_with_subject_reply(store, board, subject, reply_to, body, total);
     if (id < 0) {
         println("agora post: failed to write post");
         return 1;

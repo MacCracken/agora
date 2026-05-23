@@ -968,6 +968,123 @@ fn t43_board_path_named(): i64 {
     return 0;
 }
 
+# T44: subject_reply_prefix prepends "Re: " when not already present.
+fn t44_subject_reply_prefix_adds_re(): i64 {
+    var out = alloc(SUBJECT_MAX_BYTES + 8);
+    var n = subject_reply_prefix("Hello world", 11, out, SUBJECT_MAX_BYTES + 8);
+    var expected = "Re: Hello world";
+    var elen = strlen(expected);
+    if (n != elen) {
+        test_fail("t44_subject_reply_prefix_adds_re", "wrong length");
+        return 1;
+    }
+    if (memeq(out, expected, elen) == 0) {
+        test_fail("t44_subject_reply_prefix_adds_re", "byte mismatch");
+        return 1;
+    }
+    test_pass("t44_subject_reply_prefix_adds_re");
+    return 0;
+}
+
+# T45: subject_reply_prefix does NOT double-prefix when "Re: " is
+# already present (RFC 5322 § 3.6.5).
+fn t45_subject_reply_prefix_no_double_re(): i64 {
+    var out = alloc(SUBJECT_MAX_BYTES + 8);
+    var input = "Re: Hello world";
+    var n = subject_reply_prefix(input, strlen(input), out, SUBJECT_MAX_BYTES + 8);
+    if (n != strlen(input)) {
+        test_fail("t45_subject_reply_prefix_no_double_re", "length should match input");
+        return 1;
+    }
+    if (memeq(out, input, strlen(input)) == 0) {
+        test_fail("t45_subject_reply_prefix_no_double_re", "byte mismatch");
+        return 1;
+    }
+    test_pass("t45_subject_reply_prefix_no_double_re");
+    return 0;
+}
+
+# T46: subject_reply_prefix Re: check is case-insensitive on the
+# letters (matches mail-client behavior).
+fn t46_subject_reply_prefix_case_insensitive(): i64 {
+    var out = alloc(SUBJECT_MAX_BYTES + 8);
+    # Lowercase "re: " — should NOT be doubled
+    var n = subject_reply_prefix("re: foo", 7, out, SUBJECT_MAX_BYTES + 8);
+    if (n != 7) {
+        test_fail("t46_subject_reply_prefix_case_insensitive", "lowercase re: should not double");
+        return 1;
+    }
+    # Mixed case "rE: " — also should not double
+    var n2 = subject_reply_prefix("rE: bar", 7, out, SUBJECT_MAX_BYTES + 8);
+    if (n2 != 7) {
+        test_fail("t46_subject_reply_prefix_case_insensitive", "mixed-case rE: should not double");
+        return 1;
+    }
+    test_pass("t46_subject_reply_prefix_case_insensitive");
+    return 0;
+}
+
+# T47: post_reply_to extracts the integer Reply-To value from
+# headers.
+fn t47_post_reply_to_extracts_id(): i64 {
+    var content = "Subject: Re: hi\r\nDate: 2026-01-01T00:00:00Z\r\nReply-To: 7\r\n\r\nbody";
+    var pid = post_reply_to(content, strlen(content));
+    if (pid != 7) {
+        test_fail("t47_post_reply_to_extracts_id", "expected 7");
+        return 1;
+    }
+    test_pass("t47_post_reply_to_extracts_id");
+    return 0;
+}
+
+# T48: post_reply_to returns 0 when the header is absent.
+fn t48_post_reply_to_missing_returns_zero(): i64 {
+    var content = "Subject: hi\r\nDate: 2026-01-01T00:00:00Z\r\n\r\nbody";
+    var pid = post_reply_to(content, strlen(content));
+    if (pid != 0) {
+        test_fail("t48_post_reply_to_missing_returns_zero", "expected 0");
+        return 1;
+    }
+    # Headerless too
+    var content2 = "plain headerless body";
+    var pid2 = post_reply_to(content2, strlen(content2));
+    if (pid2 != 0) {
+        test_fail("t48_post_reply_to_missing_returns_zero", "headerless expected 0");
+        return 1;
+    }
+    test_pass("t48_post_reply_to_missing_returns_zero");
+    return 0;
+}
+
+# T49: post_format_with_headers includes Reply-To when reply_to > 0,
+# omits it when 0. Round-trip via post_reply_to.
+fn t49_format_with_reply_to_header(): i64 {
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var flen = post_format_with_headers("test", 42, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    if (flen < 0) {
+        test_fail("t49_format_with_reply_to_header", "format returned -1");
+        return 1;
+    }
+    var pid = post_reply_to(fbuf, flen);
+    if (pid != 42) {
+        test_fail("t49_format_with_reply_to_header", "Reply-To round-trip failed");
+        return 1;
+    }
+    # Re-test without reply_to → no header → 0
+    var flen2 = post_format_with_headers("test", 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    if (flen2 < 0) {
+        test_fail("t49_format_with_reply_to_header", "format-no-reply returned -1");
+        return 1;
+    }
+    var pid2 = post_reply_to(fbuf, flen2);
+    if (pid2 != 0) {
+        test_fail("t49_format_with_reply_to_header", "no-reply expected 0");
+        return 1;
+    }
+    test_pass("t49_format_with_reply_to_header");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -1036,6 +1153,12 @@ fn main(): i64 {
     t41_board_name_valid_rejects();
     t42_board_path_main_is_flat();
     t43_board_path_named();
+    t44_subject_reply_prefix_adds_re();
+    t45_subject_reply_prefix_no_double_re();
+    t46_subject_reply_prefix_case_insensitive();
+    t47_post_reply_to_extracts_id();
+    t48_post_reply_to_missing_returns_zero();
+    t49_format_with_reply_to_header();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

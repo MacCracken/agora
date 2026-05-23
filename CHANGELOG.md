@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — ADR 0005 + M5-F: threading via Reply-To (2026-05-23) — **M5 close**
+
+This bite closes M5. agora is now a **multi-board threaded BBS over telnet** — the post storage cycle that opened with ADR 0002 / M5-A / 0.4.0 reaches feature completeness with same-board reply linkage. Next release tag will be **0.5.0** (M5 close + roadmap restructure documented under 0.4.0).
+
+- **[ADR 0005](docs/adr/0005-threading-via-reply-to.md)** — captures three load-bearing decisions: (A) reply relationship encoded as a `Reply-To: <id>` header in the RFC-822 block from ADR 0003; (α) same-board only (cross-board upgrade path documented as non-breaking); (p) scan-on-read for enumeration (O(n) per read, fine at v1.0 scale; mitigations available if scale grows). Rejects deep-threading via `In-Reply-To`+`References`, sidecar reply index, and fully-qualified `<board>/<id>` Reply-To values with concrete reasoning.
+- **`src/board.cyr` additions**:
+  - `post_format_with_headers(subject, reply_to, body, body_len, out, cap)` — extends ADR 0003's header block with an optional `Reply-To: <id>\r\n` line when `reply_to > 0`. The original `post_format_with_subject` becomes a thin wrapper passing `reply_to == 0`.
+  - `post_new_with_subject_reply(store, board, subject, reply_to, body, body_len)` — wraps `post_format_with_headers` + the M5-G EXCL+flock claim. Same critical-section shape as M5-D's `post_new_with_subject`.
+  - `post_reply_to(buf, len)` — extract parent ID from a post file's `Reply-To` header. Returns 0 when absent / unparseable / headerless.
+  - `replies_to(store, board, parent_id, out_ids, max)` — scan the board's posts, accumulate IDs whose `Reply-To` matches `parent_id`. Returns sorted-ascending count.
+  - `subject_reply_prefix(parent_subject, parent_len, out, max)` — RFC 5322 § 3.6.5 Re: rule: prepend "Re: " unless already present (case-insensitive on the letters). Never doubled.
+- **Telnet `reply <id>`** command — validates parent exists in current board, derives Re-prefixed subject, **skips the Subject prompt**, transitions straight to MODE_POSTING. Parked state in globals (`g_reply_to`, `g_reply_subject`, `g_reply_subject_len`) is read by `session_finalize_post` on '.' commit and cleared after each post.
+- **Telnet `read <id>`** appends `Replies: N, M, ...` after the body when any posts in the current board target this post. Silent when no replies.
+- **CLI `agora post --reply-to <id>`** flag. When `--reply-to` is given without `--subject`, the CLI auto-derives the Re: subject from the parent (matching the wire-side reply UX).
+- **Tests 43 → 49** (6 new): `t44_subject_reply_prefix_adds_re`, `t45_subject_reply_prefix_no_double_re` (RFC 5322 no-double rule), `t46_subject_reply_prefix_case_insensitive` (lowercase + mixed-case `re:`), `t47_post_reply_to_extracts_id`, `t48_post_reply_to_missing_returns_zero` (absent header + headerless), `t49_format_with_reply_to_header` (round-trip via `post_format_with_headers` ↔ `post_reply_to`).
+- **End-to-end smoke** — CLI: `post`/`post --reply-to 1` chain; on-disk file shows Reply-To header. Telnet: `read 1` shows `Replies: 2, 3`; `reply 1` derives `Subject: Re: ...` automatically and writes Reply-To header; `list` displays the new reply; `read 1` reflects the new reply count.
+- **Binary**: 135,064 B (M5-E) → 140,152 B (+5,088 B for the threading primitives, reply command, replies-list rendering, and CLI --reply-to plumbing).
+
+**M5 cycle summary** (six bites + two ADRs, ready for 0.5.0 tag):
+- M5-A storage primitives (ADR 0002)
+- M5-B in-session command interpreter
+- M5-C sorted listing
+- M5-D RFC-822 headers (ADR 0003)
+- M5-G per-store flock
+- M5-H ingress input filter
+- M5-E boards (ADR 0004)
+- M5-F threading (ADR 0005)
+
 ### Added — ADR 0004 + M5-E: boards (2026-05-23)
 
 agora is now a **multi-board BBS over telnet**. New session model: every connection opens at the implicit "main" board (flat `<store>/` per 0.4.0 layout); `enter <name>` switches to a named board (`<store>/<name>/`); `leave` returns to main. The prompt shows `[name] >` when in a named board so the user always knows which board their next command targets.
