@@ -1,0 +1,135 @@
+# bench_telnet.bcyr — agora telnet protocol microbenchmarks.
+#
+# Measures the per-byte cost of the IAC state machine, the Q-method
+# option negotiation, and the subneg parser. Lets us catch regressions
+# when the parser grows new features (LINEMODE was the last; CHARSET /
+# NEW_ENVIRON may come). Run with: cyrius bench benches/bench_telnet.bcyr
+#
+# Each work fn resets only the fields it touches (parser state +
+# tx_len + relevant option state) so successive iterations measure
+# the same code path. The TelnetState struct itself is allocated
+# once, in main(), and reused across iterations — alloc cost lives
+# outside the timed region.
+
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "src/telnet.cyr"
+
+# Bench-time TelnetState — initialized once in main().
+var g_ts = 0;
+
+# ----------------------------------------------------------------
+# B1 — plain byte through the parser. Hot path for any data flow
+# inside the telnet stream. Should be the cheapest single feed.
+# ----------------------------------------------------------------
+fn work_plain_byte(): i64 {
+    store64(g_ts + TS_STATE, ST_DATA);
+    telnet_feed(g_ts, 0x41);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# B2 — IAC option exchange for an UNTRACKED option (naive-refuse
+# fast path: 3 bytes through the parser, single 3-byte reply).
+# Untracked options are everything outside ECHO / SGA / NAWS / TT
+# / LINEMODE; we use OPT_STATUS as a stable untracked example.
+# ----------------------------------------------------------------
+fn work_iac_untracked(): i64 {
+    store64(g_ts + TS_STATE, ST_DATA);
+    store64(g_ts + TS_TX_LEN, 0);
+    telnet_feed(g_ts, IAC);
+    telnet_feed(g_ts, WILL);
+    telnet_feed(g_ts, OPT_STATUS);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# B3 — IAC option exchange for a TRACKED option in the Q machine's
+# "agree" path (him_state Q_NO -> Q_YES, single 3-byte DO reply +
+# possibly a follow-up subneg request). Uses SGA — it agrees without
+# any follow-up subneg, so we measure pure Q-transition cost.
+# ----------------------------------------------------------------
+fn work_iac_tracked_agree(): i64 {
+    store64(g_ts + TS_STATE, ST_DATA);
+    store64(g_ts + TS_TX_LEN, 0);
+    opt_set_him(g_ts, OPT_SUPPRESS_GO_AHEAD, Q_NO);
+    telnet_feed(g_ts, IAC);
+    telnet_feed(g_ts, WILL);
+    telnet_feed(g_ts, OPT_SUPPRESS_GO_AHEAD);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# B4 — full NAWS subnegotiation: 9 bytes through the parser
+# (IAC SB NAWS w_hi w_lo h_hi h_lo IAC SE) plus the handle_sb
+# dispatch that decodes the 4-byte payload into TS_TERM_*.
+# ----------------------------------------------------------------
+fn work_subneg_naws(): i64 {
+    store64(g_ts + TS_STATE, ST_DATA);
+    store64(g_ts + TS_TX_LEN, 0);
+    store64(g_ts + TS_SB_LEN, 0);
+    telnet_feed(g_ts, IAC);
+    telnet_feed(g_ts, SB);
+    telnet_feed(g_ts, OPT_NAWS);
+    telnet_feed(g_ts, 0x00);
+    telnet_feed(g_ts, 0x50);
+    telnet_feed(g_ts, 0x00);
+    telnet_feed(g_ts, 0x18);
+    telnet_feed(g_ts, IAC);
+    telnet_feed(g_ts, SE);
+    telnet_handle_sb(g_ts);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# B5 — emit the 4-option opening salvo. One-time per connection;
+# measured here so we know what we pay on accept(). Resets all
+# four tracked options to Q_NO before each iteration.
+# ----------------------------------------------------------------
+fn work_announce_salvo(): i64 {
+    store64(g_ts + TS_TX_LEN, 0);
+    opt_set_us( g_ts, OPT_ECHO,              Q_NO);
+    opt_set_us( g_ts, OPT_SUPPRESS_GO_AHEAD, Q_NO);
+    opt_set_him(g_ts, OPT_NAWS,              Q_NO);
+    opt_set_him(g_ts, OPT_TERMINAL_TYPE,     Q_NO);
+    telnet_announce(g_ts);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_ts = telnet_state_new();
+
+    var all = vec_new();
+
+    # Batch size 10000, rounds 10 — sub-100ns ops dominate the
+    # clock-gettime overhead at small batch sizes; this gives
+    # stable per-iteration averages.
+
+    var b1 = bench_new("telnet/plain_byte");
+    bench_run_batch(b1, &work_plain_byte, 10000, 10);
+    vec_push(all, b1);
+
+    var b2 = bench_new("telnet/iac_untracked");
+    bench_run_batch(b2, &work_iac_untracked, 10000, 10);
+    vec_push(all, b2);
+
+    var b3 = bench_new("telnet/iac_tracked_agree");
+    bench_run_batch(b3, &work_iac_tracked_agree, 10000, 10);
+    vec_push(all, b3);
+
+    var b4 = bench_new("telnet/subneg_naws");
+    bench_run_batch(b4, &work_subneg_naws, 10000, 10);
+    vec_push(all, b4);
+
+    var b5 = bench_new("telnet/announce_salvo");
+    bench_run_batch(b5, &work_announce_salvo, 10000, 10);
+    vec_push(all, b5);
+
+    bench_report_all(all);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

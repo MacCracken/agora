@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-23 (M1 close: cross-platform telnet listener)
+
+Multi-bite M1 cycle landed end-to-end: RFC 854 IAC parser + RFC 1143 Q-method option negotiation + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE + RFC 1184 LINEMODE, all wire-conformant via paired python TCP client smoke. Cross-platform via `lib/net.cyr` (Linux x86_64 + aarch64 today; macOS / Windows / AGNOS as the stdlib gains backends — see [ADR 0001](docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md)). 24 tests passing; 5-benchmark parser baseline captured in [`BENCHMARKS.md`](BENCHMARKS.md). Binary 43,216 B (v0.1.0 scaffold) → 70,960 B at 0.2.0 close.
+
+### Changed
+
+- `cmd_serve` upgraded from M1 stub to a real cross-platform telnet listener (default port 2323; configurable via `agora serve <port>`).
+- `print_banner` / `cmd_version` / connection-MOTD strings bumped to 0.2.0. (Note: version strings remain inlined in `src/main.cyr` — `cyrius` has no source-level `${file:VERSION}` interpolation yet, only `.cyml`-level. Embedded version constant via a generated `version_str.cyr` is a v1.0 close-out item.)
+- `cyrius.cyml` `[deps].stdlib` grew from 7 modules (scaffold) to 13 modules across the M1 cycle: added `net` + `result` + `tagged` (first-bite, socket primitives + Result type), `vec` + `fnptr` + `bench` (close-bite, bench harness dependencies).
+
+### Added — M1 close: bench harness + first parser baseline (2026-05-23)
+
+- **`benches/bench_telnet.bcyr`** (~115 LOC) — five parser microbenchmarks via `lib/bench.cyr` `bench_run_batch` (10 rounds × 10,000 iterations each):
+  - `telnet/plain_byte` — single byte through ST_DATA path
+  - `telnet/iac_untracked` — `IAC WILL OPT_STATUS` (3 bytes, naive-refuse + 3-byte reply)
+  - `telnet/iac_tracked_agree` — `IAC WILL SGA` (3 bytes, Q machine agree + 3-byte reply)
+  - `telnet/subneg_naws` — full NAWS subneg (9 bytes + payload decode)
+  - `telnet/announce_salvo` — 4-option opening salvo (one-time-per-connection cost)
+- **`BENCHMARKS.md` at repo root** — first baseline captured per [first-party-documentation § Benchmarks](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#benchmarks-and-performance-docs). Numbers on Linux x86_64 workstation, Cyrius 6.0.1:
+  | Benchmark | Avg |
+  |---|---:|
+  | `telnet/plain_byte` | **10 ns** |
+  | `telnet/iac_untracked` | **63 ns** |
+  | `telnet/iac_tracked_agree` | **73 ns** |
+  | `telnet/subneg_naws` | **97 ns** |
+  | `telnet/announce_salvo` | **132 ns** |
+
+  Derived throughput: ~100 M plain-bytes/s through the parser; ~14 M tracked option-exchanges/s; ~10 M NAWS subnegs/s. Orders of magnitude above any plausible BBS load.
+- **`cyrius.cyml` `[deps]`** — added `vec`, `fnptr`, `bench` to stdlib list (needed for the bench harness). Binary grew 62,176 → 70,960 B (+8,784 B from the larger stdlib surface); DCE NOPs 26,707 B of the bench-only paths leaving them unreachable but allocated. Acceptable cost for the M1 close — release-build optimization is a v1.x close-out concern, not blocking.
+- **What's NOT in the baseline** (deferred to follow-up bench files): accept-loop rate (needs paired client process), end-to-end echo latency over loopback, memory pressure under N concurrent connections, DCE-stripped binary perf.
+
+### M1 closed (2026-05-23) — cross-platform telnet listener
+
+All four protocol bites + bench harness now landed. M1 close summary:
+
+- **Protocol surface**: RFC 854 (IAC parser), RFC 1143 (Q-method negotiation), RFC 1073 (NAWS), RFC 1091 (TERMINAL_TYPE), RFC 1184 (LINEMODE) — all wire-conformant.
+- **Tests**: 24/24 green, RFC sequences + state transitions + malformed-payload defense.
+- **Smoke**: end-to-end handshake (announce → peer agree → server TT SEND → peer NAWS+TT IS+LINEMODE ACK → data echo) wire-conformant via python TCP client.
+- **Bench**: parser at 10 ns/byte hot path, ~100 ns for full option exchanges. First baseline captured.
+- **Lifecycle**: slowloris timeout (60 s default) + graceful EOF/error close.
+- **Cross-platform**: built on `lib/net.cyr` per [ADR 0001](docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md) — Linux x86_64 + aarch64 today, macOS/Windows/AGNOS as stdlib gains backends.
+
+**Next in-flight slot: M2** — ANSI BBS aesthetic. Consumes `bannermanor` 1.0.0 ✅ (for ASCII MOTD banners) + darshana ≥ 1.0 ❌ (currently 0.5.3 — likely gated on darshana's own 1.0 cut). Likely first M2 bite: bannermanor MOTD on connect ahead of the existing plaintext banner.
+
 ### Added — Post-v1.0 roadmap: v2.x sovereignty pillars (2026-05-23)
 
 - **`docs/development/roadmap-future.md`** — new file consolidating six unpinned design directions for the v2.x sovereignty layer:

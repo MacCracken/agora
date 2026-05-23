@@ -31,7 +31,7 @@ enum AgoraDefaults {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.1.0 scaffold");
+    println("v0.2.0 — M1 telnet listener");
     return 0;
 }
 
@@ -99,7 +99,7 @@ fn handle_client(cfd): i64 {
 
     # Banner. RFC 854 doesn't require CR-LF before negotiation, but
     # most clients are friendlier when the first bytes are printable.
-    var banner = "agora 0.1.0 — telnet BBS (M1 protocol smoke)\r\nType anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
+    var banner = "agora 0.2.0 — telnet BBS\r\nType anything; Ctrl+] then 'quit' to exit.\r\n\r\n";
     send_buf(cfd, banner, strlen(banner));
 
     # Allocate the recv buffer once.
@@ -238,7 +238,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.1.0");
+    println("agora 0.2.0");
     return 0;
 }
 

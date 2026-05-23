@@ -16,8 +16,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.1.0` (2026-05-23) |
-| **Cycle** | M0 closed; **M1 in progress** (cross-platform telnet listener) |
+| **Released** | `0.2.0` (2026-05-23) |
+| **Cycle** | M0 + **M1 closed at 0.2.0** (2026-05-23) — cross-platform telnet listener wire-conformant; M2 (ANSI BBS aesthetic) next, gated on darshana ≥ 1.0 |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -25,38 +25,48 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 62,176 B at M1 fourth-bite (61,152 third; 59,280 second; 56,064 first; 43,216 v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 70,960 B at M1 close (62,176 fourth-bite; 61,152 third; 59,280 second; 56,064 first; 43,216 v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
-Compile output reports `188 unreachable fns (21,861 B)` — agora consumes a thin slice of the expanded stdlib (added `net` + `result` + `tagged` at M1 first-bite); DCE will roughly cut the binary by 22 KB at the M1 close.
+Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
 
 ## Tests + benchmarks
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **24 tests passing** at M1 fourth-bite — RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE + RFC 1184 LINEMODE (parser conformance, announce salvo, Q transitions, NAWS/TT subneg capture, LINEMODE DO+MODE-request burst, MODE ACK mask parse, SLC parsed-ignored, malformed-MODE drop) |
-| Bench harness | not yet present — earns at M1 close (parser throughput + accept-loop rate) |
-| `cyrius audit` | clean (build + lint pass; tests green; bench surface empty pre-M1-close) |
+| `src/test.cyr` | **24 tests passing** at M1 close — RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE + RFC 1184 LINEMODE (parser conformance, announce salvo, Q transitions, NAWS/TT subneg capture, LINEMODE DO+MODE-request burst, MODE ACK mask parse, SLC parsed-ignored, malformed-MODE drop) |
+| `benches/bench_telnet.bcyr` | **5 benchmarks** — see [`/BENCHMARKS.md`](../../BENCHMARKS.md). Hot path 10 ns/byte (plain) → 132 ns (4-option announce salvo). |
+| `cyrius audit` | clean (build + lint pass; tests green; first bench baseline captured at M1 close) |
+
+## Recently closed
+
+**M1 closed 2026-05-23** — five bites, all wire-conformant:
+
+1. **First-bite**: IAC parser + naive-refuse negotiation + listener loop (10 tests; 56,064 B)
+2. **Second-bite**: RFC 1143 Q-method (Q_NO/WANTYES/YES per option per side) + announce salvo + slowloris timeout + graceful close (15 tests; 59,280 B, +3,216 B)
+3. **Third-bite**: RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE subneg parsing + TT SEND auto-emit on him-Q_YES (20 tests; 61,152 B, +1,872 B)
+4. **Fourth-bite**: RFC 1184 LINEMODE tracked-him + DO+MODE-request burst + MODE ACK mask capture + SLC parsed-ignored (24 tests; 62,176 B, +1,024 B)
+5. **Close-bite**: 5-bench parser harness ([`/BENCHMARKS.md`](../../BENCHMARKS.md)) — 10 ns/plain-byte, 73 ns tracked-IAC, 97 ns NAWS subneg, 132 ns announce salvo (24 tests; 70,960 B, +8,784 B from new stdlib deps for bench)
+
+End-to-end handshake via python TCP client wire-conformant: announce → peer agree → server TT SEND → peer NAWS + TT IS + LINEMODE ACK → data echo. Slowloris defense at 60s; graceful EOF/error close; cross-platform via `lib/net.cyr` per [ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md).
 
 ## In-flight slot
 
-**M1 — Telnet listener (RFC 854 + LINEMODE 1184)**, cross-platform via `lib/net.cyr`.
+**M2 — ANSI BBS aesthetic** (color, cursor positioning, banners).
 
-**First-bite landed 2026-05-23**: IAC parser (`src/telnet.cyr`) + naive-refuse option negotiation + listener loop in `cmd_serve` + 10-test conformance suite. Binary 56,064 B.
+Gate state (per [`roadmap.md`](roadmap.md)):
 
-**Second-bite landed 2026-05-23**: RFC 1143 Q-method option negotiation (`Q_NO` / `Q_WANTYES` / `Q_YES` per option per side; per-connection 512 B of option state). `telnet_announce` sends the four-option opening salvo (`WILL ECHO`, `WILL SGA`, `DO NAWS`, `DO TT`). Slowloris defense via `sock_set_recv_timeout(cfd, 60, 0)`. Graceful close on `n == 0` / `n < 0`. Test suite grew 10 → 15. Binary 59,280 B (+3,216 B).
+- **bannermanor** 1.0.0 ✅ — ready to consume for ASCII MOTD banners.
+- **darshana** 0.5.3 ❌ — needs ≥ 1.0.0 stable for ANSI escape sequences (color, cursor positioning). Likely waiting on darshana's own 1.0 cut.
 
-**Third-bite landed 2026-05-23**: NAWS (RFC 1073) + TERMINAL_TYPE (RFC 1091) subneg parsing. `telnet_handle_sb` decodes payloads into per-connection `term_cols` / `term_rows` / `term_type` fields (256-byte ASCII buffer for TT). `ts_on_him_yes` hook auto-emits `IAC SB TT SEND IAC SE` when him-TT transitions to `Q_YES`. Test suite grew 15 → 20. Binary 61,152 B (+1,872 B).
+**Likely first M2 bite**: bannermanor MOTD on connect, replacing the current plaintext "agora 0.1.0 — telnet BBS (M1 protocol smoke)" string. bannermanor consumption is the path with the gate met today.
 
-**Fourth-bite landed 2026-05-23**: RFC 1184 LINEMODE promoted to tracked-him. Peer's `WILL LINEMODE` lands him-state on Q_YES → server replies `DO LINEMODE` + immediately fires `IAC SB LINEMODE MODE (EDIT|TRAPSIG) IAC SE` (10-byte burst). Peer's MODE ACK mask parsed into `TS_LM_MODE`. SLC subneg parsed-and-ignored. Test suite grew 20 → 24. End-to-end smoke runs the full LINEMODE handshake green. Binary 62,176 B (+1,024 B).
-
-**Remaining bites for M1 close** (per [`roadmap.md`](roadmap.md#m1--telnet-listener-rfc-854--rfc-1184-linemode)):
-
-- Bench harness — parser throughput per byte + accept-loop rate. First numbers land in `BENCHMARKS.md` at repo root per first-party `benchmarks-rust-v-cyrius.md` shape. This is the last bite before M1 close.
+**Second bite gated on darshana 1.0**: ANSI-colored prompt + basic cursor positioning for menu redraws (NAWS-aware via the term_cols/term_rows already captured by M1's subneg parser — first concrete consumer of the NAWS data).
 
 ## Recent shipped
 
-- **0.1.0** (2026-05-23) — Scaffold ship. argv dispatch + boot banner + 6 stub verbs. 43,216 B binary. See [`CHANGELOG.md`](../../CHANGELOG.md#010--2026-05-23-scaffold).
+- **0.2.0** (2026-05-23) — M1 close: cross-platform telnet listener. 5-bite cycle (IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness). 24 tests; 70,960 B; first parser baseline at 10 ns/byte hot path. See [`CHANGELOG.md`](../../CHANGELOG.md#020--2026-05-23-m1-close-cross-platform-telnet-listener).
+- **0.1.0** (2026-05-23) — Scaffold ship. argv dispatch + boot banner + 6 stub verbs. 43,216 B binary.
 
 ## Consumers
 

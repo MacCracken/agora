@@ -13,8 +13,8 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | Milestone | Scope | Gate state |
 |---|---|---|
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
-| **M1** ← in progress | Telnet listener (RFC 854) + LINEMODE (RFC 1184), cross-platform via `lib/net.cyr` | none (cross-platform decoupled from AGNOS — see [ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)) |
-| M2 | ANSI BBS aesthetic (color, cursor positioning, banners) | bannermanor 1.0.0 ✅ / darshana stable (0.5.3 pre-1.0; needs 1.0.0) |
+| **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
+| **M2** ← in progress | ANSI BBS aesthetic (color, cursor positioning, banners) | bannermanor 1.0.0 ✅ / darshana stable (0.5.3 pre-1.0; needs 1.0.0) |
 | M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ (available 2026-05-23) |
 | M4 | Stored-file deltas + compression | sankoch ≥ 2.2 ✅ (currently 2.2.6) |
 | M5 | Post persistence (boards / threads / messages) | filesystem write target — Linux today; AGNOS gated on 1.33.x ext4 WRITE |
@@ -34,27 +34,21 @@ Notes:
 - Pre-M1: no networking, no persistence, no protocol code. Stub verbs print M-tagged hints and exit non-zero (except `version` / `help`).
 - Greek naming lane introduced to the AGNOS ecosystem — ancient ἀγορά + Doja Cat "Agora Hills" (Scarlet, 2023) + Agoura Hills CA (hyperlocal to project's home base in Thousand Oaks). Multi-layer convergence per `kii`'s precedent.
 
+### M1 — Telnet listener (closed 2026-05-23)
+
+Five bites, all wire-conformant. Cross-platform via `lib/net.cyr` (Linux x86_64 + aarch64 day one; macOS/Windows/AGNOS as stdlib gains backends — [ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)):
+
+1. **First-bite** — RFC 854 IAC parser (`src/telnet.cyr`) + naive-refuse negotiation + listener loop in `cmd_serve` + 10-test conformance suite. Binary 56,064 B.
+2. **Second-bite** — RFC 1143 Q-method option negotiation (`Q_NO` / `Q_WANTYES` / `Q_YES` per option per side, 512 B per connection) + `telnet_announce` 4-option opening salvo + slowloris timeout (`sock_set_recv_timeout(60s)`) + graceful EOF/error close. 15 tests; 59,280 B.
+3. **Third-bite** — RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE subneg parsing into `term_cols`/`term_rows`/`term_type` fields; `ts_on_him_yes` hook auto-emits `IAC SB TT SEND IAC SE` when him-TT lands `Q_YES`. 20 tests; 61,152 B.
+4. **Fourth-bite** — RFC 1184 LINEMODE promoted to tracked-him: peer `WILL LINEMODE` triggers `DO LINEMODE` + `IAC SB LINEMODE MODE (EDIT|TRAPSIG) IAC SE` 10-byte burst; MODE ACK mask captured; SLC parsed-and-ignored. 24 tests; 62,176 B.
+5. **Close-bite** — `benches/bench_telnet.bcyr` (5 microbenchmarks via `lib/bench.cyr`) + first baseline in [`/BENCHMARKS.md`](../../BENCHMARKS.md): 10 ns plain byte, 73 ns tracked-IAC, 97 ns NAWS subneg, 132 ns announce salvo. 24 tests still green; 70,960 B (+8.8 KB from new stdlib deps).
+
+End-to-end smoke via python TCP client runs the full handshake (announce → peer agree → server TT SEND → NAWS + TT IS + LINEMODE ACK → data echo) wire-conformant.
+
 ---
 
 ## In Progress
-
-### M1 — Telnet listener (RFC 854 + RFC 1184 LINEMODE)
-
-**Cross-platform target.** Built on `lib/net.cyr` (cyrius stdlib socket layer — `tcp_socket` / `sock_bind` / `sock_listen` / `sock_accept` / `sock_send` / `sock_recv`). Linux x86_64 + aarch64 are the day-one targets; macOS and Windows follow as `lib/net.cyr` grows platform backends.
-
-Sub-bites:
-
-- **bite A** — IAC command parser (RFC 854 §11.2): single-byte IAC (`0xFF`), 2-byte option commands (DO/DONT/WILL/WONT + option code), variable-length subnegotiation (`IAC SB ... IAC SE`).
-- **bite B** — Option negotiation state machine: per-option {local-state, remote-state} × {NO, WANT-NO, WANT-YES, YES} per RFC 1143 Q method.
-- **bite C** — LINEMODE option (RFC 1184): MODE subnegotiation (EDIT / TRAPSIG / SOFT_TAB / LIT_ECHO), SLC (Set Local Character) table.
-- **bite D** — Socket loop: `cmd_serve` opens listener on port 23 (configurable), accepts in a loop, hands each conn to the protocol layer.
-- **bite E** — Unit tests in `src/test.cyr` — parser exercised against canonical IAC sequences from the RFCs.
-
-The protocol layer is **pure parsing/encoding** and testable without any socket I/O. The socket loop is a thin wrapper over `lib/net.cyr`.
-
----
-
-## Backlog (gates met or near-met)
 
 ### M2 — ANSI BBS aesthetic
 
@@ -63,11 +57,17 @@ The protocol layer is **pure parsing/encoding** and testable without any socket 
 
 Scope at this milestone: MOTD banner on connect, ANSI-colored prompt, basic cursor positioning for menu redraws. Single-color ANSI before 256-color/truecolor.
 
+**Likely first M2 bite**: bannermanor MOTD on connect, replacing the current plaintext "agora 0.1.0 — telnet BBS (M1 protocol smoke)" string. bannermanor's gate is met today; darshana's isn't, so the ANSI-colored prompt / cursor positioning bites wait. The NAWS data captured at M1 (`term_cols` / `term_rows`) becomes M2's first concrete consumer — banner width-aware downscale, prompt redraw on resize.
+
+---
+
+## Backlog (gates met or near-met)
+
 ### M3 — Inline-image post bodies
 
 - **kii** at 1.0.0 ✅ — image → ASCII-art conversion.
 
-Scope: post bodies may include inline images that render as ASCII art over the telnet stream. Constrained to a max image size + terminal-width-aware downscale before kii dispatch.
+Scope: post bodies may include inline images that render as ASCII art over the telnet stream. Constrained to a max image size + terminal-width-aware downscale (consumes the NAWS data captured by M1's subneg parser) before kii dispatch.
 
 ### M4 — Stored-file deltas
 
