@@ -17,7 +17,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 | Field | Value |
 |---|---|
 | **Released** | `0.3.0` (2026-05-23) |
-| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 in progress** — ADR 0002 + M5-A + M5-B landed 2026-05-23: post storage primitives + CLI verbs + in-session command interpreter over telnet. **agora is now a working BBS over the wire.** Remaining M5 bites: C (sort), D (headers), E (boards), F (threads), G (lock), H (validation). |
+| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 in progress** — ADR 0002 + M5-A/B/C/H landed 2026-05-23: post storage, telnet command interpreter, sorted listing, input filter. **agora is a working BBS over the wire, with sane UX + ingress security.** Remaining M5 bites: D (headers, likely own ADR), E (boards), F (threads), G (lock). |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 116,232 B at M5-B (109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-B's +6 KB is the in-session command interpreter (session helpers + dispatch). | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 116,904 B at M5-H (116,232 M5-B; 109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-C + M5-H land flat (~672 B for sort + filter). | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
@@ -34,7 +34,7 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **29 tests passing** at M5-A — 24 M1 IAC/Q-method/subneg/LINEMODE conformance tests + 5 M5-A board-storage tests (`parse_post_id` valid / non-txt / non-digit / zero / `build_post_path` shape). Pure functions only — full storage round-trip verified via CLI smoke not test.cyr. |
+| `src/test.cyr` | **32 tests passing** at M5-H — 24 M1 IAC/Q-method/subneg/LINEMODE conformance tests + 5 M5-A board-storage tests + 2 M5-C sort tests + 1 M5-H input-filter test. Pure functions only — full storage round-trip + wire integration verified via Python TCP-client smoke, not test.cyr. |
 | `benches/bench_telnet.bcyr` | **5 benchmarks** — see [`/BENCHMARKS.md`](../../BENCHMARKS.md). Hot path 10 ns/byte (plain) → 132 ns (4-option announce salvo). |
 | `cyrius audit` | clean (build + lint pass; tests green; first bench baseline captured at M1 close) |
 
@@ -50,16 +50,18 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 **M5-A landed 2026-05-23**: `src/board.cyr` + CLI verbs (`post`/`list`/`read`) + 5 tests + end-to-end CLI round-trip. Binary 109,992 B.
 
-**M5-B landed 2026-05-23**: in-session command interpreter over telnet. `handle_client` runs a line-buffered loop after the MOTD; supports `help` / `list` / `read <id>` / `post` (with `.`-terminated multi-line body) / `quit`. `agora serve` grew `--store <path>` (default `./agora-data/`). Session helpers (`session_execute`, `session_finalize_post`, `line_parse_int`, etc.) factored into ~250 LOC. End-to-end smoke walks every command path. **agora is now a working BBS over telnet.** Binary 116,232 B.
+**M5-B landed 2026-05-23**: in-session command interpreter over telnet. `handle_client` runs a line-buffered loop after the MOTD; supports `help` / `list` / `read <id>` / `post` (with `.`-terminated multi-line body) / `quit`. `agora serve` grew `--store <path>` (default `./agora-data/`). Session helpers factored into ~250 LOC. **agora is now a working BBS over telnet.** Binary 116,232 B.
+
+**M5-C landed 2026-05-23**: `post_list` returns IDs ascending via `sort_i64_asc` (in-place insertion sort, O(n²), fine for v1.0 scale). Two new tests. Wire smoke confirms `list` returns `1 2 3 4 5`.
+
+**M5-H landed 2026-05-23**: input filter on post bodies — `input_byte_ok` drops NUL (cstring-tooling poison) and ESC (terminal-control injection in stored posts read by other users). Lives at the storage-policy layer in `src/board.cyr`; enforced at ingress in `handle_client`. One new test plus wire-smoke proves a malicious post containing `\x1b[31m` and `\x00` lands on disk with the dangerous bytes stripped.
 
 **Remaining bites for M5 close**:
 
-- **M5-C** — Sort post list. M5-A returns directory-iteration order; sort by ID ascending is a one-pass change once a consumer cares about ordering.
-- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Deferred per ADR 0002 until we know what fields the wire-level post flow needs.
-- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`).
-- **M5-F** — Threads (post-replies-to-post linkage).
+- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Deferred per ADR 0002 until we know what fields the wire-level post flow needs. Will likely take its own ADR (header set, encoding, parsing rules).
+- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`). UI question: how does the user pick a board (per-session `cd`, per-command flag, separate connection per board)?
+- **M5-F** — Threads (post-replies-to-post linkage). Depends on M5-D for a `Reply-To` header field.
 - **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness. EXCL guarantees no corruption today; lock adds the "don't lose a post to ID-race" invariant.
-- **M5-H** — Input validation hardening before any post body ships over the wire (binary safety, max-line-width, control-char filtering).
 
 ## Recent shipped
 

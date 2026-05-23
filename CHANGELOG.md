@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M5-C: sorted post listing (2026-05-23)
+
+- **`post_list` now returns IDs in ascending order**. M5-A/B returned directory-iteration order which is non-deterministic and unfriendly to the `list` UX (and to anyone diff-checking output across runs).
+- **`sort_i64_asc(arr, count)`** — in-place insertion sort over an i64 array. O(n²); appropriate for the v1.0 scale (`DIRENT_ID_MAX = 4096`, real post counts well below). Bumping the algorithm earns a bite only if a consumer reports perf concerns.
+- Two new tests: `t30_sort_i64_asc_basic` (8-element unsorted array → ascending) and `t31_sort_i64_asc_empty_and_single` (edge cases). Wire smoke with 5 posts confirms `list` returns `1 2 3 4 5`.
+
+### Added — M5-H: input filter on post bodies (2026-05-23)
+
+- **`input_byte_ok(b)`** in `src/board.cyr` — drops NUL (`0x00`) and ESC (`0x1B`) from incoming post bodies; passthrough for everything else (TAB / CR / LF / printable ASCII / UTF-8 high bytes / BEL / BS / DEL). Applied in `handle_client`'s byte dispatch *before* the byte reaches the line buffer.
+- **Threat model** documented inline:
+  - **NUL** terminates cstring tooling downstream (`cat`, `grep`, `agora read`'s byte writer, `fmt_int_buf`); a post containing NUL would render as truncated everywhere.
+  - **ESC** = terminal-control injection. A post containing `\x1b[2J` (clear screen), `\x1b[10;1H` (cursor to row 10), `\x1b]0;evil\x07` (set window title), or 70s-era VT keyboard-remapping sequences executes in the *viewer's* terminal when another user runs `read N` over telnet. Classic chat-attack vector — strip at ingress.
+- **Living at the storage-policy layer** — `input_byte_ok` lives in `src/board.cyr` because it expresses what the post storage system accepts, not what the wire protocol allows. main.cyr's `handle_client` enforces it at ingress. Future operator-config may add an opt-in for raw-mode posts (useful if an operator wants to allow ANSI art in posts on a known-friendly LAN).
+- **One new test**: `t32_input_byte_ok_filters_nul_esc` exercises both rejected bytes + 9 passthrough cases including UTF-8 lead/continuation bytes.
+- **Wire smoke**: a malicious post containing `Hello\x1b[31mRED\x1b[0m and NUL\x00here` lands on disk as `Hello[31mRED[0m and NULhere\r\n` — both ESC bytes and the NUL byte stripped; the harmless `[31m` / `[0m` text bytes remain as inert content. `grep -c -P "\x1b" 6.txt` and `grep -c -P "\x00" 6.txt` both return 0.
+
 ### Added — M5-B: in-session command interpreter over telnet (2026-05-23)
 
 - **Connected-client command loop** — `handle_client` now runs a line-buffered command interpreter after the MOTD instead of the echo-only loop. Supported commands (typed at the `>` prompt):

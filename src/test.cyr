@@ -721,6 +721,77 @@ fn t29_build_post_path_shape(): i64 {
     return 0;
 }
 
+# T30: sort_i64_asc reorders an unsorted i64 array ascending.
+# Matches the post_list use case where dir_list returns
+# directory-iteration order and we need post IDs sorted for display.
+fn t30_sort_i64_asc_basic(): i64 {
+    var arr = alloc(8 * 8);
+    store64(arr + 0 * 8, 5);
+    store64(arr + 1 * 8, 2);
+    store64(arr + 2 * 8, 9);
+    store64(arr + 3 * 8, 1);
+    store64(arr + 4 * 8, 7);
+    store64(arr + 5 * 8, 3);
+    store64(arr + 6 * 8, 8);
+    store64(arr + 7 * 8, 4);
+    sort_i64_asc(arr, 8);
+    var expected[8];
+    store64(&expected + 0 * 8, 1);
+    store64(&expected + 1 * 8, 2);
+    store64(&expected + 2 * 8, 3);
+    store64(&expected + 3 * 8, 4);
+    store64(&expected + 4 * 8, 5);
+    store64(&expected + 5 * 8, 7);
+    store64(&expected + 6 * 8, 8);
+    store64(&expected + 7 * 8, 9);
+    var i = 0;
+    while (i < 8) {
+        if (load64(arr + i * 8) != load64(&expected + i * 8)) {
+            test_fail("t30_sort_i64_asc_basic", "mismatch at index");
+            return 1;
+        }
+        i = i + 1;
+    }
+    test_pass("t30_sort_i64_asc_basic");
+    return 0;
+}
+
+# T31: sort_i64_asc on empty and single-element arrays is a no-op
+# (and doesn't crash). Edge cases that post_list hits on an empty
+# store or a store with one post.
+fn t31_sort_i64_asc_empty_and_single(): i64 {
+    var arr = alloc(4 * 8);
+    # Empty
+    sort_i64_asc(arr, 0);
+    # Single
+    store64(arr + 0 * 8, 42);
+    sort_i64_asc(arr, 1);
+    if (load64(arr + 0 * 8) != 42) {
+        test_fail("t31_sort_i64_asc_empty_and_single", "single-element value changed");
+        return 1;
+    }
+    test_pass("t31_sort_i64_asc_empty_and_single");
+    return 0;
+}
+
+# T32: input_byte_ok drops NUL + ESC, passes through everything else
+# (TAB / CR / LF / printable ASCII / UTF-8 high bytes / BS / DEL).
+fn t32_input_byte_ok_filters_nul_esc(): i64 {
+    if (input_byte_ok(0)    != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "NUL should drop"); return 1; }
+    if (input_byte_ok(0x1B) != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "ESC should drop"); return 1; }
+    if (input_byte_ok(9)    != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "TAB should pass"); return 1; }
+    if (input_byte_ok(10)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "LF should pass");  return 1; }
+    if (input_byte_ok(13)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "CR should pass");  return 1; }
+    if (input_byte_ok(32)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "space should pass"); return 1; }
+    if (input_byte_ok(65)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "'A' should pass");   return 1; }
+    if (input_byte_ok(126)  != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "'~' should pass");   return 1; }
+    if (input_byte_ok(127)  != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "DEL should pass (BS handling is M5-B+ polish)"); return 1; }
+    if (input_byte_ok(0xC3) != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "UTF-8 lead byte should pass"); return 1; }
+    if (input_byte_ok(0xA9) != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "UTF-8 cont byte should pass"); return 1; }
+    test_pass("t32_input_byte_ok_filters_nul_esc");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -775,6 +846,9 @@ fn main(): i64 {
     t27_parse_post_id_rejects_non_digits();
     t28_parse_post_id_rejects_zero();
     t29_build_post_path_shape();
+    t30_sort_i64_asc_basic();
+    t31_sort_i64_asc_empty_and_single();
+    t32_input_byte_ok_filters_nul_esc();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

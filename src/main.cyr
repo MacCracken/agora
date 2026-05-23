@@ -147,6 +147,10 @@ fn echo_byte(cfd, b): i64 {
     return send_buf(cfd, &one, 1);
 }
 
+# `input_byte_ok` lives in board.cyr (storage-policy layer). It's
+# what the post storage system accepts; main.cyr's wire layer just
+# enforces it at ingress. See board.cyr for the rationale.
+
 # Return 1 if buffer [line, line_len) starts with the cstring `prefix`,
 # 0 otherwise. Used by the command parser to dispatch on the first
 # token of a typed command line.
@@ -435,6 +439,13 @@ fn handle_client(cfd): i64 {
 
             if (ev == EV_DATA) {
                 var db = telnet_data_byte(ts) & 0xFF;
+                # M5-H input filter: drop NUL + ESC silently before
+                # they reach the line buffer or get echoed back to
+                # the client. See input_byte_ok for the reasoning.
+                if (input_byte_ok(db) == 0) {
+                    i = i + 1;
+                    continue;
+                }
                 # === CR / LF: line terminator dispatch ===
                 var is_cr = 0;
                 var is_lf = 0;

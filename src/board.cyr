@@ -46,6 +46,32 @@ enum BoardCap {
     DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once
 }
 
+# M5-H input filter — return 1 if byte is allowed into a post body,
+# 0 to drop silently. Telnet bytes from a connected client are
+# adversarial-by-default; we drop two classes:
+#
+#   - **NUL (0x00)** — terminates cstring downstream tools (cat,
+#     grep, `agora read` output, the `list` numeric formatter); a
+#     post containing NUL would render as truncated everywhere.
+#   - **ESC (0x1B)** — terminal-control injection. A post containing
+#     ESC sequences (cursor moves, color changes, screen clears,
+#     keyboard reprogramming on old VT terminals) executes in the
+#     viewer's terminal when another user reads it. The classic
+#     "embed ESC sequences in chat to wreck the viewer's session"
+#     attack. We strip at ingress; future operator config may add
+#     an opt-in flag for raw-mode posts.
+#
+# Everything else is passthrough — TAB, CR, LF, all printable ASCII,
+# UTF-8 high bytes (128-255), BEL, BS, DEL. M5-B+ may grow backspace
+# handling (`db == 0x08` → line_pos -= 1, echo "\b \b"); for now BS
+# lands in the post body as a literal control byte (uncommon in
+# practice over telnet).
+fn input_byte_ok(b): i64 {
+    if (b == 0)    { return 0; }
+    if (b == 0x1B) { return 0; }
+    return 1;
+}
+
 # Create the storage directory if it doesn't exist. Treats EEXIST
 # (-17 on Linux) as success — operators may pre-create the dir with
 # specific ownership, or it may have been left from a previous run.
@@ -168,10 +194,39 @@ fn post_read(store, id, out_buf, out_cap): i64 {
     return file_read_all(path_buf, out_buf, out_cap);
 }
 
+# Insertion sort an i64 array in place. O(n²); used by post_list
+# to deliver IDs in ascending order. Insertion sort is appropriate
+# for the v1.0 BBS scale — DIRENT_ID_MAX is 4,096 and post counts
+# in real-world BBS use are well below; quicksort overhead isn't
+# worth it. Bumping the sort algorithm earns a bite if a consumer
+# reports a perf concern.
+fn sort_i64_asc(arr, count): i64 {
+    var i = 1;
+    while (i < count) {
+        var j = i;
+        var swapping = 1;
+        while (swapping == 1) {
+            if (j <= 0) { swapping = 0; }
+            else {
+                var prev = load64(arr + (j - 1) * 8);
+                var curr = load64(arr + j * 8);
+                if (prev <= curr) { swapping = 0; }
+                else {
+                    store64(arr + (j - 1) * 8, curr);
+                    store64(arr + j * 8, prev);
+                    j = j - 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # List all post IDs in the store. Writes IDs as i64s into out_ids,
-# up to DIRENT_ID_MAX entries. Returns the count of IDs written.
-# IDs are returned in directory-iteration order (NOT sorted) at
-# M5-A — sorting earns a bite when a consumer needs it.
+# up to max_ids entries. Returns the count of IDs written.
+# IDs are returned in **ascending order** (M5-C); the underlying
+# dir_list returns directory-iteration order which we then sort.
 fn post_list(store, out_ids, max_ids): i64 {
     var entries = dir_list(str_from(store));
     var n = vec_len(entries);
@@ -187,5 +242,6 @@ fn post_list(store, out_ids, max_ids): i64 {
         }
         i = i + 1;
     }
+    sort_i64_asc(out_ids, count);
     return count;
 }

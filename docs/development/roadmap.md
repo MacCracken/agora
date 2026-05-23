@@ -15,7 +15,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
 | **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
 | **M2** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | closed 2026-05-23 at 0.3.0 — three bites: M2-A/B/C. See [`state.md`](state.md#recently-closed). M2-D (NAWS width clamp) deferred as optional polish. |
-| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A + M5-B landed 2026-05-23** — ADR 0002 + `src/board.cyr` (one-file-per-post) + CLI verbs + in-session command interpreter over telnet (`list` / `read <id>` / `post` / `help` / `quit`). **agora is a working BBS over the wire.** Linux today via `lib/io.cyr` + `lib/fs.cyr`. Remaining bites: C (sort), D (headers), E (boards), F (threads), G (lock), H (input validation). |
+| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A/B/C/H landed 2026-05-23** — ADR 0002 + `src/board.cyr` (one-file-per-post) + CLI verbs + in-session command interpreter + sorted listing + ingress input filter (NUL / ESC drop). **agora is a working BBS over the wire with sane UX and security.** Linux today via `lib/io.cyr` + `lib/fs.cyr`. Remaining bites: D (headers, likely own ADR), E (boards), F (threads), G (lock). |
 | M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ — gated on M5 post bodies existing first |
 | M4 | Stored-file deltas + compression | sankoch 2.2.6 ✅ — gated on M5 |
 | M6 | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — naturally follows M5 |
@@ -97,14 +97,15 @@ The previously-open questions resolved into [ADR 0002](../adr/0002-one-file-per-
 
 **M5-B landed 0.3.0+** (un-tagged toward 0.4.0): in-session command interpreter over telnet. `handle_client` runs a line-buffered loop after the MOTD; supports `help` / `list` / `read <id>` / `post` (multi-line, `.`-terminated) / `quit`. `agora serve` grew `--store <path>`. agora is now a **working BBS over the wire** — connect with any telnet client, post a message, list, read. Binary 109,992 → 116,232 B.
 
-**Remaining bites for M5 close**:
+**M5-C landed 0.3.0+**: `post_list` returns IDs ascending via `sort_i64_asc` (in-place insertion sort). Wire smoke confirms `list` returns sequential IDs.
 
-- **M5-C** — Sort post list by ID ascending (M5-A/B returns directory-iteration order).
-- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Header set picked once the wire-level post flow is real.
-- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`).
-- **M5-F** — Threads (post-replies-to-post linkage).
-- **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness.
-- **M5-H** — Input validation hardening (binary safety, max-line-width, control-char filtering on post bodies received over the wire).
+**M5-H landed 0.3.0+**: input filter — `input_byte_ok` drops NUL + ESC from incoming post bodies at ingress in `handle_client`. Threat-modelled inline (cstring-truncation downstream + terminal-control injection in stored posts read by other users). One unit test + wire smoke.
+
+**Remaining bites for M5 close**:
+- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Header set picked once the wire-level post flow is real. Will likely take its own ADR.
+- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`). Includes UI surface question (per-session `cd`? per-command flag? separate connection per board?).
+- **M5-F** — Threads (post-replies-to-post linkage). Depends on M5-D for a `Reply-To` header.
+- **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness. EXCL guarantees no corruption today; lock adds "don't lose a post to ID-race".
 
 ### M6 — User accounts + auth
 
