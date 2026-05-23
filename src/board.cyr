@@ -161,12 +161,51 @@ fn post_max_id(store): i64 {
     return max_id;
 }
 
+# === M5-G: per-store single-writer lock ===
+#
+# Two concurrent writers (CLI + telnet, two CLI processes, etc.) can
+# both read `post_max_id` and try to claim the same next-ID. The EXCL
+# flag (ADR 0002 § Positive consequences) means one wins and one
+# fails with -1 from post_new — no corruption, but the loser's post
+# is dropped. M5-G upgrades this to "both succeed, with distinct IDs"
+# by serializing the claim+write critical section through a per-store
+# flock.
+#
+# The lockfile is `<store>/.lock`. Created lazily on first acquire;
+# operators can delete it between runs. parse_post_id rejects
+# `.lock` (no `.txt` suffix) so it doesn't show up in `list`.
+
+# Acquire the per-store write lock. Returns the lockfile fd on
+# success (caller must `store_lock_release` to release + close),
+# or -1 on any failure (open / lock syscall).
+fn store_lock_acquire(store): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    var slen = strlen(store);
+    memcpy(path_buf, store, slen);
+    store8(path_buf + slen, 47);              # '/'
+    store8(path_buf + slen + 1, 46);          # '.'
+    memcpy(path_buf + slen + 2, "lock", 4);
+    store8(path_buf + slen + 6, 0);           # NUL
+
+    var fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var rc = file_lock(fd);
+    if (rc != 0) { file_close(fd); return 0 - 1; }
+    return fd;
+}
+
+# Release the per-store write lock. Closing the fd also releases
+# the kernel-side flock.
+fn store_lock_release(fd): i64 {
+    file_close(fd);
+    return 0;
+}
+
 # Write a new post: ensure store exists, claim next ID, write body
 # with O_EXCL. Returns the assigned ID on success, negative on error.
-# The EXCL flag guarantees we never silently overwrite — if two
-# concurrent writers race on the same ID, one wins and one gets -1
-# back (M5-G adds a lock to make the race impossible; the EXCL
-# guarantee is correct without it).
+# **M5-G**: serializes claim+write through a per-store flock so
+# concurrent writers serialize and both succeed with distinct IDs
+# rather than one losing to EEXIST.
 fn post_new(store, body_buf, body_len): i64 {
     if (body_len <= 0)              { return 0 - 1; }
     if (body_len > POST_MAX_BYTES)  { return 0 - 1; }
@@ -174,14 +213,20 @@ fn post_new(store, body_buf, body_len): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return 0 - 1; }
 
+    # Acquire the store-wide write lock for the claim+write critical
+    # section. Block until acquired (cooperative serialization).
+    var lock_fd = store_lock_acquire(store);
+    if (lock_fd < 0) { return 0 - 1; }
+
     var id = post_max_id(store) + 1;
     var path_buf = alloc(PATH_MAX_BYTES);
     build_post_path(store, id, path_buf);
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
     var n = file_write(fd, body_buf, body_len);
     file_close(fd);
+    store_lock_release(lock_fd);
     if (n != body_len) { return 0 - 1; }
     return id;
 }
@@ -367,6 +412,8 @@ fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
 # post_new with a Subject header (ADR 0003). Formats Subject + Date +
 # body into a temporary buffer, then writes the result via the same
 # EXCL-claim path as post_new. Returns the assigned ID or -1.
+# **M5-G**: format happens outside the lock (pure per-call work);
+# claim+write is inside.
 fn post_new_with_subject(store, subject, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
@@ -374,21 +421,25 @@ fn post_new_with_subject(store, subject, body, body_len): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return 0 - 1; }
 
-    # Worst-case file = headers + body. Headers are ~50 B; body
-    # up to POST_MAX_BYTES. POST_MAX_BYTES + 1 KB is comfortable.
+    # Format outside the lock — no shared state, no cross-process
+    # dependencies; shortens the critical section.
     var fcap = POST_MAX_BYTES + 1024;
     var fbuf = alloc(fcap);
     var flen = post_format_with_subject(subject, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
+
+    var lock_fd = store_lock_acquire(store);
+    if (lock_fd < 0) { return 0 - 1; }
 
     var id = post_max_id(store) + 1;
     var path_buf = alloc(PATH_MAX_BYTES);
     build_post_path(store, id, path_buf);
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
     var n = file_write(fd, fbuf, flen);
     file_close(fd);
+    store_lock_release(lock_fd);
     if (n != flen) { return 0 - 1; }
     return id;
 }

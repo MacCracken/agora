@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (0.3.0 released; M5-A/B/C/H/D landed + ADR 0003 — RFC-822 post headers; agora is a BBS with post metadata over the wire) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (0.3.0 released; M5-A/B/C/H/D/G landed; agora is a BBS with metadata + concurrent-writer correctness) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,7 +39,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [Unreleased] ADRs 0002/0003 + M5-A storage + M5-B session interpreter + M5-C sorted listing + M5-H input filter + M5-D RFC-822 headers. |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close + [0.3.0] M2 close + [Unreleased] ADRs 0002/0003 + M5-A storage + M5-B session interpreter + M5-C sorted listing + M5-H input filter + M5-D RFC-822 headers + M5-G per-store flock. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 close)** — first parser baseline (5 microbenchmarks via `lib/bench.cyr`). Hand-maintained; `scripts/bench-history.sh` auto-gen pattern is the v1.x close-out goal. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
@@ -57,7 +57,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.3.0 (M2 close) shipped; M5 cycle in flight — ADRs 0002 + 0003 + M5-A/B/C/H/D landed 2026-05-23 (post storage, telnet-side command interpreter, sorted listing, ingress input filter, RFC-822 headers); 38 tests; 128,352 B. Remaining: E (boards), F (threads), G (lock). |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.3.0 (M2 close) shipped; M5 cycle in flight — ADRs 0002 + 0003 + M5-A/B/C/H/D/G landed 2026-05-23 (post storage, telnet command interpreter, sorted listing, input filter, RFC-822 headers, per-store flock); 38 tests; 129,096 B. Remaining: E (boards), F (threads). |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. Now points at `roadmap-future.md` for post-v1.0 directions. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 

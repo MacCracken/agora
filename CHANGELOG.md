@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M5-G: per-store flock for the post-claim critical section (2026-05-23)
+
+- **New primitives in `src/board.cyr`**:
+  - `store_lock_acquire(store)` — opens `<store>/.lock` (`O_WRONLY | O_CREAT`, 0o644), takes a blocking `LOCK_EX` flock via `lib/io.cyr` `file_lock`, returns the lockfile fd
+  - `store_lock_release(fd)` — `file_close` (kernel releases the lock implicitly)
+- **`post_new` and `post_new_with_subject` now serialize claim+write** through the lock. The `post_max_id` + `O_CREAT | O_EXCL` open + `write` triple runs inside the locked region; format-with-subject (pure per-call work) runs outside to shorten the critical section.
+- **Lockfile naming dodges `parse_post_id`** — `.lock` doesn't end in `.txt` so it's filtered out by `post_list` / `post_max_id`. No new exclusion needed.
+- **What this changes**: pre-M5-G, two concurrent writers reading the same `post_max_id` and racing on the EXCL claim would result in one writer succeeding and the other returning `-1` (EEXIST). The EXCL guarantee meant no corruption — just a dropped post. M5-G upgrades to "both writers serialize, both succeed, distinct IDs." Correctness improvement for high-fanout deployments (CLI + telnet concurrent, multiple CLI processes, future thread-per-conn accept loop).
+- **Smoke**: 50 parallel `agora post` invocations under M5-G all return distinct IDs and produce 50 files on disk; zero errors. (Pre-M5-G the race window is narrow enough on this host that 50 also succeed by luck — the lock makes it a guarantee instead of probabilistic.)
+- **Binary**: 128,352 → 129,096 B (+744 B for the lock helpers).
+- **Tests still 38/38 green** — the lock is invisible to test.cyr's single-process pure-function suite. The "two-writer correctness" property is verified by the parallel CLI smoke harness in this CHANGELOG entry; an automated parallel-process test belongs in `tests/` once a multi-process harness exists (deferred).
+
 ### Added — ADR 0003 + M5-D: RFC-822-shaped post headers (Subject + Date) (2026-05-23)
 
 - **[ADR 0003](docs/adr/0003-rfc-822-post-headers.md)** — captures the header-format decision: per-post file gets `Subject: <single-line>\r\n` + `Date: <ISO-8601-UTC>\r\n\r\n` block, then body. Rejects three alternatives (JSON, CYML front matter, TSV) with concrete reasoning. Backwards-compat with M5-A/B/C headerless posts is built into the parser (first byte not ASCII uppercase → treat whole file as body).
