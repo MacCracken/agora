@@ -700,21 +700,22 @@ fn t28_parse_post_id_rejects_zero(): i64 {
 }
 
 fn t29_build_post_path_shape(): i64 {
+    # M5-E: build_post_path now takes (store, board, id). board=="main"
+    # collapses to flat-root layout (free backwards compat with 0.4.0).
     var buf = alloc(PATH_MAX_BYTES);
-    var len = build_post_path("/var/agora", 42, buf);
+    var len = build_post_path("/var/agora", "main", 42, buf);
     var expected = "/var/agora/42.txt";
     var exp_len = strlen(expected);
     if (len != exp_len) {
-        test_fail("t29_build_post_path_shape", "length mismatch");
+        test_fail("t29_build_post_path_shape", "length mismatch (main)");
         return 1;
     }
     if (memeq(buf, expected, exp_len) == 0) {
-        test_fail("t29_build_post_path_shape", "byte mismatch");
+        test_fail("t29_build_post_path_shape", "byte mismatch (main)");
         return 1;
     }
-    # NUL-terminator at position `len`
     if ((load8(buf + len) & 0xFF) != 0) {
-        test_fail("t29_build_post_path_shape", "missing NUL terminator");
+        test_fail("t29_build_post_path_shape", "missing NUL terminator (main)");
         return 1;
     }
     test_pass("t29_build_post_path_shape");
@@ -886,6 +887,87 @@ fn t38_post_subject_headerless_returns_zero(): i64 {
     return 0;
 }
 
+# T39: build_post_path with a named board adds the subdirectory.
+fn t39_build_post_path_named_board(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = build_post_path("/var/agora", "art", 7, buf);
+    var expected = "/var/agora/art/7.txt";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t39_build_post_path_named_board", "length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t39_build_post_path_named_board", "byte mismatch");
+        return 1;
+    }
+    test_pass("t39_build_post_path_named_board");
+    return 0;
+}
+
+# T40: board_name_valid accepts the canonical alphabet.
+fn t40_board_name_valid_accepts(): i64 {
+    if (board_name_valid("art")               != 1) { test_fail("t40", "art");                return 1; }
+    if (board_name_valid("a")                 != 1) { test_fail("t40", "a");                  return 1; }
+    if (board_name_valid("9")                 != 1) { test_fail("t40", "9");                  return 1; }
+    if (board_name_valid("hello-world_2")     != 1) { test_fail("t40", "hello-world_2");      return 1; }
+    if (board_name_valid("a1b2c3d4e5f6g7h8")  != 1) { test_fail("t40", "16-char");            return 1; }
+    test_pass("t40_board_name_valid_accepts");
+    return 0;
+}
+
+# T41: board_name_valid rejects what ADR 0004 says it should.
+fn t41_board_name_valid_rejects(): i64 {
+    if (board_name_valid(0)                   != 0) { test_fail("t41", "NUL pointer");        return 1; }
+    if (board_name_valid("")                  != 0) { test_fail("t41", "empty string");       return 1; }
+    if (board_name_valid("main")              != 0) { test_fail("t41", "reserved name main"); return 1; }
+    if (board_name_valid("Art")               != 0) { test_fail("t41", "uppercase A");        return 1; }
+    if (board_name_valid("a.b")               != 0) { test_fail("t41", "dot in middle");      return 1; }
+    if (board_name_valid("a/b")               != 0) { test_fail("t41", "slash in middle");    return 1; }
+    if (board_name_valid("-foo")              != 0) { test_fail("t41", "leading dash");       return 1; }
+    if (board_name_valid("_foo")              != 0) { test_fail("t41", "leading underscore"); return 1; }
+    if (board_name_valid(".lock")             != 0) { test_fail("t41", "leading dot");        return 1; }
+    if (board_name_valid("..")                != 0) { test_fail("t41", "dotdot");             return 1; }
+    if (board_name_valid("a b")               != 0) { test_fail("t41", "space");              return 1; }
+    if (board_name_valid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != 0) { test_fail("t41", "33 char"); return 1; }
+    test_pass("t41_board_name_valid_rejects");
+    return 0;
+}
+
+# T42: board_path("/store", "main", ...) collapses to "/store".
+fn t42_board_path_main_is_flat(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = board_path("/var/agora", "main", buf);
+    var expected = "/var/agora";
+    if (len != strlen(expected)) {
+        test_fail("t42_board_path_main_is_flat", "length");
+        return 1;
+    }
+    if (memeq(buf, expected, strlen(expected)) == 0) {
+        test_fail("t42_board_path_main_is_flat", "bytes");
+        return 1;
+    }
+    test_pass("t42_board_path_main_is_flat");
+    return 0;
+}
+
+# T43: board_path("/store", "art", ...) appends "/art".
+fn t43_board_path_named(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = board_path("/var/agora", "art", buf);
+    var expected = "/var/agora/art";
+    if (len != strlen(expected)) {
+        test_fail("t43_board_path_named", "length");
+        return 1;
+    }
+    if (memeq(buf, expected, strlen(expected)) == 0) {
+        test_fail("t43_board_path_named", "bytes");
+        return 1;
+    }
+    test_pass("t43_board_path_named");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -949,6 +1031,11 @@ fn main(): i64 {
     t36_header_get_subject();
     t37_header_get_missing();
     t38_post_subject_headerless_returns_zero();
+    t39_build_post_path_named_board();
+    t40_board_name_valid_accepts();
+    t41_board_name_valid_rejects();
+    t42_board_path_main_is_flat();
+    t43_board_path_named();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

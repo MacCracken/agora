@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — ADR 0004 + M5-E: boards (2026-05-23)
+
+agora is now a **multi-board BBS over telnet**. New session model: every connection opens at the implicit "main" board (flat `<store>/` per 0.4.0 layout); `enter <name>` switches to a named board (`<store>/<name>/`); `leave` returns to main. The prompt shows `[name] >` when in a named board so the user always knows which board their next command targets.
+
+- **[ADR 0004](docs/adr/0004-board-layout.md)** — captures three load-bearing decisions: layout (flat-root = "main", subdirs = named — free backwards compat with 0.4.0 stores), UI (modal current-board for telnet, `--board` flag for CLI), lifecycle (auto-create on first post). Rejects three alternatives (all-boards-as-subdirs migration, sidecar index, per-port-board UI) with concrete reasoning.
+- **`src/board.cyr` refactor** (~150 LOC):
+  - `board_path(store, board, out)` — resolves to `<store>` for "main", `<store>/<board>` for named.
+  - `board_name_valid(name)` — validates per ADR 0004 (1-32 bytes, lowercase ASCII + digits + '-' / '_', first byte letter or digit, "main" reserved).
+  - `board_ensure(store, board)` — mkdir the per-board subdir (and `<store>` itself) treating EEXIST as success.
+  - `boards_list(store, out, max)` — enumerate named subdirectory-shaped boards; filters post files + lockfile + hidden entries.
+  - **Every existing primitive grew a `board` parameter** — `post_new`, `post_new_with_subject`, `post_read`, `post_list`, `post_max_id`, `store_lock_acquire`, `build_post_path`. Each board has its own ID counter + its own lockfile.
+- **`src/main.cyr` wire integration** (~200 LOC):
+  - New session state `current_board` (per-connection NUL-terminated cstring buffer, default "main").
+  - New commands: `boards` (list main + named, with per-board post counts), `enter <name>` (switch board; auto-creates), `leave` (return to main).
+  - `send_prompt` helper — bare `> ` in main, `[name] > ` in a named board.
+  - `help` text updated; `session_execute` signature grew `current_board` parameter; `session_finalize_post` grew `current_board` parameter.
+- **CLI `--board <name>` flag** on all three verbs (`post` / `list` / `read`). Default `main`. `parse_board()` helper mirrors the `--store` / `--subject` shape. `first_positional_after_verb` updated to skip any `--<flag> <value>` pair so the positional ID arg in `read` doesn't get shadowed.
+- **Per-board lock + ID counter granularity** — concurrent writers to different boards never contend with each other. `<store>/<board>/.lock` per board (and `<store>/.lock` for main).
+- **Tests grew 38 → 43**: `t39_build_post_path_named_board` (subdirectory path shape), `t40_board_name_valid_accepts` (canonical alphabet), `t41_board_name_valid_rejects` (uppercase, dot, slash, leading dash/underscore, reserved "main", over-length), `t42_board_path_main_is_flat`, `t43_board_path_named`.
+- **End-to-end smoke** — five-case verification:
+  1. Backwards-compat: legacy 0.4.0 flat store reads `list` + `read` correctly via the `main` resolution
+  2. CLI `--board art` posts land in `<store>/art/` with their own ID counter
+  3. Invalid board name (`BAD-Caps`) rejected at CLI ingress
+  4. On-disk layout matches ADR (main posts at root, art posts in subdir, per-board lockfiles)
+  5. Telnet session: `boards` shows counts, `enter art` switches prompt + scope, `read 2` reads from art (not main), `leave` restores main, all `list` / `read` reflect the current board
+- **Roadmap restructured** to reflect the new release plan (per user direction 2026-05-23): **0.5.0** = M5 close (M5-E shipped, M5-F remaining), **0.6.0** = M6 sigil-backed auth, **0.7.0** = security sweep with CVE / 0-day web research, **0.8.0** = hardening + v1 lockdown, **1.0.0** = complete with iron validation on archaemenid LAN.
+
 ## [0.4.0] — 2026-05-23 (M5 partial — post persistence with metadata + concurrent-writer correctness)
 
 agora is now a **working BBS over telnet**. Six bites landed across the M5 cycle: post storage primitives (M5-A), in-session command interpreter (M5-B), sorted listing (M5-C), RFC-822 headers per [ADR 0003](docs/adr/0003-rfc-822-post-headers.md) (M5-D), per-store flock (M5-G), and ingress input filter (M5-H). Two ADRs land: 0002 (one file per post, monotonic IDs) and 0003 (RFC-822 headers). 38 tests; 129,096 B; bench baseline unchanged. **M5 is partial** — boards (M5-E) and threads (M5-F) defer to a later release. Single-board single-thread BBS is the 0.4.0 shipping shape.

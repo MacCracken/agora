@@ -84,14 +84,14 @@ fn print_help(): i64 {
     println("                 --store sets the post-storage root for the");
     println("                 in-session post/list/read commands —");
     println("                 default ./agora-data/, same as the CLI verbs)");
-    println("  post [--store <path>] [--subject <text>]");
+    println("  post [--store <path>] [--board <name>] [--subject <text>]");
     println("                 read stdin → new post → print assigned ID");
-    println("                 (default store ./agora-data/; subject is");
-    println("                 written as an RFC-822-shaped header per");
-    println("                 ADR 0003. Empty subject is allowed.)");
-    println("  list [--store <path>]");
-    println("                 list post IDs in the store");
-    println("  read <id> [--store <path>]");
+    println("                 (default store ./agora-data/, board 'main';");
+    println("                 named boards live at <store>/<name>/. Subject");
+    println("                 is written as an RFC-822 header per ADR 0003.)");
+    println("  list [--store <path>] [--board <name>]");
+    println("                 list post IDs in the chosen board");
+    println("  read <id> [--store <path>] [--board <name>]");
     println("                 print a post body to stdout by ID");
     println("  whoami         show current user (M6+: real impl)");
     println("  version        print version string");
@@ -150,6 +150,19 @@ fn echo_byte(cfd, b): i64 {
     return send_buf(cfd, &one, 1);
 }
 
+# Send the in-session prompt. M5-E: when current_board is "main"
+# the prompt is the bare `> ` (preserves 0.4.0 visual); when in a
+# named board the prompt is `[name] > ` so the user always knows
+# which board their next command targets.
+fn send_prompt(cfd, current_board): i64 {
+    if (streq(current_board, "main") != 0) {
+        return send_str(cfd, "> ");
+    }
+    send_str(cfd, "[");
+    send_str(cfd, current_board);
+    return send_str(cfd, "] > ");
+}
+
 # `input_byte_ok` lives in board.cyr (storage-policy layer). It's
 # what the post storage system accepts; main.cyr's wire layer just
 # enforces it at ingress. See board.cyr for the rationale.
@@ -196,9 +209,12 @@ fn line_parse_int(line, off, line_len): i64 {
 }
 
 # Execute a typed command line. Returns the new session mode
-# (MODE_COMMAND or MODE_POSTING) and writes side-effect bytes to
-# cfd. Quit-style commands set *quit_out = 1 and return MODE_COMMAND.
-fn session_execute(cfd, line, line_len, quit_out): i64 {
+# (MODE_COMMAND or MODE_POSTING_SUBJECT) and writes side-effect bytes
+# to cfd. Quit-style commands set *quit_out = 1 and return MODE_COMMAND.
+# M5-E: `current_board` is a pointer to the per-session board-name
+# buffer (`BOARD_NAME_MAX + 1` bytes, NUL-terminated). `enter` and
+# `leave` write into this buffer; all storage commands route through it.
+fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     # Trim trailing spaces.
     var len = line_len;
     var trimming = 1;
@@ -212,17 +228,103 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
 
     if (line_has_prefix(line, len, "help") != 0) {
         send_str(cfd, "\r\nCommands:\r\n");
-        send_str(cfd, "  list           list post IDs\r\n");
-        send_str(cfd, "  read <id>      read a post by ID\r\n");
-        send_str(cfd, "  post           compose a new post; end with '.' on a line by itself\r\n");
-        send_str(cfd, "  help           this message\r\n");
-        send_str(cfd, "  quit           close the session\r\n\r\n");
+        send_str(cfd, "  boards          list all boards (main + named)\r\n");
+        send_str(cfd, "  enter <name>    switch to a named board (auto-creates)\r\n");
+        send_str(cfd, "  leave           return to main\r\n");
+        send_str(cfd, "  list            list post IDs in the current board\r\n");
+        send_str(cfd, "  read <id>       read a post by ID\r\n");
+        send_str(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
+        send_str(cfd, "  help            this message\r\n");
+        send_str(cfd, "  quit            close the session\r\n\r\n");
+        return MODE_COMMAND;
+    }
+
+    # M5-E: `boards` — list main + all named subdirectory boards.
+    if (line_has_prefix(line, len, "boards") != 0) {
+        var idsmain = alloc(DIRENT_ID_MAX * 8);
+        var maincount = post_list(g_store_buf, "main", idsmain, DIRENT_ID_MAX);
+        # Always list main
+        send_str(cfd, "  main      ");
+        var ibuf[24];
+        var ilen = fmt_int_buf(maincount, &ibuf);
+        send_buf(cfd, &ibuf, ilen);
+        send_str(cfd, " posts\r\n");
+
+        var names = alloc(BOARD_LIST_MAX * 8);
+        var bcount = boards_list(g_store_buf, names, BOARD_LIST_MAX);
+        var i = 0;
+        while (i < bcount) {
+            var entry = load64(names + i * 8);
+            var name_cstr = str_data(entry);
+            var pcount = post_list(g_store_buf, name_cstr, idsmain, DIRENT_ID_MAX);
+            send_str(cfd, "  ");
+            send_str(cfd, name_cstr);
+            # Pad to 10 columns for visual alignment with "main      "
+            var nlen = strlen(name_cstr);
+            var pad = 10 - nlen;
+            while (pad > 0) {
+                send_str(cfd, " ");
+                pad = pad - 1;
+            }
+            var pbuf[24];
+            var plen = fmt_int_buf(pcount, &pbuf);
+            send_buf(cfd, &pbuf, plen);
+            send_str(cfd, " posts\r\n");
+            i = i + 1;
+        }
+        return MODE_COMMAND;
+    }
+
+    # M5-E: `enter <name>` — switch the session's current board.
+    # Auto-creates the board's directory on first use (ADR 0004 § Lifecycle).
+    if (line_has_prefix(line, len, "enter") != 0) {
+        # Skip "enter" + leading spaces. Always advance `i` regardless of
+        # which branch we take (avoids the trap-pattern that bit M5-D parse).
+        var i = 5;
+        var skipping = 1;
+        while (skipping == 1) {
+            if (i >= len) { skipping = 0; }
+            else { if ((load8(line + i) & 0xFF) != 32) { skipping = 0; }
+                   else                                 { i = i + 1; } }
+        }
+        if (i >= len) {
+            send_str(cfd, "usage: enter <name>\r\n");
+            return MODE_COMMAND;
+        }
+        var name_len = len - i;
+        if (name_len > BOARD_NAME_MAX) {
+            send_str(cfd, "board name too long (max 32 bytes)\r\n");
+            return MODE_COMMAND;
+        }
+        var name_buf = alloc(BOARD_NAME_MAX + 1);
+        memcpy(name_buf, line + i, name_len);
+        store8(name_buf + name_len, 0);
+
+        if (board_name_valid(name_buf) == 0) {
+            send_str(cfd, "invalid board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')\r\n");
+            return MODE_COMMAND;
+        }
+        # Switch + auto-create
+        memcpy(current_board, name_buf, name_len);
+        store8(current_board + name_len, 0);
+        board_ensure(g_store_buf, current_board);
+        send_str(cfd, "entered ");
+        send_str(cfd, current_board);
+        send_str(cfd, "\r\n");
+        return MODE_COMMAND;
+    }
+
+    # M5-E: `leave` — return to main.
+    if (line_has_prefix(line, len, "leave") != 0) {
+        memcpy(current_board, "main", 4);
+        store8(current_board + 4, 0);
+        send_str(cfd, "back in main\r\n");
         return MODE_COMMAND;
     }
 
     if (line_has_prefix(line, len, "list") != 0) {
         var ids = alloc(DIRENT_ID_MAX * 8);
-        var count = post_list(g_store_buf, ids, DIRENT_ID_MAX);
+        var count = post_list(g_store_buf, current_board, ids, DIRENT_ID_MAX);
         if (count == 0) {
             send_str(cfd, "(no posts)\r\n");
         } else {
@@ -241,7 +343,7 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
                 send_buf(cfd, &idbuf, idlen);
                 send_str(cfd, "  ");
                 # Subject (or empty for headerless / no-Subject posts)
-                var flen = post_read(g_store_buf, id, fbuf, POST_MAX_BYTES + 1024);
+                var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
                 if (flen > 0) {
                     var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
                     if (slen > 0) {
@@ -262,7 +364,7 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
             return MODE_COMMAND;
         }
         var fbuf = alloc(POST_MAX_BYTES + 1024);
-        var flen = post_read(g_store_buf, id, fbuf, POST_MAX_BYTES + 1024);
+        var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
         if (flen <= 0) {
             send_str(cfd, "post not found\r\n");
             return MODE_COMMAND;
@@ -315,16 +417,14 @@ fn session_execute(cfd, line, line_len, quit_out): i64 {
     return MODE_COMMAND;
 }
 
-# Finalize a post-compose flow: write the accumulated body + subject,
-# send the assigned ID (or an error). The `subject` argument is a
-# NUL-terminated cstring built up by the MODE_POSTING_SUBJECT phase;
-# pass 0 for headerless / legacy post.
-fn session_finalize_post(cfd, subject, body, body_len): i64 {
+# Finalize a post-compose flow: write the accumulated body + subject
+# into the session's current_board, send the assigned ID (or an error).
+fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
     if (body_len <= 0) {
         send_str(cfd, "(empty post discarded)\r\n");
         return 0;
     }
-    var id = post_new_with_subject(g_store_buf, subject, body, body_len);
+    var id = post_new_with_subject(g_store_buf, current_board, subject, body, body_len);
     if (id < 0) {
         send_str(cfd, "post failed (storage error)\r\n");
         return 0;
@@ -429,9 +529,8 @@ fn handle_client(cfd): i64 {
         var motd_len = render_motd(motd);
         send_buf(cfd, motd, motd_len);
     }
-    send_str(cfd, "> ");
-
-    # Per-session state.
+    # Per-session state. Note `current_board` is allocated + initialized
+    # before the prompt so send_prompt has it.
     var rxbuf   = alloc(RECV_BUF_BYTES);
     var line    = alloc(LINE_BUF_CAP);
     var line_pos = 0;
@@ -441,10 +540,17 @@ fn handle_client(cfd): i64 {
     # finalized so we can pass it as cstring to post_new_with_subject.
     var subject = alloc(SUBJECT_MAX_BYTES + 1);
     var subject_len = 0;
+    # M5-E: per-session current board name (default "main"). enter/leave
+    # mutate this; session_execute reads it for all storage operations.
+    var current_board = alloc(BOARD_NAME_MAX + 1);
+    memcpy(current_board, "main", 4);
+    store8(current_board + 4, 0);
     var mode    = MODE_COMMAND;
     var last_cr = 0;
     var quit    = alloc(8);
     store64(quit, 0);
+
+    send_prompt(cfd, current_board);
 
     var done = 0;
     while (done == 0) {
@@ -510,10 +616,10 @@ fn handle_client(cfd): i64 {
                     send_str(cfd, "\r\n");
                     # Mode-aware line dispatch.
                     if (mode == MODE_COMMAND) {
-                        mode = session_execute(cfd, line, line_pos, quit);
+                        mode = session_execute(cfd, line, line_pos, current_board, quit);
                         line_pos = 0;
                         if (mode == MODE_COMMAND) {
-                            if (load64(quit) == 0) { send_str(cfd, "> "); }
+                            if (load64(quit) == 0) { send_prompt(cfd, current_board); }
                         }
                     }
                     else { if (mode == MODE_POSTING_SUBJECT) {
@@ -535,13 +641,13 @@ fn handle_client(cfd): i64 {
                         # MODE_POSTING: '.' alone ends + commits.
                         if (line_pos == 1) {
                             if ((load8(line) & 0xFF) == 46) {
-                                session_finalize_post(cfd, subject, post, post_pos);
+                                session_finalize_post(cfd, current_board, subject, post, post_pos);
                                 post_pos = 0;
                                 subject_len = 0;
                                 store8(subject, 0);
                                 line_pos = 0;
                                 mode = MODE_COMMAND;
-                                send_str(cfd, "> ");
+                                send_prompt(cfd, current_board);
                                 i = i + 1; continue;
                             }
                         }
@@ -688,9 +794,10 @@ fn cmd_serve(): i64 {
 # Default post-storage root, used by cmd_post / cmd_list / cmd_read
 # when --store is not passed. Cwd-relative per ADR 0002.
 var DEFAULT_STORE = "./agora-data";
+var DEFAULT_BOARD = "main";
 
 # Walk argv looking for --store <path>. Returns the path cstring if
-# found, else the supplied default. Used by all three M5-A verbs.
+# found, else the supplied default.
 fn parse_store(default_store): i64 {
     args_init();
     var n = argc();
@@ -706,17 +813,41 @@ fn parse_store(default_store): i64 {
     return default_store;
 }
 
+# Walk argv looking for --board <name>. Returns the name cstring if
+# found, else "main". M5-E: every CLI verb routes through this.
+fn parse_board(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--board") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return DEFAULT_BOARD;
+        }
+        i = i + 1;
+    }
+    return DEFAULT_BOARD;
+}
+
 # Walk argv looking for the first non-flag positional after the verb.
-# Skips `--store <path>` pairs. Returns 0 if no positional found.
+# Skips any `--<flag> <value>` pair (so all our two-arg flags —
+# `--store`, `--board`, `--subject`, `--motd` — don't shadow the
+# positional). Returns 0 if no positional found.
 fn first_positional_after_verb(): i64 {
     args_init();
     var n = argc();
     var i = 2;
     while (i < n) {
         var arg = argv(i);
-        if (streq(arg, "--store") != 0) {
-            i = i + 2;
-            continue;
+        # Two-char flag prefix '--'? skip arg + value.
+        if (strlen(arg) >= 2) {
+            if ((load8(arg) & 0xFF) == 45) {        # '-'
+                if ((load8(arg + 1) & 0xFF) == 45) { # '--'
+                    i = i + 2;
+                    continue;
+                }
+            }
         }
         return arg;
     }
@@ -747,7 +878,15 @@ fn parse_subject_flag(): i64 {
 # 0 + id on success, 1 on no-input / write failure.
 fn cmd_post(): i64 {
     var store = parse_store(DEFAULT_STORE);
+    var board = parse_board();
     var subject = parse_subject_flag();
+    # M5-E: validate the board name unless it's the default "main".
+    if (streq(board, "main") == 0) {
+        if (board_name_valid(board) == 0) {
+            println("agora post: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
+            return 2;
+        }
+    }
     var body = alloc(POST_MAX_BYTES);
     var total = 0;
     var rgo = 1;
@@ -761,7 +900,7 @@ fn cmd_post(): i64 {
         println("agora post: no input on stdin (pipe in post body)");
         return 1;
     }
-    var id = post_new_with_subject(store, subject, body, total);
+    var id = post_new_with_subject(store, board, subject, body, total);
     if (id < 0) {
         println("agora post: failed to write post");
         return 1;
@@ -771,13 +910,13 @@ fn cmd_post(): i64 {
     return 0;
 }
 
-# `agora list` — print `<id>  <subject>` per post (M5-D). Subject
-# is empty for headerless / no-Subject posts; the bare ID still
-# prints. Reads each post file once (negligible cost at v1.0 scale).
+# `agora list` — print `<id>  <subject>` per post in the chosen board
+# (default "main"). Subject is empty for headerless / no-Subject posts.
 fn cmd_list(): i64 {
     var store = parse_store(DEFAULT_STORE);
+    var board = parse_board();
     var ids = alloc(DIRENT_ID_MAX * 8);
-    var count = post_list(store, ids, DIRENT_ID_MAX);
+    var count = post_list(store, board, ids, DIRENT_ID_MAX);
     if (count == 0) {
         println("agora list: no posts");
         return 0;
@@ -789,7 +928,7 @@ fn cmd_list(): i64 {
         var id = load64(ids + i * 8);
         print_num(id);
         sys_write(1, "  ", 2);
-        var flen = post_read(store, id, fbuf, POST_MAX_BYTES + 1024);
+        var flen = post_read(store, board, id, fbuf, POST_MAX_BYTES + 1024);
         if (flen > 0) {
             var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
             if (slen > 0) { sys_write(1, sbuf, slen); }
@@ -800,11 +939,11 @@ fn cmd_list(): i64 {
     return 0;
 }
 
-# `agora read <id>` — print one post body to stdout (M5-D: headers
-# stripped). Subject is shown as a one-line prefix; headerless
-# legacy posts skip the prefix.
+# `agora read <id>` — print one post body to stdout. Subject is
+# shown as a one-line prefix; headerless legacy posts skip the prefix.
 fn cmd_read(): i64 {
     var store = parse_store(DEFAULT_STORE);
+    var board = parse_board();
     var id_arg = first_positional_after_verb();
     if (id_arg == 0) {
         println("agora read: missing post ID");
@@ -816,7 +955,7 @@ fn cmd_read(): i64 {
         return 2;
     }
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    var flen = post_read(store, id, fbuf, POST_MAX_BYTES + 1024);
+    var flen = post_read(store, board, id, fbuf, POST_MAX_BYTES + 1024);
     if (flen <= 0) {
         println("agora read: post not found");
         return 1;

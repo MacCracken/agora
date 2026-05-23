@@ -17,7 +17,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 | Field | Value |
 |---|---|
 | **Released** | `0.4.0` (2026-05-23) |
-| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + **M5 partial (0.4.0)** — ADRs 0002 + 0003 + M5-A/B/C/H/D/G shipped 2026-05-23. **agora is a working single-board BBS over telnet with post metadata, sane UX, ingress security, and concurrent-writer correctness.** Deferred to a later release: M5-E (boards), M5-F (threads). |
+| **Cycle** | M0 + M1 (0.2.0) + M2 (0.3.0) + M5 partial (0.4.0) + **M5 close in progress** — ADR 0004 + M5-E landed 2026-05-23: agora is now a **multi-board BBS** via in-session `boards` / `enter` / `leave` + CLI `--board <name>` flag. Backwards-compatible with 0.4.0 flat-store layout (main = flat-root). Release plan: 0.5.0 closes M5 (M5-F threads remaining), 0.6.0 ships M6 (sigil auth), 0.7.0 is the security sweep, 0.8.0 is hardening + v1 lockdown, 1.0.0 ships. |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 129,096 B at M5-G (128,352 M5-D; 116,904 M5-H; 116,232 M5-B; 109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-G adds +744 B for the store-lock helpers. | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 135,064 B at M5-E (129,096 M5-G; 128,352 M5-D; 116,904 M5-H; 116,232 M5-B; 109,992 M5-A; 85,544 M2 close; 70,960 M1 close; 43,216 v0.1.0 scaffold). M5-E adds +5,968 B for board-aware primitives + boards/enter/leave commands + name validator + --board flag. | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
@@ -34,7 +34,7 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **38 tests passing** at M5-D — 24 M1 conformance + 5 M5-A board-storage + 2 M5-C sort + 1 M5-H input-filter + 6 M5-D header tests (`post_body_offset` headerless/CRLF/LF, `header_get` Subject/missing, `post_subject` normalization). Full wire integration verified via Python TCP-client smoke. |
+| `src/test.cyr` | **43 tests passing** at M5-E — adds 5 M5-E board tests (`build_post_path` named-board, `board_name_valid` accept + reject, `board_path` main-is-flat + named). Full wire integration verified via Python TCP-client smoke. |
 | `benches/bench_telnet.bcyr` | **5 benchmarks** — see [`/BENCHMARKS.md`](../../BENCHMARKS.md). Hot path 10 ns/byte (plain) → 132 ns (4-option announce salvo). |
 | `cyrius audit` | clean (build + lint pass; tests green; first bench baseline captured at M1 close) |
 
@@ -58,12 +58,13 @@ Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close a
 
 **M5-D landed 2026-05-23**: RFC-822-shaped headers per [ADR 0003](../adr/0003-rfc-822-post-headers.md). Each post file gets `Subject: ...\r\nDate: ISO-8601\r\n\r\n<body>`. New `post_body_offset` + `header_get` + `post_subject` primitives in `board.cyr`. Wire flow grew `MODE_POSTING_SUBJECT` between `MODE_COMMAND` and `MODE_POSTING` — typing `post` prompts `Subject:` first. `list` shows `<id>  <subject>`; `read` shows `Subject: ...\r\n\r\n<body>`. CLI `agora post` grew `--subject <text>` flag. Backwards compatible with M5-A/B/C headerless posts (sniffer rejects non-uppercase first bytes, falls back to whole-file-is-body). **Plus a session-buffer corruption bug fix**: paired LF after CR was being appended to the line buffer at position 0 (broke every command after the first). 38 tests; binary 128,352 B.
 
-**M5-G landed 2026-05-23**: per-store flock (`<store>/.lock`) around the `post_max_id` + EXCL-claim + write critical section. `store_lock_acquire` / `store_lock_release` helpers via `lib/io.cyr` `file_lock`. `post_new` and `post_new_with_subject` both serialize through it; format runs outside the lock. Pre-M5-G a race would drop one of two concurrent posts (EEXIST); post-M5-G both serialize and succeed with distinct IDs. 50-parallel-CLI smoke confirms 50/50 success. Binary 129,096 B (+744 B).
+**M5-G landed 2026-05-23**: per-store flock around `post_max_id` + EXCL-claim + write critical section. Concurrent writers serialize; no ID race. Binary 129,096 B.
 
-**Remaining bites for M5 close**:
+**M5-E landed 2026-05-23** ([ADR 0004](../adr/0004-board-layout.md)): boards. Flat-root = "main", subdirs = named (free backwards-compat with 0.4.0). Per-board ID counter + lockfile + post-extraction. New telnet commands: `boards`, `enter <name>`, `leave`. CLI grew `--board <name>` flag on post/list/read. `current_board` per-connection session state; prompt shows `[name] >` when in a named board. 5 new tests (43 total). End-to-end smoke covers backwards-compat + CLI + invalid-name rejection + on-disk layout + telnet flow. Binary 135,064 B (+5,968 B).
 
-- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`). UI question: how does the user pick a board (per-session `cd`, per-command flag, separate connection per board)?
-- **M5-F** — Threads (post-replies-to-post linkage). M5-D unblocks via the `Reply-To` header field.
+**Remaining bites for M5 close (→ 0.5.0)**:
+
+- **M5-F** — Threads (post-replies-to-post linkage). `Reply-To: <board>/<id>` header per ADR 0003 shape. In-session `reply <id>` enters compose mode with the Subject pre-prefixed `Re: ...`. `read <id>` shows referencing replies inline.
 
 ## Recent shipped
 

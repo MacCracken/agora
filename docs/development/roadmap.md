@@ -13,13 +13,16 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | Milestone | Scope | Gate state |
 |---|---|---|
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
-| **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
-| **M2** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | closed 2026-05-23 at 0.3.0 — three bites: M2-A/B/C. See [`state.md`](state.md#recently-closed). M2-D (NAWS width clamp) deferred as optional polish. |
-| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A/B/C/H/D/G landed 2026-05-23** — ADRs 0002 + 0003, `src/board.cyr`, CLI verbs, telnet command interpreter, sorted listing, ingress input filter, RFC-822 headers (Subject + Date), per-store flock for concurrent-writer correctness. **agora is a working BBS with metadata, sane UX, ingress security, and concurrent-writer correctness.** Linux today via `lib/io.cyr` + `lib/fs.cyr`. Remaining bites: E (boards), F (threads). |
-| M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ — gated on M5 post bodies existing first |
-| M4 | Stored-file deltas + compression | sankoch 2.2.6 ✅ — gated on M5 |
-| M6 | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — naturally follows M5 |
-| **1.0.0** | All six milestones green, multi-user telnet BBS | M0–M6 + iron validation on archaemenid LAN |
+| **M1 (0.2.0)** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | shipped 2026-05-23 — five bites |
+| **M2 (0.3.0)** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | shipped 2026-05-23 — three bites |
+| **M5 partial (0.4.0)** ✅ | Single-board post persistence (ADRs 0002/0003 — storage primitives + RFC-822 headers + per-store flock + ingress filter) | shipped 2026-05-23 — six bites + two ADRs |
+| **M5 close (0.5.0)** ← in progress | Boards + threads — M5-E (ADR 0004 boards) **landed 2026-05-23**; M5-F (threads) remaining. agora becomes a multi-board BBS with reply-linkage. |
+| **M6 (0.6.0)** | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — login flow, `whoami`, per-board posting permissions |
+| **Security sweep (0.7.0)** | External CVE / 0-day research + code audit | walk every input boundary, every IAC sequence path, every storage write; web-research known telnet/BBS CVEs (CVE-2020-10188, CVE-2011-4862, modern Mastodon/Matrix vulns); file `docs/audit/2026-MM-DD-pre-1.0-audit.md` |
+| **Hardening + v1 lockdown (0.8.0)** | All audit findings closed, ABI freeze, doc-pass, perf bench re-run, downstream verification | last patch before 1.0.0; everything in the 1.0 set has shipped at least once at this release |
+| M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ — gated on M5 close + a real consumer need (M5+ if surfaced) |
+| M4 | Stored-file deltas + compression | sankoch 2.2.6 ✅ — gated on M5 close |
+| **1.0.0** | All milestones green, multi-user telnet BBS on archaemenid iron | M0–M6 + security sweep + hardening + iron validation on archaemenid LAN |
 
 ---
 

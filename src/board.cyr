@@ -44,6 +44,77 @@ enum BoardCap {
     POST_MAX_BYTES = 65536;
     PATH_MAX_BYTES = 512;
     DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once
+    BOARD_NAME_MAX = 32;     # ADR 0004 validation: ≤ 32 bytes
+    BOARD_LIST_MAX = 256;    # max named boards listed at once
+}
+
+# === ADR 0004: per-board layout ===
+#
+# "main" = flat-root (free backwards compat with 0.4.0 stores).
+# Named boards = `<store>/<name>/`. Each board has its own monotonic
+# ID counter + its own lockfile. The board name "main" is reserved
+# — it's the implicit flat root, NOT a literal subdir.
+
+# Validate a board name per ADR 0004:
+#   - 1 to BOARD_NAME_MAX bytes
+#   - bytes are lowercase ASCII (a-z), digits (0-9), `-`, or `_`
+#   - first byte is a letter or digit (no leading dash/underscore — dodges
+#     "starts-with-dot" sniffer for hidden files; reserves `_*` for
+#     future internal-use namespace)
+#   - the literal name "main" is reserved
+#   - the literal name ".lock" (and anything starting with `.`) is
+#     impossible per the leading-letter-or-digit rule
+#
+# Returns 1 if valid, 0 if invalid. Caller surfaces user-facing
+# error message.
+fn board_name_valid(name): i64 {
+    if (name == 0) { return 0; }
+    var len = strlen(name);
+    if (len < 1)              { return 0; }
+    if (len > BOARD_NAME_MAX) { return 0; }
+    # Reserved: "main" is the implicit flat root
+    if (streq(name, "main") != 0) { return 0; }
+    # First byte must be lowercase letter or digit
+    var c0 = load8(name) & 0xFF;
+    var c0_ok = 0;
+    if (c0 >= 97) { if (c0 <= 122) { c0_ok = 1; } }   # a-z
+    if (c0 >= 48) { if (c0 <= 57)  { c0_ok = 1; } }   # 0-9
+    if (c0_ok == 0) { return 0; }
+    # Rest: a-z, 0-9, '-', '_'
+    var i = 1;
+    while (i < len) {
+        var c = load8(name + i) & 0xFF;
+        var ok = 0;
+        if (c >= 97) { if (c <= 122) { ok = 1; } }    # a-z
+        if (c >= 48) { if (c <= 57)  { ok = 1; } }    # 0-9
+        if (c == 45) { ok = 1; }                       # '-'
+        if (c == 95) { ok = 1; }                       # '_'
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Resolve a (store, board) pair into a filesystem path. Writes the
+# NUL-terminated path into out_buf; returns the length.
+#
+#   board == "main"  → `<store>`              (flat root, ADR 0004 § Decision)
+#   board == "art"   → `<store>/art`
+#
+# out_buf must be ≥ PATH_MAX_BYTES.
+fn board_path(store, board, out_buf): i64 {
+    var slen = strlen(store);
+    memcpy(out_buf, store, slen);
+    var pos = slen;
+    if (streq(board, "main") == 0) {
+        # Named board: append "/<board>"
+        store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+        var blen = strlen(board);
+        memcpy(out_buf + pos, board, blen);
+        pos = pos + blen;
+    }
+    store8(out_buf + pos, 0);
+    return pos;
 }
 
 # M5-H input filter — return 1 if byte is allowed into a post body,
@@ -72,11 +143,9 @@ fn input_byte_ok(b): i64 {
     return 1;
 }
 
-# Create the storage directory if it doesn't exist. Treats EEXIST
-# (-17 on Linux) as success — operators may pre-create the dir with
-# specific ownership, or it may have been left from a previous run.
-# Returns 0 on success or already-exists; returns the raw errno
-# (negative) on any other failure.
+# Create a directory if it doesn't exist. Treats EEXIST (-17 on
+# Linux) as success. Returns 0 on success or already-exists;
+# negative errno otherwise.
 fn store_ensure(path): i64 {
     var rc = syscall(SYS_MKDIR, path, PERM_DIR);
     if (rc == 0) { return 0; }
@@ -84,15 +153,26 @@ fn store_ensure(path): i64 {
     return rc;
 }
 
-# Build the on-disk path for a given post ID into `out_buf`:
-#   <store>/<id>.txt\0
-# Returns the length (excluding the NUL terminator).
-# out_buf must be at least PATH_MAX_BYTES.
-fn build_post_path(store, id, out_buf): i64 {
-    var pos = 0;
-    var store_len = strlen(store);
-    memcpy(out_buf + pos, store, store_len);
-    pos = pos + store_len;
+# Ensure the (store, board) path exists. For board == "main" this
+# is equivalent to store_ensure(store); for named boards it ensures
+# `<store>` first, then `<store>/<name>` second (one-level mkdir,
+# no recursive needed).
+fn board_ensure(store, board): i64 {
+    var rc = store_ensure(store);
+    if (rc != 0) { return rc; }
+    if (streq(board, "main") != 0) { return 0; }
+    var path_buf = alloc(PATH_MAX_BYTES);
+    board_path(store, board, path_buf);
+    return store_ensure(path_buf);
+}
+
+# Build the on-disk path for a given (board, id) into `out_buf`:
+#   board == "main"  →  <store>/<id>.txt
+#   else             →  <store>/<board>/<id>.txt
+# Returns the length (excluding NUL). out_buf must be ≥ PATH_MAX_BYTES.
+fn build_post_path(store, board, id, out_buf): i64 {
+    var pos = board_path(store, board, out_buf);  # writes path + NUL
+    # board_path's NUL is at pos; overwrite with '/'
     store8(out_buf + pos, 47); pos = pos + 1;   # '/'
 
     var idbuf[24];
@@ -144,11 +224,13 @@ fn parse_post_id(name): i64 {
     return n;
 }
 
-# Find the highest existing post ID in the store. Returns 0 if the
-# store is empty / non-existent. O(n) in the post count — acceptable
-# for the v1.0 BBS scale per ADR 0002 § Negative consequences.
-fn post_max_id(store): i64 {
-    var entries = dir_list(str_from(store));
+# Find the highest existing post ID in `(store, board)`. Returns 0
+# if the board is empty / non-existent. Per ADR 0004 each board has
+# its own monotonic counter — listing scans only that board's dir.
+fn post_max_id(store, board): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    board_path(store, board, path_buf);
+    var entries = dir_list(str_from(path_buf));
     var n = vec_len(entries);
     var max_id = 0;
     var i = 0;
@@ -175,17 +257,19 @@ fn post_max_id(store): i64 {
 # operators can delete it between runs. parse_post_id rejects
 # `.lock` (no `.txt` suffix) so it doesn't show up in `list`.
 
-# Acquire the per-store write lock. Returns the lockfile fd on
-# success (caller must `store_lock_release` to release + close),
-# or -1 on any failure (open / lock syscall).
-fn store_lock_acquire(store): i64 {
+# Acquire the per-board write lock. Lockfile is `<board-path>/.lock`.
+# Per ADR 0004 each board has its own lock — concurrent writers to
+# different boards never contend with each other.
+#
+# Returns lockfile fd on success (caller must `store_lock_release`
+# to release + close), or -1 on failure.
+fn store_lock_acquire(store, board): i64 {
     var path_buf = alloc(PATH_MAX_BYTES);
-    var slen = strlen(store);
-    memcpy(path_buf, store, slen);
-    store8(path_buf + slen, 47);              # '/'
-    store8(path_buf + slen + 1, 46);          # '.'
-    memcpy(path_buf + slen + 2, "lock", 4);
-    store8(path_buf + slen + 6, 0);           # NUL
+    var blen = board_path(store, board, path_buf);
+    store8(path_buf + blen, 47);              # '/'
+    store8(path_buf + blen + 1, 46);          # '.'
+    memcpy(path_buf + blen + 2, "lock", 4);
+    store8(path_buf + blen + 6, 0);           # NUL
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
@@ -194,7 +278,7 @@ fn store_lock_acquire(store): i64 {
     return fd;
 }
 
-# Release the per-store write lock. Closing the fd also releases
+# Release the per-board write lock. Closing the fd also releases
 # the kernel-side flock.
 fn store_lock_release(fd): i64 {
     file_close(fd);
@@ -206,21 +290,21 @@ fn store_lock_release(fd): i64 {
 # **M5-G**: serializes claim+write through a per-store flock so
 # concurrent writers serialize and both succeed with distinct IDs
 # rather than one losing to EEXIST.
-fn post_new(store, body_buf, body_len): i64 {
+fn post_new(store, board, body_buf, body_len): i64 {
     if (body_len <= 0)              { return 0 - 1; }
     if (body_len > POST_MAX_BYTES)  { return 0 - 1; }
 
-    var rc = store_ensure(store);
+    var rc = board_ensure(store, board);
     if (rc != 0) { return 0 - 1; }
 
-    # Acquire the store-wide write lock for the claim+write critical
+    # Acquire the per-board write lock for the claim+write critical
     # section. Block until acquired (cooperative serialization).
-    var lock_fd = store_lock_acquire(store);
+    var lock_fd = store_lock_acquire(store, board);
     if (lock_fd < 0) { return 0 - 1; }
 
-    var id = post_max_id(store) + 1;
+    var id = post_max_id(store, board) + 1;
     var path_buf = alloc(PATH_MAX_BYTES);
-    build_post_path(store, id, path_buf);
+    build_post_path(store, board, id, path_buf);
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
     if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
@@ -231,11 +315,11 @@ fn post_new(store, body_buf, body_len): i64 {
     return id;
 }
 
-# Read a post by ID into the caller-allocated buffer. Returns the
-# number of bytes read, or negative on error.
-fn post_read(store, id, out_buf, out_cap): i64 {
+# Read a post by (board, id) into the caller-allocated buffer.
+# Returns the number of bytes read, or negative on error.
+fn post_read(store, board, id, out_buf, out_cap): i64 {
     var path_buf = alloc(PATH_MAX_BYTES);
-    build_post_path(store, id, path_buf);
+    build_post_path(store, board, id, path_buf);
     return file_read_all(path_buf, out_buf, out_cap);
 }
 
@@ -414,11 +498,11 @@ fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
 # EXCL-claim path as post_new. Returns the assigned ID or -1.
 # **M5-G**: format happens outside the lock (pure per-call work);
 # claim+write is inside.
-fn post_new_with_subject(store, subject, body, body_len): i64 {
+fn post_new_with_subject(store, board, subject, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
 
-    var rc = store_ensure(store);
+    var rc = board_ensure(store, board);
     if (rc != 0) { return 0 - 1; }
 
     # Format outside the lock — no shared state, no cross-process
@@ -428,12 +512,12 @@ fn post_new_with_subject(store, subject, body, body_len): i64 {
     var flen = post_format_with_subject(subject, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
-    var lock_fd = store_lock_acquire(store);
+    var lock_fd = store_lock_acquire(store, board);
     if (lock_fd < 0) { return 0 - 1; }
 
-    var id = post_max_id(store) + 1;
+    var id = post_max_id(store, board) + 1;
     var path_buf = alloc(PATH_MAX_BYTES);
-    build_post_path(store, id, path_buf);
+    build_post_path(store, board, id, path_buf);
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
     if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
@@ -488,8 +572,10 @@ fn sort_i64_asc(arr, count): i64 {
 # up to max_ids entries. Returns the count of IDs written.
 # IDs are returned in **ascending order** (M5-C); the underlying
 # dir_list returns directory-iteration order which we then sort.
-fn post_list(store, out_ids, max_ids): i64 {
-    var entries = dir_list(str_from(store));
+fn post_list(store, board, out_ids, max_ids): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    board_path(store, board, path_buf);
+    var entries = dir_list(str_from(path_buf));
     var n = vec_len(entries);
     var count = 0;
     var i = 0;
@@ -504,5 +590,53 @@ fn post_list(store, out_ids, max_ids): i64 {
         i = i + 1;
     }
     sort_i64_asc(out_ids, count);
+    return count;
+}
+
+# List all named boards in the store. Writes Str-pointers into
+# out_names (8 bytes each); returns the count.
+#
+# "main" is implicit — never returned by this function. Callers
+# render "main" themselves alongside the named-board list. Per ADR
+# 0004, named boards are subdirectories of `<store>`; anything in
+# `<store>` that isn't a regular file (post .txt + lockfile) or a
+# subdirectory is silently skipped.
+#
+# The names are surfaced verbatim from the filesystem — board_name_valid
+# isn't enforced on read (operators may have created weird names
+# pre-validator-introduction); the validator only gates writes
+# from the wire.
+fn boards_list(store, out_names, max_boards): i64 {
+    var entries = dir_list(str_from(store));
+    var n = vec_len(entries);
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        if (count >= max_boards) { return count; }
+        var entry = vec_get(entries, i);
+        var name_cstr = str_data(entry);
+        # Filter: skip post files (.txt suffix) and the lockfile.
+        var keep = 1;
+        if (parse_post_id(name_cstr) > 0) { keep = 0; }
+        if (streq(name_cstr, ".lock") != 0) { keep = 0; }
+        # Skip files starting with '.' generally (hidden / lockfile)
+        if ((load8(name_cstr) & 0xFF) == 46) { keep = 0; }
+        if (keep != 0) {
+            # We need to verify it's a directory. Build full path,
+            # call is_dir.
+            var full = alloc(PATH_MAX_BYTES);
+            var slen = strlen(store);
+            memcpy(full, store, slen);
+            store8(full + slen, 47);     # '/'
+            var nlen = strlen(name_cstr);
+            memcpy(full + slen + 1, name_cstr, nlen);
+            store8(full + slen + 1 + nlen, 0);
+            if (is_dir(str_from(full)) == 1) {
+                store64(out_names + count * 8, entry);
+                count = count + 1;
+            }
+        }
+        i = i + 1;
+    }
     return count;
 }
