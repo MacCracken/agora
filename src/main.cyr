@@ -34,6 +34,19 @@ enum AgoraDefaults {
     # verbatim; operators are responsible for using CRLF line
     # endings (telnet NVT) and embedding any ANSI escapes they want.
     MOTD_FILE_CAP     = 4096;
+    # Per-connection line buffer cap for the M5-B command parser.
+    # 4 KB absorbs any plausible command + a long post-body line.
+    LINE_BUF_CAP      = 4096;
+}
+
+# M5-B session modes. Drives the per-byte dispatch in handle_client:
+#   MODE_COMMAND  — interpret each completed line as a command
+#                   (list / read / post / help / quit / ...)
+#   MODE_POSTING  — accumulate lines into the post body; commit
+#                   when we see a line that is exactly "."
+enum SessMode {
+    MODE_COMMAND = 0;
+    MODE_POSTING = 1;
 }
 
 # Operator-supplied MOTD, loaded once in cmd_serve before the
@@ -44,6 +57,12 @@ enum AgoraDefaults {
 # accept loop currently single-tracks anyway.
 var g_motd_buf = 0;
 var g_motd_len = 0;
+
+# Post-storage root used by the telnet-side command interpreter
+# (M5-B). Set once in cmd_serve from --store <path>, defaults to
+# the same `./agora-data/` used by the CLI verbs. Per-connection
+# handle_client reads this without threading through args.
+var g_store_buf = "./agora-data";
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
@@ -57,10 +76,13 @@ fn print_help(): i64 {
     println("USAGE: agora <command> [args]");
     println("");
     println("COMMANDS:");
-    println("  serve [port] [--motd <path>]");
+    println("  serve [port] [--motd <path>] [--store <path>]");
     println("                 start telnet listener (default port 2323;");
     println("                 --motd reads a file as the connection MOTD");
-    println("                 instead of the default bannermanor render)");
+    println("                 instead of the default bannermanor render;");
+    println("                 --store sets the post-storage root for the");
+    println("                 in-session post/list/read commands —");
+    println("                 default ./agora-data/, same as the CLI verbs)");
     println("  post [--store <path>]");
     println("                 read stdin → new post → print assigned ID");
     println("                 (default store ./agora-data/)");
@@ -101,6 +123,178 @@ fn motd_emit_cstr(buf, pos, s): i64 {
     var n = strlen(s);
     memcpy(buf + pos, s, n);
     return pos + n;
+}
+
+# === M5-B session helpers ===
+#
+# The session state for one telnet client is kept in `handle_client`'s
+# locals (a heap-allocated struct buys nothing while the accept loop
+# single-tracks). These free-standing helpers take the explicit args
+# they need and operate on the per-connection buffers.
+
+# Send a NUL-terminated cstring over the socket. Convenience wrapper
+# for the in-session prompts / replies.
+fn send_str(cfd, s): i64 {
+    return send_buf(cfd, s, strlen(s));
+}
+
+# Echo a single byte back to the client. We announced WILL ECHO at
+# connect (M2-B Q-method announce salvo), so the client trusts us
+# to drive the display.
+fn echo_byte(cfd, b): i64 {
+    var one[1];
+    store8(&one, b & 0xFF);
+    return send_buf(cfd, &one, 1);
+}
+
+# Return 1 if buffer [line, line_len) starts with the cstring `prefix`,
+# 0 otherwise. Used by the command parser to dispatch on the first
+# token of a typed command line.
+fn line_has_prefix(line, line_len, prefix): i64 {
+    var plen = strlen(prefix);
+    if (line_len < plen) { return 0; }
+    return memeq(line, prefix, plen);
+}
+
+# Parse a positive integer from `line[off..line_len)`. Skips leading
+# spaces. Stops at the first non-digit byte. Returns the parsed
+# integer, or -1 if no digits found / value is zero.
+fn line_parse_int(line, off, line_len): i64 {
+    # Skip leading spaces — track explicitly without the trap of
+    # using one loop variable for "did we stop because of EOL or
+    # because we found a non-space?"
+    var i = off;
+    var skipping = 1;
+    while (skipping == 1) {
+        if (i >= line_len)                       { skipping = 0; }
+        else { if ((load8(line + i) & 0xFF) != 32) { skipping = 0; }
+               else                                { i = i + 1; } }
+    }
+    # Read digits
+    var n = 0;
+    var got_any = 0;
+    var reading = 1;
+    while (reading == 1) {
+        if (i >= line_len) { reading = 0; }
+        else {
+            var c = load8(line + i) & 0xFF;
+            if (c < 48) { reading = 0; }
+            else { if (c > 57) { reading = 0; }
+                   else        { n = n * 10 + (c - 48); got_any = 1; i = i + 1; } }
+        }
+    }
+    if (got_any == 0) { return 0 - 1; }
+    if (n <= 0)       { return 0 - 1; }
+    return n;
+}
+
+# Execute a typed command line. Returns the new session mode
+# (MODE_COMMAND or MODE_POSTING) and writes side-effect bytes to
+# cfd. Quit-style commands set *quit_out = 1 and return MODE_COMMAND.
+fn session_execute(cfd, line, line_len, quit_out): i64 {
+    # Trim trailing spaces.
+    var len = line_len;
+    var trimming = 1;
+    while (trimming == 1) {
+        if (len <= 0) { trimming = 0; }
+        else { if ((load8(line + len - 1) & 0xFF) != 32) { trimming = 0; }
+               else                                       { len = len - 1; } }
+    }
+    # Empty line — nothing to do, return to prompt.
+    if (len == 0) { return MODE_COMMAND; }
+
+    if (line_has_prefix(line, len, "help") != 0) {
+        send_str(cfd, "\r\nCommands:\r\n");
+        send_str(cfd, "  list           list post IDs\r\n");
+        send_str(cfd, "  read <id>      read a post by ID\r\n");
+        send_str(cfd, "  post           compose a new post; end with '.' on a line by itself\r\n");
+        send_str(cfd, "  help           this message\r\n");
+        send_str(cfd, "  quit           close the session\r\n\r\n");
+        return MODE_COMMAND;
+    }
+
+    if (line_has_prefix(line, len, "list") != 0) {
+        var ids = alloc(DIRENT_ID_MAX * 8);
+        var count = post_list(g_store_buf, ids, DIRENT_ID_MAX);
+        if (count == 0) {
+            send_str(cfd, "(no posts)\r\n");
+        } else {
+            var idx = 0;
+            while (idx < count) {
+                var idbuf[24];
+                var idlen = fmt_int_buf(load64(ids + idx * 8), &idbuf);
+                send_buf(cfd, &idbuf, idlen);
+                send_str(cfd, "\r\n");
+                idx = idx + 1;
+            }
+        }
+        return MODE_COMMAND;
+    }
+
+    if (line_has_prefix(line, len, "read") != 0) {
+        var id = line_parse_int(line, 4, len);
+        if (id < 0) {
+            send_str(cfd, "usage: read <id>\r\n");
+            return MODE_COMMAND;
+        }
+        var body = alloc(POST_MAX_BYTES);
+        var blen = post_read(g_store_buf, id, body, POST_MAX_BYTES);
+        if (blen <= 0) {
+            send_str(cfd, "post not found\r\n");
+            return MODE_COMMAND;
+        }
+        send_buf(cfd, body, blen);
+        # Trailing newline guarantee — operator-supplied post bodies
+        # may or may not end in CRLF.
+        if ((load8(body + blen - 1) & 0xFF) != 10) {
+            send_str(cfd, "\r\n");
+        }
+        return MODE_COMMAND;
+    }
+
+    if (line_has_prefix(line, len, "post") != 0) {
+        send_str(cfd, "Compose post. End with '.' on a line by itself.\r\n");
+        return MODE_POSTING;
+    }
+
+    if (line_has_prefix(line, len, "quit") != 0) {
+        send_str(cfd, "bye\r\n");
+        store64(quit_out, 1);
+        return MODE_COMMAND;
+    }
+    if (line_has_prefix(line, len, "exit") != 0) {
+        send_str(cfd, "bye\r\n");
+        store64(quit_out, 1);
+        return MODE_COMMAND;
+    }
+    if (line_has_prefix(line, len, "bye") != 0) {
+        send_str(cfd, "bye\r\n");
+        store64(quit_out, 1);
+        return MODE_COMMAND;
+    }
+
+    send_str(cfd, "unknown command — type 'help' for the list\r\n");
+    return MODE_COMMAND;
+}
+
+# Finalize a post-compose flow: write the accumulated body, send
+# the assigned ID (or an error). Caller resets post_pos afterward.
+fn session_finalize_post(cfd, body, body_len): i64 {
+    if (body_len <= 0) {
+        send_str(cfd, "(empty post discarded)\r\n");
+        return 0;
+    }
+    var id = post_new(g_store_buf, body, body_len);
+    if (id < 0) {
+        send_str(cfd, "post failed (storage error)\r\n");
+        return 0;
+    }
+    send_str(cfd, "posted as #");
+    var idbuf[24];
+    var idlen = fmt_int_buf(id, &idbuf);
+    send_buf(cfd, &idbuf, idlen);
+    send_str(cfd, "\r\n");
+    return 0;
 }
 
 # Render the colored MOTD into a caller-allocated buffer. Returns
@@ -152,13 +346,20 @@ fn render_motd(buf): i64 {
     return pos;
 }
 
-# Serve one connection. Sends a banner, then runs an IAC-aware
-# read/echo loop until the peer disconnects or sends a graceful close.
+# Serve one connection. Sends MOTD + initial prompt, then runs the
+# M5-B in-session command interpreter (`list` / `read <id>` / `post`
+# / `help` / `quit`) until the peer disconnects or sends `quit`.
 #
-# M1 first-bite shape: refuse all options, echo each data byte back
-# (server-side echo so the client sees what it types when the client
-# itself has WILL ECHO off). Posts / boards / sessions land later;
-# this proves the wire works.
+# Per-byte dispatch: every byte goes through the IAC state machine
+# first (M1), then the data byte (when present) drives the line
+# buffer and mode-aware handler. We announced WILL ECHO at connect
+# (M2-B Q-method), so the server drives the visual display — every
+# typed byte gets echoed before processing.
+#
+# CR / LF handling per telnet NVT (RFC 854): CR is the line
+# terminator; the LF that often follows is paired and silently
+# absorbed. Lone LF also terminates (raw `nc -e` and similar clients
+# send only \n).
 fn handle_client(cfd): i64 {
     # Slowloris defense: bound how long a quiet client can pin the
     # accept-loop worker. recv() returns EWOULDBLOCK after timeout
@@ -181,7 +382,6 @@ fn handle_client(cfd): i64 {
     # MOTD: prefer the operator-supplied file (loaded once at startup
     # via --motd <path>) if present; otherwise render the default
     # bannermanor + darshana MOTD into a per-connection 1 KB buffer.
-    # See `render_motd` above for the default-path provenance.
     if (g_motd_buf != 0) {
         send_buf(cfd, g_motd_buf, g_motd_len);
     } else {
@@ -189,11 +389,20 @@ fn handle_client(cfd): i64 {
         var motd_len = render_motd(motd);
         send_buf(cfd, motd, motd_len);
     }
+    send_str(cfd, "> ");
 
-    # Allocate the recv buffer once.
-    var rxbuf = alloc(RECV_BUF_BYTES);
+    # Per-session state.
+    var rxbuf   = alloc(RECV_BUF_BYTES);
+    var line    = alloc(LINE_BUF_CAP);
+    var line_pos = 0;
+    var post    = alloc(POST_MAX_BYTES);
+    var post_pos = 0;
+    var mode    = MODE_COMMAND;
+    var last_cr = 0;
+    var quit    = alloc(8);
+    store64(quit, 0);
+
     var done = 0;
-
     while (done == 0) {
         var n = sys_read(cfd, rxbuf, RECV_BUF_BYTES);
         # n == 0   : peer closed cleanly (EOF). Graceful exit.
@@ -203,37 +412,107 @@ fn handle_client(cfd): i64 {
             done = 1;
             continue;
         }
+        if (load64(quit) != 0) { done = 1; continue; }
 
-        # Feed each byte through the IAC state machine. IAC responses
-        # (e.g. WONT/DONT for refused options) are drained BEFORE the
-        # next data byte's echo so on-wire ordering matches RFC 854 —
-        # the peer sees option replies in the same temporal sequence
-        # they were elicited. Naive echo policy for M1; line discipline
-        # / LINEMODE land in follow-ups.
         var i = 0;
         while (i < n) {
+            if (load64(quit) != 0) { i = n; continue; }
             var b = load8(rxbuf + i) & 0xFF;
             var ev = telnet_feed(ts, b);
 
+            # Drain any IAC responses queued by the state machine
+            # before processing the data byte — keeps on-wire order
+            # matching RFC 854.
             var tx_len = telnet_tx_len(ts);
             if (tx_len > 0) {
                 send_buf(cfd, telnet_tx_buf(ts), tx_len);
                 telnet_tx_consume(ts);
             }
 
-            if (ev == EV_DATA) {
-                var db = telnet_data_byte(ts);
-                var one[1];
-                store8(&one, db & 0xFF);
-                send_buf(cfd, &one, 1);
-            }
             if (ev == EV_SB) {
-                # NAWS / TERMINAL_TYPE / etc. payloads get parsed
-                # into TelnetState fields here. A follow-up call to
-                # telnet_handle_sb may also queue replies (e.g. a
-                # second TT SEND) — the next loop iteration's
-                # tx-buf drain flushes them.
                 telnet_handle_sb(ts);
+            }
+
+            if (ev == EV_DATA) {
+                var db = telnet_data_byte(ts) & 0xFF;
+                # === CR / LF: line terminator dispatch ===
+                var is_cr = 0;
+                var is_lf = 0;
+                if (db == 13) { is_cr = 1; }
+                if (db == 10) { is_lf = 1; }
+                if (is_cr != 0) {
+                    last_cr = 1;
+                    send_str(cfd, "\r\n");
+                    # Process the line in the current mode
+                    if (mode == MODE_COMMAND) {
+                        mode = session_execute(cfd, line, line_pos, quit);
+                        line_pos = 0;
+                        if (mode == MODE_COMMAND) {
+                            if (load64(quit) == 0) { send_str(cfd, "> "); }
+                        }
+                    } else {
+                        # MODE_POSTING: check if line is exactly "."
+                        if (line_pos == 1) {
+                            if ((load8(line) & 0xFF) == 46) {
+                                session_finalize_post(cfd, post, post_pos);
+                                post_pos = 0;
+                                line_pos = 0;
+                                mode = MODE_COMMAND;
+                                send_str(cfd, "> ");
+                                i = i + 1; continue;
+                            }
+                        }
+                        # Otherwise append line + CRLF to post body
+                        if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
+                            memcpy(post + post_pos, line, line_pos);
+                            post_pos = post_pos + line_pos;
+                            store8(post + post_pos, 13); post_pos = post_pos + 1;
+                            store8(post + post_pos, 10); post_pos = post_pos + 1;
+                        }
+                        line_pos = 0;
+                    }
+                } else { if (is_lf != 0) {
+                    if (last_cr != 0) {
+                        # Paired LF after CR — silently absorbed.
+                        last_cr = 0;
+                    } else {
+                        # Lone LF: treat as line terminator (Unix clients).
+                        send_str(cfd, "\r\n");
+                        if (mode == MODE_COMMAND) {
+                            mode = session_execute(cfd, line, line_pos, quit);
+                            line_pos = 0;
+                            if (mode == MODE_COMMAND) {
+                                if (load64(quit) == 0) { send_str(cfd, "> "); }
+                            }
+                        } else {
+                            if (line_pos == 1) {
+                                if ((load8(line) & 0xFF) == 46) {
+                                    session_finalize_post(cfd, post, post_pos);
+                                    post_pos = 0;
+                                    line_pos = 0;
+                                    mode = MODE_COMMAND;
+                                    send_str(cfd, "> ");
+                                    i = i + 1; continue;
+                                }
+                            }
+                            if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
+                                memcpy(post + post_pos, line, line_pos);
+                                post_pos = post_pos + line_pos;
+                                store8(post + post_pos, 13); post_pos = post_pos + 1;
+                                store8(post + post_pos, 10); post_pos = post_pos + 1;
+                            }
+                            line_pos = 0;
+                        }
+                    }
+                } else {
+                    # === Printable byte: echo + append to line ===
+                    last_cr = 0;
+                    if (line_pos < LINE_BUF_CAP - 1) {
+                        store8(line + line_pos, db);
+                        line_pos = line_pos + 1;
+                        echo_byte(cfd, db);
+                    }
+                } }
             }
             i = i + 1;
         }
@@ -320,7 +599,9 @@ fn cmd_serve(): i64 {
     var port = DEFAULT_PORT;
 
     # Argv scan. Order-insensitive: a positive-integer positional
-    # is taken as the port; --motd consumes the next arg as a path.
+    # is taken as the port; --motd consumes the next arg as an MOTD
+    # path; --store consumes the next arg as the post-storage root
+    # used by the in-session command interpreter (M5-B).
     var i = 2;
     var go = 1;
     while (i < n) {
@@ -333,6 +614,16 @@ fn cmd_serve(): i64 {
                 continue;
             }
             load_motd_file(argv(i + 1));
+            i = i + 2;
+            continue;
+        }
+        if (streq(arg, "--store") != 0) {
+            if (i + 1 >= n) {
+                println("agora serve: --store requires a path argument");
+                go = 0;
+                continue;
+            }
+            g_store_buf = argv(i + 1);
             i = i + 2;
             continue;
         }

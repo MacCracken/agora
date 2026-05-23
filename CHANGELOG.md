@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M5-B: in-session command interpreter over telnet (2026-05-23)
+
+- **Connected-client command loop** — `handle_client` now runs a line-buffered command interpreter after the MOTD instead of the echo-only loop. Supported commands (typed at the `>` prompt):
+  - `help` — list available commands
+  - `list` — print post IDs (one per line)
+  - `read <id>` — print one post body, trailing-CRLF-normalized
+  - `post` — enter compose mode; multi-line input ends with `.` on a line by itself; assigned ID is returned ("posted as #N")
+  - `quit` / `exit` / `bye` — close the session ("bye" then disconnect)
+- **`agora serve` grew `--store <path>`** — same shape and default (`./agora-data/`) as the CLI verbs. Passed through to `handle_client` via the new `g_store_buf` global (set-once-at-startup, parallel to `g_motd_*`).
+- **Session helpers in `src/main.cyr`** (~250 LOC added):
+  - `send_str(cfd, s)` / `echo_byte(cfd, b)` — wire-output convenience
+  - `line_has_prefix(line, len, prefix)` — command dispatch by leading token
+  - `line_parse_int(line, off, len)` — parse `<id>` argument; skips leading whitespace, stops at first non-digit, rejects zero / no-digits
+  - `session_execute(cfd, line, len, quit_out)` — dispatch on the typed line; returns the new mode (`MODE_COMMAND` or `MODE_POSTING`)
+  - `session_finalize_post(cfd, body, len)` — commit the composed body via `post_new`, send "posted as #N" or "post failed (storage error)"
+- **CR/LF discipline per telnet NVT (RFC 854)** — CR is the canonical line terminator; the LF that often follows is paired and silently absorbed via a `last_cr` flag; lone LF also terminates (raw-`nc` clients). Each typed printable byte is echoed (we announced `WILL ECHO` at M2-B). Backspace handling is deferred — typed text isn't editable in-line at M5-B.
+- **Two-mode state machine**:
+  - `MODE_COMMAND` (default): each complete line dispatches to a command
+  - `MODE_POSTING`: each complete line is appended to the post body (with CRLF); a line that's exactly `.` ends the compose flow and commits
+- **End-to-end smoke** — Python TCP client walks every command path:
+  `help` shows the list, empty `list` returns "(no posts)", `post` + multi-line body + `.` returns "posted as #1", `list` reflects the new ID, `read 1` returns the body bytes, `read 99` returns "post not found", `badcmd` returns "unknown command", `quit` returns "bye" + disconnects. Files land in `--store` per ADR 0002 shape.
+- **24-test parser suite + 5-test board suite still green** — this bite is integration-layer code; the IAC state machine and post storage primitives are untouched. Binary 109,992 → 116,232 B (+6,240 B for the command interpreter).
+
 ### Added — M5 ADR 0002 + M5-A: post storage primitives (2026-05-23)
 
 - **`docs/adr/0002-one-file-per-post-storage.md`** — captures the M5 storage-layout decision: one file per post (`<store>/<id>.txt`, monotonic-integer IDs), operator-configurable storage root via `--store <path>` (default `./agora-data/`), plaintext UTF-8 body bytes only. Rejects two alternatives — one-file-per-thread-with-offset-index and SQLite-style WAL — with concrete reasoning. The shape is a strict prefix of the eventual v2.x content-addressed-storage layout (pillar 2 in `roadmap-future.md`): swap the ID-assignment fn, schema stays.
