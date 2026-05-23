@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-23 (M2 close: ANSI BBS aesthetic)
+
+M2 cycle landed end-to-end across three bites — `bnrmr`-rendered AGORA banner embedded as the connection MOTD (M2-A), darshana SGR coloring wrapped around the banner / version / prompt at connection time (M2-B), and `agora serve [port] [--motd <path>]` operator override (M2-C). bannermanor patched 1.0.0 → 1.0.1 the same day so every AGNOS consumer of darshana is on the same `0.5.3` pin. M2-D (NAWS-aware width clamping) remains an optional polish bite — M2 is functionally closed without it.
+
+24-test parser conformance still green. Binary 70,960 B (M1 close) → 85,544 B (M2 close); the +14.6 KB is mostly `lib/darshana.cyr` consumption surface (most DCE-eligible — 243 unreachable fns NOPed at 31,515 B). Bench baseline unchanged from M1 (`telnet/plain_byte` ~10 ns, `subneg_naws` ~100 ns).
+
+### Changed
+
+- `cyrius.cyml [deps]` — added `[deps.darshana]` git dep pinned at `0.5.3` (M2-B). Bannermanor pins the same `0.5.3` at 1.0.1.
+- `src/main.cyr` — version literals (`print_banner` / `cmd_version` / `render_motd` version line) bumped to 0.3.0. Inline-version-string drift remains the known technical-debt item flagged in [0.2.0]; CI's drift-check step (added in 0.2.0) caught us if we'd forgotten.
+- `print_help` updated to document the `--motd` flag.
+
 ### Added — M2-C: `agora serve --motd <path>` operator override (2026-05-23)
 
 - **New flag**: `agora serve [port] [--motd <path>]`. Order-insensitive argv parse — positive-integer positionals still take the port, `--motd` consumes the next arg as a filesystem path.

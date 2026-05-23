@@ -14,7 +14,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 |---|---|---|
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
 | **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
-| **M2** ← in progress | ANSI BBS aesthetic (color, cursor positioning, banners) | bannermanor 1.0.1 ✅ / darshana 0.5.3 ✅ (pinned git dep — functionality is the gate, not the version label) |
+| **M2** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | closed 2026-05-23 at 0.3.0 — three bites: M2-A/B/C. See [`state.md`](state.md#recently-closed). M2-D (NAWS width clamp) deferred as optional polish. |
 | M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ (available 2026-05-23) |
 | M4 | Stored-file deltas + compression | sankoch ≥ 2.2 ✅ (currently 2.2.6) |
 | M5 | Post persistence (boards / threads / messages) | filesystem write target — Linux today; AGNOS gated on 1.33.x ext4 WRITE |

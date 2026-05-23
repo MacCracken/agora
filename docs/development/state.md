@@ -16,8 +16,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.2.0` (2026-05-23) |
-| **Cycle** | M0 + **M1 closed at 0.2.0** (2026-05-23) — cross-platform telnet listener wire-conformant; M2 (ANSI BBS aesthetic) next, gated on darshana ≥ 1.0 |
+| **Released** | `0.3.0` (2026-05-23) |
+| **Cycle** | M0 + M1 (0.2.0) + **M2 closed at 0.3.0** (2026-05-23) — ANSI BBS aesthetic complete: bannermanor MOTD + darshana SGR colors + `--motd` operator override. M3 (inline-image post bodies) is post-M5 in the natural sequence; M5 (post persistence) is the next substantive cycle. |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -71,7 +71,8 @@ Gate state (per [`roadmap.md`](roadmap.md)):
 
 ## Recent shipped
 
-- **0.2.0** (2026-05-23) — M1 close: cross-platform telnet listener. 5-bite cycle (IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness). 24 tests; 70,960 B; first parser baseline at 10 ns/byte hot path. See [`CHANGELOG.md`](../../CHANGELOG.md#020--2026-05-23-m1-close-cross-platform-telnet-listener).
+- **0.3.0** (2026-05-23) — M2 close: ANSI BBS aesthetic. 3-bite cycle (bannermanor MOTD, darshana SGR colors, `--motd` operator override). 24 tests still green; 85,544 B (+14.6 KB from M1 close, most DCE-eligible). bannermanor patched 1.0.1 the same day for ecosystem alignment on darshana 0.5.3. See [`CHANGELOG.md`](../../CHANGELOG.md#030--2026-05-23-m2-close-ansi-bbs-aesthetic).
+- **0.2.0** (2026-05-23) — M1 close: cross-platform telnet listener. 5-bite cycle (IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness). 24 tests; 70,960 B; first parser baseline at 10 ns/byte hot path.
 - **0.1.0** (2026-05-23) — Scaffold ship. argv dispatch + boot banner + 6 stub verbs. 43,216 B binary.
 
 ## Consumers
