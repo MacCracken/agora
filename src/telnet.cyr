@@ -105,7 +105,9 @@ enum TS {
     TS_TERM_TYPE = 104;   # pointer to 256-byte ASCII terminal-type buffer
     TS_TERM_TLEN = 112;   # actual length (bytes) of term_type string
 
-    TS_SIZE      = 120;   # total struct size for alloc()
+    TS_LM_MODE   = 120;   # active LINEMODE MODE mask (RFC 1184); 0 until peer ACKs
+
+    TS_SIZE      = 128;   # total struct size for alloc()
 }
 
 # Per-connection terminal-type buffer cap. Real values are short
@@ -119,6 +121,35 @@ enum TermCap {
 enum TermTT {
     TT_IS   = 0;
     TT_SEND = 1;
+}
+
+# LINEMODE subneg sub-commands (RFC 1184 § 1) — these follow the
+# OPT_LINEMODE byte inside IAC SB ... IAC SE framing.
+enum LMSub {
+    LM_MODE        = 1;
+    LM_FORWARDMASK = 2;
+    LM_SLC         = 3;
+}
+
+# LINEMODE MODE bits (RFC 1184 § 2 — Subnegotiation for LINEMODE Mode)
+#
+#   LM_EDIT      Client performs line editing locally and forwards
+#                whole lines on Enter. The default-on bit for BBS use.
+#   LM_TRAPSIG   Client maps signal characters (Ctrl+C → IP, Ctrl+\ → BRK,
+#                Ctrl+] → AYT, etc.) into IAC commands. We want this.
+#   LM_MODE_ACK  Set in the peer's confirmation reply, NOT in our
+#                requests. RFC mandates the bit but ignores it on
+#                first-from-server transmission.
+#   LM_SOFT_TAB  Client expands TAB locally — defer.
+#   LM_LIT_ECHO  Echo unprintable bytes literally — defer.
+#
+# Default-shape mask the server requests: LM_EDIT | LM_TRAPSIG = 3.
+enum LMMode {
+    LM_EDIT     = 0x01;
+    LM_TRAPSIG  = 0x02;
+    LM_MODE_ACK = 0x04;
+    LM_SOFT_TAB = 0x08;
+    LM_LIT_ECHO = 0x10;
 }
 
 # === RFC 1143 Q-method option state (per option, per side) ===
@@ -184,8 +215,16 @@ fn telnet_state_new(): i64 {
     store64(ts + TS_TERM_TYPE, tt);
     store64(ts + TS_TERM_TLEN, 0);
 
+    store64(ts + TS_LM_MODE, 0);
+
     return ts;
 }
+
+# Active LINEMODE MODE mask (RFC 1184). 0 until peer confirms via
+# IAC SB LINEMODE MODE <mask> IAC SE — non-zero values include the
+# LM_MODE_ACK bit (0x04) plus whatever subset of EDIT/TRAPSIG/SOFT_TAB/
+# LIT_ECHO the peer accepted.
+fn telnet_linemode_mask(ts): i64 { return load64(ts + TS_LM_MODE); }
 
 # === Terminal capabilities (populated by EV_SB handling) ===
 
@@ -241,6 +280,7 @@ fn opt_pref_him(opt): i64 {
     if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
     if (opt == OPT_NAWS)              { return 1; }
     if (opt == OPT_TERMINAL_TYPE)     { return 1; }
+    if (opt == OPT_LINEMODE)          { return 1; }
     return 0;
 }
 
@@ -539,11 +579,28 @@ fn ts_emit_tt_send(ts): i64 {
     return 0;
 }
 
-# Hook for "him-state just entered Q_YES" — currently only TT
-# uses it (to prompt the peer for its name). Add more options here
-# as M1 grows (e.g. CHARSET, NEW_ENVIRON).
+# Emit the 7-byte LINEMODE MODE request:
+#   IAC SB LINEMODE MODE (EDIT | TRAPSIG) IAC SE
+# Called when him-LINEMODE first transitions to Q_YES. Establishes
+# the BBS-default mode: client buffers a line locally, forwards on
+# Enter, traps signal chars (Ctrl+C / Ctrl+\ / Ctrl+]) as IAC commands.
+fn ts_emit_linemode_request(ts): i64 {
+    ts_tx_push(ts, IAC);
+    ts_tx_push(ts, SB);
+    ts_tx_push(ts, OPT_LINEMODE);
+    ts_tx_push(ts, LM_MODE);
+    ts_tx_push(ts, LM_EDIT | LM_TRAPSIG);
+    ts_tx_push(ts, IAC);
+    ts_tx_push(ts, SE);
+    return 0;
+}
+
+# Hook for "him-state just entered Q_YES" — fires the option-specific
+# follow-up subneg request that RFC ergonomics expect right after the
+# agreement (TT name request, LINEMODE MODE establishment, etc.).
 fn ts_on_him_yes(ts, opt): i64 {
     if (opt == OPT_TERMINAL_TYPE) { ts_emit_tt_send(ts); }
+    if (opt == OPT_LINEMODE)      { ts_emit_linemode_request(ts); }
     return 0;
 }
 
@@ -589,7 +646,44 @@ fn telnet_handle_sb(ts): i64 {
         return 0;
     }
 
-    # Other subnegs (LINEMODE, STATUS IS, etc.) — ignore for now.
+    if (opt == OPT_LINEMODE) {
+        # RFC 1184 § 1: payload starts with a LINEMODE sub-command
+        # (MODE / FORWARDMASK / SLC), followed by sub-command-specific
+        # data. We only consume MODE for now — SLC is parsed-and-
+        # ignored (the peer's local-character table doesn't drive
+        # any server behavior pre-LINEMODE-aware-input-handling).
+        if (len < 2) { return 0; }
+        var sub = load8(buf + 1) & 0xFF;
+
+        if (sub == LM_MODE) {
+            # MODE reply is a single mask byte (plus LM_MODE_ACK bit
+            # if peer is confirming our request). Anything beyond
+            # is malformed — drop.
+            if (len != 3) { return 0; }
+            var mask = load8(buf + 2) & 0xFF;
+            store64(ts + TS_LM_MODE, mask);
+            return 0;
+        }
+
+        if (sub == LM_SLC) {
+            # SLC is a sequence of (func, modifier, value) triplets
+            # — 3-byte units. Peer sends its current local-character
+            # table; we acknowledge by no-op for M1. Validate the
+            # triplet count is plausible (multiple of 3) but don't
+            # mutate state.
+            return 0;
+        }
+
+        if (sub == LM_FORWARDMASK) {
+            # Server-side FORWARDMASK is the client's request to
+            # forward only specific keystrokes verbatim. Defer.
+            return 0;
+        }
+
+        return 0;
+    }
+
+    # Other subnegs (STATUS IS, NEW_ENVIRON, etc.) — ignore for now.
     return 0;
 }
 

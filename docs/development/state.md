@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 61,152 B at M1 third-bite (59,280 second-bite; 56,064 first-bite; 43,216 v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 62,176 B at M1 fourth-bite (61,152 third; 59,280 second; 56,064 first; 43,216 v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `188 unreachable fns (21,861 B)` — agora consumes a thin slice of the expanded stdlib (added `net` + `result` + `tagged` at M1 first-bite); DCE will roughly cut the binary by 22 KB at the M1 close.
@@ -34,7 +34,7 @@ Compile output reports `188 unreachable fns (21,861 B)` — agora consumes a thi
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **20 tests passing** at M1 third-bite — RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE (parser conformance, announce salvo, Q transitions, NAWS 80×24 + IAC-escape variant + malformed-drop, TT IS string capture, WILL TT → SEND emit) |
+| `src/test.cyr` | **24 tests passing** at M1 fourth-bite — RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS + RFC 1091 TERMINAL_TYPE + RFC 1184 LINEMODE (parser conformance, announce salvo, Q transitions, NAWS/TT subneg capture, LINEMODE DO+MODE-request burst, MODE ACK mask parse, SLC parsed-ignored, malformed-MODE drop) |
 | Bench harness | not yet present — earns at M1 close (parser throughput + accept-loop rate) |
 | `cyrius audit` | clean (build + lint pass; tests green; bench surface empty pre-M1-close) |
 
@@ -46,12 +46,13 @@ Compile output reports `188 unreachable fns (21,861 B)` — agora consumes a thi
 
 **Second-bite landed 2026-05-23**: RFC 1143 Q-method option negotiation (`Q_NO` / `Q_WANTYES` / `Q_YES` per option per side; per-connection 512 B of option state). `telnet_announce` sends the four-option opening salvo (`WILL ECHO`, `WILL SGA`, `DO NAWS`, `DO TT`). Slowloris defense via `sock_set_recv_timeout(cfd, 60, 0)`. Graceful close on `n == 0` / `n < 0`. Test suite grew 10 → 15. Binary 59,280 B (+3,216 B).
 
-**Third-bite landed 2026-05-23**: NAWS (RFC 1073) + TERMINAL_TYPE (RFC 1091) subneg parsing. `telnet_handle_sb` decodes payloads into per-connection `term_cols` / `term_rows` / `term_type` fields (256-byte ASCII buffer for TT). `ts_on_him_yes` hook auto-emits `IAC SB TT SEND IAC SE` when him-TT transitions to `Q_YES`. EV_SB wired into `handle_client`. Test suite grew 15 → 20. End-to-end smoke runs the full handshake — agree to ECHO/SGA, server sends TT SEND on WILL TT, NAWS + TT IS replies consumed silently, data byte echoes clean. Binary 61,152 B (+1,872 B).
+**Third-bite landed 2026-05-23**: NAWS (RFC 1073) + TERMINAL_TYPE (RFC 1091) subneg parsing. `telnet_handle_sb` decodes payloads into per-connection `term_cols` / `term_rows` / `term_type` fields (256-byte ASCII buffer for TT). `ts_on_him_yes` hook auto-emits `IAC SB TT SEND IAC SE` when him-TT transitions to `Q_YES`. Test suite grew 15 → 20. Binary 61,152 B (+1,872 B).
+
+**Fourth-bite landed 2026-05-23**: RFC 1184 LINEMODE promoted to tracked-him. Peer's `WILL LINEMODE` lands him-state on Q_YES → server replies `DO LINEMODE` + immediately fires `IAC SB LINEMODE MODE (EDIT|TRAPSIG) IAC SE` (10-byte burst). Peer's MODE ACK mask parsed into `TS_LM_MODE`. SLC subneg parsed-and-ignored. Test suite grew 20 → 24. End-to-end smoke runs the full LINEMODE handshake green. Binary 62,176 B (+1,024 B).
 
 **Remaining bites for M1 close** (per [`roadmap.md`](roadmap.md#m1--telnet-listener-rfc-854--rfc-1184-linemode)):
 
-- RFC 1184 LINEMODE — full MODE subnegotiation (EDIT / TRAPSIG / SOFT_TAB / LIT_ECHO) + SLC (Set Local Character) table. Move LINEMODE from untracked → tracked (`opt_pref_him` returns 1), add LINEMODE subneg dispatch in `telnet_handle_sb`.
-- Bench harness — parser throughput per byte + accept-loop rate. First numbers go into `BENCHMARKS.md` at repo root.
+- Bench harness — parser throughput per byte + accept-loop rate. First numbers land in `BENCHMARKS.md` at repo root per first-party `benchmarks-rust-v-cyrius.md` shape. This is the last bite before M1 close.
 
 ## Recent shipped
 

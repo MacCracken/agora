@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M1 fourth-bite: RFC 1184 LINEMODE (2026-05-23)
+
+- **LINEMODE promoted to tracked** — `opt_pref_him(OPT_LINEMODE)` now returns 1. Peer's `WILL LINEMODE` lands him-state on `Q_YES` via the `Q_NO → Q_YES` transition; server replies `IAC DO LINEMODE` (3 bytes) and immediately follows with the MODE-establishment request (7 bytes) for a total 10-byte burst.
+- **`ts_emit_linemode_request`** — composes `IAC SB LINEMODE MODE (LM_EDIT | LM_TRAPSIG) IAC SE`. Mask 0x03 is the BBS default: client buffers a line locally and forwards on Enter; client traps signal characters (Ctrl+C → IP, Ctrl+\ → BRK, Ctrl+] → AYT) as IAC commands. `ts_on_him_yes` dispatches to this on `Q_YES` transition for OPT_LINEMODE (alongside the existing TT SEND emit).
+- **`telnet_handle_sb` LINEMODE dispatch** — sub-command MODE stores the peer's acknowledged mask byte into a new `TS_LM_MODE` field; sub-command SLC is parsed-and-ignored (RFC 1184 § Set Local Character — peer's local-character table doesn't drive server behavior yet); FORWARDMASK deferred. Malformed MODE (not exactly 1 mask byte) silently dropped.
+- **TelnetState grew 1 field** — `TS_LM_MODE` (i64, holds the active LINEMODE mask after peer ACK). Total struct size 120 B → 128 B; per-connection allocation unchanged otherwise.
+- **`telnet_linemode_mask` accessor** — exposes the current LINEMODE mask to consumers; 0 until peer confirms via `IAC SB LINEMODE MODE <mask> IAC SE`.
+- **Tests grew to 24** (was 20) — `t21_will_linemode_emits_mode_request` (10-byte burst: DO LINEMODE + MODE-request), `t22_linemode_mode_ack_parse` (mask 0x07 stored from peer ACK), `t23_linemode_slc_ignored` (SLC parsed-and-ignored, parser recovers to DATA), `t24_linemode_mode_malformed_dropped` (zero-mask-byte MODE silently dropped).
+- **End-to-end smoke** — python TCP client sends `WILL LINEMODE`, server replies with the exact 10-byte burst; client ACKs `MODE 0x07`, server captures silently; subsequent data byte 'L' echoes through cleanly. Binary 61,152 → **62,176 B** (+1,024 B for LINEMODE).
+
 ### Added — M1 third-bite: NAWS + TERMINAL_TYPE subneg parsing (2026-05-23)
 
 - **NAWS payload parser** (RFC 1073) — `telnet_handle_sb` decodes the 4-byte BE-encoded window-size payload into per-connection `term_cols` / `term_rows` fields. IAC-escaped 0xFF bytes inside the payload pass through correctly (already handled by the SB-IAC state). Malformed lengths (not exactly 4 payload bytes) are silently dropped.

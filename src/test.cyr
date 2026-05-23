@@ -549,6 +549,119 @@ fn t20_naws_malformed_dropped(): i64 {
     return 0;
 }
 
+# T21: peer WILL LINEMODE → server replies DO LINEMODE (Q_NO → Q_YES
+# via opt_pref_him=1) and immediately emits the MODE request
+# (IAC SB LINEMODE MODE EDIT|TRAPSIG IAC SE). Total tx_buf bytes: 3 + 7.
+fn t21_will_linemode_emits_mode_request(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_LINEMODE);
+
+    var len = telnet_tx_len(ts);
+    if (len != 10) {
+        test_fail("t21_will_linemode_emits_mode_request", "expected 10 bytes (DO + MODE-req)");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    # 0..2 : IAC DO LINEMODE
+    if ((load8(buf + 0) & 0xFF) != IAC)          { test_fail("t21_will_linemode_emits_mode_request", "byte 0"); return 1; }
+    if ((load8(buf + 1) & 0xFF) != DO)           { test_fail("t21_will_linemode_emits_mode_request", "byte 1"); return 1; }
+    if ((load8(buf + 2) & 0xFF) != OPT_LINEMODE) { test_fail("t21_will_linemode_emits_mode_request", "byte 2"); return 1; }
+    # 3..9 : IAC SB LINEMODE LM_MODE 0x03 IAC SE
+    if ((load8(buf + 3) & 0xFF) != IAC)          { test_fail("t21_will_linemode_emits_mode_request", "byte 3"); return 1; }
+    if ((load8(buf + 4) & 0xFF) != SB)           { test_fail("t21_will_linemode_emits_mode_request", "byte 4"); return 1; }
+    if ((load8(buf + 5) & 0xFF) != OPT_LINEMODE) { test_fail("t21_will_linemode_emits_mode_request", "byte 5"); return 1; }
+    if ((load8(buf + 6) & 0xFF) != LM_MODE)      { test_fail("t21_will_linemode_emits_mode_request", "byte 6"); return 1; }
+    if ((load8(buf + 7) & 0xFF) != 0x03)         { test_fail("t21_will_linemode_emits_mode_request", "byte 7"); return 1; }
+    if ((load8(buf + 8) & 0xFF) != IAC)          { test_fail("t21_will_linemode_emits_mode_request", "byte 8"); return 1; }
+    if ((load8(buf + 9) & 0xFF) != SE)           { test_fail("t21_will_linemode_emits_mode_request", "byte 9"); return 1; }
+    if (opt_him(ts, OPT_LINEMODE) != Q_YES) {
+        test_fail("t21_will_linemode_emits_mode_request", "him-LINEMODE should be Q_YES");
+        return 1;
+    }
+    test_pass("t21_will_linemode_emits_mode_request");
+    return 0;
+}
+
+# T22: peer's MODE ACK subneg parses into TS_LM_MODE.
+# IAC SB LINEMODE MODE 0x07 IAC SE  (EDIT|TRAPSIG|MODE_ACK)
+fn t22_linemode_mode_ack_parse(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_LINEMODE);
+    telnet_feed(ts, LM_MODE);
+    telnet_feed(ts, 0x07);   # EDIT | TRAPSIG | MODE_ACK
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev != EV_SB) {
+        test_fail("t22_linemode_mode_ack_parse", "expected EV_SB");
+        return 1;
+    }
+    telnet_handle_sb(ts);
+    if (telnet_linemode_mask(ts) != 0x07) {
+        test_fail("t22_linemode_mode_ack_parse", "lm_mask should be 0x07");
+        return 1;
+    }
+    test_pass("t22_linemode_mode_ack_parse");
+    return 0;
+}
+
+# T23: peer's SLC subneg is parsed-and-ignored — doesn't change
+# lm_mask and doesn't corrupt the parser. SLC carries triplets
+# (func, mod, val) and can be long; we accept any length.
+fn t23_linemode_slc_ignored(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_LINEMODE);
+    telnet_feed(ts, LM_SLC);
+    # One triplet: func=3 (SLC_IP), mod=0, val=3 (Ctrl+C)
+    telnet_feed(ts, 0x03);
+    telnet_feed(ts, 0x00);
+    telnet_feed(ts, 0x03);
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev != EV_SB) {
+        test_fail("t23_linemode_slc_ignored", "expected EV_SB");
+        return 1;
+    }
+    telnet_handle_sb(ts);
+    if (telnet_linemode_mask(ts) != 0) {
+        test_fail("t23_linemode_slc_ignored", "lm_mask should remain 0");
+        return 1;
+    }
+    # Parser back in DATA — next byte comes through as data
+    var ev2 = telnet_feed(ts, 0x42);
+    if (ev2 != EV_DATA) {
+        test_fail("t23_linemode_slc_ignored", "parser should recover to DATA");
+        return 1;
+    }
+    test_pass("t23_linemode_slc_ignored");
+    return 0;
+}
+
+# T24: malformed MODE subneg (wrong length — 2 bytes instead of 3)
+# silently dropped, lm_mask stays 0.
+fn t24_linemode_mode_malformed_dropped(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    telnet_feed(ts, OPT_LINEMODE);
+    telnet_feed(ts, LM_MODE);
+    # No mask byte — malformed
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SE);
+    telnet_handle_sb(ts);
+    if (telnet_linemode_mask(ts) != 0) {
+        test_fail("t24_linemode_mode_malformed_dropped", "lm_mask must stay 0");
+        return 1;
+    }
+    test_pass("t24_linemode_mode_malformed_dropped");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -594,6 +707,10 @@ fn main(): i64 {
     t18_terminal_type_is();
     t19_will_tt_emits_send();
     t20_naws_malformed_dropped();
+    t21_will_linemode_emits_mode_request();
+    t22_linemode_mode_ack_parse();
+    t23_linemode_slc_ignored();
+    t24_linemode_mode_malformed_dropped();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
