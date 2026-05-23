@@ -80,7 +80,8 @@ fn t02_iac_iac_literal(): i64 {
     return 0;
 }
 
-# T3: IAC WILL ECHO triggers IAC DONT ECHO response (naive refuse).
+# T3: IAC WILL ECHO from client triggers IAC DONT ECHO response —
+# Q-method: him_ECHO=NO is our preference (we want US to echo, not him).
 fn t03_will_echo_refused(): i64 {
     var ts = telnet_state_new();
     telnet_feed(ts, IAC);
@@ -108,12 +109,18 @@ fn t03_will_echo_refused(): i64 {
         test_fail("t03_will_echo_refused", "byte 2 should be OPT_ECHO");
         return 1;
     }
+    if (opt_him(ts, OPT_ECHO) != Q_NO) {
+        test_fail("t03_will_echo_refused", "him-ECHO state should stay Q_NO");
+        return 1;
+    }
     test_pass("t03_will_echo_refused");
     return 0;
 }
 
-# T4: IAC DO SUPPRESS_GO_AHEAD triggers IAC WONT SUPPRESS_GO_AHEAD response.
-fn t04_do_sga_refused(): i64 {
+# T4: IAC DO SGA from client triggers IAC WILL SGA — Q-method:
+# us_SGA=YES is our preference (modern char-at-a-time mode), so we
+# agree on the spot. Replaces the v0.1 naive-refuse-everything shape.
+fn t04_do_sga_agreed(): i64 {
     var ts = telnet_state_new();
     telnet_feed(ts, IAC);
     telnet_feed(ts, DO);
@@ -121,16 +128,20 @@ fn t04_do_sga_refused(): i64 {
 
     var len = telnet_tx_len(ts);
     if (len != 3) {
-        test_fail("t04_do_sga_refused", "tx_len should be 3");
+        test_fail("t04_do_sga_agreed", "tx_len should be 3");
         return 1;
     }
     var buf = telnet_tx_buf(ts);
     var b1 = load8(buf + 1) & 0xFF;
-    if (b1 != WONT) {
-        test_fail("t04_do_sga_refused", "verb should be WONT for DO");
+    if (b1 != WILL) {
+        test_fail("t04_do_sga_agreed", "verb should be WILL for tracked us-pref");
         return 1;
     }
-    test_pass("t04_do_sga_refused");
+    if (opt_us(ts, OPT_SUPPRESS_GO_AHEAD) != Q_YES) {
+        test_fail("t04_do_sga_agreed", "us-SGA state should be Q_YES after agreement");
+        return 1;
+    }
+    test_pass("t04_do_sga_agreed");
     return 0;
 }
 
@@ -268,22 +279,148 @@ fn t09_subneg_malformed_recovers(): i64 {
     return 0;
 }
 
-# T10: tx_buf drain / consume cycle resets length to 0.
-fn t10_tx_consume_resets(): i64 {
+# T10: telnet_announce queues the four-option opening salvo and
+# parks each tracked option in Q_WANTYES on the appropriate side.
+fn t10_announce_salvo(): i64 {
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+
+    var len = telnet_tx_len(ts);
+    if (len != 12) {
+        test_fail("t10_announce_salvo", "expected 12 bytes (4 × IAC verb opt)");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    # Order: WILL ECHO, WILL SGA, DO NAWS, DO TT
+    if ((load8(buf + 0) & 0xFF) != IAC)                    { test_fail("t10_announce_salvo", "byte 0");  return 1; }
+    if ((load8(buf + 1) & 0xFF) != WILL)                   { test_fail("t10_announce_salvo", "byte 1");  return 1; }
+    if ((load8(buf + 2) & 0xFF) != OPT_ECHO)               { test_fail("t10_announce_salvo", "byte 2");  return 1; }
+    if ((load8(buf + 3) & 0xFF) != IAC)                    { test_fail("t10_announce_salvo", "byte 3");  return 1; }
+    if ((load8(buf + 4) & 0xFF) != WILL)                   { test_fail("t10_announce_salvo", "byte 4");  return 1; }
+    if ((load8(buf + 5) & 0xFF) != OPT_SUPPRESS_GO_AHEAD)  { test_fail("t10_announce_salvo", "byte 5");  return 1; }
+    if ((load8(buf + 6) & 0xFF) != IAC)                    { test_fail("t10_announce_salvo", "byte 6");  return 1; }
+    if ((load8(buf + 7) & 0xFF) != DO)                     { test_fail("t10_announce_salvo", "byte 7");  return 1; }
+    if ((load8(buf + 8) & 0xFF) != OPT_NAWS)               { test_fail("t10_announce_salvo", "byte 8");  return 1; }
+    if ((load8(buf + 9) & 0xFF) != IAC)                    { test_fail("t10_announce_salvo", "byte 9");  return 1; }
+    if ((load8(buf + 10) & 0xFF) != DO)                    { test_fail("t10_announce_salvo", "byte 10"); return 1; }
+    if ((load8(buf + 11) & 0xFF) != OPT_TERMINAL_TYPE)     { test_fail("t10_announce_salvo", "byte 11"); return 1; }
+
+    # All four parked in Q_WANTYES on the right side
+    if (opt_us(ts, OPT_ECHO) != Q_WANTYES)                 { test_fail("t10_announce_salvo", "us-ECHO not WANTYES");  return 1; }
+    if (opt_us(ts, OPT_SUPPRESS_GO_AHEAD) != Q_WANTYES)    { test_fail("t10_announce_salvo", "us-SGA not WANTYES");   return 1; }
+    if (opt_him(ts, OPT_NAWS) != Q_WANTYES)                { test_fail("t10_announce_salvo", "him-NAWS not WANTYES"); return 1; }
+    if (opt_him(ts, OPT_TERMINAL_TYPE) != Q_WANTYES)       { test_fail("t10_announce_salvo", "him-TT not WANTYES");   return 1; }
+
+    test_pass("t10_announce_salvo");
+    return 0;
+}
+
+# T11: post-announce, peer's DO ECHO reply is silent agreement —
+# us-state moves WANTYES → YES, no reply on the wire.
+fn t11_announce_then_do_silent(): i64 {
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+    telnet_tx_consume(ts);  # drain announce salvo
+
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, DO);
+    telnet_feed(ts, OPT_ECHO);
+
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t11_announce_then_do_silent", "WANTYES→YES must be silent");
+        return 1;
+    }
+    if (opt_us(ts, OPT_ECHO) != Q_YES) {
+        test_fail("t11_announce_then_do_silent", "us-ECHO should be Q_YES after agreement");
+        return 1;
+    }
+    test_pass("t11_announce_then_do_silent");
+    return 0;
+}
+
+# T12: post-announce, peer's DONT ECHO reply (refusal) silently
+# moves us-state back to NO with no on-wire response.
+fn t12_announce_then_dont_silent(): i64 {
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+    telnet_tx_consume(ts);
+
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, DONT);
+    telnet_feed(ts, OPT_ECHO);
+
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t12_announce_then_dont_silent", "WANTYES→NO must be silent");
+        return 1;
+    }
+    if (opt_us(ts, OPT_ECHO) != Q_NO) {
+        test_fail("t12_announce_then_dont_silent", "us-ECHO should be Q_NO after refusal");
+        return 1;
+    }
+    test_pass("t12_announce_then_dont_silent");
+    return 0;
+}
+
+# T13: untracked option (STATUS, code 5) still naive-refuses —
+# Q machine only applies to options we declared a preference for.
+fn t13_untracked_option_refused(): i64 {
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_STATUS);
+
+    if (telnet_tx_len(ts) != 3) {
+        test_fail("t13_untracked_option_refused", "expected 3-byte refuse reply");
+        return 1;
+    }
+    var buf = telnet_tx_buf(ts);
+    if ((load8(buf + 1) & 0xFF) != DONT) {
+        test_fail("t13_untracked_option_refused", "untracked WILL must DONT");
+        return 1;
+    }
+    test_pass("t13_untracked_option_refused");
+    return 0;
+}
+
+# T14: peer's WILL NAWS reply to our announce silently parks
+# him-NAWS in Q_YES.
+fn t14_announce_then_will_silent(): i64 {
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+    telnet_tx_consume(ts);
+
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, OPT_NAWS);
+
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t14_announce_then_will_silent", "WANTYES→YES on him must be silent");
+        return 1;
+    }
+    if (opt_him(ts, OPT_NAWS) != Q_YES) {
+        test_fail("t14_announce_then_will_silent", "him-NAWS should be Q_YES");
+        return 1;
+    }
+    test_pass("t14_announce_then_will_silent");
+    return 0;
+}
+
+# T15: tx_buf drain / consume cycle resets length to 0.
+fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
     telnet_feed(ts, IAC);
     telnet_feed(ts, WILL);
     telnet_feed(ts, OPT_ECHO);
     if (telnet_tx_len(ts) != 3) {
-        test_fail("t10_tx_consume_resets", "expected tx_len 3 before consume");
+        test_fail("t15_tx_consume_resets", "expected tx_len 3 before consume");
         return 1;
     }
     telnet_tx_consume(ts);
     if (telnet_tx_len(ts) != 0) {
-        test_fail("t10_tx_consume_resets", "tx_len should be 0 after consume");
+        test_fail("t15_tx_consume_resets", "tx_len should be 0 after consume");
         return 1;
     }
-    test_pass("t10_tx_consume_resets");
+    test_pass("t15_tx_consume_resets");
     return 0;
 }
 
@@ -296,13 +433,18 @@ fn main(): i64 {
     t01_plain_data();
     t02_iac_iac_literal();
     t03_will_echo_refused();
-    t04_do_sga_refused();
+    t04_do_sga_agreed();
     t05_nop_consumed();
     t06_subneg_basic();
     t07_subneg_escaped_iac();
     t08_mixed_data_iac();
     t09_subneg_malformed_recovers();
-    t10_tx_consume_resets();
+    t10_announce_salvo();
+    t11_announce_then_do_silent();
+    t12_announce_then_dont_silent();
+    t13_untracked_option_refused();
+    t14_announce_then_will_silent();
+    t15_tx_consume_resets();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

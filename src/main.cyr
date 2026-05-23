@@ -23,6 +23,10 @@ enum AgoraDefaults {
     DEFAULT_PORT      = 2323;
     LISTEN_BACKLOG    = 16;
     RECV_BUF_BYTES    = 4096;
+    # Slowloris timeout — caps how long a quiet client can pin an
+    # accept-loop worker. 60s of no traffic ends the connection.
+    # Tuned for human-paced BBS use; trim for higher fanout.
+    RECV_TIMEOUT_SECS = 60;
 }
 
 fn print_banner(): i64 {
@@ -75,8 +79,23 @@ fn send_buf(cfd, buf, len): i64 {
 # itself has WILL ECHO off). Posts / boards / sessions land later;
 # this proves the wire works.
 fn handle_client(cfd): i64 {
+    # Slowloris defense: bound how long a quiet client can pin the
+    # accept-loop worker. recv() returns EWOULDBLOCK after timeout
+    # with no traffic, which we treat as a clean disconnect.
+    sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
+
     # Per-connection telnet state.
     var ts = telnet_state_new();
+
+    # Open with the preferred-options salvo (IAC WILL ECHO / WILL SGA
+    # / DO NAWS / DO TERMINAL_TYPE). Send before the banner so clients
+    # negotiate before any application bytes flow.
+    telnet_announce(ts);
+    var tx_len_ann = telnet_tx_len(ts);
+    if (tx_len_ann > 0) {
+        send_buf(cfd, telnet_tx_buf(ts), tx_len_ann);
+        telnet_tx_consume(ts);
+    }
 
     # Banner. RFC 854 doesn't require CR-LF before negotiation, but
     # most clients are friendlier when the first bytes are printable.
@@ -89,6 +108,9 @@ fn handle_client(cfd): i64 {
 
     while (done == 0) {
         var n = sys_read(cfd, rxbuf, RECV_BUF_BYTES);
+        # n == 0   : peer closed cleanly (EOF). Graceful exit.
+        # n  < 0   : socket error or SO_RCVTIMEO fired. Treat as
+        #            disconnect — slowloris defense.
         if (n <= 0) {
             done = 1;
             continue;

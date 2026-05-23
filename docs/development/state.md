@@ -25,16 +25,16 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 56,064 B at M1 first-bite (was 43,216 B at v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 59,280 B at M1 second-bite (56,064 B first-bite; 43,216 B v0.1.0 scaffold) | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
-Compile output reports `190 unreachable fns (22,412 B)` — agora consumes a thin slice of the now-expanded stdlib (added `net` + `result` + `tagged` for M1); DCE will roughly cut the binary by 22 KB at the M1 close.
+Compile output reports `188 unreachable fns (21,861 B)` — agora consumes a thin slice of the expanded stdlib (added `net` + `result` + `tagged` at M1 first-bite); DCE will roughly cut the binary by 22 KB at the M1 close.
 
 ## Tests + benchmarks
 
 | Surface | Status |
 |---|---|
-| `src/test.cyr` | **10 tests passing** at M1 first-bite — RFC 854 IAC sequences (plain data, IAC IAC literal, WILL/DO refusal, NOP, subneg collect, escaped IAC in SB, malformed-SB recovery, tx drain) |
+| `src/test.cyr` | **15 tests passing** at M1 second-bite — RFC 854 IAC sequences + RFC 1143 Q-method (plain data, IAC IAC literal, WILL ECHO refused per him-pref, DO SGA agreed per us-pref, NOP, subneg collect, escaped IAC in SB, malformed-SB recovery, announce salvo, agreement silence, refusal silence, untracked-option fallthrough, tx drain) |
 | Bench harness | not yet present — earns at M1 close (parser throughput + accept-loop rate) |
 | `cyrius audit` | clean (build + lint pass; tests green; bench surface empty pre-M1-close) |
 
@@ -42,14 +42,15 @@ Compile output reports `190 unreachable fns (22,412 B)` — agora consumes a thi
 
 **M1 — Telnet listener (RFC 854 + LINEMODE 1184)**, cross-platform via `lib/net.cyr`.
 
-**First-bite landed 2026-05-23**: IAC parser (`src/telnet.cyr`) + naive-refuse option negotiation + listener loop in `cmd_serve` + 10-test conformance suite. End-to-end smoke green — python TCP client receives banner, server refuses options in RFC-conformant order, plain data bytes echo. Binary 56,064 B.
+**First-bite landed 2026-05-23**: IAC parser (`src/telnet.cyr`) + naive-refuse option negotiation + listener loop in `cmd_serve` + 10-test conformance suite. Binary 56,064 B.
+
+**Second-bite landed 2026-05-23**: RFC 1143 Q-method option negotiation (`Q_NO` / `Q_WANTYES` / `Q_YES` per option per side; per-connection 512 B of option state). `telnet_announce` sends the four-option opening salvo (`WILL ECHO`, `WILL SGA`, `DO NAWS`, `DO TT`). Slowloris defense via `sock_set_recv_timeout(cfd, 60, 0)`. Graceful close on `n == 0` / `n < 0`. Test suite grew 10 → 15. End-to-end smoke confirms announce-then-silent-agreement on the wire. Binary 59,280 B (+3,216 B).
 
 **Remaining bites for M1 close** (per [`roadmap.md`](roadmap.md#m1--telnet-listener-rfc-854--rfc-1184-linemode)):
 
-- Real option negotiation per RFC 1143 (Q method) — agree to `WILL SUPPRESS_GO_AHEAD`, `WILL ECHO`, request `DO TERMINAL_TYPE` + `DO NAWS`.
-- RFC 1184 LINEMODE state machine — MODE subnegotiation (EDIT / TRAPSIG / SOFT_TAB / LIT_ECHO), SLC table.
-- Connection lifecycle — graceful close on EOF, slowloris defense via `sock_set_recv_timeout`.
-- Bench harness — parser throughput + accept-loop rate.
+- **NAWS / TERMINAL_TYPE subneg consumption** — when peer agrees to our `DO NAWS` and sends `IAC SB NAWS w1 w2 h1 h2 IAC SE`, parse the 4-byte payload into per-connection `term_cols` / `term_rows` fields. Same shape for TERMINAL_TYPE `IS` reply.
+- RFC 1184 LINEMODE — full MODE subnegotiation (EDIT / TRAPSIG / SOFT_TAB / LIT_ECHO) + SLC (Set Local Character) table. Gated on us deciding LINEMODE is preferred; currently untracked so peer's `WILL LINEMODE` gets a `DONT`.
+- Bench harness — parser throughput per byte + accept-loop rate.
 
 ## Recent shipped
 

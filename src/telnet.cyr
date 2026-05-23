@@ -97,7 +97,27 @@ enum TS {
     TS_SB_CAP    = 56;    # capacity (bytes)
     TS_SB_LEN    = 64;    # bytes currently accumulated
 
-    TS_SIZE      = 72;    # total struct size for alloc()
+    TS_OPT_US    = 72;    # pointer to 256-byte us-side option state (RFC 1143 Q)
+    TS_OPT_HIM   = 80;    # pointer to 256-byte him-side option state
+
+    TS_SIZE      = 88;    # total struct size for alloc()
+}
+
+# === RFC 1143 Q-method option state (per option, per side) ===
+#
+# Three states are sufficient for a server that:
+#   1. Announces its preferences on connect
+#   2. Holds those preferences forever (never changes mind)
+#   3. Refuses anything else
+#
+# The full RFC 1143 machine has six states (NO, WANTNO,
+# WANTNO_OPPOSITE, WANTYES, WANTYES_OPPOSITE, YES) but the
+# OPPOSITE variants only matter when a side changes preference
+# mid-conversation. We never do that, so they collapse out.
+enum OptQ {
+    Q_NO      = 0;
+    Q_WANTYES = 1;
+    Q_YES     = 2;
 }
 
 # Minimum capacities — tuned to RFC requirements:
@@ -112,10 +132,17 @@ enum TelCap {
 }
 
 # Allocate + initialize a fresh TelnetState. Caller owns the memory.
+# Option-state arrays are zero-initialized — Q_NO == 0 — so every
+# option starts in the Q_NO state until announce/peer activity moves
+# it. memset to 0 is required because cyrius alloc() does not zero.
 fn telnet_state_new(): i64 {
     var ts = alloc(TS_SIZE);
     var tx = alloc(TX_BUF_CAP);
     var sb = alloc(SB_BUF_CAP);
+    var ou = alloc(256);
+    var oh = alloc(256);
+    memset(ou, 0, 256);
+    memset(oh, 0, 256);
 
     store64(ts + TS_STATE,    ST_DATA);
     store64(ts + TS_VERB,     0);
@@ -129,7 +156,69 @@ fn telnet_state_new(): i64 {
     store64(ts + TS_SB_CAP, SB_BUF_CAP);
     store64(ts + TS_SB_LEN, 0);
 
+    store64(ts + TS_OPT_US,  ou);
+    store64(ts + TS_OPT_HIM, oh);
+
     return ts;
+}
+
+# === Per-option Q-state accessors ===
+
+fn opt_us(ts, opt): i64 {
+    return load8(load64(ts + TS_OPT_US) + (opt & 0xFF)) & 0xFF;
+}
+
+fn opt_him(ts, opt): i64 {
+    return load8(load64(ts + TS_OPT_HIM) + (opt & 0xFF)) & 0xFF;
+}
+
+fn opt_set_us(ts, opt, state): i64 {
+    store8(load64(ts + TS_OPT_US) + (opt & 0xFF), state & 0xFF);
+    return 0;
+}
+
+fn opt_set_him(ts, opt, state): i64 {
+    store8(load64(ts + TS_OPT_HIM) + (opt & 0xFF), state & 0xFF);
+    return 0;
+}
+
+# === Server-side option preferences ===
+#
+# Returns 1 if we want us=YES (we will perform <opt>) for this option,
+# 0 otherwise. Drives both telnet_announce() and the per-event Q
+# transitions on receive WILL/DO.
+#
+# Policy:
+#   ECHO   us=YES — server echoes user input (BBS standard)
+#   SGA    us=YES — server suppresses go-ahead (modern char-at-a-time)
+#   others us=NO
+fn opt_pref_us(opt): i64 {
+    if (opt == OPT_ECHO)              { return 1; }
+    if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
+    return 0;
+}
+
+# Returns 1 if we want him=YES (peer will perform <opt>) for this option.
+#
+# Policy:
+#   SGA    him=YES — both sides suppress GA
+#   NAWS   him=YES — we want client window size
+#   TT     him=YES — we want client terminal type
+#   others him=NO
+fn opt_pref_him(opt): i64 {
+    if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
+    if (opt == OPT_NAWS)              { return 1; }
+    if (opt == OPT_TERMINAL_TYPE)     { return 1; }
+    return 0;
+}
+
+# Returns 1 if either us or him preference is set for this option —
+# i.e., the option is tracked by the Q machine. Untracked options
+# fall through to naive-refuse in the parser.
+fn opt_tracked(opt): i64 {
+    if (opt_pref_us(opt)  != 0) { return 1; }
+    if (opt_pref_him(opt) != 0) { return 1; }
+    return 0;
 }
 
 # Push one byte onto the response buffer. Silently drops if full —
@@ -183,21 +272,117 @@ fn telnet_sb_len(ts): i64 { return load64(ts + TS_SB_LEN); }
 # Read the last emitted data byte (only valid when feed returned EV_DATA).
 fn telnet_data_byte(ts): i64 { return load64(ts + TS_DATA_OUT); }
 
-# Compose a 3-byte IAC response: IAC <verb> <opt>. Used for refusing
-# options under the naive-refuse pattern (every DO -> WONT, every WILL
-# -> DONT). Refuse-by-default means we never accidentally agree to
-# options we don't implement.
-fn telnet_respond_refuse(ts, verb, opt): i64 {
+# Compose a 3-byte IAC response: IAC <verb> <opt>.
+fn ts_emit_iac3(ts, verb, opt): i64 {
     ts_tx_push(ts, IAC);
+    ts_tx_push(ts, verb & 0xFF);
+    ts_tx_push(ts, opt  & 0xFF);
+    return 0;
+}
+
+# Naive-refuse handler for untracked options. Every WILL → DONT,
+# every DO → WONT, WONT/DONT silent. Defensive default per RFC 1143.
+fn telnet_respond_refuse(ts, verb, opt): i64 {
     if (verb == DO) {
-        ts_tx_push(ts, WONT);
-    } else {
-        # WILL / WONT / DONT all refused-by-symmetry. Defensive: any
-        # verb we don't handle gets a DONT reply per RFC 1143's
-        # "be conservative in what you send" guidance.
-        ts_tx_push(ts, DONT);
+        ts_emit_iac3(ts, WONT, opt);
+        return 0;
     }
-    ts_tx_push(ts, opt & 0xFF);
+    if (verb == WILL) {
+        ts_emit_iac3(ts, DONT, opt);
+        return 0;
+    }
+    # WONT / DONT — already-refused state. No response needed.
+    return 0;
+}
+
+# Q-method dispatch for a single IAC verb + option.
+#
+# Reads the current state for the relevant side (us-state for DO/DONT
+# verbs, him-state for WILL/WONT verbs), runs the transition per
+# RFC 1143 § Q method, and emits the reply on the tx buffer.
+#
+# Untracked options route to naive-refuse — we never accidentally agree
+# to anything we haven't preferred.
+fn telnet_handle_negotiation(ts, verb, opt): i64 {
+    opt = opt & 0xFF;
+
+    if (opt_tracked(opt) == 0) {
+        telnet_respond_refuse(ts, verb, opt);
+        return 0;
+    }
+
+    # WILL <opt>: peer announces "I will do <opt>". Affects him-state.
+    if (verb == WILL) {
+        var sh = opt_him(ts, opt);
+        if (sh == Q_NO) {
+            if (opt_pref_him(opt) != 0) {
+                opt_set_him(ts, opt, Q_YES);
+                ts_emit_iac3(ts, DO, opt);
+            } else {
+                ts_emit_iac3(ts, DONT, opt);
+            }
+            return 0;
+        }
+        if (sh == Q_WANTYES) {
+            opt_set_him(ts, opt, Q_YES);
+            # no reply — we previously asked; this is the confirmation
+            return 0;
+        }
+        # Q_YES — already agreed; no reply
+        return 0;
+    }
+
+    # WONT <opt>: peer refuses / abandons <opt>. Affects him-state.
+    if (verb == WONT) {
+        var sh = opt_him(ts, opt);
+        if (sh == Q_YES) {
+            opt_set_him(ts, opt, Q_NO);
+            ts_emit_iac3(ts, DONT, opt);
+            return 0;
+        }
+        if (sh == Q_WANTYES) {
+            opt_set_him(ts, opt, Q_NO);
+            # no reply — peer refused our announce; accept silently
+            return 0;
+        }
+        # Q_NO — already off; no reply
+        return 0;
+    }
+
+    # DO <opt>: peer asks "please you do <opt>". Affects us-state.
+    if (verb == DO) {
+        var su = opt_us(ts, opt);
+        if (su == Q_NO) {
+            if (opt_pref_us(opt) != 0) {
+                opt_set_us(ts, opt, Q_YES);
+                ts_emit_iac3(ts, WILL, opt);
+            } else {
+                ts_emit_iac3(ts, WONT, opt);
+            }
+            return 0;
+        }
+        if (su == Q_WANTYES) {
+            opt_set_us(ts, opt, Q_YES);
+            return 0;
+        }
+        return 0;
+    }
+
+    # DONT <opt>: peer asks "please stop doing <opt>". Affects us-state.
+    if (verb == DONT) {
+        var su = opt_us(ts, opt);
+        if (su == Q_YES) {
+            opt_set_us(ts, opt, Q_NO);
+            ts_emit_iac3(ts, WONT, opt);
+            return 0;
+        }
+        if (su == Q_WANTYES) {
+            opt_set_us(ts, opt, Q_NO);
+            return 0;
+        }
+        return 0;
+    }
+
     return 0;
 }
 
@@ -267,7 +452,7 @@ fn telnet_feed(ts, b): i64 {
     if (state == ST_OPT) {
         # We just saw IAC <verb>; b is the option code.
         var verb = load64(ts + TS_VERB);
-        telnet_respond_refuse(ts, verb, b);
+        telnet_handle_negotiation(ts, verb, b);
         store64(ts + TS_STATE, ST_DATA);
         return EV_NONE;
     }
@@ -307,22 +492,32 @@ fn telnet_feed(ts, b): i64 {
     return EV_NONE;
 }
 
-# Emit the server-side "preferred options" opening salvo. Called once
-# per connection just after accept. The Q method (RFC 1143) lets us
-# announce our preferences without driving WILL/WONT loops.
+# Emit the server-side preferred-options salvo. Called once per
+# connection just after accept(). Drives our four tracked options
+# into the Q_WANTYES state and queues the four 3-byte announcements
+# onto the tx buffer; the caller flushes after telnet_announce
+# returns. The peer's WILL/WONT or DO/DONT replies are then absorbed
+# by telnet_handle_negotiation via the WANTYES → YES transition (or
+# WANTYES → NO if the peer refuses).
 #
-# M1 first-bite policy: refuse-by-default for option negotiation. We
-# announce nothing on connect — the client's first move drives the
-# conversation, and we WONT/DONT everything. A follow-up bite will
-# upgrade this to:
+# We announce:
 #
+#   IAC WILL ECHO                (server echoes input — BBS standard)
 #   IAC WILL SUPPRESS_GO_AHEAD   (modern char-at-a-time mode)
-#   IAC WILL ECHO                (server echoes input)
-#   IAC DO   NAWS                (window size for future redraw)
-#   IAC DO   TERMINAL_TYPE       (so we know what we're talking to)
-#
-# Right now we send nothing — the connection is usable as a raw
-# byte pipe, which is enough for the M1 banner test.
+#   IAC DO   NAWS                (we want the window size)
+#   IAC DO   TERMINAL_TYPE       (we want the terminal type)
 fn telnet_announce(ts): i64 {
+    opt_set_us(ts, OPT_ECHO, Q_WANTYES);
+    ts_emit_iac3(ts, WILL, OPT_ECHO);
+
+    opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_WANTYES);
+    ts_emit_iac3(ts, WILL, OPT_SUPPRESS_GO_AHEAD);
+
+    opt_set_him(ts, OPT_NAWS, Q_WANTYES);
+    ts_emit_iac3(ts, DO, OPT_NAWS);
+
+    opt_set_him(ts, OPT_TERMINAL_TYPE, Q_WANTYES);
+    ts_emit_iac3(ts, DO, OPT_TERMINAL_TYPE);
+
     return 0;
 }
