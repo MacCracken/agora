@@ -1061,7 +1061,7 @@ fn t48_post_reply_to_missing_returns_zero(): i64 {
 # omits it when 0. Round-trip via post_reply_to.
 fn t49_format_with_reply_to_header(): i64 {
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    var flen = post_format_with_headers("test", 42, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    var flen = post_format_with_headers("test", 42, 0, 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
     if (flen < 0) {
         test_fail("t49_format_with_reply_to_header", "format returned -1");
         return 1;
@@ -1072,7 +1072,7 @@ fn t49_format_with_reply_to_header(): i64 {
         return 1;
     }
     # Re-test without reply_to → no header → 0
-    var flen2 = post_format_with_headers("test", 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    var flen2 = post_format_with_headers("test", 0, 0, 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
     if (flen2 < 0) {
         test_fail("t49_format_with_reply_to_header", "format-no-reply returned -1");
         return 1;
@@ -1413,6 +1413,90 @@ fn t63_fingerprint_of_rfc8032_v1_pk(): i64 {
     return 0;
 }
 
+# === M6-E From-header round-trip ===
+
+# T64: format_with_headers writes a `From: <handle> <fp16>` line
+# when both from_handle and from_fp are non-empty cstrings.
+fn t64_format_with_from_header(): i64 {
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var flen = post_format_with_headers("subj", 0, "alice", "deadbeef12345678", "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    if (flen < 0) {
+        test_fail("t64_format_with_from_header", "format returned -1");
+        return 1;
+    }
+    # The header block should contain the literal "From: alice deadbeef12345678\r\n"
+    var needle = "From: alice deadbeef12345678";
+    var nlen = strlen(needle);
+    # Linear scan
+    var i = 0;
+    var found = 0;
+    while (i + nlen <= flen) {
+        if (memeq(fbuf + i, needle, nlen) == 1) {
+            found = 1;
+            i = flen;
+            continue;
+        }
+        i = i + 1;
+    }
+    if (found == 0) {
+        test_fail("t64_format_with_from_header", "From line missing");
+        return 1;
+    }
+    test_pass("t64_format_with_from_header");
+    return 0;
+}
+
+# T65: post_from extracts handle + fp from a well-formed header block.
+fn t65_post_from_extracts(): i64 {
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var flen = post_format_with_headers("subj", 0, "bob", "0123456789abcdef", "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    var hbuf[33];
+    var fpbuf[17];
+    var ok = post_from(fbuf, flen, &hbuf, ACCOUNT_HANDLE_BUF, &fpbuf, ACCOUNT_FP_BUF_BYTES);
+    if (ok != 1) {
+        test_fail("t65_post_from_extracts", "post_from returned 0");
+        return 1;
+    }
+    if (streq(&hbuf, "bob") == 0) {
+        test_fail("t65_post_from_extracts", "handle mismatch");
+        return 1;
+    }
+    if (streq(&fpbuf, "0123456789abcdef") == 0) {
+        test_fail("t65_post_from_extracts", "fp mismatch");
+        return 1;
+    }
+    test_pass("t65_post_from_extracts");
+    return 0;
+}
+
+# T66: post_from on a header block without From → returns 0,
+# writes empty cstrings to both out buffers (anonymous post).
+fn t66_post_from_absent_is_anonymous(): i64 {
+    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    # Anonymous (from_handle = 0): no From header written
+    var flen = post_format_with_headers("subj", 0, 0, 0, "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    var hbuf[33];
+    var fpbuf[17];
+    # Pre-fill to detect that they get zeroed
+    store8(&hbuf, 0x41);
+    store8(&fpbuf, 0x41);
+    var ok = post_from(fbuf, flen, &hbuf, ACCOUNT_HANDLE_BUF, &fpbuf, ACCOUNT_FP_BUF_BYTES);
+    if (ok != 0) {
+        test_fail("t66_post_from_absent_is_anonymous", "expected 0");
+        return 1;
+    }
+    if ((load8(&hbuf) & 0xFF) != 0) {
+        test_fail("t66_post_from_absent_is_anonymous", "handle not NUL-zeroed");
+        return 1;
+    }
+    if ((load8(&fpbuf) & 0xFF) != 0) {
+        test_fail("t66_post_from_absent_is_anonymous", "fp not NUL-zeroed");
+        return 1;
+    }
+    test_pass("t66_post_from_absent_is_anonymous");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1482,6 +1566,9 @@ fn main(): i64 {
     t61_parse_auth_sig_no_space();
     t62_seed_to_pk_rfc8032_v1();
     t63_fingerprint_of_rfc8032_v1_pk();
+    t64_format_with_from_header();
+    t65_post_from_extracts();
+    t66_post_from_absent_is_anonymous();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

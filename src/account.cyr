@@ -266,6 +266,55 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 # as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
 # future bite may add a `<store>/.users/.by-handle/<handle> → <fp>`
 # symlink index if a real deployment hits the scale.
+# === From-header parsing (M6-E, ADR 0006) ===
+#
+# `From: <handle> <fp16>\r\n` in the RFC-822 header block. Handle
+# and fp are split on the first space. Either field absent (or the
+# whole header absent) means anonymous — caller renders "[anon]".
+
+# Extract handle + fp from a post file's `From:` header. Writes
+# NUL-terminated handle into handle_out (caller supplies h_max ≥
+# ACCOUNT_HANDLE_BUF) and fp into fp_out (caller supplies
+# ACCOUNT_FP_BUF_BYTES). Returns 1 on success, 0 if no From header
+# or malformed (no space separator).
+fn post_from(buf, len, handle_out, h_max, fp_out, fp_max): i64 {
+    var raw_buf = alloc(h_max + fp_max + 8);
+    var raw_len = header_get(buf, len, "From", raw_buf, h_max + fp_max + 4);
+    if (raw_len <= 0) {
+        store8(handle_out, 0);
+        store8(fp_out, 0);
+        return 0;
+    }
+    # Find the space separator
+    var i = 0;
+    var space = 0 - 1;
+    while (i < raw_len) {
+        if ((load8(raw_buf + i) & 0xFF) == 32) {
+            space = i;
+            i = raw_len;
+            continue;
+        }
+        i = i + 1;
+    }
+    if (space < 0) {
+        # No space — malformed, treat as anonymous.
+        store8(handle_out, 0);
+        store8(fp_out, 0);
+        return 0;
+    }
+    # Copy handle [0..space) → handle_out (clamped to h_max - 1)
+    var hlen = space;
+    if (hlen > h_max - 1) { hlen = h_max - 1; }
+    if (hlen > 0) { memcpy(handle_out, raw_buf, hlen); }
+    store8(handle_out + hlen, 0);
+    # Copy fp [space+1..raw_len) → fp_out (clamped to fp_max - 1)
+    var flen = raw_len - space - 1;
+    if (flen > fp_max - 1) { flen = fp_max - 1; }
+    if (flen > 0) { memcpy(fp_out, raw_buf + space + 1, flen); }
+    store8(fp_out + flen, 0);
+    return 1;
+}
+
 # === Keyfile primitives (M6-D, ADR 0006) ===
 #
 # Keyfile is 32 raw bytes — the Ed25519 seed. sigil's

@@ -451,22 +451,26 @@ fn header_get(buf, len, name, out_buf, out_max): i64 {
     return vlen;
 }
 
-# Compose a post file with Subject + Date + optional Reply-To
-# headers + blank line + body. Writes into out_buf at offset 0;
-# returns total bytes written, or -1 if it wouldn't fit in out_cap.
+# Compose a post file with Subject + Date + optional Reply-To +
+# optional From headers + blank line + body. Writes into out_buf at
+# offset 0; returns total bytes written, or -1 if it wouldn't fit
+# in out_cap.
 #
 # Subject may be empty (NUL string or strlen == 0). `reply_to == 0`
 # means "regular post, no Reply-To header"; `reply_to > 0` writes
-# the header line per ADR 0005.
-fn post_format_with_headers(subject, reply_to, body, body_len, out_buf, out_cap): i64 {
+# the header line per ADR 0005. `from_handle == 0 OR from_fp == 0`
+# means "anonymous post, no From header"; both non-null cstrings
+# writes the `From: <handle> <fp16>` line per ADR 0006.
+fn post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_len, out_buf, out_cap): i64 {
     var pos = 0;
     var slen = 0;
     if (subject != 0) { slen = strlen(subject); }
     if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
 
     # Worst-case header overhead: Subject 9+slen+2, Date 6+20+2,
-    # Reply-To 10+24+2 (24 = max digits of int64), blank 2. ~80 + slen.
-    if (pos + 9 + slen + 80 + body_len > out_cap) { return 0 - 1; }
+    # Reply-To 10+24+2 (24 = max digits of int64), From 6+32+1+16+2,
+    # blank 2. ~140 + slen.
+    if (pos + 9 + slen + 140 + body_len > out_cap) { return 0 - 1; }
 
     # "Subject: <subject>\r\n"
     memcpy(out_buf + pos, "Subject: ", 9); pos = pos + 9;
@@ -492,6 +496,21 @@ fn post_format_with_headers(subject, reply_to, body, body_len, out_buf, out_cap)
         store8(out_buf + pos, 10); pos = pos + 1;
     }
 
+    # "From: <handle> <fp16>\r\n"  (M6-E / ADR 0006, only if both
+    # from_handle and from_fp are non-null cstrings)
+    if (from_handle != 0) { if (from_fp != 0) {
+        var hlen = strlen(from_handle);
+        var flen = strlen(from_fp);
+        if (hlen > 0) { if (flen > 0) {
+            memcpy(out_buf + pos, "From: ", 6); pos = pos + 6;
+            memcpy(out_buf + pos, from_handle, hlen); pos = pos + hlen;
+            store8(out_buf + pos, 32); pos = pos + 1;            # ' '
+            memcpy(out_buf + pos, from_fp, flen); pos = pos + flen;
+            store8(out_buf + pos, 13); pos = pos + 1;
+            store8(out_buf + pos, 10); pos = pos + 1;
+        } }
+    } }
+
     # Blank line — header/body separator
     store8(out_buf + pos, 13); pos = pos + 1;
     store8(out_buf + pos, 10); pos = pos + 1;
@@ -504,9 +523,9 @@ fn post_format_with_headers(subject, reply_to, body, body_len, out_buf, out_cap)
     return pos;
 }
 
-# Backwards-compat alias for M5-D callers (no Reply-To).
+# Backwards-compat alias for M5-D callers (no Reply-To, no From).
 fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
-    return post_format_with_headers(subject, 0, body, body_len, out_buf, out_cap);
+    return post_format_with_headers(subject, 0, 0, 0, body, body_len, out_buf, out_cap);
 }
 
 # post_new with a Subject header (ADR 0003). Formats Subject + Date +
@@ -515,13 +534,15 @@ fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
 # **M5-G**: format happens outside the lock (pure per-call work);
 # claim+write is inside.
 fn post_new_with_subject(store, board, subject, body, body_len): i64 {
-    return post_new_with_subject_reply(store, board, subject, 0, body, body_len);
+    return post_new_with_subject_reply(store, board, subject, 0, 0, 0, body, body_len);
 }
 
-# Write a new post with Subject + (optional) Reply-To. Same EXCL +
-# flock semantics as M5-G's `post_new_with_subject`; the format
-# call grows one header field when reply_to > 0.
-fn post_new_with_subject_reply(store, board, subject, reply_to, body, body_len): i64 {
+# Write a new post with Subject + (optional) Reply-To + (optional)
+# From. Same EXCL + flock semantics as M5-G's `post_new_with_subject`;
+# the format call grows one header field per non-default param.
+# M6-E adds from_handle / from_fp: both non-null cstrings → write
+# `From: <handle> <fp16>`; either null → anonymous post (no From).
+fn post_new_with_subject_reply(store, board, subject, reply_to, from_handle, from_fp, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
 
@@ -530,7 +551,7 @@ fn post_new_with_subject_reply(store, board, subject, reply_to, body, body_len):
 
     var fcap = POST_MAX_BYTES + 1024;
     var fbuf = alloc(fcap);
-    var flen = post_format_with_headers(subject, reply_to, body, body_len, fbuf, fcap);
+    var flen = post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
     var lock_fd = store_lock_acquire(store, board);

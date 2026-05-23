@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M6-E: `From:` header on posts + CLI `--as` + auth-post gate (2026-05-23)
+
+- **`post_format_with_headers` signature grew** `from_handle` + `from_fp` parameters (both cstrings; either-null = no header / anonymous post). Worst-case header overhead bumped to ~140 bytes accounting for the `From: <32-byte-handle> <16-hex-fp>\r\n` line. `post_new_with_subject_reply` got the same two new params; `post_format_with_subject` and `post_new_with_subject` wrappers pass 0/0 for both. Per ADR 0006 § Specifics — `From: <handle> <space> <fp16-hex>` two-token format.
+- **New helper `post_from(buf, len, handle_out, h_max, fp_out, fp_max)`** in `src/account.cyr` — extracts `From:` value, splits on first space, NUL-terminates handle + fp into caller buffers. Returns 1 on success, 0 if no From header / malformed (no space) — caller renders "[anon]" / "anonymous".
+- **Wire-side auth gate**: `post` and `reply` commands in `session_execute` check `g_session_fp`; if anonymous, reply `auth required — run 'login <handle>' first\r\n` and stay in `MODE_COMMAND`. ADR 0006 § P1 default-policy fulfillment.
+- **`session_finalize_post` reads `g_session_handle` + `g_session_fp`** when the session is authenticated, passes them through to `post_new_with_subject_reply`. Anonymous sessions can't reach this path (auth gate above) but the function still tolerates 0/0 for backward-compat with future CLI-driven flows.
+- **CLI `agora post --as <handle> [--key <path>]`** — when `--as` is given, the CLI loads the keyfile (default `~/.agora/key`), derives the fingerprint via `keyfile_to_fingerprint`, looks up the handle in the store (`account_resolve_handle`), and refuses if the handle isn't registered or is registered to a different fingerprint. Anonymous CLI posts (no `--as`) keep the 0.5.x shape — no `From:` header on disk.
+- **`list` rendering** (CLI + telnet) updated to `<id>  [<handle>]  <subject>` — `[anon]` for posts with no `From:` header (legacy 0.4/0.5 posts + anonymous new posts).
+- **`read <id>` rendering** (CLI + telnet) prepends `From: <handle> <fp16>\r\n` (or `From: anonymous\r\n` when no header) before the existing `Subject:` line.
+- **New CLI helper `parse_as_flag`** mirrors the `--store` / `--subject` / `--key` / `--handle` parsers. `first_positional_after_verb` already skips any `--*` pair generically, so the new flag doesn't shadow `read <id>`.
+- **Tests grew 63 → 66**: `t64_format_with_from_header` (formatter writes the literal `From: alice deadbeef12345678` line), `t65_post_from_extracts` (round-trip: format with handle+fp → parse handle+fp out), `t66_post_from_absent_is_anonymous` (no-header case zeroes both out buffers + returns 0).
+- **Test fix**: `t49_format_with_reply_to_header` updated for the new 8-param signature of `post_format_with_headers` (passes 0,0 for from_handle/from_fp). t49 was crashing with SIGSEGV on the old 6-arg call site before the fix — caught by the test suite before the bite was claimed done.
+- **End-to-end smoke** (8 cases): keygen + register `alice` → CLI anon post (id 1, no `From:` on disk) → CLI `--as alice --key …` post (id 2, `From: alice 8a708167937a0a86` on disk) → CLI `--as bob` rejected (`handle is not registered`) → `list` shows `1  [anon]  anon post` / `2  [alice]  alice post` → `read 1` shows `From: anonymous` → `read 2` shows `From: alice 8a708167937a0a86` → telnet anonymous-session `post` blocked with `auth required — run 'login <handle>' first`. **PASS.**
+- **Binary growth**: 366,080 B (M6-D) → 370,528 B (this bite, +4.4 KB).
+- **Backwards compat**: existing 0.4 / 0.5 posts and 0.5/0.4 stores transparent — missing `From:` continues to mean anonymous; `list` shows `[anon]` and `read` shows `From: anonymous` exactly as if the post were freshly anonymous. No data migration.
+
 ### Added — M6-D: keygen / register / whoami (CLI + telnet) (2026-05-23)
 
 - **New CLI verbs**:

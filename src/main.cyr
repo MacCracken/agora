@@ -372,16 +372,28 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             # which is negligible at the v1.0 BBS scale.
             var fbuf = alloc(POST_MAX_BYTES + 1024);
             var sbuf = alloc(SUBJECT_MAX_BYTES);
+            var hbuf = alloc(ACCOUNT_HANDLE_BUF);
+            var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
             var idx = 0;
             while (idx < count) {
                 var id = load64(ids + idx * 8);
-                # ID right-aligned-ish: emit the integer then 2 spaces
                 var idbuf[24];
                 var idlen = fmt_int_buf(id, &idbuf);
                 send_buf(cfd, &idbuf, idlen);
                 send_str(cfd, "  ");
-                # Subject (or empty for headerless / no-Subject posts)
                 var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
+                # M6-E: [<handle>|anon] before subject.
+                send_str(cfd, "[");
+                if (flen > 0) {
+                    if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
+                        send_buf(cfd, hbuf, strlen(hbuf));
+                    } else {
+                        send_str(cfd, "anon");
+                    }
+                } else {
+                    send_str(cfd, "anon");
+                }
+                send_str(cfd, "]  ");
                 if (flen > 0) {
                     var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
                     if (slen > 0) {
@@ -411,13 +423,27 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # M5-D: surface Subject before the body so the reader knows
         # what they're looking at. Headerless (M5-A/B/C) posts skip
         # this — body_off == 0 and post_subject returns 0 length.
+        # M6-E: From line above subject (or "From: anonymous" for
+        # missing-header posts).
+        var hbuf = alloc(ACCOUNT_HANDLE_BUF);
+        var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
+        send_str(cfd, "From: ");
+        if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
+            send_buf(cfd, hbuf, strlen(hbuf));
+            send_str(cfd, " ");
+            send_buf(cfd, fpbuf, strlen(fpbuf));
+            send_str(cfd, "\r\n");
+        } else {
+            send_str(cfd, "anonymous\r\n");
+        }
         var sbuf = alloc(SUBJECT_MAX_BYTES);
         var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
         if (slen > 0) {
             send_str(cfd, "Subject: ");
             send_buf(cfd, sbuf, slen);
-            send_str(cfd, "\r\n\r\n");
+            send_str(cfd, "\r\n");
         }
+        send_str(cfd, "\r\n");
 
         var body_off = post_body_offset(fbuf, flen);
         var body_len = flen - body_off;
@@ -448,6 +474,13 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "post") != 0) {
+        # M6-E: auth-post default per ADR 0006 § P1. Anonymous sessions
+        # may read freely but cannot post; the operator-config policies
+        # in M6-F refine this per-board.
+        if ((load8(g_session_fp) & 0xFF) == 0) {
+            send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+            return MODE_COMMAND;
+        }
         send_str(cfd, "Subject: ");
         return MODE_POSTING_SUBJECT;
     }
@@ -458,6 +491,11 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     # The session's `reply_to_out` global slot is set here and read
     # by handle_client when finalizing the post.
     if (line_has_prefix(line, len, "reply") != 0) {
+        # M6-E: auth-required per ADR 0006 § P1 (same gate as `post`).
+        if ((load8(g_session_fp) & 0xFF) == 0) {
+            send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+            return MODE_COMMAND;
+        }
         var parent_id = line_parse_int(line, 5, len);
         if (parent_id < 0) {
             send_str(cfd, "usage: reply <id>\r\n");
@@ -591,11 +629,21 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
         g_reply_to = 0;
         return 0;
     }
+    # M6-E: From: header derived from the bound session identity.
+    # Anonymous session → from_handle / from_fp both 0 → no header.
+    var from_handle = 0;
+    var from_fp     = 0;
+    if (g_session_fp != 0) {
+        if ((load8(g_session_fp) & 0xFF) != 0) {
+            from_handle = g_session_handle;
+            from_fp     = g_session_fp;
+        }
+    }
     var id = 0 - 1;
     if (g_reply_to > 0) {
-        id = post_new_with_subject_reply(g_store_buf, current_board, g_reply_subject, g_reply_to, body, body_len);
+        id = post_new_with_subject_reply(g_store_buf, current_board, g_reply_subject, g_reply_to, from_handle, from_fp, body, body_len);
     } else {
-        id = post_new_with_subject(g_store_buf, current_board, subject, body, body_len);
+        id = post_new_with_subject_reply(g_store_buf, current_board, subject, 0, from_handle, from_fp, body, body_len);
     }
     if (id < 0) {
         send_str(cfd, "post failed (storage error)\r\n");
@@ -1140,14 +1188,64 @@ fn parse_reply_to_flag(): i64 {
     return 0;
 }
 
-# `agora post [--subject "..."]` — read stdin → write a new post →
-# print assigned ID. Up to POST_MAX_BYTES (64 KB) of body. Returns
-# 0 + id on success, 1 on no-input / write failure.
+# M6-E: --as <handle> for CLI-side authored posts. When given, the
+# CLI loads the keyfile (default ~/.agora/key, override --key),
+# derives the fingerprint, and validates that the handle is registered
+# to that fingerprint in the store. Anonymous posts (default — no
+# --as) keep the 0.5.x shape (no From header).
+fn parse_as_flag(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--as") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `agora post [--subject "..."] [--as <handle>] [--key <path>]` —
+# read stdin → write a new post → print assigned ID. Up to
+# POST_MAX_BYTES (64 KB) of body. With --as, the post lands with a
+# `From: <handle> <fp16>` header; without, it's anonymous.
 fn cmd_post(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var board = parse_board();
     var subject = parse_subject_flag();
     var reply_to = parse_reply_to_flag();
+    # M6-E: resolve identity. --as alone is insufficient — we need
+    # the matching key to prove ownership of the handle.
+    var as_handle = parse_as_flag();
+    var from_handle = 0;
+    var from_fp     = 0;
+    if (as_handle != 0) {
+        if (handle_valid(as_handle) == 0) {
+            println("agora post: invalid --as handle");
+            return 2;
+        }
+        var key_path = parse_key_flag(default_key_path());
+        var fp_buf = alloc(ACCOUNT_FP_BUF_BYTES);
+        if (keyfile_to_fingerprint(key_path, fp_buf) != 0) {
+            println("agora post: --as requires a keyfile (run 'agora keygen' or pass --key <path>)");
+            return 1;
+        }
+        # Verify handle ↔ key binding via the store registry.
+        var resolved_fp = alloc(ACCOUNT_FP_BUF_BYTES);
+        if (account_resolve_handle(store, as_handle, resolved_fp) != 1) {
+            println("agora post: --as handle is not registered in this store");
+            return 1;
+        }
+        if (streq(fp_buf, resolved_fp) == 0) {
+            println("agora post: --as handle is registered to a different keyfile");
+            return 1;
+        }
+        from_handle = as_handle;
+        from_fp     = fp_buf;
+    }
     # M5-E: validate the board name unless it's the default "main".
     if (streq(board, "main") == 0) {
         if (board_name_valid(board) == 0) {
@@ -1185,7 +1283,7 @@ fn cmd_post(): i64 {
         println("agora post: no input on stdin (pipe in post body)");
         return 1;
     }
-    var id = post_new_with_subject_reply(store, board, subject, reply_to, body, total);
+    var id = post_new_with_subject_reply(store, board, subject, reply_to, from_handle, from_fp, body, total);
     if (id < 0) {
         println("agora post: failed to write post");
         return 1;
@@ -1208,12 +1306,26 @@ fn cmd_list(): i64 {
     }
     var fbuf = alloc(POST_MAX_BYTES + 1024);
     var sbuf = alloc(SUBJECT_MAX_BYTES);
+    var hbuf = alloc(ACCOUNT_HANDLE_BUF);
+    var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
     var i = 0;
     while (i < count) {
         var id = load64(ids + i * 8);
         print_num(id);
         sys_write(1, "  ", 2);
         var flen = post_read(store, board, id, fbuf, POST_MAX_BYTES + 1024);
+        # M6-E: `[<handle>]` or `[anon]` before the subject.
+        sys_write(1, "[", 1);
+        if (flen > 0) {
+            if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
+                sys_write(1, hbuf, strlen(hbuf));
+            } else {
+                sys_write(1, "anon", 4);
+            }
+        } else {
+            sys_write(1, "anon", 4);
+        }
+        sys_write(1, "]  ", 3);
         if (flen > 0) {
             var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
             if (slen > 0) { sys_write(1, sbuf, slen); }
@@ -1247,11 +1359,24 @@ fn cmd_read(): i64 {
     }
     var sbuf = alloc(SUBJECT_MAX_BYTES);
     var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+    # M6-E: `From: <handle> <fp16>` (or "From: anonymous") preface.
+    var hbuf = alloc(ACCOUNT_HANDLE_BUF);
+    var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
+    sys_write(1, "From: ", 6);
+    if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
+        sys_write(1, hbuf, strlen(hbuf));
+        sys_write(1, " ", 1);
+        sys_write(1, fpbuf, strlen(fpbuf));
+        sys_write(1, "\n", 1);
+    } else {
+        sys_write(1, "anonymous\n", 10);
+    }
     if (slen > 0) {
         sys_write(1, "Subject: ", 9);
         sys_write(1, sbuf, slen);
-        sys_write(1, "\n\n", 2);
+        sys_write(1, "\n", 1);
     }
+    sys_write(1, "\n", 1);
     var body_off = post_body_offset(fbuf, flen);
     var body_len = flen - body_off;
     if (body_len > 0) {
