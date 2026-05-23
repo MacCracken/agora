@@ -1,0 +1,191 @@
+# board.cyr — post storage primitives (M5-A).
+#
+# One file per post per ADR 0002: <store>/<id>.txt where <id> is a
+# monotonic integer. No headers in the file at M5-A — plaintext UTF-8
+# body bytes only. Headers earn their slot at M5-D once we know what
+# the wire-level post-creation flow surfaces.
+#
+# Storage root is caller-provided (defaults wired in main.cyr via
+# --store <path>, default `./agora-data/`). The trust boundary is the
+# operator's CLI; the storage layer treats paths as opaque cstrings.
+#
+# Cross-platform: built on lib/io.cyr (file_open / file_read /
+# file_write / file_read_all) plus lib/fs.cyr (dir_list). Per the
+# M1-and-onward cross-platform stance (ADR 0001), AGNOS is one
+# target among many — same source builds on every platform the
+# cyrius stdlib reaches.
+
+# === Linux x86_64 syscall constants not yet exposed in lib/io.cyr ===
+
+enum BoardSys {
+    SYS_MKDIR = 83;
+}
+
+# O_EXCL — fail if the file already exists. Used by post_new for
+# atomic "claim the next ID" semantics (per ADR 0002 § Positive
+# consequences). lib/io.cyr exposes O_CREAT but not O_EXCL.
+enum BoardOpen {
+    BO_EXCL = 128;
+}
+
+# Filesystem permission constants (octal 0755 for directories,
+# 0644 for files). Encoded as i64 because cyrius enums require
+# positive integer literals.
+enum BoardPerm {
+    PERM_DIR  = 0x1ED;   # rwx r-x r-x  (0o755)
+    PERM_FILE = 0x1A4;   # rw- r-- r--  (0o644)
+}
+
+# Per-post maximums. Conservative ceilings — bumping them is a
+# named bite, not a silent change. A BBS post is usually < 4 KB
+# of text; the 64 KB ceiling absorbs ASCII-art posts and inline
+# images-as-text (M3's eventual workload).
+enum BoardCap {
+    POST_MAX_BYTES = 65536;
+    PATH_MAX_BYTES = 512;
+    DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once
+}
+
+# Create the storage directory if it doesn't exist. Treats EEXIST
+# (-17 on Linux) as success — operators may pre-create the dir with
+# specific ownership, or it may have been left from a previous run.
+# Returns 0 on success or already-exists; returns the raw errno
+# (negative) on any other failure.
+fn store_ensure(path): i64 {
+    var rc = syscall(SYS_MKDIR, path, PERM_DIR);
+    if (rc == 0) { return 0; }
+    if (rc == (0 - 17)) { return 0; }
+    return rc;
+}
+
+# Build the on-disk path for a given post ID into `out_buf`:
+#   <store>/<id>.txt\0
+# Returns the length (excluding the NUL terminator).
+# out_buf must be at least PATH_MAX_BYTES.
+fn build_post_path(store, id, out_buf): i64 {
+    var pos = 0;
+    var store_len = strlen(store);
+    memcpy(out_buf + pos, store, store_len);
+    pos = pos + store_len;
+    store8(out_buf + pos, 47); pos = pos + 1;   # '/'
+
+    var idbuf[24];
+    var idlen = fmt_int_buf(id, &idbuf);
+    memcpy(out_buf + pos, &idbuf, idlen);
+    pos = pos + idlen;
+
+    store8(out_buf + pos, 46); pos = pos + 1;   # '.'
+    store8(out_buf + pos, 116); pos = pos + 1;  # 't'
+    store8(out_buf + pos, 120); pos = pos + 1;  # 'x'
+    store8(out_buf + pos, 116); pos = pos + 1;  # 't'
+    store8(out_buf + pos, 0);                   # NUL
+    return pos;
+}
+
+# Parse "<digits>.txt" → integer id, or 0 if the name doesn't match.
+# Used by post_max_id and post_list to filter directory entries.
+# Returns 0 for any name that isn't a positive-integer post id.
+fn parse_post_id(name): i64 {
+    var len = strlen(name);
+    if (len < 5) { return 0; }
+    # Suffix must be ".txt"
+    if ((load8(name + len - 4) & 0xFF) != 46)  { return 0; }
+    if ((load8(name + len - 3) & 0xFF) != 116) { return 0; }
+    if ((load8(name + len - 2) & 0xFF) != 120) { return 0; }
+    if ((load8(name + len - 1) & 0xFF) != 116) { return 0; }
+    # Prefix must be all digits and > 0. Iterate over every prefix
+    # byte regardless of validity — we always advance `i`, and the
+    # `ok` flag short-circuits the arithmetic. This shape avoids the
+    # cyrius-classic "continue without incrementing i = infinite loop"
+    # trap that early drafts of this fn hit.
+    var i = 0;
+    var n = 0;
+    var ok = 1;
+    var prefix_len = len - 4;
+    while (i < prefix_len) {
+        var c = load8(name + i) & 0xFF;
+        if (ok != 0) {
+            if (c < 48) { ok = 0; }
+            if (c > 57) { ok = 0; }
+            if (ok != 0) {
+                n = n * 10 + (c - 48);
+            }
+        }
+        i = i + 1;
+    }
+    if (ok == 0) { return 0; }
+    if (n <= 0)  { return 0; }
+    return n;
+}
+
+# Find the highest existing post ID in the store. Returns 0 if the
+# store is empty / non-existent. O(n) in the post count — acceptable
+# for the v1.0 BBS scale per ADR 0002 § Negative consequences.
+fn post_max_id(store): i64 {
+    var entries = dir_list(str_from(store));
+    var n = vec_len(entries);
+    var max_id = 0;
+    var i = 0;
+    while (i < n) {
+        var entry = vec_get(entries, i);
+        var id = parse_post_id(str_data(entry));
+        if (id > max_id) { max_id = id; }
+        i = i + 1;
+    }
+    return max_id;
+}
+
+# Write a new post: ensure store exists, claim next ID, write body
+# with O_EXCL. Returns the assigned ID on success, negative on error.
+# The EXCL flag guarantees we never silently overwrite — if two
+# concurrent writers race on the same ID, one wins and one gets -1
+# back (M5-G adds a lock to make the race impossible; the EXCL
+# guarantee is correct without it).
+fn post_new(store, body_buf, body_len): i64 {
+    if (body_len <= 0)              { return 0 - 1; }
+    if (body_len > POST_MAX_BYTES)  { return 0 - 1; }
+
+    var rc = store_ensure(store);
+    if (rc != 0) { return 0 - 1; }
+
+    var id = post_max_id(store) + 1;
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_post_path(store, id, path_buf);
+
+    var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var n = file_write(fd, body_buf, body_len);
+    file_close(fd);
+    if (n != body_len) { return 0 - 1; }
+    return id;
+}
+
+# Read a post by ID into the caller-allocated buffer. Returns the
+# number of bytes read, or negative on error.
+fn post_read(store, id, out_buf, out_cap): i64 {
+    var path_buf = alloc(PATH_MAX_BYTES);
+    build_post_path(store, id, path_buf);
+    return file_read_all(path_buf, out_buf, out_cap);
+}
+
+# List all post IDs in the store. Writes IDs as i64s into out_ids,
+# up to DIRENT_ID_MAX entries. Returns the count of IDs written.
+# IDs are returned in directory-iteration order (NOT sorted) at
+# M5-A — sorting earns a bite when a consumer needs it.
+fn post_list(store, out_ids, max_ids): i64 {
+    var entries = dir_list(str_from(store));
+    var n = vec_len(entries);
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        if (count >= max_ids) { return count; }
+        var entry = vec_get(entries, i);
+        var id = parse_post_id(str_data(entry));
+        if (id > 0) {
+            store64(out_ids + count * 8, id);
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}

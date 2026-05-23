@@ -16,3 +16,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | # | Title | Status |
 |---|---|---|
 | 0001 | [Cross-platform listener decoupled from AGNOS](0001-cross-platform-listener-decoupled-from-agnos.md) | Accepted (2026-05-23) |
+| 0002 | [One file per post for the M5 storage layout](0002-one-file-per-post-storage.md) | Accepted (2026-05-23) |

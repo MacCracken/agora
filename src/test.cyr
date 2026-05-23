@@ -8,6 +8,7 @@
 # CI gate: exit 0 on full pass; non-zero on first failure.
 
 include "src/telnet.cyr"
+include "src/board.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -662,6 +663,64 @@ fn t24_linemode_mode_malformed_dropped(): i64 {
     return 0;
 }
 
+# T25-T29: M5-A board.cyr — post-id parsing + path building.
+# Pure functions; no filesystem I/O in the test path (full round-trip
+# verified via CLI smoke instead — see CHANGELOG [Unreleased] M5-A).
+
+fn t25_parse_post_id_valid(): i64 {
+    if (parse_post_id("1.txt") != 1)         { test_fail("t25_parse_post_id_valid", "1.txt");   return 1; }
+    if (parse_post_id("42.txt") != 42)       { test_fail("t25_parse_post_id_valid", "42.txt");  return 1; }
+    if (parse_post_id("9999.txt") != 9999)   { test_fail("t25_parse_post_id_valid", "9999.txt"); return 1; }
+    test_pass("t25_parse_post_id_valid");
+    return 0;
+}
+
+fn t26_parse_post_id_rejects_non_txt(): i64 {
+    if (parse_post_id("1.log") != 0)         { test_fail("t26_parse_post_id_rejects_non_txt", "1.log");      return 1; }
+    if (parse_post_id("1.tx") != 0)          { test_fail("t26_parse_post_id_rejects_non_txt", "1.tx");       return 1; }
+    if (parse_post_id("1") != 0)             { test_fail("t26_parse_post_id_rejects_non_txt", "1 (no ext)"); return 1; }
+    test_pass("t26_parse_post_id_rejects_non_txt");
+    return 0;
+}
+
+fn t27_parse_post_id_rejects_non_digits(): i64 {
+    if (parse_post_id("foo.txt") != 0)       { test_fail("t27_parse_post_id_rejects_non_digits", "foo.txt"); return 1; }
+    if (parse_post_id("1a.txt") != 0)        { test_fail("t27_parse_post_id_rejects_non_digits", "1a.txt");  return 1; }
+    if (parse_post_id("a1.txt") != 0)        { test_fail("t27_parse_post_id_rejects_non_digits", "a1.txt");  return 1; }
+    if (parse_post_id("1.2.txt") != 0)       { test_fail("t27_parse_post_id_rejects_non_digits", "1.2.txt"); return 1; }
+    test_pass("t27_parse_post_id_rejects_non_digits");
+    return 0;
+}
+
+fn t28_parse_post_id_rejects_zero(): i64 {
+    # IDs are 1-indexed — `0.txt` is reserved and rejected.
+    if (parse_post_id("0.txt") != 0)         { test_fail("t28_parse_post_id_rejects_zero", "0.txt"); return 1; }
+    test_pass("t28_parse_post_id_rejects_zero");
+    return 0;
+}
+
+fn t29_build_post_path_shape(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = build_post_path("/var/agora", 42, buf);
+    var expected = "/var/agora/42.txt";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t29_build_post_path_shape", "length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t29_build_post_path_shape", "byte mismatch");
+        return 1;
+    }
+    # NUL-terminator at position `len`
+    if ((load8(buf + len) & 0xFF) != 0) {
+        test_fail("t29_build_post_path_shape", "missing NUL terminator");
+        return 1;
+    }
+    test_pass("t29_build_post_path_shape");
+    return 0;
+}
+
 # T15: tx_buf drain / consume cycle resets length to 0.
 fn t15_tx_consume_resets(): i64 {
     var ts = telnet_state_new();
@@ -711,6 +770,11 @@ fn main(): i64 {
     t22_linemode_mode_ack_parse();
     t23_linemode_slc_ignored();
     t24_linemode_mode_malformed_dropped();
+    t25_parse_post_id_valid();
+    t26_parse_post_id_rejects_non_txt();
+    t27_parse_post_id_rejects_non_digits();
+    t28_parse_post_id_rejects_zero();
+    t29_build_post_path_shape();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

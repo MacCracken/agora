@@ -17,6 +17,7 @@
 
 include "lib/darshana.cyr"
 include "src/telnet.cyr"
+include "src/board.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -60,9 +61,13 @@ fn print_help(): i64 {
     println("                 start telnet listener (default port 2323;");
     println("                 --motd reads a file as the connection MOTD");
     println("                 instead of the default bannermanor render)");
-    println("  post           create a new post (M5+: real impl)");
-    println("  list           list recent posts (M5+: real impl)");
-    println("  read <id>      read a post by ID (M5+: real impl)");
+    println("  post [--store <path>]");
+    println("                 read stdin → new post → print assigned ID");
+    println("                 (default store ./agora-data/)");
+    println("  list [--store <path>]");
+    println("                 list post IDs in the store");
+    println("  read <id> [--store <path>]");
+    println("                 print a post body to stdout by ID");
     println("  whoami         show current user (M6+: real impl)");
     println("  version        print version string");
     println("  help           show this message");
@@ -340,19 +345,111 @@ fn cmd_serve(): i64 {
     return cmd_serve_on(port);
 }
 
+# Default post-storage root, used by cmd_post / cmd_list / cmd_read
+# when --store is not passed. Cwd-relative per ADR 0002.
+var DEFAULT_STORE = "./agora-data";
+
+# Walk argv looking for --store <path>. Returns the path cstring if
+# found, else the supplied default. Used by all three M5-A verbs.
+fn parse_store(default_store): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--store") != 0) {
+            if (i + 1 < n) { return argv(i + 1); }
+            return default_store;
+        }
+        i = i + 1;
+    }
+    return default_store;
+}
+
+# Walk argv looking for the first non-flag positional after the verb.
+# Skips `--store <path>` pairs. Returns 0 if no positional found.
+fn first_positional_after_verb(): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    while (i < n) {
+        var arg = argv(i);
+        if (streq(arg, "--store") != 0) {
+            i = i + 2;
+            continue;
+        }
+        return arg;
+    }
+    return 0;
+}
+
+# `agora post` — read stdin → write a new post → print assigned ID.
+# Up to POST_MAX_BYTES (64 KB) of body. Returns 0 + id on success,
+# 1 on no-input / write failure.
 fn cmd_post(): i64 {
-    println("agora post: M5 stub — post persistence not implemented yet.");
-    return 1;
+    var store = parse_store(DEFAULT_STORE);
+    var body = alloc(POST_MAX_BYTES);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(STDIN, body + total, POST_MAX_BYTES - total);
+        if (n <= 0) { rgo = 0; continue; }
+        total = total + n;
+        if (total >= POST_MAX_BYTES) { rgo = 0; }
+    }
+    if (total <= 0) {
+        println("agora post: no input on stdin (pipe in post body)");
+        return 1;
+    }
+    var id = post_new(store, body, total);
+    if (id < 0) {
+        println("agora post: failed to write post");
+        return 1;
+    }
+    print_num(id);
+    println("");
+    return 0;
 }
 
+# `agora list` — print every post ID in the store, one per line.
 fn cmd_list(): i64 {
-    println("agora list: M5 stub — no posts yet (storage not implemented).");
-    return 1;
+    var store = parse_store(DEFAULT_STORE);
+    var ids = alloc(DIRENT_ID_MAX * 8);
+    var count = post_list(store, ids, DIRENT_ID_MAX);
+    if (count == 0) {
+        println("agora list: no posts");
+        return 0;
+    }
+    var i = 0;
+    while (i < count) {
+        print_num(load64(ids + i * 8));
+        println("");
+        i = i + 1;
+    }
+    return 0;
 }
 
+# `agora read <id>` — print one post body to stdout.
 fn cmd_read(): i64 {
-    println("agora read: M5 stub — no posts yet (storage not implemented).");
-    return 1;
+    var store = parse_store(DEFAULT_STORE);
+    var id_arg = first_positional_after_verb();
+    if (id_arg == 0) {
+        println("agora read: missing post ID");
+        return 2;
+    }
+    var id = atoi(id_arg);
+    if (id <= 0) {
+        println("agora read: invalid post ID");
+        return 2;
+    }
+    var body = alloc(POST_MAX_BYTES);
+    var len = post_read(store, id, body, POST_MAX_BYTES);
+    if (len <= 0) {
+        println("agora read: post not found");
+        return 1;
+    }
+    sys_write(1, body, len);
+    return 0;
 }
 
 fn cmd_whoami(): i64 {

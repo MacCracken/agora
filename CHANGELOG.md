@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M5 ADR 0002 + M5-A: post storage primitives (2026-05-23)
+
+- **`docs/adr/0002-one-file-per-post-storage.md`** — captures the M5 storage-layout decision: one file per post (`<store>/<id>.txt`, monotonic-integer IDs), operator-configurable storage root via `--store <path>` (default `./agora-data/`), plaintext UTF-8 body bytes only. Rejects two alternatives — one-file-per-thread-with-offset-index and SQLite-style WAL — with concrete reasoning. The shape is a strict prefix of the eventual v2.x content-addressed-storage layout (pillar 2 in `roadmap-future.md`): swap the ID-assignment fn, schema stays.
+- **`src/board.cyr`** (~165 LOC) — `store_ensure` (mkdir, EEXIST-as-success), `build_post_path` (path formatter), `parse_post_id` (filename → integer or 0), `post_max_id` (O(n) dir scan), `post_new` (write with `O_CREAT | O_EXCL` for atomic ID claim), `post_read` (file_read_all by ID), `post_list` (iterate dir, parse valid IDs). All bounded by named caps (`POST_MAX_BYTES = 64 KB`, `PATH_MAX_BYTES = 512`, `DIRENT_ID_MAX = 4096`).
+- **CLI verbs now real** — `cmd_post` reads stdin into a 64 KB buffer (multi-read loop until EOF) → `post_new` → prints assigned ID. `cmd_list` walks the store directory, prints valid post IDs. `cmd_read <id>` validates the ID, opens the file, writes body bytes to stdout. All three accept `--store <path>` (order-insensitive parse, same shape as M2-C's `--motd`).
+- **`stdlib` deps grew**: added `str` (for `dir_list`'s Str interop) and `fs` (the `dir_list` primitive itself).
+- **Tests grew 24 → 29** — `t25_parse_post_id_valid` (1.txt / 42.txt / 9999.txt round-trip), `t26_parse_post_id_rejects_non_txt` (`1.log` / `1.tx` / bare-int), `t27_parse_post_id_rejects_non_digits` (`foo.txt` / `1a.txt` / `1.2.txt`), `t28_parse_post_id_rejects_zero` (IDs are 1-indexed), `t29_build_post_path_shape` (verbatim path construction). The cyrius "continue without incrementing i = infinite loop" trap surfaced + got fixed during the first test run.
+- **End-to-end CLI smoke** — empty store → `no posts` exit 0; three posts written round-trip via stdin → file IDs 1/2/3 on disk under 0644; `list` returns IDs (directory order; sort is M5-A-deferred); `read 2` returns the body verbatim; `read 99` reports `post not found` exit 1; `read foo` reports `invalid post ID` exit 2.
+- **Binary delta**: 85,544 B (0.3.0) → 109,992 B (+24.4 KB for board.cyr + str + fs stdlib surface; most DCE-eligible).
+- **Out of scope at M5-A** (per ADR 0002): boards (M5-E), threads (M5-F), concurrent-write lock (M5-G), telnet-wire integration (M5-B), RFC-822 headers in the post file (M5-D).
+
 ## [0.3.0] — 2026-05-23 (M2 close: ANSI BBS aesthetic)
 
 M2 cycle landed end-to-end across three bites — `bnrmr`-rendered AGORA banner embedded as the connection MOTD (M2-A), darshana SGR coloring wrapped around the banner / version / prompt at connection time (M2-B), and `agora serve [port] [--motd <path>]` operator override (M2-C). bannermanor patched 1.0.0 → 1.0.1 the same day so every AGNOS consumer of darshana is on the same `0.5.3` pin. M2-D (NAWS-aware width clamping) remains an optional polish bite — M2 is functionally closed without it.

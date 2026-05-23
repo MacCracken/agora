@@ -15,10 +15,10 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **M0 (0.1.0)** ✅ | argv dispatch + boot banner + stub verbs | scaffold-only — shipped 2026-05-23 |
 | **M1** ✅ | Telnet listener (RFC 854 + 1143 + 1073 + 1091 + 1184), cross-platform via `lib/net.cyr` | closed 2026-05-23 — five bites: IAC parser, Q-method, NAWS+TT subneg, LINEMODE, bench harness. See [`state.md`](state.md#recently-closed). |
 | **M2** ✅ | ANSI BBS aesthetic — bannermanor MOTD + darshana SGR colors + `--motd` override | closed 2026-05-23 at 0.3.0 — three bites: M2-A/B/C. See [`state.md`](state.md#recently-closed). M2-D (NAWS width clamp) deferred as optional polish. |
-| M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ (available 2026-05-23) |
-| M4 | Stored-file deltas + compression | sankoch ≥ 2.2 ✅ (currently 2.2.6) |
-| M5 | Post persistence (boards / threads / messages) | filesystem write target — Linux today; AGNOS gated on 1.33.x ext4 WRITE |
-| M6 | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) |
+| **M5** ← in progress | Post persistence (boards / threads / messages) | **M5-A landed 2026-05-23** — ADR 0002 + `src/board.cyr` (one-file-per-post) + CLI verbs real (`post` / `list` / `read`). Linux today via `lib/io.cyr` + `lib/fs.cyr`; AGNOS is one stdlib backend among many per [ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md), no special gate. Remaining bites: B (wire integration), C (sort), D (headers), E (boards), F (threads), G (lock), H (input validation). |
+| M3 | Inline-image post bodies (ASCII-art conversion) | kii 1.0.0 ✅ — gated on M5 post bodies existing first |
+| M4 | Stored-file deltas + compression | sankoch 2.2.6 ✅ — gated on M5 |
+| M6 | User accounts + auth | sigil-backed identity ✅ (sigil 3.4.2) — naturally follows M5 |
 | **1.0.0** | All six milestones green, multi-user telnet BBS | M0–M6 + iron validation on archaemenid LAN |
 
 ---
@@ -87,14 +87,23 @@ Scope: file attachments compressed on write, decompressed on read. Diff-based st
 
 ## Future
 
-### M5 — Post persistence
+### M5 — Post persistence (in progress — promote to In Progress section above)
 
-Boards / threads / messages stored as files in a per-board directory tree. Linux: writes through libc/syscalls today. AGNOS: gated on agnos 1.33.x ext4 WRITE landing (Phase 1–5 currently read-only as of agnos 1.32.2).
+Boards / threads / messages stored as files. Cross-platform via `lib/io.cyr` + `lib/fs.cyr` — Linux x86_64 + aarch64 today, AGNOS becomes one target among many as the stdlib gains a backend per [ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md).
 
-Open questions:
+The previously-open questions resolved into [ADR 0002](../adr/0002-one-file-per-post-storage.md): **one file per post** (`<store>/<id>.txt`, monotonic-integer IDs, plaintext UTF-8); **single-writer lock** at M5-G (EXCL-flag guarantees no corruption today; lock guarantees no ID-race).
 
-- File layout: one file per post vs. one file per thread with offset index. Decision in an ADR when the work starts.
-- Concurrency: single-writer-per-board lock vs. SQLite-style WAL. Bias toward single-writer since BBS posting is human-paced.
+**M5-A landed 0.3.0+** (un-tagged toward 0.4.0): `src/board.cyr` + the three CLI verbs (`agora post` / `list` / `read`), each accepting `--store <path>` (default `./agora-data/`). 5 new tests covering `parse_post_id` + `build_post_path`. Full round-trip via CLI smoke. Binary 85,544 → 109,992 B.
+
+**Remaining bites for M5 close**:
+
+- **M5-B** — Telnet-wire integration. Surface `post` / `list` / `read` over the connected-client loop. M5's user-facing payoff.
+- **M5-C** — Sort post list by ID ascending (M5-A returns directory-iteration order).
+- **M5-D** — RFC-822-shaped headers in the post file (Subject / From / Date). Header set picked once the wire-level post flow is real.
+- **M5-E** — Boards (subdirectories: `<store>/<board>/<id>.txt`).
+- **M5-F** — Threads (post-replies-to-post linkage).
+- **M5-G** — Single-writer lock (flock-style) for concurrent-writer correctness.
+- **M5-H** — Input validation hardening (binary safety, max-line-width, control-char filtering on post bodies received over the wire).
 
 ### M6 — User accounts + auth
 
