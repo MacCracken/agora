@@ -14,6 +14,14 @@ Multi-bite M1 cycle landed end-to-end: RFC 854 IAC parser + RFC 1143 Q-method op
 - `print_banner` / `cmd_version` / connection-MOTD strings bumped to 0.2.0. (Note: version strings remain inlined in `src/main.cyr` — `cyrius` has no source-level `${file:VERSION}` interpolation yet, only `.cyml`-level. Embedded version constant via a generated `version_str.cyr` is a v1.0 close-out item.)
 - `cyrius.cyml` `[deps].stdlib` grew from 7 modules (scaffold) to 13 modules across the M1 cycle: added `net` + `result` + `tagged` (first-bite, socket primitives + Result type), `vec` + `fnptr` + `bench` (close-bite, bench harness dependencies).
 
+### Added — CI / Release workflows (2026-05-23)
+
+Pattern adopted from [kii](https://github.com/MacCracken/kii) + [bannermanor](https://github.com/MacCracken/bannermanor), the first-party reference implementations:
+
+- **`.github/workflows/ci.yml`** — push / PR / `workflow_call` triggers. Concurrency: `cancel-in-progress` per-ref so only the latest push tests. Steps: checkout → install cyrius toolchain (version read from `cyrius.cyml [package].cyrius` — single source of truth) → `cyrius deps` → `cyrius build src/main.cyr build/agora` → **version drift check** (compares `./build/agora --version | head -1` against `VERSION`; catches inline-literal drift in `src/main.cyr` since cyrius lacks source-level `${file:VERSION}`) → `cyrius test` (auto-picks `[build].test`, runs the 24-test conformance suite).
+- **`.github/workflows/release.yml`** — tag-triggered on `tags: ['[0-9]*']` (semver-only filter per CLAUDE.md). `permissions: contents: write`. CI gate via `uses: ./.github/workflows/ci.yml` (re-runs the full CI matrix before the release artifact builds). **Version verify**: `VERSION` file must equal the git tag, or the run fails. Then install + build + `softprops/action-gh-release@v2` with `files: build/*` and auto-generated release notes from the GitHub API.
+- **What's NOT in CI yet** (deferred until earned): fuzz harness (a `tests/agora.fcyr` driving telnet_feed against random byte streams — adversarial-by-default protocol, fuzz earns its spot at M2+ when the input surface widens with NAWS/TT consumption), bench step (`BENCHMARKS.md` is hand-maintained at 0.2.0; CI bench gates land alongside `scripts/bench-history.sh` at v1.0 close-out), aarch64 cross build (waits on cyrius cross-toolchain availability in the CI runner image), `CYRIUS_DCE=1` builds (CLAUDE.md mentions but kii / bannermanor don't enforce yet — match the reference implementations until the convention formalizes).
+
 ### Added — M1 close: bench harness + first parser baseline (2026-05-23)
 
 - **`benches/bench_telnet.bcyr`** (~115 LOC) — five parser microbenchmarks via `lib/bench.cyr` `bench_run_batch` (10 rounds × 10,000 iterations each):

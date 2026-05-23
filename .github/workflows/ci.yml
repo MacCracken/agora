@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # release.yml gates on this workflow via `uses: ./.github/workflows/ci.yml`.
+  # GitHub Actions requires the called workflow to opt in via `workflow_call:`
+  # — without this, the release-tag run trips on the CI-gate step.
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        # Reads the pinned cyrius version out of cyrius.cyml [package].cyrius
+        # — the single source of truth per first-party-standards. Override
+        # with CYRIUS_VERSION env var if a CI-side rebuild against a
+        # different toolchain is ever needed.
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Build
+        # Binary name `agora` matches the repo name and cyrius.cyml
+        # [build].output, so no naming-divergence handling needed
+        # (cf. kii / bannermanor's CI which carry an explanatory comment).
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/agora
+
+      - name: Version drift check
+        # The version strings in src/main.cyr (print_banner, cmd_version,
+        # connection MOTD) are hand-edited at each milestone close. This
+        # step catches the class of drift where VERSION bumps but the
+        # literal doesn't (or vice versa). Auto-generated literals from
+        # a `version_str.cyr` build-hook are a v1.0 close-out item —
+        # see CHANGELOG [0.2.0] note about the inlined-version-string
+        # technical debt.
+        run: |
+          EXPECTED="agora $(cat VERSION | tr -d '[:space:]')"
+          ACTUAL=$(./build/agora --version | head -1)
+          test "$ACTUAL" = "$EXPECTED" || { echo "version drift: binary says '$ACTUAL', VERSION says '$EXPECTED'"; exit 1; }
+
+      - name: Test
+        # Explicit `src/test.cyr` path: at cyrius 6.0.1 bare `cyrius
+        # test` only searches tests/*.tcyr and exits 1 if nothing's
+        # there (it does NOT fall back to [build].test in cyrius.cyml,
+        # despite that being implied by kii's CI comment from cyrius
+        # 5.6.28). Until we land a tests/agora.tcyr split (likely at
+        # M5+ when persistence widens the test surface), the explicit
+        # path is the working form. Runs the 24-test RFC 854 / 1143 /
+        # 1073 / 1091 / 1184 conformance suite.
+        run: cyrius test src/test.cyr

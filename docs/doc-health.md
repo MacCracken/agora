@@ -17,7 +17,7 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ## At a glance — 2026-05-23 inventory (v0.1.0 doc-tree adoption)
 
-**~14 markdown files** across the repo (+2 since v0.1.0: `roadmap-future.md` at M1 fourth-bite closeout + `/BENCHMARKS.md` at M1 close). First-party doc tree scaffolded today; everything fresh by construction. Bucket counts:
+**~14 markdown files** across the repo (+2 since v0.1.0: `roadmap-future.md` at M1 fourth-bite closeout + `/BENCHMARKS.md` at M1 close). First-party doc tree scaffolded today; everything fresh by construction. **CI/release workflows** added at 0.2.0 close (`.github/workflows/ci.yml` + `release.yml`) per kii / bannermanor reference shape — not docs but file-tree state worth noting here. Bucket counts:
 
 | Bucket | Count | What it means |
 |---|---|---|
