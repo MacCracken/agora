@@ -61,10 +61,10 @@ Scope at this milestone: MOTD banner on connect, ANSI-colored prompt, basic curs
 
 - **M2-A** (bannermanor): `bnrmr "AGORA"` block-font banner embedded in `src/main.cyr` as a string constant. Replaced the v0.2.0 plaintext one-line MOTD.
 - **M2-B** (darshana): `render_motd(buf)` runs at connection time, wraps the banner lines in cyan (SGR 36), the version line in yellow (SGR 33), and the prompt in default fg via `tty_sgr_buf` / `tty_sgr_reset_buf`. Buffer-targeted primitives flush to the telnet socket in one `send_buf` call.
+- **M2-C** (operator override): `agora serve [port] [--motd <path>]`. `load_motd_file` reads up to 4 KB via `lib/io.cyr` `file_read_all` once at startup; if loaded, `handle_client` sends those bytes verbatim, otherwise falls back to the default `render_motd`. Three failure modes warn-and-fall-back: missing path arg, read failure, zero-byte file.
 
-**Optional follow-ups before M3** (lands when demand surfaces, not blocking):
+**Optional remaining bite** (M2 functionally closes without it):
 
-- **M2-C** — `agora serve --motd <path>` operator override. Pulls the embedded fallback out into a default-when-flag-absent path.
 - **M2-D** — NAWS-aware width clamping. First concrete consumer of `term_cols` / `term_rows` from M1's subneg parser. Earned when banners wider than 80 columns enter the default set, or when a consumer reports rendering on narrow terminals.
 
 ---

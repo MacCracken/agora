@@ -25,7 +25,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | 84,488 B at M2-B (71,120 M2-A; 70,960 M1 close; 43,216 v0.1.0 scaffold). M2-B's +13 KB is the `lib/darshana.cyr` surface; most is DCE-eligible. | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | 85,544 B at M2-C (84,488 M2-B; 71,120 M2-A; 70,960 M1 close; 43,216 v0.1.0 scaffold). M2-C's +1 KB is `load_motd_file` + argv-scan + globals. | `cyrius build src/main.cyr build/agora` |
 | `build/agora` (DCE) | TBD — first DCE build at M1 close | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 
 Compile output reports `220 unreachable fns (26,707 B NOPed)` — the M1-close addition of `vec` + `fnptr` + `bench` (for the bench harness) grew the surface; DCE NOPs the bench-only paths but doesn't strip them from the file. Release-binary optimization (strip + DCE-aware emit) is a v1.x close-out concern.
@@ -63,10 +63,11 @@ Gate state (per [`roadmap.md`](roadmap.md)):
 
 **M2-B landed 2026-05-23**: darshana SGR-colored MOTD. `render_motd(buf)` composes the bannermanor banner with cyan-wrapped art lines + yellow-wrapped version line + default-fg prompt via `tty_sgr_buf` / `tty_sgr_reset_buf`. Wire smoke confirms 4 ESC sequences flow alongside the data bytes. Bannermanor 1.0.0 → 1.0.1 ecosystem-aligned to the same darshana 0.5.3 pin the same day.
 
-**Remaining M2 work** (both optional — M2 functionally closes on coloring; these are operator-ergonomics polish):
+**M2-C landed 2026-05-23**: `agora serve --motd <path>` operator override. `load_motd_file` reads up to 4 KB via `lib/io.cyr` `file_read_all` once at startup, parks in globals (`g_motd_buf` / `g_motd_len`). `handle_client` sends verbatim if loaded, else falls back to `render_motd`. Three failure modes warn-and-fall-back: missing path arg, read failure, zero-byte file. Argv parse is order-insensitive (positionals take port, `--motd` consumes next arg).
 
-- **M2-C** — operator-overridable MOTD via `agora serve --motd <path>`. Pulls the embedded fallback out into a default-when-flag-absent path. Lands if/when operator demand surfaces.
-- **M2-D** — NAWS-aware width clamping. First concrete consumer of `term_cols` / `term_rows` from M1's subneg parser. Lands when banners wider than 80 columns are added to the default set, OR when a consumer reports rendering on a 40-column terminal.
+**Remaining M2 work** (optional, only one bite left):
+
+- **M2-D** — NAWS-aware width clamping. First concrete consumer of `term_cols` / `term_rows` from M1's subneg parser. Lands when banners wider than 80 columns enter the default set, OR when a consumer reports rendering on a narrow terminal. **M2 is functionally closed without it**; the bite is polish/insurance for an edge case that doesn't currently exist.
 
 ## Recent shipped
 

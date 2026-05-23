@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (0.2.0 shipped + M2-A + M2-B landed; ecosystem-aligned to darshana 0.5.3 across agora and bannermanor) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (0.2.0 shipped + M2-A + M2-B + M2-C landed; M2 functionally closed) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,7 +39,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close (five bites + CI/release setup) + [Unreleased] M2-A bannermanor MOTD + M2-B darshana SGR coloring. |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] scaffold + [0.2.0] M1 close (five bites + CI/release setup) + [Unreleased] M2-A bannermanor MOTD + M2-B darshana SGR coloring + M2-C `--motd` override. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 close)** — first parser baseline (5 microbenchmarks via `lib/bench.cyr`). Hand-maintained; `scripts/bench-history.sh` auto-gen pattern is the v1.x close-out goal. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
@@ -57,7 +57,7 @@ Numbers exact at v0.1.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.2.0 (M1 close) shipped; M2-A + M2-B both landed 2026-05-23 (bannermanor MOTD + darshana SGR coloring); binary 84,488 B; optional M2-C / M2-D remain when demand surfaces. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.2.0 (M1 close) shipped; M2 functionally closed at M2-C 2026-05-23 (bannermanor MOTD + darshana SGR colors + `--motd` operator override); binary 85,544 B; only optional M2-D (NAWS width clamp) remains. |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | M0–M6 + v1.0 criteria. Extracted from `README.md` at v0.1.0 doc-tree adoption. Now points at `roadmap-future.md` for post-v1.0 directions. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 

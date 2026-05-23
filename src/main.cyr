@@ -28,7 +28,21 @@ enum AgoraDefaults {
     # accept-loop worker. 60s of no traffic ends the connection.
     # Tuned for human-paced BBS use; trim for higher fanout.
     RECV_TIMEOUT_SECS = 60;
+    # Operator-supplied MOTD ceiling (--motd <path>). 4 KB covers
+    # any reasonable BBS welcome banner. File contents are sent
+    # verbatim; operators are responsible for using CRLF line
+    # endings (telnet NVT) and embedding any ANSI escapes they want.
+    MOTD_FILE_CAP     = 4096;
 }
+
+# Operator-supplied MOTD, loaded once in cmd_serve before the
+# listener opens. Null (0) means "use the default render_motd"; a
+# non-null pointer with g_motd_len > 0 means "send these bytes
+# verbatim to every connection". Globals (vs. threading through
+# handle_client) since they're set-once-at-startup state and the
+# accept loop currently single-tracks anyway.
+var g_motd_buf = 0;
+var g_motd_len = 0;
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
@@ -42,7 +56,10 @@ fn print_help(): i64 {
     println("USAGE: agora <command> [args]");
     println("");
     println("COMMANDS:");
-    println("  serve [port]   start telnet listener (default port 2323)");
+    println("  serve [port] [--motd <path>]");
+    println("                 start telnet listener (default port 2323;");
+    println("                 --motd reads a file as the connection MOTD");
+    println("                 instead of the default bannermanor render)");
     println("  post           create a new post (M5+: real impl)");
     println("  list           list recent posts (M5+: real impl)");
     println("  read <id>      read a post by ID (M5+: real impl)");
@@ -156,14 +173,17 @@ fn handle_client(cfd): i64 {
         telnet_tx_consume(ts);
     }
 
-    # MOTD: render the bannermanor-derived ASCII banner with darshana
-    # SGR coloring. See `render_motd` above for the full provenance
-    # (banner from `bnrmr "AGORA"`; colors via darshana 0.5.3 `_buf`
-    # primitives). Buffer is 1 KB — comfortable for the ~600-byte
-    # rendered output with headroom for color tweaks.
-    var motd = alloc(1024);
-    var motd_len = render_motd(motd);
-    send_buf(cfd, motd, motd_len);
+    # MOTD: prefer the operator-supplied file (loaded once at startup
+    # via --motd <path>) if present; otherwise render the default
+    # bannermanor + darshana MOTD into a per-connection 1 KB buffer.
+    # See `render_motd` above for the default-path provenance.
+    if (g_motd_buf != 0) {
+        send_buf(cfd, g_motd_buf, g_motd_len);
+    } else {
+        var motd = alloc(1024);
+        var motd_len = render_motd(motd);
+        send_buf(cfd, motd, motd_len);
+    }
 
     # Allocate the recv buffer once.
     var rxbuf = alloc(RECV_BUF_BYTES);
@@ -268,15 +288,55 @@ fn cmd_serve_on(port): i64 {
     return 0;
 }
 
+# Load an operator-supplied MOTD file into the g_motd_* globals.
+# Returns 0 on success, non-zero on any I/O error (with a stderr
+# warning + fallback to the default render_motd path). The
+# allocation lives for the process lifetime — set-once-at-startup;
+# no per-connection re-read.
+fn load_motd_file(path): i64 {
+    var buf = alloc(MOTD_FILE_CAP);
+    var n = file_read_all(path, buf, MOTD_FILE_CAP);
+    if (n < 0) {
+        println("agora serve: --motd path could not be read; using default MOTD");
+        return 1;
+    }
+    if (n == 0) {
+        println("agora serve: --motd file is empty; using default MOTD");
+        return 1;
+    }
+    g_motd_buf = buf;
+    g_motd_len = n;
+    return 0;
+}
+
 fn cmd_serve(): i64 {
     args_init();
     var n = argc();
     var port = DEFAULT_PORT;
-    if (n >= 3) {
-        var arg = argv(2);
+
+    # Argv scan. Order-insensitive: a positive-integer positional
+    # is taken as the port; --motd consumes the next arg as a path.
+    var i = 2;
+    var go = 1;
+    while (i < n) {
+        if (go == 0) { continue; }
+        var arg = argv(i);
+        if (streq(arg, "--motd") != 0) {
+            if (i + 1 >= n) {
+                println("agora serve: --motd requires a path argument");
+                go = 0;
+                continue;
+            }
+            load_motd_file(argv(i + 1));
+            i = i + 2;
+            continue;
+        }
         var p = atoi(arg);
         if (p > 0) { port = p; }
+        i = i + 1;
     }
+    if (go == 0) { return 2; }
+
     return cmd_serve_on(port);
 }
 

@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M2-C: `agora serve --motd <path>` operator override (2026-05-23)
+
+- **New flag**: `agora serve [port] [--motd <path>]`. Order-insensitive argv parse — positive-integer positionals still take the port, `--motd` consumes the next arg as a filesystem path.
+- **`load_motd_file(path)`** — reads up to 4 KB from `path` once at startup via `lib/io.cyr` `file_read_all`, parks the buffer + length in two globals (`g_motd_buf`, `g_motd_len`). Three failure modes warn-and-fall-back to the default MOTD: missing path arg (returns exit 2), `read` failure (open error or read error), and zero-byte file. Set-once-at-startup state — no per-connection re-read.
+- **`handle_client` MOTD dispatch** — if `g_motd_buf` is non-null, sends those bytes verbatim; otherwise allocates a per-connection 1 KB buffer and runs the M2-B `render_motd` path. The override is verbatim — operator is responsible for CRLF line endings (telnet NVT, RFC 854) and any ANSI escapes they want to embed.
+- **Smoke** — three cases verified end-to-end against a python TCP client:
+  1. No flag → default cyan-wrapped AGORA banner via `render_motd`
+  2. `--motd /tmp/operator-motd.txt` → file content delivered verbatim
+  3. `--motd /nonexistent` → stderr warning, server continues with default MOTD
+- **Help text updated** in `print_help` to document the flag.
+- 24-test parser suite still green (this bite is content-layer, doesn't touch the IAC state machine). Binary 84,488 → 85,544 B (+1,056 B).
+
 ### Added — M2-B: darshana SGR-colored MOTD (2026-05-23)
 
 - **`[deps.darshana]`** — added to `cyrius.cyml` as a git dep pinned at `0.5.3`. Functional surface (`tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_fg_rgb_buf`, cursor primitives) is present at 0.5.3 even though darshana itself is pre-1.0 — the "needs ≥ 1.0" gate in the original roadmap was a version-label restriction, not a functionality one. Bannermanor 1.0.1 re-pinned to the same `0.5.3` the same day so every AGNOS consumer of darshana is on one version.
