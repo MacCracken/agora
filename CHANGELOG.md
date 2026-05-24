@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-05-23 (sigil 3.1.1 → 3.4.3 release-notes diff — audit-followup, no bump)
+
+Audit-followup release discharging the "sigil 3.1.1 → 3.4.3 release-notes diff read" item from the 0.7.0 audit's `Deferred to 0.8 v1-hardening` queue ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md) § "Deferred"). **No sigil bump needed**; bundled 3.1.1 stays pinned through cyrius 6.0.1's lib snapshot.
+
+### Security
+
+- **0.7.0 deferred item closed**: full diff read of `~/Repos/sigil/CHANGELOG.md` from 3.1.2 through 3.4.3 (13 releases). Findings:
+  - **Zero CRITICAL/HIGH** in any release affecting agora's consumed surface (`ed25519_verify`, `ed25519_keypair`, `sha256`).
+  - **Constant-time discipline maintained** through the diff window — explicit note at sigil 3.2.1: "Constant-time discipline maintained for the scalar-mul primitive even though verify inputs are public — preserves the 'no timing side-channels on any future secret-data caller' invariant."
+  - **Ed25519 signature malleability fix** (sigil HIGH H3 — RFC 8032 §5.1.7 / §8.4 S < L check) — landed at sigil 2.1.0 (April 2026), already in 3.1.1, already in agora.
+  - **One MEDIUM** flagged in sigil 3.0.0 → 3.1.x (thread-safety on module-global crypto scratch — `_sha_*`, `_ed_*` etc.) — **does not apply to agora**. ADR 0007 fork-per-conn makes every child process single-threaded; sigil primitives are never called concurrently from multiple threads within a single agora process. Sigil 3.3.0 closed it anyway via "per-call working state" rewrite, so even if a future agora consumer goes multi-thread within one process, the bundled-3.1.1 limitation is bounded by the documented mitigation (`_sigil_batch_mutex`) which agora never invokes.
+  - **3.2.x — 3.4.x improvements** (parallel `sv_verify_batch`, `VerifyScratch` alloc-free, NI self-test gate, X.509 / ECDSA P-256 / TEE attestation surface, `secret var` adoption for zeroization) all add new surface area that agora doesn't consume. The bundled 3.1.1 has every fix relevant to our call pattern.
+
+### Verdict
+
+- **NO sigil version bump.** Bundled `sigil` (in cyrius 6.0.1 stdlib lib snapshot, 3.1.1) is sufficient through agora 1.0.
+- **No `cyrius.cyml` change.** stdlib pin stays at cyrius 6.0.1 / sigil 3.1.1.
+- **No code change in agora.** All five 0.7.0 HIGH fixes (H1-H3, M3, M6) plus the 0.8.0 fork-per-conn refactor plus the 0.8.1 keyfile-mode-warn all stay in place.
+
+### Verified
+
+- 79/79 tests pass (no change from 0.8.1 — this release is documentation only).
+- Binary 378,400 B (0.8.1) → 378,416 B (0.8.2), +16 B from the version-literal string-length deltas only (one banner line picked up a longer suffix). No functional code change.
+- `cyrius audit` clean.
+
+### Changed
+
+- Version literals bumped 0.8.1 → 0.8.2 in `print_banner` (cites the diff-read decision), `cmd_version`, `render_motd`.
+
+### Followup queued for 0.8.3
+
+- **B / audit M4** — anonymous `enter <name>` board-create gate. Independent of concurrency model + sigil; next bite in the 0.8.x sequence.
+
+## [0.8.1] — 2026-05-23 (keyfile mode warn-on-load — audit L1)
+
+Smallest possible patch closing audit L1 from the 0.7.0 security sweep ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md) § L1). `keyfile_load_seed` now `fstat`s the open keyfile and warns to stderr if any group / other permission bit is set (mode & 0o077 != 0). Doesn't refuse the load — containerized deployments may legitimately use world-readable mounts; the operator notices the warning on next `register` / `whoami` / `--as` invocation and decides whether to tighten.
+
+### Security
+
+- **Audit L1 closed** — keyfile mode warn-on-load. Same shape as `ssh`'s `-i` permission check, minus the refuse-on-loose behavior. The warning surfaces on every load (not cached) so a `chmod 644` mid-deployment trips immediately.
+
+### Changed
+
+- `src/account.cyr` — new `mode_is_loose(mode)` pure-bit helper (returns 1 iff `mode & 0o077 != 0`); new `keyfile_warn_loose_mode(path, fd)` that fstats + warns on stderr; `keyfile_load_seed` rewritten from one-shot `file_read_all` to explicit open + fstat + read + close so the warning hook can run between open and read.
+- `src/test.cyr` — new `t79_mode_is_loose` (79 tests total): 10 fixed-mode cases covering tight (0o600 / 0o700 / 0o400 / 0o000) → 0, loose (0o644 / 0o660 / 0o604 / 0o666 / 0o601 / 0o610) → 1, and `S_IFREG | 0o600` (high type bits don't trigger) → 0.
+
+### Verified
+
+- **79/79 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build` (+1 test for the mode-bit math).
+- **End-to-end smoke**: `agora keygen --key ./key` produces 0o600 silently; `chmod 644 ./key && agora whoami --key ./key` emits `agora: warning: keyfile ./key has loose permissions (group/other readable); recommend chmod 600` on stderr and continues; `chmod 666` likewise; `chmod 600` returns to silent.
+- Binary 377,520 B (0.8.0) → 378,400 B (0.8.1), +880 B (+0.23%) for the fstat call + mode check + warn-emit + the test scaffolding for t79.
+- 5 telnet-parser benchmarks unchanged from M1-close baseline (this patch only touches the keyfile-load path; never on the hot path).
+- `cyrius audit` clean.
+
 ## [0.8.0] — 2026-05-23 (concurrent accept — fork-per-connection)
 
 agora becomes a **truly multi-user telnet BBS**. The accept loop now forks per connection ([ADR 0007](docs/adr/0007-fork-per-accept-concurrency.md)); each client runs in its own process with isolated identity slots, isolated session state, and kernel-managed memory cleanup at `sys_exit`. The two co-scheduled MEDIUM findings from the 0.7.0 audit — **M1** (bump-allocator memory growth in long-running serve) and **M2** (`g_login_*` slot collision under concurrent accept) — both close via process isolation: kernel reclaims per-child memory atomically at exit, and globals are per-process post-fork so two clients running `login` simultaneously cannot collide.

@@ -1755,6 +1755,68 @@ fn t78_parse_post_id_accepts_18_digits(): i64 {
     return 0;
 }
 
+# === 0.8.1 audit-L1 regression (t79) ===
+# Audit doc: docs/audit/2026-05-23-audit.md § L1.
+
+# A-1 — mode_is_loose: pure bit-math gate for keyfile-mode warn.
+# Tight modes (owner-only): 0o600 / 0o700 / 0o400 → 0.
+# Loose modes (any g/o bit): 0o644 / 0o660 / 0o604 / 0o666 → 1.
+fn t79_mode_is_loose(): i64 {
+    # Tight (owner-only) modes — must return 0.
+    if (mode_is_loose(0x180) != 0) {                  # 0o600 rw- --- ---
+        test_fail("t79_mode_is_loose", "0o600 misclassified as loose");
+        return 1;
+    }
+    if (mode_is_loose(0x1C0) != 0) {                  # 0o700 rwx --- ---
+        test_fail("t79_mode_is_loose", "0o700 misclassified as loose");
+        return 1;
+    }
+    if (mode_is_loose(0x100) != 0) {                  # 0o400 r-- --- ---
+        test_fail("t79_mode_is_loose", "0o400 misclassified as loose");
+        return 1;
+    }
+    if (mode_is_loose(0) != 0) {                      # 0o000
+        test_fail("t79_mode_is_loose", "0o000 misclassified as loose");
+        return 1;
+    }
+    # Loose modes — must return 1.
+    if (mode_is_loose(0x1A4) != 1) {                  # 0o644 rw- r-- r--
+        test_fail("t79_mode_is_loose", "0o644 not detected as loose");
+        return 1;
+    }
+    if (mode_is_loose(0x1B0) != 1) {                  # 0o660 rw- rw- ---
+        test_fail("t79_mode_is_loose", "0o660 not detected as loose");
+        return 1;
+    }
+    if (mode_is_loose(0x184) != 1) {                  # 0o604 rw- --- r--
+        test_fail("t79_mode_is_loose", "0o604 not detected as loose");
+        return 1;
+    }
+    if (mode_is_loose(0x1B6) != 1) {                  # 0o666 rw- rw- rw-
+        test_fail("t79_mode_is_loose", "0o666 not detected as loose");
+        return 1;
+    }
+    # Edge: only an other-execute bit (0o001) → loose.
+    if (mode_is_loose(0x181) != 1) {                  # 0o601 rw- --- --x
+        test_fail("t79_mode_is_loose", "0o601 not detected as loose");
+        return 1;
+    }
+    # Edge: only a group-execute bit (0o010) → loose.
+    if (mode_is_loose(0x188) != 1) {                  # 0o610 rw- --x ---
+        test_fail("t79_mode_is_loose", "0o610 not detected as loose");
+        return 1;
+    }
+    # High bits (setuid / type bits above 0o7777) must NOT trigger.
+    # 0o100600 (regular file + 0o600) is a common st_mode value;
+    # only the low 0o777 should matter for our check.
+    if (mode_is_loose(0x8180) != 0) {                 # 0o100600 (S_IFREG | 0o600)
+        test_fail("t79_mode_is_loose", "S_IFREG|0o600 (regular file, tight) misclassified");
+        return 1;
+    }
+    test_pass("t79_mode_is_loose");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1839,6 +1901,7 @@ fn main(): i64 {
     t76_post_from_rejects_invalid_fp();
     t77_parse_post_id_rejects_overlong_digits();
     t78_parse_post_id_accepts_18_digits();
+    t79_mode_is_loose();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

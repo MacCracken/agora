@@ -338,10 +338,51 @@ fn post_from(buf, len, handle_out, h_max, fp_out, fp_max): i64 {
 # (= seed||pk) and 32-byte pk from the seed on every load. The
 # secret never crosses the wire.
 
+# 0.8.1 audit L1 — mode-bit check helper. A keyfile is "loose" if
+# any group / other permission bit is set (mode & 0o077 != 0). Pure
+# bit math so the test suite can exercise it without touching files.
+#
+# Tight: 0o600 (rw- --- ---) → 0; 0o400 (r-- --- ---) → 0; 0o700 → 0.
+# Loose: 0o644 (rw- r-- r--) → 1; 0o604 (rw- --- r--) → 1; 0o660 → 1.
+fn mode_is_loose(mode): i64 {
+    if ((mode & 0x3F) != 0) { return 1; }     # 0x3F = 0o077
+    return 0;
+}
+
+# fstat the open keyfile and warn to stderr if mode is loose. Doesn't
+# refuse the load — containerized deployments may legitimately use
+# world-readable mounts. Returns 1 if a warning fired, 0 otherwise.
+# Silent on fstat errors (no useful action; the caller's read will
+# surface any real fd problem).
+fn keyfile_warn_loose_mode(path, fd): i64 {
+    var st[144];                              # STAT_BUFSZ
+    if (sys_fstat(fd, &st) != 0) { return 0; }
+    # st_mode is a 4-byte field at STAT_MODE; permission bits live in
+    # the low 16. Load 2 bytes is sufficient — type/special-bits sit
+    # above 0o7777 and we only care about g+o here.
+    var lo = load8((&st) + STAT_MODE)     & 0xFF;
+    var hi = load8((&st) + STAT_MODE + 1) & 0xFF;
+    var mode = lo | (hi << 8);
+    if (mode_is_loose(mode) == 0) { return 0; }
+    syscall(1, 2, "agora: warning: keyfile ", 24);
+    syscall(1, 2, path, strlen(path));
+    syscall(1, 2, " has loose permissions (group/other readable); recommend chmod 600\n", 67);
+    return 1;
+}
+
 # Read the 32-byte seed from a keyfile into seed_out. Returns 0 on
 # success, -1 on missing file / wrong size / read error.
+#
+# 0.8.1: opens + fstat-warns (audit L1, ADR 0006-adjacent — see
+# docs/audit/2026-05-23-audit.md § L1) + reads + closes. The warning
+# is informational; loose-mode keyfiles still load so containerized
+# operators can override their mount strategy.
 fn keyfile_load_seed(path, seed_out): i64 {
-    var n = file_read_all(path, seed_out, ACCOUNT_SEED_BYTES);
+    var fd = file_open(path, 0, 0);           # O_RDONLY
+    if (fd < 0) { return 0 - 1; }
+    keyfile_warn_loose_mode(path, fd);
+    var n = file_read(fd, seed_out, ACCOUNT_SEED_BYTES);
+    file_close(fd);
     if (n != ACCOUNT_SEED_BYTES) { return 0 - 1; }
     return 0;
 }

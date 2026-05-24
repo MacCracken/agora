@@ -20,7 +20,11 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.6.0** | M6 — sigil-backed auth + per-board policy (ADR 0006) | ✅ 2026-05-23 |
 | **0.7.0** | Security sweep — external CVE / 0-day research + code audit | ✅ 2026-05-23 |
 | **0.8.0** | Concurrent accept via fork-per-connection (ADR 0007) — audit M1 + M2 closed | ✅ 2026-05-23 |
-| **0.8.x** | Audit followups (L1 keyfile mode, M4 anon board-create, sigil version diff), ABI freeze, doc-pass | ← next cycle |
+| **0.8.1** | Keyfile mode warn-on-load (audit L1 closed) | ✅ 2026-05-23 |
+| **0.8.2** | Sigil 3.1.1 → 3.4.3 release-notes diff (no bump; 0.7.0 deferred item discharged) | ✅ 2026-05-23 |
+| **0.8.x** | Remaining audit followup: B audit-M4 anon board-create gate (0.8.3) | ← next cycle |
+| **0.9.0** | ABI freeze decision (likely new ADR 0008 — `post_format_with_headers` shape) |  |
+| **0.9.x** | Doc-pass on guides + examples (F), perf re-run + final 1.0 closeout (G) |  |
 | **1.0.0** | Iron validation on archaemenid LAN |  |
 
 ---
@@ -31,12 +35,12 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 **0.8.0 shipped just bite E** (concurrent-accept) — the structural change that closes audit M1 + M2. The other bites from the 0.8 cycle plan are queued for 0.8.x patches, in recommended order:
 
-- **0.8-A — keyfile mode warn-on-load** (audit L1). `fstat` after `keyfile_load_seed` open; warn on stderr if mode & 0o077 != 0. Don't refuse — containers legitimately use world-readable mounts.
-- **0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read.** Verify `ed25519_verify` constant-time guarantee; scan for crypto fixes between bundled (3.1.1) and standalone tip (3.4.3). Bump sigil if any HIGH-or-up issue lands.
-- **0.8-B — anonymous board-create gate** (audit M4). Today an unauthenticated client can spam `enter <name>` to mkdir arbitrary subdirectories under the store. Fix: require auth for `board_ensure` from the wire, OR add an accept-loop rate limit. (Both mitigations are orthogonal.)
-- **0.8-D — ABI freeze decision** (likely new ADR 0008). `post_format_with_headers` is at 8 args; decide whether to freeze the current shape OR refactor to a params-struct before 1.0.
-- **0.8-F — guides + examples doc-pass** (deferred from M6 close + 0.7.x). Rewrite `docs/guides/getting-started.md` + `docs/examples/` to cover the 0.8.0 surface (concurrent fork, M6 auth, the 5 0.7.0 audit-hardenings, the new ADR 0007 concurrency model).
-- **0.8-G — perf re-run + final closeout sweep**. Re-capture bench numbers (parser hot path expected unchanged — fork is pre-IAC), full CLAUDE.md "Closeout Pass" §1-11 against the 0.8.x tip, prep for 1.0 cut.
+- ~~0.8-A — keyfile mode warn-on-load~~ **shipped at 0.8.1.**
+- ~~0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read~~ **shipped at 0.8.2.** No bump needed; bundled 3.1.1 has all relevant crypto fixes. Full rationale in [CHANGELOG 0.8.2](../../CHANGELOG.md).
+- **0.8-B — anonymous board-create gate** (audit M4, queued for 0.8.3). Today an unauthenticated client can spam `enter <name>` to mkdir arbitrary subdirectories under the store. Fix: require auth for `board_ensure` from the wire, OR add an accept-loop rate limit. (Both mitigations are orthogonal.)
+- **0.8-D / 0.9.0 — ABI freeze decision** (likely new ADR 0008). `post_format_with_headers` is at 8 args; decide whether to freeze the current shape OR refactor to a params-struct before 1.0. Earns a minor bump (0.9.0) because the answer affects the public function signature.
+- **0.8-F / 0.9.1 — guides + examples doc-pass** (deferred from M6 close + 0.7.x). Rewrite `docs/guides/getting-started.md` + `docs/examples/` to cover the 0.8.x surface (concurrent fork, M6 auth, the 5 0.7.0 audit-hardenings, ADR 0007 concurrency, 0.8.1 keyfile mode warn).
+- **0.8-G / 0.9.2 — perf re-run + final closeout sweep**. Re-capture bench numbers (parser hot path expected unchanged — fork is pre-IAC), full CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip, prep for 1.0 cut.
 
 **Deferred from 0.7.0 (still queued; pull when a deployment asks):**
 
