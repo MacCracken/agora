@@ -21,3 +21,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0004 | [Board layout: flat-root = main, subdirs = named](0004-board-layout.md) | Accepted (2026-05-23) |
 | 0005 | [Threading via Reply-To header](0005-threading-via-reply-to.md) | Accepted (2026-05-23) |
 | 0006 | [Identity model: sigil Ed25519, `.users/<fp>`, challenge/response login](0006-identity-model.md) | Accepted (2026-05-23) |
+| 0007 | [Concurrent connections via fork-per-accept](0007-fork-per-accept-concurrency.md) | Accepted (2026-05-23) |

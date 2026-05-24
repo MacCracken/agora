@@ -6,7 +6,7 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-05-23 (post-0.7.0 ship; pre-1.0 security sweep cycle closed — 5 audit fixes landed, first `docs/audit/` entry filed) | **Refresh cadence**: every release; ideally bumped by the release post-hook.
+> **Last refresh**: 2026-05-23 (post-0.8.0 ship; ADR 0007 fork-per-accept landed — audit M1 + M2 closed via process isolation; agora is now a truly multi-user telnet BBS) | **Refresh cadence**: every release; ideally bumped by the release post-hook.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
 
@@ -16,11 +16,11 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 **What to know after a fresh agent boot:**
 
-1. **Where we are**: agora is a **multi-board threaded BBS with sigil-backed auth, per-board posting policy, and an audit-hardened input layer** at v0.7.0. M6 cycle + 0.7.0 security sweep both closed. The clean slate is ready for **0.8.0 v1 hardening + ABI freeze** (per the release plan in [`roadmap.md`](roadmap.md)).
-2. **Where to read first**: this file (state.md), then [`roadmap.md`](roadmap.md) for the release plan, then [`CLAUDE.md`](../../CLAUDE.md) for project rules. Decisions live in [`../adr/`](../adr/) — six ADRs as of 0.6.0 (no new ADR at 0.7.0; the audit doc is the record). Audit findings live in [`../audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md) — read it before touching the IAC parser, post storage, or auth surface.
-3. **What's next**: 0.8.0 — v1 hardening + ABI freeze + concurrent-accept refactor. Inputs: 0.7.0 audit § "Deferred to 0.8 v1-hardening" (M1/M2 concurrent-accept + per-conn memory arenas, M4 anonymous-board-create rate-limit / auth-gate, L1 keyfile mode warn-on-load, sigil 3.1.1 → 3.4.3 release-notes diff). Plus: tighten benchmarks; doc-pass on stale guides/examples; final pre-1.0 sweep of CHANGELOG / state.md / roadmap.md.
-4. **What to build / test**: `cyrius build src/main.cyr build/agora` (clean → 377 KB), `cyrius test src/test.cyr` (78/78 pass), `cyrius bench benches/bench_telnet.bcyr` (5 baselines unchanged from M1-close — security patches don't touch the parser hot path), `./build/agora serve 2323` (telnet to localhost:2323), `./build/agora keygen --key ~/.agora/key` + `./build/agora register --handle <h> --store <s>` + `./build/agora whoami --store <s>` (M6 CLI surface). Smoke the 0.7.0 hardenings: `agora post --subject $'foo\r\nReply-To: 1'` exits 2; `agora list --board "../../etc"` exits 2.
-5. **What NOT to do**: don't commit / push — user owns git. Don't use `gh` CLI. Don't add unprompted version bumps (per durable CLAUDE.md rules). When inventing demo handles in smoke tests / examples, use three-letter old-arcade-game names (`qix`, `pac`, `zax`, `dig`, `jst`) — NOT `alice` (per saved memory).
+1. **Where we are**: agora is a **multi-user, multi-board threaded BBS with sigil-backed auth, per-board posting policy, audit-hardened input, and concurrent connection handling** at v0.8.0. M6 + 0.7.0 security sweep + 0.8.0 concurrent-accept all closed. The path to 1.0 is now down to: audit followups (M4 anon-board-create gate, L1 keyfile mode warn), sigil version diff read, doc-pass on stale guides + examples, ABI freeze decision, and iron validation on archaemenid LAN.
+2. **Where to read first**: this file (state.md), then [`roadmap.md`](roadmap.md) for the release plan, then [`CLAUDE.md`](../../CLAUDE.md) for project rules. Decisions live in [`../adr/`](../adr/) — **seven ADRs** as of 0.8.0 (ADR 0007 fork-per-accept landed this cycle). Audit findings live in [`../audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md) — read it before touching the IAC parser, post storage, or auth surface. Concurrency model lives in [`../adr/0007-fork-per-accept-concurrency.md`](../adr/0007-fork-per-accept-concurrency.md) — read it before touching `cmd_serve_on`.
+3. **What's next**: the 0.8 cycle had 7 bites in the original plan (A L1 keyfile mode, B M4 anon-board-create, C sigil 3.1.1→3.4.3 diff, D ABI freeze decision, **E concurrent-accept ✅**, F doc-pass, G perf re-run + closeout). 0.8.0 shipped **just E**; the user can pick the next bite (A/B/C/D/F/G) at any time, or batch them as 0.8.1+ patches. Recommended order: small wins first (A → C → B → D → F → G) before the 1.0 cut.
+4. **What to build / test**: `cyrius build src/main.cyr build/agora` (clean → 378 KB), `cyrius test src/test.cyr` (78/78 pass), `cyrius bench benches/bench_telnet.bcyr` (5 baselines unchanged from M1-close — fork happens before the IAC byte path), `./build/agora serve 2323` (telnet to localhost:2323; **NOW MULTI-USER** — open as many simultaneous connections as your kernel allows). Concurrency smoke: `python3 /tmp/agora-concurrent-smoke.py 2323 3` (script in the 0.8.0 work tree; verifies 3 independent sessions). M6 CLI: `./build/agora keygen --key ~/.agora/key` + `./build/agora register --handle <h> --store <s>` + `./build/agora whoami --store <s>`.
+5. **What NOT to do**: don't commit / push — user owns git. Don't use `gh` CLI. Don't add unprompted version bumps (per durable CLAUDE.md rules). When inventing demo handles in smoke tests / examples, use three-letter old-arcade-game names (`qix`, `pac`, `zax`, `dig`, `jst`) — NOT `alice` (per saved memory). **Don't add SIGCHLD signal handlers** to the accept loop — ADR 0007 § Alternatives explicitly rejected sigaction-based reaping due to the x86_64 trampoline trap in cyrius. Stick with the waitpid(WNOHANG) loop.
 
 ---
 
@@ -28,8 +28,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.7.0` (2026-05-23) |
-| **Cycle** | M0 / M1 / M2 / M5 / M6 + **0.7.0 security sweep** all closed. **0.8 v1 hardening + ABI freeze is the next cycle.** Release plan after that: 1.0 ship on archaemenid iron. |
+| **Released** | `0.8.0` (2026-05-23) |
+| **Cycle** | M0 / M1 / M2 / M5 / M6 + 0.7.0 security sweep + **0.8.0 concurrent-accept (just E)** all closed. **0.8.x patches (A audit-L1, B audit-M4, C sigil diff, D ABI freeze, F doc-pass) carry the rest of the 0.8 cycle.** Then: 1.0 ship on archaemenid iron. |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -37,11 +37,11 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Artifact | Size | Build line |
 |---|---|---|
-| `build/agora` (x86_64, no DCE) | **377,184 B** at 0.7.0 | `cyrius build src/main.cyr build/agora` |
-| `build/agora` (DCE) | same size — DCE NOPs unreachable fns in place rather than stripping (**673 fns / ~160 KB** NOPed at 0.7.0, ~95% of which is sigil's unreachable PQC / keccak / hashmap_fast / thread paths). Real binary strip is a v1.x close-out concern. | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
+| `build/agora` (x86_64, no DCE) | **377,520 B** at 0.8.0 | `cyrius build src/main.cyr build/agora` |
+| `build/agora` (DCE) | same size — DCE NOPs unreachable fns in place rather than stripping (**670 fns / ~159 KB** NOPed at 0.8.0; threading functions are still DCE-NOPed even though we now use `sys_fork` + `sys_waitpid`, because the higher-level `thread_create` / `mutex_*` wrappers remain unused). Real binary strip is a v1.x close-out concern. | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
 | `build/test` | 78 tests | `cyrius build src/test.cyr build/test && ./build/test` |
 
-Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) → 86 KB M2 close (0.3.0) → 129 KB M5 partial (0.4.0) → 140 KB M5 close (0.5.0) → 375 KB M6 close (0.6.0) → **377 KB 0.7.0 security sweep**. The 0.6→0.7 delta (+2,216 B / +0.6%) is the new header/fp validators + login-deadline check; no new stdlib deps.
+Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) → 86 KB M2 close (0.3.0) → 129 KB M5 partial (0.4.0) → 140 KB M5 close (0.5.0) → 375 KB M6 close (0.6.0) → 377 KB 0.7.0 security sweep → **378 KB 0.8.0 concurrent-accept**. The 0.7→0.8 delta (+336 B / +0.09%) is the fork wrapper + waitpid reaper loop in `cmd_serve_on`; no new stdlib deps (`sys_fork` / `sys_waitpid` / `sys_exit` were already exposed via the existing `syscalls` stdlib module).
 
 ## Tests + benchmarks
 
@@ -53,7 +53,30 @@ Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) �
 
 ## In-flight slot
 
-**0.8.0 — v1 hardening + ABI freeze + concurrent-accept refactor** (next cycle, not yet started)
+**0.8.x patches — remaining 0.8 cycle bites** (concurrent-accept E shipped at 0.8.0; A/B/C/D/F/G queued)
+
+Per the bite plan agreed at 0.8.0 cycle-open (state.md history), the 0.8 cycle had 7 bites. **E (concurrent-accept) shipped at 0.8.0** via [ADR 0007](../adr/0007-fork-per-accept-concurrency.md) — audit M1 + M2 both closed via process isolation. Remaining bites, in recommended order:
+
+- **0.8-A — keyfile mode warn-on-load** (audit L1). `fstat` after `keyfile_load_seed` open; warn on stderr if mode & 0o077 != 0. Small (~30 LOC + 1-2 tests). Defense-in-depth.
+- **0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read** (audit deferred). Research-only; bump sigil if any HIGH-or-up issue lands between bundled (3.1.1 in cyrius 6.0.1) and standalone tip (3.4.3).
+- **0.8-B — anonymous board-create gate** (audit M4). Today an unauthenticated client can spam `enter <new>` to mkdir arbitrary subdirs. Fix: require auth for `board_ensure` from wire OR add accept-loop rate limit. Design call.
+- **0.8-D — ABI freeze decision**. `post_format_with_headers` is at 8 args; freeze the current shape OR refactor to a params-struct. Likely earns a new ADR (0008). Pre-1.0 decision.
+- **0.8-F — guides + examples doc-pass** (doc-health Tier 5/6, bumped from 0.7.x). Rewrite `docs/guides/getting-started.md` + `docs/examples/` for the 0.8.0 surface (concurrent fork, all M6 verbs, the 5 audit-hardenings as security-features-not-bugs).
+- **0.8-G — perf re-run + final closeout sweep**. Re-capture bench numbers, full CLAUDE.md "Closeout Pass" §1-11 against the 0.8.x tip, prep for 1.0 cut.
+
+**Previous (0.8.0 fork-per-accept) cycle closed 2026-05-23** — see "Recent shipped" below.
+
+### Archived 0.8.0 in-flight notes (for next-session reference)
+
+**Bite plan**: 5 sub-bites of E (ADR design, fork implementation, zombie reaper, smoke test, closeout). Shipped 2026-05-23 from a single editing session.
+
+**Design decision**: fork-per-accept (option F) over thread-per-accept (option T) because M2 only closes with a shared-state refactor under threading; fork closes M2 for free via address-space isolation. Single-thread epoll (option E) also rejected — would force every byte handler in `handle_client` to be yield-aware, doubling cognitive load on the line/IAC state machine. Single-track-with-arena (option S) only closes M1; M2 stays queued. Memory model: process-exit cleanup (option X) over per-conn freelist arena (option Y) — kernel-managed reclamation is strictly stronger than `fl_free`. Zombie reaper: non-blocking `sys_waitpid(-1, NULL, WNOHANG)` loop (option p) over `SIG_IGN` (option q) or `SA_NOCLDWAIT` (option r) — avoids the x86_64 sigaction trampoline trap that cyrius `lib/darshana.cyr` documents.
+
+**Smoke verification**: 3 simultaneous TCP sessions via `/tmp/agora-concurrent-smoke.py` — all 3 got own banner + own anonymous response (proves no global collision, M2 closed). Reaper drains zombies from previous accept iterations (verified: round-1's 3 zombies cleared at round-2's accept). Steady-state: ≤ N zombies pending between accepts, where N = children that exited since last accept.
+
+**Carried forward**: audit M4 (anonymous `enter` board-create gate) — independent of concurrency model, queued for 0.8-B.
+
+### Archived 0.7.0 in-flight notes (for next-session reference)
 
 The 0.7.0 audit produced four deferred items that 0.8 has to land before the 1.0 cut:
 
@@ -106,6 +129,7 @@ Reference reading before the cycle: [`../audit/2026-05-23-audit.md`](../audit/20
 
 ## Recent shipped
 
+- **0.8.0** (2026-05-23) — concurrent accept via fork-per-connection ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)). Audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) both close via process isolation. Loop: drain zombies → accept → fork → child runs handle_client + exit / parent loops. **agora is now a truly multi-user telnet BBS** — open as many concurrent sessions as the kernel allows. +336 B binary (+0.09%); no new stdlib deps; tests unchanged at 78/78 (E is in the accept loop, not in unit-testable code). Audit M4 (anonymous board-create) carried forward to 0.8-B.
 - **0.7.0** (2026-05-23) — pre-1.0 security sweep. First `docs/audit/` entry (2026-05-23-audit.md). 5 actionable findings fixed (H1 CLI subject CRLF injection, H2 cmd_list/cmd_read --board path-traversal, H3 post_from re-validation, M3 parse_post_id overflow guard, M6 30s login deadline). 4 deferred to 0.8 v1-hardening (M1/M2 concurrent-accept, M4 anon board-create, L1 keyfile mode). 8 new regression tests (70 → 78); binary 375 → 377 KB (+0.6%). No new stdlib deps. **agora's input layer is now hardened against the obvious wire/CLI injection vectors; the next cycle (0.8) closes the memory + concurrency story.**
 - **0.6.0** (2026-05-23) — M6 close: sigil-backed auth + per-board policy. 6 bites (M6-A ADR through M6-F policy) + 1 new ADR (0006 identity model). 21 new tests (49 → 70); binary 140 → 375 KB. **agora is a multi-board threaded BBS with Ed25519 challenge/response auth and operator-configurable per-board posting policy.** New CLI: `keygen` / `register` / `whoami`. New telnet commands: `login` / `whoami`. New stdlib deps: sigil + freelist + bigint + ct.
 - **0.5.0** (2026-05-23) — M5 close: boards + threads. 2 new bites (M5-E boards, M5-F threading) + 2 new ADRs (0004 board layout, 0005 Reply-To threading). 49 tests; 140,160 B. **agora is a multi-board threaded BBS.**
@@ -144,7 +168,7 @@ None yet. agora is a binary (telnet server), not a library. Future consumers may
 
 ## Source surface
 
-- `src/main.cyr` — argv dispatch + verb handlers + telnet `handle_client` + session helpers + login flow + CLI keygen/register/whoami + 0.7.0 audit gates (`cmd_post` --subject C0 filter, `cmd_list`/`cmd_read` --board validation, MODE_LOGIN_AWAIT_SIG 30s deadline) (~1.65k LOC at 0.7.0)
+- `src/main.cyr` — argv dispatch + verb handlers + telnet `handle_client` + session helpers + login flow + CLI keygen/register/whoami + 0.7.0 audit gates (`cmd_post` --subject C0 filter, `cmd_list`/`cmd_read` --board validation, MODE_LOGIN_AWAIT_SIG 30s deadline) + **0.8.0 fork-per-accept in `cmd_serve_on`** (waitpid reaper, sys_fork, child handle_client + sys_exit, parent loops) (~1.66k LOC at 0.8.0)
 - `src/telnet.cyr` — RFC 854 IAC parser + RFC 1143 Q-method + RFC 1184 LINEMODE state machine (unchanged since 0.2.0; audit confirmed bounds-clean against CVE-2020-10188 / CVE-2011-4862)
 - `src/board.cyr` — post storage + headers + threading + flock + board layout + From-header param + per-board policy + 0.7.0 audit helpers (`header_text_ok` / `header_text_buf_ok` / `header_text_cstr_ok` / `fp16_valid`; `parse_post_id` 18-digit cap) (ADRs 0002/0003/0004/0005/0006)
 - `src/account.cyr` — fingerprint + handle validation + per-user dir + keyfile + nonce / sig parse + From-header extractor + 0.7.0 audit re-validation tail in `post_from` (~510 LOC at 0.7.0)

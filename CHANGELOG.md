@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-23 (concurrent accept — fork-per-connection)
+
+agora becomes a **truly multi-user telnet BBS**. The accept loop now forks per connection ([ADR 0007](docs/adr/0007-fork-per-accept-concurrency.md)); each client runs in its own process with isolated identity slots, isolated session state, and kernel-managed memory cleanup at `sys_exit`. The two co-scheduled MEDIUM findings from the 0.7.0 audit — **M1** (bump-allocator memory growth in long-running serve) and **M2** (`g_login_*` slot collision under concurrent accept) — both close via process isolation: kernel reclaims per-child memory atomically at exit, and globals are per-process post-fork so two clients running `login` simultaneously cannot collide.
+
+### Added
+
+- **[ADR 0007 — Concurrent connections via fork-per-accept](docs/adr/0007-fork-per-accept-concurrency.md)** — decision rationale: rejects thread-per-accept (M2 only closes with shared-state refactor; concurrency bug surface), epoll event loop (forces every byte handler to be yield-aware), and single-track-with-arena (only closes half the audit). Picks fork because the kernel address-space boundary closes M1 + M2 simultaneously with the smallest source-level diff.
+
+### Changed
+
+- `cmd_serve_on` (`src/main.cyr`) is now fork-per-accept. Loop shape:
+  1. Drain zombies via `sys_waitpid(-1, NULL, WNOHANG)` until it returns ≤ 0.
+  2. `sock_accept` for the next client.
+  3. `sys_fork`: child closes the listening fd and runs `handle_client(cfd)` + `sys_exit(0)`; parent closes the accepted cfd and continues.
+- Per-connection state (`g_session_fp` / `g_session_handle` / `g_login_fp` / `g_login_nonce` / `g_login_started_ms` / `g_reply_*`) stays in globals — fork makes them per-process automatically; no struct refactor needed. This was a deliberate decision in ADR 0007 (smallest possible diff for the audit close).
+- Banner / version literals bumped 0.7.0 → 0.8.0 in `print_banner`, `cmd_version`, `render_motd`.
+
+### Verified
+
+- **78/78 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build`. No new tests for E itself — the change is in the accept loop, exercised end-to-end by smoke testing (see below).
+- **Concurrent-accept smoke** (3 simultaneous sessions): each gets its own MOTD + banner + prompt + independent `whoami` (anonymous, no cross-session state). Test driver: `python3 /tmp/agora-concurrent-smoke.py 23456 3` against `./build/agora serve 23456`. 3/3 sessions OK.
+- **Zombie reaper smoke**: round 1 of 3 connections leaves 3 zombies (`ps -eo ... ZN`); round 2 of 1 connection triggers the waitpid drain at top of accept loop, clearing all 3 round-1 zombies. Round 2's own child becomes the new pending zombie (reaped at next accept). Steady-state behavior matches ADR 0007's "drained at next iteration" model.
+- Binary size 377,184 B (0.7.0) → 377,520 B (0.8.0), +336 B (+0.09%) for the fork wrapper + waitpid reaper loop. DCE same.
+- 5 telnet-parser benchmarks unchanged from M1-close baseline — fork happens before any IAC byte flows, so the parser hot path is unaffected.
+
+### Security
+
+- **Audit M1 closed** (bump-allocator memory growth). Each connection's bump-allocated memory is reclaimed atomically by the kernel at child `sys_exit`. The parent's per-loop allocations (Result wrappers from `sock_accept`) are minimal and bounded by the accept rate.
+- **Audit M2 closed** (login-challenge slot collision). Post-fork, every child has its own copy of `g_login_*` / `g_session_*` / `g_login_started_ms` via the kernel's address-space isolation. Two clients running `login alice` and `login bob` simultaneously cannot poison each other's parked challenge.
+- **Audit M4 NOT closed** (anonymous `enter` can spam-create boards). Independent of the concurrency model; explicit auth gate or accept-loop rate limit needed. Carried forward to 0.8.x patches.
+
+### Operator notes
+
+- Run `agora serve` under a process supervisor (systemd, runit, supervisord) so the parent crash kills all children. Standard for any forking server; called out explicitly because the v0.7.x single-track model didn't surface this concern.
+- Zombies persist between accept iterations — visible as `ZN` rows in `ps` against the parent's PID. This is expected: the waitpid reaper runs at the top of each accept loop iteration. On a busy server, zombies are drained within ms of each new connection. On an idle server, zombies wait until the next connection arrives. Not a leak; bounded by N children since last accept.
+
 ## [0.7.0] — 2026-05-23 (pre-1.0 security sweep)
 
 agora's first dedicated security audit cycle per CLAUDE.md "Security Hardening" and the roadmap release plan. Full line-by-line read of the IAC parser (`src/telnet.cyr`), post storage + ingress (`src/board.cyr`), M6 auth surface (`src/account.cyr`), and the wire dispatch in `src/main.cyr`, against the CLAUDE.md security checklist + external CVE history (CVE-2020-10188 telnetd IAC overflow, CVE-2011-4862 telnetd AUTHENTICATION overflow). Full findings in [`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md).

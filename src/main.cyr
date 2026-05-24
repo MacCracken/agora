@@ -104,7 +104,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.7.0 — pre-1.0 security sweep");
+    println("v0.8.0 — concurrent accept (fork-per-conn, ADR 0007)");
     return 0;
 }
 
@@ -720,7 +720,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 0.7.0 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 0.8.0 — telnet BBS\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1045,6 +1045,17 @@ fn cmd_serve_on(port): i64 {
 
     var stop = 0;
     while (stop == 0) {
+        # ADR 0007: drain any zombies that accumulated since the last
+        # accept. Non-blocking — exits the loop immediately when no
+        # zombies are ready. Without this the process table fills as
+        # children exit and the kernel keeps their exit-status entries
+        # around indefinitely.
+        var reap = 1;
+        while (reap == 1) {
+            var rpid = sys_waitpid(0 - 1, 0, WNOHANG);
+            if (rpid <= 0) { reap = 0; }
+        }
+
         var ar = sock_accept(sfd);
         if (is_ok(ar) == 0) {
             # Transient accept errors should not kill the loop;
@@ -1052,7 +1063,30 @@ fn cmd_serve_on(port): i64 {
             continue;
         }
         var cfd = result_unwrap(ar);
-        handle_client(cfd);
+
+        # ADR 0007: fork-per-accept. Each connection becomes its own
+        # process; the kernel handles per-conn memory cleanup at child
+        # exit (closes audit M1) and globals are per-process (closes
+        # audit M2). Parent immediately closes the accepted cfd —
+        # the child has its own fd via fork — and loops back to
+        # accept the next connection.
+        var pid = sys_fork();
+        if (pid == 0) {
+            # Child: drop the listening fd we inherited (a child crash
+            # shouldn't leak the listener), serve the client, exit.
+            sock_close(sfd);
+            handle_client(cfd);
+            sys_exit(0);
+        }
+        if (pid < 0) {
+            # Fork failed (likely RLIMIT_NPROC). Close the cfd so
+            # the client gets EOF, log to stderr, keep serving.
+            sock_close(cfd);
+            syscall(1, 2, "agora serve: fork failed (resource exhaustion?); connection dropped\n", 68);
+            continue;
+        }
+        # Parent: child owns cfd now via fork; we drop our copy.
+        sock_close(cfd);
     }
 
     sock_close(sfd);
@@ -1637,7 +1671,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.7.0");
+    println("agora 0.8.0");
     return 0;
 }
 

@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (post-0.7.0 ship — pre-1.0 security sweep closed; first `docs/audit/` entry filed; full doc-tree sync; next cycle is 0.8.0 v1-hardening + concurrent-accept refactor) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (post-0.8.0 ship — concurrent-accept via fork-per-connection; ADR 0007 landed; audit M1 + M2 closed via process isolation; full doc-tree sync) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -15,22 +15,22 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (post-0.7.0)
+## At a glance — 2026-05-23 inventory (post-0.8.0)
 
-**~19 markdown files** across the doc tree (+1 since 0.6.0: `docs/audit/2026-05-23-audit.md` — first security audit). 0.7.0 closeout synced state.md / roadmap.md / CHANGELOG / this file in lockstep. **CI/release workflows** in place since 0.2.0. Bucket counts:
+**~20 markdown files** across the doc tree (+1 since 0.7.0: `docs/adr/0007-fork-per-accept-concurrency.md`). 0.8.0 closeout synced state.md / roadmap.md / CHANGELOG / this file in lockstep. **CI/release workflows** in place since 0.2.0. Bucket counts:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | 7 | Refreshed at 0.7.0 close: state.md, roadmap.md, CHANGELOG, this file, VERSION, plus 3 inlined version literals in main.cyr. New: `docs/audit/2026-05-23-audit.md` (first audit entry). |
-| 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` still 0.1.0-era. Re-queued from 0.7.x to 0.8 (no real-deployment pressure surfaced this cycle). |
+| ✅ **Fresh / touched in current cycle** | 8 | Refreshed at 0.8.0 close: state.md, roadmap.md, CHANGELOG, this file, VERSION, plus 3 inlined version literals in main.cyr. New: `docs/adr/0007-fork-per-accept-concurrency.md` + ADR README index row. |
+| 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` still 0.1.0-era. Re-queued to 0.8-F (no real-deployment pressure surfaced; will land in the doc-pass bite). |
 | 🟠 **Read-through outstanding** | 0 | None. |
-| 🔵 **Probably evergreen** | 6 | All six ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model). 0.7.0 added no new ADR — the audit doc is the record. |
+| 🔵 **Probably evergreen** | 7 | All seven ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency). 0.8.0 added ADR 0007. |
 | 📦 **Archive — frozen by design** | 0 | None. |
-| ❓ **Open strategic question** | 0 | 0.7.0 audit closed cleanly with severity-rated findings. Next open question opens with the 0.8.0 concurrent-accept refactor (likely an ADR on per-connection memory arena design + slot lifecycle). |
+| ❓ **Open strategic question** | 0 | 0.8.0 concurrent-accept closed via fork (ADR 0007 settled all the design candidates). Next open question opens with 0.8-D (ABI freeze decision for `post_format_with_headers`) — may earn ADR 0008. |
 
-Numbers exact post-0.7.0; rolls up from the per-tier tables below.
+Numbers exact post-0.8.0; rolls up from the per-tier tables below.
 
-**0.7.0 close pass 2026-05-23**: full closeout per CLAUDE.md "Closeout Pass" §1-11. VERSION bumped 0.6.0 → 0.7.0; inline literals in main.cyr (`print_banner`, `cmd_version`, `render_motd`) bumped in lockstep; no new stdlib deps; 8 new regression tests (70 → 78) for the 5 audit fixes; binary +2,216 B (+0.6%); first entry in `docs/audit/` ledger; state.md next-session boot guide updated to the 0.8.0 v1-hardening next cycle.
+**0.8.0 close pass 2026-05-23**: full closeout per CLAUDE.md "Closeout Pass" §1-11. VERSION bumped 0.7.0 → 0.8.0; inline literals in main.cyr (`print_banner`, `cmd_version`, `render_motd`) bumped in lockstep; no new stdlib deps (`sys_fork` / `sys_waitpid` / `sys_exit` were already exposed); tests unchanged at 78/78 (E is in the accept loop, not unit-testable code); concurrency verified via the `/tmp/agora-concurrent-smoke.py` 3-session smoke; binary +336 B (+0.09%); ADR 0007 filed for the concurrency design; state.md next-session boot guide updated to the 0.8.x followup-bite queue.
 
 ---
 
@@ -39,14 +39,14 @@ Numbers exact post-0.7.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.7.0] all entered. [0.7.0] is the pre-1.0 security sweep (5 fixes landed, 4 deferred to 0.8). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.8.0] all entered. [0.8.0] is the concurrent-accept refactor (fork-per-connection; audit M1 + M2 closed). |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.6.0 close — 5 telnet-parser benchmarks all within noise of M1-close baseline (M2-M6 are application-layer). Per-release history table added. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.7.0`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `0.8.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
@@ -57,8 +57,8 @@ Numbers exact post-0.7.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.7.0 shipped (pre-1.0 security sweep closed). 78 tests; 377,184 B. Boot guide updated: next cycle is 0.8.0 v1-hardening + concurrent-accept refactor. Archived 0.7.0 + M6 in-flight notes kept for next-session reference. |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 0.7.0 close: 0.7.0 row marked ✅, "In progress" rewritten for 0.8.0 hardening with audit-deferred + doc + ABI checklist. Release plan unchanged: 0.8 hardening → 1.0 ship. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.8.0 shipped (concurrent-accept via fork-per-connection; ADR 0007 landed; audit M1 + M2 closed). 78 tests; 377,520 B. Boot guide updated: next cycle is 0.8.x followup-bites (A/C/B/D/F/G in recommended order). Archived 0.8.0 + 0.7.0 + M6 in-flight notes kept for next-session reference. |
+| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 0.8.0 close: 0.8.0 row marked ✅, "In progress" rewritten as **0.8.x — remaining 0.8 cycle bites** with A/C/B/D/F/G ordering. Release plan now shows 0.8.0 ✅ → 0.8.x → 1.0 ship. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -67,11 +67,11 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 ## Tier 3 — ADRs (`docs/adr/`)
 
-6 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
+7 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` (index) | 2026-05-23 | ✅ Fresh | One-line hook per ADR. |
+| `README.md` (index) | 2026-05-23 | ✅ Fresh | One-line hook per ADR. Refreshed at 0.8.0 for ADR 0007. |
 | `template.md` | 2026-05-23 | ✅ Fresh | Standard first-party template — status / context / decision / consequences / alternatives. |
 | `0001-cross-platform-listener-decoupled-from-agnos.md` | 2026-05-23 | 🔵 Evergreen | Load-bearing — M1 listener uses `lib/net.cyr` on Linux today, not gated on agnos kernel. Decision propagated to M5 (file storage is the same shape — see ADR 0002). |
 | `0002-one-file-per-post-storage.md` | 2026-05-23 | 🔵 Evergreen | **New at M5 cycle-open** — one file per post (`<store>/<id>.txt`, monotonic IDs, plaintext bodies). Rejects offset-index + WAL alternatives. Strict-prefix shape for the v2.x content-addressed graduation (pillar 2). |
@@ -79,6 +79,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0004-board-layout.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-E** — flat-root = "main", subdirs = named boards. Free backwards-compat with 0.4.0 stores. Modal current-board UI for telnet, `--board <name>` flag for CLI. Auto-create on first post. Rejects all-subdirs migration + sidecar index + per-port-board UI. |
 | `0005-threading-via-reply-to.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-F** — `Reply-To: <id>` header (same-board, ID-only); scan-on-read enumeration; RFC 5322 § 3.6.5 Re: subject prefix (no double). Rejects deep-threading via In-Reply-To+References, sidecar reply index, and cross-board values. |
 | `0006-identity-model.md` | 2026-05-23 | 🔵 Evergreen | **New at M6 cycle-open** — sigil Ed25519 as identity primitive; `<store>/.users/<fp16>/` per-user directory; challenge/response wire flow (server nonce → client Ed25519 sig); anon-read + auth-post default; `From: <handle> <fp16>` header; `~/.agora/key` for the keyfile. Rejects ML-DSA at first cut, password hashes, sigil-managed account store, users.cyml sidecar, and federated/WoT identity (deferred to v2.x pillar 1). |
+| `0007-fork-per-accept-concurrency.md` | 2026-05-23 | 🔵 Evergreen | **New at 0.8.0** — fork-per-accept concurrency; process-exit memory cleanup; non-blocking waitpid zombie reaper. Closes audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) via address-space isolation. Rejects thread-per-accept (M2 only closes with shared-state refactor), epoll event loop (yield-point burden on every byte handler), single-track-with-arena (only closes half the audit), per-conn freelist arena (kernel exit is strictly stronger free), `SIG_IGN` / `SA_NOCLDWAIT` auto-reap (sigaction trampoline trap on x86_64). |
 
 ---
 
