@@ -1560,6 +1560,201 @@ fn t70_can_post_anonymous_denied(): i64 {
     return 0;
 }
 
+# === 0.7.0 security audit regression tests (t71-t78) ===
+# Audit doc: docs/audit/2026-05-23-audit.md
+# Fixes: H1 (CLI subject CRLF), H2 (--board path-traversal), H3
+# (post_from re-validation), M3 (parse_post_id overflow cap).
+
+# H1 — header_text_ok rejects CR/LF/NUL/ESC/C0 + accepts TAB/printable.
+fn t71_header_text_ok_filters_control(): i64 {
+    # Rejected
+    if (header_text_ok(0)    != 0) { test_fail("t71_header_text_ok_filters_control", "NUL accepted"); return 1; }
+    if (header_text_ok(10)   != 0) { test_fail("t71_header_text_ok_filters_control", "LF accepted"); return 1; }
+    if (header_text_ok(13)   != 0) { test_fail("t71_header_text_ok_filters_control", "CR accepted"); return 1; }
+    if (header_text_ok(0x1B) != 0) { test_fail("t71_header_text_ok_filters_control", "ESC accepted"); return 1; }
+    if (header_text_ok(7)    != 0) { test_fail("t71_header_text_ok_filters_control", "BEL accepted"); return 1; }
+    if (header_text_ok(31)   != 0) { test_fail("t71_header_text_ok_filters_control", "0x1F accepted"); return 1; }
+    # Accepted
+    if (header_text_ok(9)    != 1) { test_fail("t71_header_text_ok_filters_control", "TAB rejected"); return 1; }
+    if (header_text_ok(32)   != 1) { test_fail("t71_header_text_ok_filters_control", "SP rejected"); return 1; }
+    if (header_text_ok(65)   != 1) { test_fail("t71_header_text_ok_filters_control", "'A' rejected"); return 1; }
+    if (header_text_ok(126)  != 1) { test_fail("t71_header_text_ok_filters_control", "'~' rejected"); return 1; }
+    if (header_text_ok(200)  != 1) { test_fail("t71_header_text_ok_filters_control", "UTF-8 high byte rejected"); return 1; }
+    test_pass("t71_header_text_ok_filters_control");
+    return 0;
+}
+
+# H1 — header_text_buf_ok scans a buffer and rejects on first bad byte.
+fn t72_header_text_buf_ok_rejects_injection(): i64 {
+    # Innocuous subject
+    if (header_text_buf_ok("Hello world", 11) != 1) {
+        test_fail("t72_header_text_buf_ok_rejects_injection", "clean subject rejected");
+        return 1;
+    }
+    # CRLF injection attempt: "foo\r\nReply-To: 1"
+    var inject[32];
+    memcpy(&inject, "foo", 3);
+    store8((&inject) + 3, 13);
+    store8((&inject) + 4, 10);
+    memcpy((&inject) + 5, "Reply-To: 1", 11);
+    if (header_text_buf_ok(&inject, 16) != 0) {
+        test_fail("t72_header_text_buf_ok_rejects_injection", "CRLF-injected subject accepted");
+        return 1;
+    }
+    # Lone LF (Unix newline) — also must be rejected.
+    if (header_text_buf_ok("foo\nbar", 7) != 0) {
+        test_fail("t72_header_text_buf_ok_rejects_injection", "lone-LF subject accepted");
+        return 1;
+    }
+    # cstring variant
+    if (header_text_cstr_ok("clean subject") != 1) {
+        test_fail("t72_header_text_buf_ok_rejects_injection", "cstr clean rejected");
+        return 1;
+    }
+    if (header_text_cstr_ok(0) != 1) {
+        test_fail("t72_header_text_buf_ok_rejects_injection", "cstr NULL not treated as empty");
+        return 1;
+    }
+    test_pass("t72_header_text_buf_ok_rejects_injection");
+    return 0;
+}
+
+# H3 — fp16_valid: exactly 16 lowercase hex.
+fn t73_fp16_valid_accepts(): i64 {
+    if (fp16_valid("0123456789abcdef") != 1) {
+        test_fail("t73_fp16_valid_accepts", "16 lowercase hex rejected");
+        return 1;
+    }
+    if (fp16_valid("a0b1c2d3e4f50607") != 1) {
+        test_fail("t73_fp16_valid_accepts", "mixed-position hex rejected");
+        return 1;
+    }
+    test_pass("t73_fp16_valid_accepts");
+    return 0;
+}
+
+fn t74_fp16_valid_rejects(): i64 {
+    if (fp16_valid(0) != 0) {
+        test_fail("t74_fp16_valid_rejects", "NULL accepted");
+        return 1;
+    }
+    if (fp16_valid("") != 0) {
+        test_fail("t74_fp16_valid_rejects", "empty accepted");
+        return 1;
+    }
+    if (fp16_valid("ABCDEF0123456789") != 0) {
+        test_fail("t74_fp16_valid_rejects", "uppercase accepted");
+        return 1;
+    }
+    if (fp16_valid("0123456789abcde") != 0) {       # 15 chars
+        test_fail("t74_fp16_valid_rejects", "15-char accepted");
+        return 1;
+    }
+    if (fp16_valid("0123456789abcdef0") != 0) {     # 17 chars
+        test_fail("t74_fp16_valid_rejects", "17-char accepted");
+        return 1;
+    }
+    if (fp16_valid("0123456789abcdez") != 0) {      # bad char at end
+        test_fail("t74_fp16_valid_rejects", "non-hex accepted");
+        return 1;
+    }
+    test_pass("t74_fp16_valid_rejects");
+    return 0;
+}
+
+# H3 — post_from treats a malformed handle (would-be CRLF injection
+# from a tampered .users/<fp>/handle file) as anonymous.
+fn t75_post_from_rejects_invalid_handle(): i64 {
+    # Build a header block whose From: handle contains a CR.
+    # Note: handle_valid alphabet is [a-z0-9_-]; a literal CR doesn't
+    # survive header_get's line-terminator scan. But uppercase letters
+    # ALSO fail handle_valid — use those to exercise the re-validate.
+    var raw = "Subject: x\r\nFrom: BadHandle 0123456789abcdef\r\n\r\nbody";
+    var hbuf[64];
+    var fpbuf[20];
+    var rc = post_from(raw, strlen(raw), &hbuf, 64, &fpbuf, 20);
+    if (rc != 0) {
+        test_fail("t75_post_from_rejects_invalid_handle", "uppercase handle accepted");
+        return 1;
+    }
+    # Both output buffers must be cleared (empty cstring).
+    if ((load8(&hbuf) & 0xFF) != 0) {
+        test_fail("t75_post_from_rejects_invalid_handle", "handle_out not cleared");
+        return 1;
+    }
+    if ((load8(&fpbuf) & 0xFF) != 0) {
+        test_fail("t75_post_from_rejects_invalid_handle", "fp_out not cleared");
+        return 1;
+    }
+    test_pass("t75_post_from_rejects_invalid_handle");
+    return 0;
+}
+
+# H3 — post_from rejects malformed fingerprint (wrong length / case).
+fn t76_post_from_rejects_invalid_fp(): i64 {
+    # 17-char fp — fp16_valid rejects, post_from returns 0.
+    var raw = "Subject: x\r\nFrom: alice 0123456789abcdef0\r\n\r\nbody";
+    var hbuf[64];
+    var fpbuf[20];
+    if (post_from(raw, strlen(raw), &hbuf, 64, &fpbuf, 20) != 0) {
+        test_fail("t76_post_from_rejects_invalid_fp", "17-char fp accepted");
+        return 1;
+    }
+    # Uppercase fp — also rejected.
+    var raw2 = "Subject: x\r\nFrom: alice ABCDEF0123456789\r\n\r\nbody";
+    var hbuf2[64];
+    var fpbuf2[20];
+    if (post_from(raw2, strlen(raw2), &hbuf2, 64, &fpbuf2, 20) != 0) {
+        test_fail("t76_post_from_rejects_invalid_fp", "uppercase fp accepted");
+        return 1;
+    }
+    # Sanity: a valid handle + valid fp does pass.
+    var ok_raw = "Subject: x\r\nFrom: alice 0123456789abcdef\r\n\r\nbody";
+    var hbuf3[64];
+    var fpbuf3[20];
+    if (post_from(ok_raw, strlen(ok_raw), &hbuf3, 64, &fpbuf3, 20) != 1) {
+        test_fail("t76_post_from_rejects_invalid_fp", "valid From rejected");
+        return 1;
+    }
+    if (streq(&hbuf3, "alice") == 0) {
+        test_fail("t76_post_from_rejects_invalid_fp", "valid handle not extracted");
+        return 1;
+    }
+    if (streq(&fpbuf3, "0123456789abcdef") == 0) {
+        test_fail("t76_post_from_rejects_invalid_fp", "valid fp not extracted");
+        return 1;
+    }
+    test_pass("t76_post_from_rejects_invalid_fp");
+    return 0;
+}
+
+# M3 — parse_post_id caps the digit prefix at 18 (i64 overflow guard).
+fn t77_parse_post_id_rejects_overlong_digits(): i64 {
+    # 19-digit prefix would wrap i64; reject.
+    if (parse_post_id("1234567890123456789.txt") != 0) {
+        test_fail("t77_parse_post_id_rejects_overlong_digits", "19-digit accepted");
+        return 1;
+    }
+    # 20-digit prefix — also reject.
+    if (parse_post_id("12345678901234567890.txt") != 0) {
+        test_fail("t77_parse_post_id_rejects_overlong_digits", "20-digit accepted");
+        return 1;
+    }
+    test_pass("t77_parse_post_id_rejects_overlong_digits");
+    return 0;
+}
+
+fn t78_parse_post_id_accepts_18_digits(): i64 {
+    # 18-digit prefix is exactly at the i64 ceiling — accept.
+    var id = parse_post_id("100000000000000000.txt");
+    if (id != 100000000000000000) {
+        test_fail("t78_parse_post_id_accepts_18_digits", "18-digit value mis-parsed");
+        return 1;
+    }
+    test_pass("t78_parse_post_id_accepts_18_digits");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1636,6 +1831,14 @@ fn main(): i64 {
     t68_board_policy_path_named();
     t69_board_admins_path_named();
     t70_can_post_anonymous_denied();
+    t71_header_text_ok_filters_control();
+    t72_header_text_buf_ok_rejects_injection();
+    t73_fp16_valid_accepts();
+    t74_fp16_valid_rejects();
+    t75_post_from_rejects_invalid_handle();
+    t76_post_from_rejects_invalid_fp();
+    t77_parse_post_id_rejects_overlong_digits();
+    t78_parse_post_id_accepts_18_digits();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

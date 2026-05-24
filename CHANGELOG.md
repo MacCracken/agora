@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-23 (pre-1.0 security sweep)
+
+agora's first dedicated security audit cycle per CLAUDE.md "Security Hardening" and the roadmap release plan. Full line-by-line read of the IAC parser (`src/telnet.cyr`), post storage + ingress (`src/board.cyr`), M6 auth surface (`src/account.cyr`), and the wire dispatch in `src/main.cyr`, against the CLAUDE.md security checklist + external CVE history (CVE-2020-10188 telnetd IAC overflow, CVE-2011-4862 telnetd AUTHENTICATION overflow). Full findings in [`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md).
+
+**No CRITICAL findings.** The bounded IAC buffers, fresh single-use nonces over `/dev/urandom`, and per-board flock + `O_EXCL` claim path all held up. **5 actionable findings** landed as fixes this cycle (3 HIGH, 2 MEDIUM); 4 deferred to 0.8 v1-hardening (concurrent-accept refactor + per-conn memory arenas, accept-loop rate-limit / `enter` auth gate, keyfile mode warn-on-load, sigil 3.1.1 → 3.4.3 release-notes diff read).
+
+### Security — fixed this cycle
+
+- **H1 — CLI subject CRLF injection** (`cmd_post`). `--subject $'foo\r\nReply-To: 42'` previously wrote forged headers into the stored post, parsed as real headers by `post_reply_to` / `post_from` on every subsequent read. New helpers `header_text_ok` / `header_text_buf_ok` / `header_text_cstr_ok` in `src/board.cyr` reject CR/LF/NUL/ESC and other C0 control bytes (except TAB) from header-context values; `cmd_post` calls the validator at entry.
+- **H2 — `cmd_list` + `cmd_read` accept path-traversal `--board`** (`src/main.cyr`). `--board "../../etc"` previously resolved through `board_path` to a parent-of-store directory. Now both verbs run `board_name_valid` whenever `board != "main"`, mirroring `cmd_post`'s existing check.
+- **H3 — `post_from` does not re-validate handle / fp on read** (`src/account.cyr`). A tampered `.users/<fp>/handle` file (operator-side or a future federated-import path) could smuggle ESC sequences into every reader's terminal via the `send_buf(cfd, hbuf, strlen(hbuf))` render path. `post_from` now re-runs `handle_valid` on the extracted handle and a new `fp16_valid` helper on the extracted fingerprint; invalid → return 0 / clear outputs / render as anonymous.
+- **M3 — `parse_post_id` digit-prefix overflow** (`src/board.cyr`). `n = n * 10 + (c - 48)` on a 19+ digit filename overflows i64. Now capped at 18 digits (i64 holds 18 full digits at 9.22e18) — anything longer is rejected as not-a-post-id.
+- **M6 — explicit 30 s deadline on parked login challenge** (`src/main.cyr` MODE_LOGIN_AWAIT_SIG). M6-C deferred this; relied on `RECV_TIMEOUT_SECS = 60` idle drop, which a heartbeat-sending client can defeat. New `g_login_started_ms` + `LOGIN_DEADLINE_MS = 30000` enforce the ADR 0006 § Specifics deadline at the top of the auth-line dispatch — uses `clock_now_ms()` from `lib/chrono.cyr`.
+
+### Security — deferred to 0.8 v1-hardening
+
+- **M1 — bump-allocator memory growth in long-running serve.** `alloc()` is bump-only; each connection accretes ~73 KB and each `read` adds ~100 KB. Will rework in the concurrent-accept refactor (per-connection arenas freed at `sock_close`).
+- **M2 — `g_login_*` slots become per-connection** at the same refactor (today's single-tracking accept loop makes them de facto per-session).
+- **M4 — anonymous `enter` can auto-create boards** (storage exhaustion vector). Fix: require auth for board creation OR add accept-loop rate limiting.
+- **L1 — `keyfile_load_seed` does not warn on world-readable mode.** Defense-in-depth `fstat` check at load time.
+
+### Verified
+
+- **78/78 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build` (+8 regression tests for the 5 fixes: t71 header_text_ok control-byte filter, t72 header_text_buf_ok CRLF injection scan, t73 fp16_valid accepts, t74 fp16_valid rejects, t75 post_from rejects invalid handle, t76 post_from rejects invalid fp, t77 parse_post_id 19+ digit overflow guard, t78 parse_post_id 18-digit ceiling).
+- **End-to-end smoke** for each HIGH fix: `agora post --subject $'foo\r\nReply-To: 1'` exits 2 with the C0-control error; `agora list --board "../../etc"` exits 2 with the invalid-name error; `agora read 1 --board "../../tmp"` exits 2 with the invalid-name error.
+- Binary size 374,968 B (0.6.0) → 377,184 B (0.7.0), +2,216 B (+0.6%) for the validator helpers + login-deadline check + test surface. DCE same.
+- 5 telnet-parser benchmarks unchanged from M1-close baseline (security patches don't touch the parser hot path).
+- `cyrius audit` clean.
+
+### Changed
+
+- `VERSION` bumped 0.6.0 → 0.7.0.
+- `print_banner` / `cmd_version` / `render_motd` version literals bumped to 0.7.0 in lockstep.
+- `src/board.cyr` grew `header_text_ok` / `header_text_buf_ok` / `header_text_cstr_ok` / `fp16_valid` (4 helpers, ~40 LOC); `parse_post_id` grew the 18-digit cap.
+- `src/account.cyr` `post_from` grew the re-validate tail (handle_valid + fp16_valid; on fail → clear outputs + return 0).
+- `src/main.cyr` `cmd_post` grew the `--subject` C0-control gate; `cmd_list` + `cmd_read` grew the `--board` validation; new globals `g_login_started_ms` + `AgoraLogin.LOGIN_DEADLINE_MS`; `login` command sets the timestamp; MODE_LOGIN_AWAIT_SIG dispatch checks the deadline before signature work.
+- `src/test.cyr` grew 8 regression tests (t71-t78).
+
+### Documentation
+
+- New `docs/audit/2026-05-23-audit.md` — full audit report. Severity rubric (CRITICAL/HIGH/MEDIUM/LOW/DOCUMENTED), per-finding repro/fix, external CVE review table, 0.7.x fix slate, 0.8 deferred items. First entry in the `docs/audit/` ledger; cadence per CLAUDE.md § Security Hardening = once per minor / pre-release.
+
 ## [0.6.0] — 2026-05-23 (M6 close — sigil-backed auth + per-board policy)
 
 agora is now a **multi-board threaded BBS with sigil-backed identity and operator-configurable per-board posting policy**. The full M6 cycle ships: six bites + one ADR landed between 0.5.0 and 0.6.0. Authenticated users can post under their handle (with a `From: <handle> <fp16>` header on disk); anonymous users can still read freely but cannot post (default policy `open` still requires auth); operators can tighten any board to `known` (registered-users-only) or `admin` (handles listed in `<board>/.admins` only).

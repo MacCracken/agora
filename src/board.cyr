@@ -172,6 +172,69 @@ fn input_byte_ok(b): i64 {
     return 1;
 }
 
+# Header-context byte filter (0.7.0 audit H1, audit doc 2026-05-23).
+#
+# Subject / handle / fp values are written into the RFC-822 header
+# block via `post_format_with_headers` — each as `Name: <value>\r\n`.
+# A value containing CR or LF would terminate the header line early
+# and inject arbitrary new headers (forge Reply-To / From / etc.) on
+# the next read. NUL truncates `strlen`-based downstream tooling;
+# ESC injects terminal control sequences into every reader's screen.
+# Other C0 control bytes (0x01-0x08, 0x0B-0x1F) are non-printable
+# junk in subjects — reject to keep stored posts grep-able.
+#
+# Allowed: TAB (0x09), printable ASCII (0x20-0x7E), DEL (0x7F is
+# unusual but renders as a glyph in modern terminals; not a security
+# hazard), and UTF-8 high bytes (0x80-0xFF) for non-ASCII subjects.
+#
+# Returns 1 if byte is safe in a header value, 0 to reject.
+fn header_text_ok(b): i64 {
+    if (b == 9)         { return 1; }     # TAB
+    if (b < 32)         { return 0; }     # C0 control (NUL, CR, LF, ESC, etc.)
+    return 1;
+}
+
+# Scan `[buf, buf+len)` and return 1 if every byte is `header_text_ok`,
+# 0 if any byte would inject. Caller surfaces user-visible error.
+fn header_text_buf_ok(buf, len): i64 {
+    var i = 0;
+    var ok = 1;
+    while (i < len) {
+        if (header_text_ok(load8(buf + i) & 0xFF) == 0) {
+            ok = 0;
+            i = len;
+            continue;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# cstring variant — accepts a NUL-terminated string.
+fn header_text_cstr_ok(s): i64 {
+    if (s == 0) { return 1; }
+    return header_text_buf_ok(s, strlen(s));
+}
+
+# Re-validate a 16-char lowercase-hex fingerprint cstring. Used by
+# `post_from` to harden against tampered handle files. Returns 1 if
+# `fp` is exactly 16 bytes of [0-9a-f], 0 otherwise.
+fn fp16_valid(fp): i64 {
+    if (fp == 0) { return 0; }
+    var len = strlen(fp);
+    if (len != 16) { return 0; }
+    var i = 0;
+    while (i < 16) {
+        var c = load8(fp + i) & 0xFF;
+        var ok = 0;
+        if (c >= 48) { if (c <= 57)  { ok = 1; } }   # 0-9
+        if (c >= 97) { if (c <= 102) { ok = 1; } }   # a-f
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Create a directory if it doesn't exist. Treats EEXIST (-17 on
 # Linux) as success. Returns 0 on success or already-exists;
 # negative errno otherwise.
@@ -228,6 +291,14 @@ fn parse_post_id(name): i64 {
     if ((load8(name + len - 3) & 0xFF) != 116) { return 0; }
     if ((load8(name + len - 2) & 0xFF) != 120) { return 0; }
     if ((load8(name + len - 1) & 0xFF) != 116) { return 0; }
+    # Cap digit-prefix length to keep `n * 10 + (c - 48)` arithmetic
+    # bounded — 0.7.0 audit finding M3. i64 holds 18 full digits
+    # (9.22e18 max); 19+ digits can wrap. A filename with a 19-digit
+    # numeric prefix isn't a legitimate agora post (post_new monotonic
+    # IDs start at 1) — reject as not-a-post-id rather than risk a
+    # negative / small overflow value silently passing through.
+    var prefix_len = len - 4;
+    if (prefix_len > 18) { return 0; }
     # Prefix must be all digits and > 0. Iterate over every prefix
     # byte regardless of validity — we always advance `i`, and the
     # `ok` flag short-circuits the arithmetic. This shape avoids the
@@ -236,7 +307,6 @@ fn parse_post_id(name): i64 {
     var i = 0;
     var n = 0;
     var ok = 1;
-    var prefix_len = len - 4;
     while (i < prefix_len) {
         var c = load8(name + i) & 0xFF;
         if (ok != 0) {

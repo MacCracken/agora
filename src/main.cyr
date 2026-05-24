@@ -92,9 +92,19 @@ var g_session_handle = 0;             # alloc'd in handle_client (ACCOUNT_HANDLE
 var g_login_fp    = 0;                # alloc'd in handle_client (ACCOUNT_FP_BUF_BYTES)
 var g_login_nonce = 0;                # alloc'd in handle_client (ACCOUNT_NONCE_BUF_BYTES)
 
+# 0.7.0 audit M6 — explicit 30 s deadline on a parked login challenge.
+# Set to `clock_now_ms()` when `login` parks the nonce; checked at
+# MODE_LOGIN_AWAIT_SIG dispatch. Independent of `RECV_TIMEOUT_SECS`
+# (which only fires on socket-idle — a client sending heartbeat bytes
+# could pin a parked slot indefinitely otherwise). ADR 0006 § Specifics.
+var g_login_started_ms = 0;
+enum AgoraLogin {
+    LOGIN_DEADLINE_MS = 30000;        # 30 s, per ADR 0006
+}
+
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.6.0 — M6 close: sigil-backed auth + per-board policy");
+    println("v0.7.0 — pre-1.0 security sweep");
     return 0;
 }
 
@@ -583,6 +593,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             return MODE_COMMAND;
         }
         nonce_to_hex(&nonce_raw, g_login_nonce);
+        g_login_started_ms = clock_now_ms();
 
         send_str(cfd, "challenge: ");
         send_buf(cfd, g_login_nonce, ACCOUNT_NONCE_HEX_BYTES);
@@ -709,7 +720,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 0.6.0 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 0.7.0 — telnet BBS\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -878,6 +889,24 @@ fn handle_client(cfd): i64 {
                         # post / subject above), and avoids the
                         # cyrius `var buf[N]`-in-deep-nesting hazards
                         # flagged in CLAUDE.md.
+                        #
+                        # 0.7.0 audit M6 — explicit 30 s deadline. Even
+                        # if the wire stayed warm (slowloris timeout
+                        # never tripped), a parked challenge older than
+                        # LOGIN_DEADLINE_MS is stale and must be rejected
+                        # before any signature work happens.
+                        if (g_login_started_ms > 0) {
+                            if (clock_now_ms() - g_login_started_ms > LOGIN_DEADLINE_MS) {
+                                send_str(cfd, "login failed (challenge timed out — retry 'login <handle>')\r\n");
+                                store8(g_login_fp, 0);
+                                store8(g_login_nonce, 0);
+                                g_login_started_ms = 0;
+                                line_pos = 0;
+                                mode = MODE_COMMAND;
+                                send_prompt(cfd, current_board);
+                                i = i + 1; continue;
+                            }
+                        }
                         var sig_raw = alloc(ACCOUNT_SIG_BYTES);
                         var sig_len = parse_auth_sig(line, line_pos, sig_raw);
                         line_pos = 0;
@@ -1226,6 +1255,18 @@ fn cmd_post(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var board = parse_board();
     var subject = parse_subject_flag();
+    # 0.7.0 audit H1 — reject CR/LF/NUL/ESC/other C0 in --subject.
+    # The CLI is operator-trusted, but stored posts persist with
+    # forged headers if injection is allowed (post_reply_to / post_from
+    # would parse the injected lines as real headers on every later
+    # read). Cheap to validate at entry; expensive to clean up at the
+    # store layer after the fact.
+    if (subject != 0) {
+        if (header_text_cstr_ok(subject) == 0) {
+            println("agora post: --subject contains control bytes (CR/LF/NUL/ESC or other C0 — not allowed in header values)");
+            return 2;
+        }
+    }
     var reply_to = parse_reply_to_flag();
     # M6-E: resolve identity. --as alone is insufficient — we need
     # the matching key to prove ownership of the handle.
@@ -1321,6 +1362,17 @@ fn cmd_post(): i64 {
 fn cmd_list(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var board = parse_board();
+    # 0.7.0 audit H2 — validate --board to prevent path-traversal
+    # (`--board "../../etc"` would resolve via board_path into the
+    # parent of <store>). cmd_post already does this; cmd_list/cmd_read
+    # missed it. Operator-side surface today; remote-disclosure surface
+    # once any tool scripts agora against an untrusted board source.
+    if (streq(board, "main") == 0) {
+        if (board_name_valid(board) == 0) {
+            println("agora list: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
+            return 2;
+        }
+    }
     var ids = alloc(DIRENT_ID_MAX * 8);
     var count = post_list(store, board, ids, DIRENT_ID_MAX);
     if (count == 0) {
@@ -1364,6 +1416,13 @@ fn cmd_list(): i64 {
 fn cmd_read(): i64 {
     var store = parse_store(DEFAULT_STORE);
     var board = parse_board();
+    # 0.7.0 audit H2 — see cmd_list for rationale.
+    if (streq(board, "main") == 0) {
+        if (board_name_valid(board) == 0) {
+            println("agora read: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
+            return 2;
+        }
+    }
     var id_arg = first_positional_after_verb();
     if (id_arg == 0) {
         println("agora read: missing post ID");
@@ -1578,7 +1637,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.6.0");
+    println("agora 0.7.0");
     return 0;
 }
 

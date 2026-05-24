@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (post-0.6.0 ship — M6 closed; full doc-tree sync for the 0.6.0 closeout; next cycle is 0.7.0 pre-1.0 security sweep) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (post-0.7.0 ship — pre-1.0 security sweep closed; first `docs/audit/` entry filed; full doc-tree sync; next cycle is 0.8.0 v1-hardening + concurrent-accept refactor) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -15,22 +15,22 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (post-0.6.0)
+## At a glance — 2026-05-23 inventory (post-0.7.0)
 
-**~18 markdown files** across the doc tree (+1 since 0.5.0: ADR 0006 — identity model). 0.6.0 closeout synced state.md / roadmap.md / BENCHMARKS.md / this file in lockstep. **CI/release workflows** in place since 0.2.0. Bucket counts:
+**~19 markdown files** across the doc tree (+1 since 0.6.0: `docs/audit/2026-05-23-audit.md` — first security audit). 0.7.0 closeout synced state.md / roadmap.md / CHANGELOG / this file in lockstep. **CI/release workflows** in place since 0.2.0. Bucket counts:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | 11 | Refreshed at 0.6.0 close: state.md, roadmap.md, BENCHMARKS.md, CHANGELOG, this file, ADR 0006, VERSION, plus the cyrius.cyml deps line + 3 inlined version literals in main.cyr. |
-| 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` both predate M5 and read as 0.1.0-era. Earned but deferred; queued for the 0.7.x cycle alongside the security audit (per the deferred-items list in state.md and roadmap.md). |
+| ✅ **Fresh / touched in current cycle** | 7 | Refreshed at 0.7.0 close: state.md, roadmap.md, CHANGELOG, this file, VERSION, plus 3 inlined version literals in main.cyr. New: `docs/audit/2026-05-23-audit.md` (first audit entry). |
+| 🟡 **Stale — refresh in place** | 2 | `docs/guides/getting-started.md` + `docs/examples/README.md` still 0.1.0-era. Re-queued from 0.7.x to 0.8 (no real-deployment pressure surfaced this cycle). |
 | 🟠 **Read-through outstanding** | 0 | None. |
-| 🔵 **Probably evergreen** | 6 | All six ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model). |
+| 🔵 **Probably evergreen** | 6 | All six ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model). 0.7.0 added no new ADR — the audit doc is the record. |
 | 📦 **Archive — frozen by design** | 0 | None. |
-| ❓ **Open strategic question** | 0 | M6 identity model resolved by ADR 0006 (2026-05-23). Next open question opens with the 0.7.0 security-sweep cycle (likely an ADR on sweep methodology or threat-model documentation). |
+| ❓ **Open strategic question** | 0 | 0.7.0 audit closed cleanly with severity-rated findings. Next open question opens with the 0.8.0 concurrent-accept refactor (likely an ADR on per-connection memory arena design + slot lifecycle). |
 
-Numbers exact post-0.5.0; rolls up from the per-tier tables below.
+Numbers exact post-0.7.0; rolls up from the per-tier tables below.
 
-**0.6.0 close pass 2026-05-23**: full closeout per CLAUDE.md "Closeout Pass" §1-11. VERSION bumped 0.5.0 → 0.6.0; inline literals in main.cyr (`print_banner`, `cmd_version`, `render_motd`) bumped in lockstep (CI drift-check validates); 4 stdlib deps added (sigil, freelist, bigint, ct); 21 new tests landed across M6 (49 → 70); per-release benchmark history added to BENCHMARKS.md; security re-scan documented in CHANGELOG [0.6.0] § Verified; state.md next-session boot guide updated to the 0.7.0-security-sweep next cycle.
+**0.7.0 close pass 2026-05-23**: full closeout per CLAUDE.md "Closeout Pass" §1-11. VERSION bumped 0.6.0 → 0.7.0; inline literals in main.cyr (`print_banner`, `cmd_version`, `render_motd`) bumped in lockstep; no new stdlib deps; 8 new regression tests (70 → 78) for the 5 audit fixes; binary +2,216 B (+0.6%); first entry in `docs/audit/` ledger; state.md next-session boot guide updated to the 0.8.0 v1-hardening next cycle.
 
 ---
 
@@ -39,14 +39,14 @@ Numbers exact post-0.5.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.6.0] all entered. [0.6.0] is the M6 close (sigil-backed auth + per-board policy, 6 bites). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.7.0] all entered. [0.7.0] is the pre-1.0 security sweep (5 fixes landed, 4 deferred to 0.8). |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.6.0 close — 5 telnet-parser benchmarks all within noise of M1-close baseline (M2-M6 are application-layer). Per-release history table added. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.6.0`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `0.7.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
@@ -57,8 +57,8 @@ Numbers exact post-0.5.0; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.6.0 shipped (M6 closed). 70 tests; 374,968 B. Boot guide updated: next cycle is 0.7.0 security sweep. Archived M6 in-flight notes kept under their own header for one cycle (next session can fold them away). |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 0.6.0 close: M6 row marked ✅, "In progress" rewritten for 0.7.0 security sweep with audit-surface checklist + deferred-from-M6 queue. Release plan unchanged: 0.7 sweep → 0.8 hardening → 1.0 ship. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.7.0 shipped (pre-1.0 security sweep closed). 78 tests; 377,184 B. Boot guide updated: next cycle is 0.8.0 v1-hardening + concurrent-accept refactor. Archived 0.7.0 + M6 in-flight notes kept for next-session reference. |
+| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 0.7.0 close: 0.7.0 row marked ✅, "In progress" rewritten for 0.8.0 hardening with audit-deferred + doc + ABI checklist. Release plan unchanged: 0.8 hardening → 1.0 ship. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -102,7 +102,15 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `README.md` | 2026-05-23 | 🟡 Stale | Placeholder text predates M5; says "first example at M1". The smoke-test scripts written during M5-F / M6-C / M6-D / M6-E / M6-F are reusable example skeletons — promoting them into `docs/examples/` is queued for 0.7.x per state.md "deferred from M6-close" list. |
+| `README.md` | 2026-05-23 | 🟡 Stale | Placeholder text predates M5; says "first example at M1". Re-queued from 0.7.x to 0.8 — no real-deployment pressure surfaced this cycle. The smoke-test scripts written during M5-F / M6-* / 0.7.0 audit-fix verification are reusable example skeletons; promoting them happens at 0.8 doc-pass. |
+
+---
+
+## Tier 7 — Audit (`docs/audit/`)
+
+| File | Last touched | Status | Notes |
+|---|---|---|---|
+| `2026-05-23-audit.md` | 2026-05-23 | ✅ Fresh | **New at 0.7.0 cycle-open** — first agora security audit. Full line-by-line review of `src/telnet.cyr` + `src/board.cyr` + `src/account.cyr` + `src/main.cyr` against CLAUDE.md "Security Hardening" + external CVE history (CVE-2020-10188, CVE-2011-4862). Severity rubric (CRITICAL/HIGH/MEDIUM/LOW/DOCUMENTED); 5 actionable findings fixed in 0.7.0; 4 deferred to 0.8. Cadence per CLAUDE.md = once per minor / pre-release; next audit at 0.8 close before 1.0 cut. |
 
 ---
 
@@ -139,8 +147,8 @@ Items that are *scheduled* doc decisions, not stale state. Surfaced here so they
 | # | Commitment | Trigger | Source | Notes |
 |---|---|---|---|---|
 | 1 | **State.md refresh per release** — `docs/development/state.md` bumped at every tag with new version / size / in-flight slot. | Every release | `CLAUDE.md` "Closeout Pass" §9 | Manual until a release post-hook lands. |
-| 2 | **getting-started.md + examples/ rewrite** — bring both up to the 0.6.0 multi-board threaded BBS + sigil-auth + per-board-policy shape; promote the M6-C / M6-D / M6-E / M6-F smoke scripts into runnable `docs/examples/` skeletons. | 0.7.x bite (deferred from M6 close per state.md list) | This file (Tier 5 + Tier 6) + state.md "deferred from M6-close" list | Re-queued at 0.6.0 ship 2026-05-23; alongside the security audit cycle so the example surface is audited together with the live code. |
-| 3 | **Pre-1.0 security audit (0.7.0)** — full review of input validation across the IAC parser + post-storage path + auth surface. File in `docs/audit/YYYY-MM-DD-audit.md`. Web research on telnet/BBS CVEs (CVE-2020-10188, CVE-2011-4862, Mastodon/Matrix vulnerabilities). | 0.7.0 cycle (per release plan) | `CLAUDE.md` "Security Hardening" + roadmap.md release plan | Telnet is adversarial-by-default — any internet-reachable user can send arbitrary IAC sequences + posts. Audit surface widens at M6 (auth) and again at M5+ if any cross-board features land post-1.0. |
+| 2 | **getting-started.md + examples/ rewrite** — bring both up to the 0.7.0 multi-board threaded BBS + sigil-auth + per-board-policy + audit-hardened-input shape; promote the M6-* and 0.7.0-audit-fix smoke scripts into runnable `docs/examples/` skeletons. | 0.8 doc-pass (re-queued from 0.7.x; no real-deployment pressure surfaced) | This file (Tier 5 + Tier 6) + state.md "0.8 in-flight slot" | Re-queued at 0.7.0 ship 2026-05-23. |
+| 3 | **Pre-1.0 security audit (0.7.0)** — full review of input validation across the IAC parser + post-storage path + auth surface. | ✅ Completed at 0.7.0 ship (2026-05-23) | `CLAUDE.md` "Security Hardening" + roadmap.md release plan | See [`audit/2026-05-23-audit.md`](audit/2026-05-23-audit.md). 5 fixes landed; 4 deferred to 0.8. Next audit at 0.8 close per cadence (once per minor / pre-release). |
 | 4 | **First architecture note** — candidate: paired-LF-after-CR session-buffer corruption fix from M5-D as a "non-obvious from code" invariant for future maintainers of the byte dispatch. | Next M6 bite that touches `handle_client`'s EOL handling, or M6 close | This file (Tier 4) | One-time; archive note here on completion. |
 
 ---

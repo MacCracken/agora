@@ -312,6 +312,22 @@ fn post_from(buf, len, handle_out, h_max, fp_out, fp_max): i64 {
     if (flen > fp_max - 1) { flen = fp_max - 1; }
     if (flen > 0) { memcpy(fp_out, raw_buf + space + 1, flen); }
     store8(fp_out + flen, 0);
+    # 0.7.0 audit H3 — re-validate both fields against the same
+    # alphabet the wire / CLI write paths enforce. Defense-in-depth
+    # against a tampered .users/<fp>/handle file (operator side or a
+    # future federated-import path landing un-validated bytes). On
+    # invalid: emit anonymous so the renderer doesn't smuggle CR/LF/
+    # ESC bytes through `send_buf` into every reader's terminal.
+    if (handle_valid(handle_out) == 0) {
+        store8(handle_out, 0);
+        store8(fp_out, 0);
+        return 0;
+    }
+    if (fp16_valid(fp_out) == 0) {
+        store8(handle_out, 0);
+        store8(fp_out, 0);
+        return 0;
+    }
     return 1;
 }
 
