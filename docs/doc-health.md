@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (post-0.9.2 final closeout sweep — BENCHMARKS.md 0.9.2 row added; state.md / roadmap.md / CHANGELOG synced for the final pre-1.0 ship; in-flight slot now reads "1.0.0 cut + archaemenid handoff") | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (**1.0.0 cut — iron-validated on archaemenid**; README status pointer rewritten; state.md / roadmap.md / CHANGELOG / VERSION all synced for the 1.0 ship; in-flight slot now reads "post-1.0 work — no active cycle") | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -30,6 +30,8 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
+**1.0.0 cut 2026-05-23**: iron-validated on archaemenid. All six v1.0 criteria met (M0-M6 + cyrius audit ✅ + archaemenid telnet ✅ via `05-telnet-login.sh` + 8-user fanout ✅ via `04-concurrent-smoke.py 2323 8` + 0.7.0 audit closed ✅ + RFC conformance ✅). VERSION → 1.0.0; three inline literals in `src/main.cyr` bumped; full clean DCE build green at 378,456 B; CHANGELOG [1.0.0] release-narrative entry; README status pointer rewritten from "v0.1.0 scaffold + M1 in progress" → "v1.0.0 shipped, iron-validated"; state.md / roadmap.md fully synced; doc-health (this file) refreshed. Cosmetic fix caught during iron run: `05-telnet-login.sh` IAC drain rewritten as drain-and-print to preserve the top row of the bannermanor MOTD.
+
 **0.9.1 doc-pass 2026-05-23**: long-deferred Tier 5 / Tier 6 rewrite, finally landed. `docs/guides/getting-started.md` rewritten from 74-line 0.1.0 stub-verb walkthrough to a full 0.9.0 surface walkthrough (build → tests → listener → anon-read → keygen/register/post `--as` → telnet `login` → per-board policy → concurrency). `docs/examples/README.md` rewritten from 6-line placeholder to a 6-row example index. Six runnable example scripts written and each verified against the binary: 01 build+test passes; 02 register+post writes ./bbs/1.txt with `From: qix <fp16>`; 03 confirms anon-read works and anon-post correctly returns exit 1; 04 confirms 3 concurrent telnet sessions get independent banners + state; 05 drives the openssl-signed challenge/response flow to a `welcome, qix` from the server; 06 walks all three policy modes. Two doc-tightening fixes caught during verification: anonymous CLI post is **denied** at M6 (board_can_post returns 0 for session_fp==0, not just on `known`/`admin`), and main-board posts live at `<store>/N.txt` not `<store>/main/N.txt` (ADR 0004 flat-root). Both corrections propagated to guide + examples + policy table.
 
 **0.8.0 close pass 2026-05-23**: full closeout per CLAUDE.md "Closeout Pass" §1-11. VERSION bumped 0.7.0 → 0.8.0; inline literals in main.cyr (`print_banner`, `cmd_version`, `render_motd`) bumped in lockstep; no new stdlib deps (`sys_fork` / `sys_waitpid` / `sys_exit` were already exposed); tests unchanged at 78/78 (E is in the accept loop, not unit-testable code); concurrency verified via the `/tmp/agora-concurrent-smoke.py` 3-session smoke; binary +336 B (+0.09%); ADR 0007 filed for the concurrency design; state.md next-session boot guide updated to the 0.8.x followup-bite queue.
@@ -40,15 +42,15 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.9.2] all entered. [0.9.2] is the final pre-1.0 closeout sweep (CLAUDE.md §1-11 walked; "Followups queued for 1.0.0" lists the iron-side gates). |
+| `README.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 1.0 cut.** Status pointer: "v1.0.0 shipped, iron-validated on archaemenid; all v1.0 criteria met". Planned-architecture box replaced with the actual 4-source-file architecture; examples + benchmarks links added. |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [1.0.0] all entered. [1.0.0] is the release-narrative entry — 18-tag arc summary + v1.0 criteria checkbox + post-1.0 followups. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 closeout — 5 telnet-parser benchmarks all within ±2 ns of M1-close baseline (every release between M6 and 0.9.2 was off-hot-path). 0.9.2 row added to per-release history. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.9.2`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `1.0.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
@@ -59,8 +61,8 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 0.9.2 shipped (final 1.0 closeout sweep; CLAUDE.md §1-11 walked). 80 tests; 378,440 B. Boot guide updated: in-flight slot is now "1.0.0 cut + archaemenid handoff"; only iron-side gates (criteria 3 + 4) remain. Archived 0.9.2 + 0.9.1 + 0.8.0 + 0.7.0 + M6 in-flight notes kept for next-session reference. |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 close: 0.9.2 row marked ✅, "In progress" section rewritten as **1.0.0 — the cut** with the full 0.8 cycle plan (A–G) all checked off and the remaining workstation / iron / user-tag tasks enumerated. |
+| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 1.0.0 shipped, iron-validated on archaemenid. 80 tests; 378,456 B. Boot guide updated: in-flight slot is now "post-1.0 work — no active cycle". Archived 1.0.0 + 0.9.2 + 0.9.1 + 0.8.0 + 0.7.0 + M6 in-flight notes kept for next-session reference. Verification-hosts table marks archaemenid as validated. |
+| `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 1.0 cut: 1.0.0 row marked ✅; "In progress" section rewritten as **no active cycle**; v1.0 criteria section rewritten with per-criterion ✅ status + verbatim verification outputs. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -98,7 +100,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `getting-started.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 0.9.1 doc-pass.** Walks the 0.9.0 surface end-to-end: prereqs, build, tests (80/80), `agora serve 2323`, anon-read commands, identity setup (keygen + register), authored CLI post via `--as`, telnet `login` challenge/response, per-board `.policy` / `.admins` table, fork-per-conn concurrency check. Cross-links to all 8 ADRs and the 6 runnable example scripts. |
+| `getting-started.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 0.9.1 doc-pass; iron-validated against 1.0.0.** Walks the 1.0 surface end-to-end: prereqs, build, tests (80/80), `agora serve 2323`, anon-read commands, identity setup (keygen + register), authored CLI post via `--as`, telnet `login` challenge/response, per-board `.policy` / `.admins` table, fork-per-conn concurrency check. Cross-links to all 8 ADRs and the 6 runnable example scripts. |
 
 ---
 
@@ -111,7 +113,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `02-register-and-post.sh` | 2026-05-23 | ✅ Fresh | **New at 0.9.1.** First writeable flow: keygen → register `qix` → post `--as` → list → read → assert `From: qix <fp16>` on disk. |
 | `03-anonymous-read.sh` | 2026-05-23 | ✅ Fresh | **New at 0.9.1.** Proves M6 default policy: anon list + read succeed against the post written by 02; anon post is denied with exit 1. |
 | `04-concurrent-smoke.py` | 2026-05-23 | ✅ Fresh | **New at 0.9.1** (skeleton lifted from `/tmp/agora-concurrent-smoke.py` referenced in state.md). Threads N (default 3) telnet sessions, asserts each gets banner + IAC bytes + `boards` reply with no cross-talk — proves ADR 0007 process isolation. |
-| `05-telnet-login.sh` | 2026-05-23 | ✅ Fresh | **New at 0.9.1.** Drives the wire challenge/response: telnet → `login qix` → read challenge → wrap seed in PKCS#8 DER → `openssl pkeyutl -sign -rawin` → reply `auth: <hex>` → assert `whoami` reports `qix`. Verified end-to-end against 0.9.0 + openssl 3.6.2. |
+| `05-telnet-login.sh` | 2026-05-23 | ✅ Fresh | **New at 0.9.1; iron-validated on archaemenid at 1.0 cut.** Drives the wire challenge/response: telnet → `login qix` → read challenge → wrap seed in PKCS#8 DER → `openssl pkeyutl -sign -rawin` → reply `auth: <hex>` → assert `whoami` reports `qix`. Drain logic rewritten at 1.0 cut: drain-and-print loop with 200ms quiet timeout replaces two blind `read` calls (preserves top row of bannermanor MOTD in stdout). |
 | `06-board-policy.sh` | 2026-05-23 | ✅ Fresh | **New at 0.9.1.** Walks all three policy modes (open / known / admin) × three identity classes (anon / pac / qix), asserts each cell's expected exit code. 9/9 assertions pass against 0.9.0. |
 
 ---

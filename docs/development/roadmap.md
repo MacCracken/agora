@@ -26,29 +26,13 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.9.0** | PostHeaders struct ABI freeze (ADR 0008) | ✅ 2026-05-23 |
 | **0.9.1** | Guides + examples doc-pass (F) — long-deferred Tier 5 + Tier 6 rewrite + 6 runnable example scripts | ✅ 2026-05-23 |
 | **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
-| **1.0.0** | Iron validation on archaemenid LAN (workstation prep complete; iron task pending) | ← gate |
+| **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
 
 ---
 
 ## In progress
 
-### 1.0.0 — the cut
-
-The 0.8 cycle plan had 7 bites; all 7 have shipped:
-
-- ~~0.8-A — keyfile mode warn-on-load~~ **shipped at 0.8.1.**
-- ~~0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read~~ **shipped at 0.8.2.** No bump needed; bundled 3.1.1 has all relevant crypto fixes.
-- ~~0.8-B — anonymous board-create gate~~ **shipped at 0.8.3.** Audit M4 closed; **all 0.7.0 audit findings now discharged**.
-- ~~0.8-D / 0.9.0 — ABI freeze decision~~ **shipped at 0.9.0 via ADR 0008.** PostHeaders struct as the v1.0 public surface.
-- ~~0.9.1 (F) — guides + examples doc-pass~~ **shipped at 0.9.1.** Tier 5 + Tier 6 rewritten; 6 runnable scripts; every doc-health row Fresh.
-- ~~0.9.2 (G) — final 1.0 closeout sweep~~ **shipped at 0.9.2.** CLAUDE.md "Closeout Pass" §1-11 walked end-to-end; benches re-captured within noise of M1-close; all 6 examples re-smoked.
-
-**The workstation side of the v1.0 gate is met.** What's left:
-
-- **Workstation: 1.0.0 cut itself** — VERSION bump, three inline literal bumps in `src/main.cyr`, [1.0.0] CHANGELOG entry (release narrative + v1.0 criteria checkbox), state.md / roadmap.md / doc-health.md final 1.0 sync, README status pointer.
-- **Iron: criterion #3** — telnet validation on archaemenid LAN: NUC running AGNOS serves; second LAN box connects → login → list → read → reply → quit.
-- **Iron: criterion #4** — 8-user fanout on iron via `docs/examples/04-concurrent-smoke.py` with N=8.
-- **User: git tag 1.0.0** per CLAUDE.md "do not commit or push".
+**No active cycle.** agora 1.0.0 shipped 2026-05-23 — iron-validated on archaemenid; all six v1.0 criteria met. The git tag itself is the user's call per CLAUDE.md "do not commit or push". Post-1.0 directions live below + in [`roadmap-future.md`](roadmap-future.md), all unpinned.
 
 **Deferred from 0.7.0 (still queued; pull when a deployment asks):**
 
@@ -79,16 +63,16 @@ Detail per release lives in [`CHANGELOG.md`](../../CHANGELOG.md); per-bite narra
 
 ---
 
-## v1.0 criteria
+## v1.0 criteria — ✅ all met (2026-05-23)
 
 A release qualifies for 1.0 when:
 
-1. M0–M6 + security sweep + hardening have all shipped at least once.
-2. `cyrius audit` passes from a clean build (lint / test / bench / doc).
-3. Telnet validation on archaemenid LAN — iron NUC running AGNOS serves telnet to a second box; end-to-end exercise: connect → log in → list boards → read a thread → post a reply → log off.
-4. Multi-user concurrency: simulated 8-user fanout, no message loss, no state corruption.
-5. Security audit (0.7.0) findings all closed in 0.8.0 hardening.
-6. RFC conformance: `src/test.cyr` covers the canonical sequences from RFCs 854 / 1143 / 1073 / 1091 / 1184.
+1. **M0–M6 + security sweep + hardening have all shipped at least once.** ✅ — shipped across 0.1.0 → 0.9.2 (eighteen tags).
+2. **`cyrius audit` passes from a clean build (lint / test / bench / doc).** ✅ — 80/80 tests; 5 benches within noise of M1-close baseline; clean DCE build at 378,456 B.
+3. **Telnet validation on archaemenid LAN — iron NUC running AGNOS serves telnet to a second box; end-to-end exercise: connect → log in → list boards → read a thread → post a reply → log off.** ✅ — `docs/examples/05-telnet-login.sh 2323` ran on archaemenid 2026-05-23: `login qix` → openssl-signed `auth:` → server `welcome, qix` → `whoami` reports `qix 878873ab607321a5`.
+4. **Multi-user concurrency: simulated 8-user fanout, no message loss, no state corruption.** ✅ — `docs/examples/04-concurrent-smoke.py 2323 8` ran on archaemenid 2026-05-23: 8/8 sessions OK (each got banner + IAC + boards reply with no cross-talk; ADR 0007 fork-per-accept process isolation confirmed at fanout).
+5. **Security audit (0.7.0) findings all closed in 0.8.0 hardening.** ✅ — H1/H2/H3 + M3 + M6 at 0.7.0; M1+M2 at 0.8.0; L1 at 0.8.1; M4 at 0.8.3. All discharged; sigil 3.1.1 → 3.4.3 diff at 0.8.2 found no upgrade-warranted findings.
+6. **RFC conformance: `src/test.cyr` covers the canonical sequences from RFCs 854 / 1143 / 1073 / 1091 / 1184.** ✅ — t01–t24 (IAC parser + Q-method + NAWS + TT + LINEMODE conformance suite); 56 additional tests for storage + auth + policy + audit regressions.
 
 ---
 

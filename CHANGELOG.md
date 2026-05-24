@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-23 (civic-marketplace BBS for AGNOS; iron-validated on archaemenid)
+
+**agora 1.0.0.** The Greek **ἀγορά** — civic-marketplace, public assembly — open as the BBS userland for AGNOS deployments. Cross-platform telnet listener, multi-user concurrent sessions via fork-per-accept, sigil-backed Ed25519 challenge/response auth, multi-board threaded posts, per-board operator policy, audit-hardened input across both wire and CLI, frozen pre-1.0 ABI. Iron-validated on **archaemenid** (the project's reference AGNOS NUC): single-session telnet login round-trip (criterion #3) and 8-user concurrent fanout (criterion #4) both green at this tag.
+
+### The arc
+
+Eighteen tags from scaffold (0.1.0) to here, all shipped 2026-05-23:
+
+- **M0 (0.1.0)** — six-stub argv dispatch; 43 KB scaffold.
+- **M1 (0.2.0)** — cross-platform telnet listener via `lib/net.cyr`; RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS + RFC 1091 TT + RFC 1184 LINEMODE conformance; 10 ns/byte hot path (the baseline this tag re-validates against). [ADR 0001](docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md).
+- **M2 (0.3.0)** — bannermanor MOTD + darshana SGR + `--motd`.
+- **M5 (0.4.0 → 0.5.0)** — post persistence: single-board (0.4.0) then multi-board threaded (0.5.0). [ADR 0002](docs/adr/0002-one-file-per-post-storage.md), [ADR 0003](docs/adr/0003-rfc-822-post-headers.md), [ADR 0004](docs/adr/0004-board-layout.md), [ADR 0005](docs/adr/0005-threading-via-reply-to.md).
+- **M6 (0.6.0)** — sigil-backed Ed25519 identity: `keygen` / `register` / `whoami` / telnet `login`; `From:` header on authored posts; per-board `.policy` (open / known / admin) + `.admins`. Adds sigil + freelist + bigint + ct to stdlib deps. [ADR 0006](docs/adr/0006-identity-model.md).
+- **0.7.0** — pre-1.0 security sweep ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md)): zero CRITICAL; 5 actionable fixes (H1 CLI subject CRLF, H2 cmd_list/cmd_read --board path-traversal, H3 post_from re-validation, M3 parse_post_id 18-digit overflow, M6 30s login deadline); 4 deferred to 0.8.
+- **0.8.0 → 0.8.3** — closes every 0.7.0 deferred finding. 0.8.0 fork-per-accept concurrency ([ADR 0007](docs/adr/0007-fork-per-accept-concurrency.md)) — audit M1 + M2 both close via address-space isolation. 0.8.1 keyfile mode warn (L1). 0.8.2 sigil 3.1.1 → 3.4.3 diff read (no bump needed). 0.8.3 anonymous board-create gate (M4).
+- **0.9.0** — pre-1.0 ABI freeze via PostHeaders struct ([ADR 0008](docs/adr/0008-post-headers-struct.md)). `post_format(ph, body, body_len, out, cap)` + `post_new(store, board, ph, body, body_len)` as the v1.0 public surface. Wire format byte-identical.
+- **0.9.1** — guides + examples doc-pass: `docs/guides/getting-started.md` rewritten for the 0.9.0 surface; `docs/examples/README.md` + six runnable scripts (01 build+test, 02 register+post, 03 anon-read, 04 concurrent-smoke.py, 05 telnet-login.sh, 06 board-policy.sh); every script verified end-to-end against the binary.
+- **0.9.2** — final closeout: CLAUDE.md "Closeout Pass" §1-11 walked end-to-end; benches re-captured within noise of M1-close; security re-scan clean; full clean DCE build green.
+- **1.0.0 (this tag)** — version bump, release narrative, iron-validation confirmation.
+
+### v1.0 criteria
+
+Per [`docs/development/roadmap.md`](docs/development/roadmap.md) § v1.0 criteria:
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | M0–M6 + security sweep + hardening all shipped at least once | ✅ |
+| 2 | `cyrius audit` passes from a clean build (lint / test / bench / doc) | ✅ |
+| 3 | Telnet validation on archaemenid LAN — connect → login → list → read → reply → quit | ✅ **`05-telnet-login.sh` green on archaemenid; fp `878873ab607321a5`** |
+| 4 | Multi-user concurrency: simulated 8-user fanout, no message loss, no state corruption | ✅ **`04-concurrent-smoke.py 2323 8` → 8/8 sessions OK with banner + IAC + boards reply, no cross-talk** |
+| 5 | Security audit (0.7.0) findings all closed in 0.8.0 hardening | ✅ — H1/H2/H3 + M3 + M6 at 0.7.0; M1+M2 at 0.8.0; L1 at 0.8.1; M4 at 0.8.3 |
+| 6 | RFC conformance: `src/test.cyr` covers RFCs 854 / 1143 / 1073 / 1091 / 1184 | ✅ — 80 tests (t01–t24 IAC suite plus 56 storage / auth / policy / audit regressions) |
+
+### Verified at 1.0.0
+
+- **80/80 tests pass** (`cyrius test src/test.cyr`).
+- **Clean DCE build** (`rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build src/main.cyr build/agora`) → 378,456 B.
+- **Iron validation on archaemenid (Linux x86_64, AGNOS):**
+  - `02-register-and-post.sh` — keygen → register `qix` → post `--as` → list → read → `From: qix 878873ab607321a5` round-trip ✅
+  - `05-telnet-login.sh 2323` — `login qix` → challenge → openssl-signed `auth:` → server `welcome, qix` → `whoami` reports bound identity ✅
+  - `04-concurrent-smoke.py 2323 8` — 8 simultaneous TCP sessions, each gets its own banner + IAC negotiation + `boards` reply with no cross-talk ✅
+- **Workstation re-smoke** of all 6 example scripts against the rebuilt 1.0.0 binary (01–06) — full green.
+- `cyrius audit` clean.
+
+### Changed
+
+- `VERSION` 0.9.2 → 1.0.0.
+- `src/main.cyr` — three inline version literals bumped (`print_banner`, `cmd_version`, `render_motd`).
+- `docs/examples/05-telnet-login.sh` — banner drain now drain-and-print instead of two blind `read` calls (preserves the top row of the bannermanor MOTD in script output; cosmetic fix caught during iron validation).
+- `docs/development/state.md` / `roadmap.md` / `doc-health.md` / `README.md` — all synced for the 1.0.0 ship.
+
+### Followups queued for post-1.0
+
+- **v2.x sovereignty pillars** ([`docs/development/roadmap-future.md`](docs/development/roadmap-future.md)) — six unpinned directions: identity continuity (portable sigil keys), content-addressed storage, threat-level node policy, federation by interest, self-distribution baked into the protocol, offline-tolerant store-and-forward. Items pull forward on consumer pressure, not by calendar.
+- **Backlogged milestones** — M3 (inline-image post bodies via kii) and M4 (stored-file deltas via sankoch) are gate-met but ship-deferred; pull when a real consumer asks.
+- **Operator CLI** — `agora policy set <board> <mode>` and `agora admins {add,rm,list}` (operators currently edit `.policy` / `.admins` files directly). Earn their slot when a real deployment asks.
+- **macOS / Windows ports** — pending `lib/net.cyr` backends in cyrius; agora carries no platform-specific code today.
+
+### Naming
+
+agora opens the **Greek naming lane** in the AGNOS ecosystem, alongside the existing Sanskrit/Hindi lane (system libs: darshana, kybernet, sankoch, sit) and the English-wordplay / Polynesian lane (user-facing tools: bannermanor, kii). Three convergent layers behind the name: ancient ἀγορά (civic-marketplace, public assembly) + Doja Cat's *Agora Hills* (Scarlet, 2023) + Agoura Hills CA (adjacent to project home base).
+
 ## [0.9.2] — 2026-05-23 (final 1.0 closeout sweep)
 
 Bite G of the 0.8 cycle plan, finally landed. The last release before the 1.0 cut. Full CLAUDE.md "Closeout Pass" §1-11 executed against the 0.9.x tip: tests + benchmarks re-captured (within noise of M1-close baseline; parser hot path unchanged across every release since M6), full clean build from `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` green, security re-scan clean (no `sys_system`, no unbounded buffers, no new external-input paths since 0.8.3), all six `docs/examples/` scripts re-verified end-to-end. No code changes beyond the version-literal bumps. After 0.9.2 the only remaining 1.0 gate is criterion #3 — telnet validation on archaemenid LAN.

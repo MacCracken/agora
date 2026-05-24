@@ -52,10 +52,15 @@ trap 'rm -f "$DER" "$MSG" "$SIG"' EXIT
 # `whoami` to confirm and `quit` to close cleanly.
 exec 3<>/dev/tcp/"$HOST"/"$PORT"
 
-# Drain banner + IAC negotiation.
+# Drain banner + IAC negotiation. We drain-and-print instead of
+# discarding so the user sees the full bannermanor MOTD; the first
+# line will carry leading IAC byte noise (binary 0xFF sequences from
+# the announce_salvo), which is expected — every subsequent line is
+# the rendered banner / prompt.
 sleep 0.5
-read -r -t 0.5 -u 3 _ || true
-read -r -t 0.5 -u 3 _ || true
+while IFS= read -r -t 0.2 -u 3 line; do
+    echo "<-- $(printf '%s' "$line" | tr -d '\r')"
+done
 
 echo "=== login qix ==="
 printf 'login qix\r\n' >&3
