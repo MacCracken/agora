@@ -17,8 +17,8 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.3.0** | M2 — ANSI BBS aesthetic (bannermanor MOTD + darshana SGR + `--motd`) | ✅ 2026-05-23 |
 | **0.4.0** | M5 partial — single-board post persistence (ADRs 0002 / 0003) | ✅ 2026-05-23 |
 | **0.5.0** | M5 close — boards + threads (ADRs 0004 / 0005) | ✅ 2026-05-23 |
-| **0.6.0** | M6 — sigil-backed auth | ← next cycle |
-| **0.7.0** | Security sweep — external CVE / 0-day research + code audit |  |
+| **0.6.0** | M6 — sigil-backed auth + per-board policy (ADR 0006) | ✅ 2026-05-23 |
+| **0.7.0** | Security sweep — external CVE / 0-day research + code audit | ← next cycle |
 | **0.8.0** | Hardening + v1 lockdown — ABI freeze, doc-pass, perf re-run |  |
 | **1.0.0** | Iron validation on archaemenid LAN |  |
 
@@ -26,19 +26,24 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 ## In progress
 
-### M6 — user accounts + auth → 0.6.0
+### 0.7.0 — pre-1.0 security sweep
 
-**sigil** 3.4.3 ✅ is the identity primitive. Per-board posting permissions, login flow, `whoami`. Out of scope: federated identity, web-of-trust (those are v2.x pillar 1 — see [`roadmap-future.md`](roadmap-future.md)).
+A dedicated audit cycle per CLAUDE.md's "Security Hardening" + "Closeout Pass" sections. Inputs: existing M6-close re-scan in CHANGELOG [0.6.0], ADR 0006 threat model, BSD telnetd CVE history (CVE-2020-10188 buffer overflow, CVE-2011-4862 encryption key exchange overflow), modern BBS / Matrix / Mastodon attack surface, sigil 3.1.1 known-issues review.
 
-**M6-A landed 2026-05-23** — [ADR 0006 — identity model](../adr/0006-identity-model.md) captures: sigil Ed25519 primitive, `<store>/.users/<fp16>/` per-user dir, challenge/response wire flow (server 32-byte nonce → client signs `"agora-login:" + nonce_hex`), anon-read + auth-post default, `From: <handle> <fp16>` post header, `~/.agora/key` keyfile.
+Audit surfaces to walk:
 
-**Remaining bites**:
+- **IAC parser** (`src/telnet.cyr`) — RFC 854 / 1143 / 1073 / 1091 / 1184 state machines, all byte-level paths bounds-checked, no buffer-cap violations under malformed input.
+- **Post storage** (`src/board.cyr`) — `parse_post_id`, `build_post_path`, `board_name_valid`, `input_byte_ok`, header parse / format, per-board policy decision in `board_can_post`.
+- **Auth surface** (`src/account.cyr` + `src/main.cyr` MODE_LOGIN_AWAIT_SIG) — challenge / nonce / sig hex validation; `From:` header injection vectors via crafted handle; `keyfile_load_seed` size checks; per-board policy bypass paths.
+- **Session globals** — `g_session_fp` / `g_session_handle` / `g_login_*` initialization and reset paths; ensure no leak between connections (single-tracking accept loop today, but the audit should be concurrent-accept-aware so we're not surprised when that lands).
 
-- **M6-B** — `src/account.cyr` primitives (fingerprint, build_user_path, register, lookup by fp / by handle)
-- **M6-C** — telnet `login` + challenge/response (new `MODE_LOGIN_AWAIT_SIG`, ed25519_verify, 30 s deadline)
-- **M6-D** — `whoami` (telnet + CLI)
-- **M6-E** — `From:` header on posts; CLI `--as <handle>`
-- **M6-F** — per-board posting policy (`.policy` + `.admins`)
+Output: `docs/audit/2026-XX-XX-audit.md` with severity-rated findings. CRITICAL / HIGH get fixed in 0.7.x; remaining queue for 0.8 v1-hardening.
+
+**Deferred from M6-close (queue for 0.7.x):**
+
+- 30 s explicit deadline on parked login challenge (currently relies on `RECV_TIMEOUT_SECS = 60` slowloris drop)
+- `agora policy set <board> <mode>` + `agora admins {add,rm,list}` CLI verbs (M6-F leaves operators to edit `.policy` / `.admins` files directly)
+- `docs/guides/getting-started.md` + `docs/examples/` rewrite covering the M6 surface
 
 ---
 
@@ -59,6 +64,7 @@ Detail per release lives in [`CHANGELOG.md`](../../CHANGELOG.md); per-bite narra
 - **M1** (0.2.0) — five-bite telnet listener: IAC parser, Q-method negotiation, NAWS + TT subneg, LINEMODE, bench harness. 10 ns/byte hot path.
 - **M2** (0.3.0) — three-bite ANSI aesthetic: bannermanor MOTD, darshana SGR colors, `--motd` operator override. Bannermanor patched 1.0.1 same-day for ecosystem alignment on darshana 0.5.3.
 - **M5** (0.4.0 + 0.5.0) — eight-bite post persistence. Single-board (0.4.0): storage primitives, in-session command interpreter, sorted listing, RFC-822 headers, per-store flock, ingress filter. Multi-board threaded (0.5.0): boards, Reply-To threading. Four ADRs total (0002, 0003, 0004, 0005).
+- **M6** (0.6.0) — six-bite sigil-backed auth + per-board policy. ADR 0006 (identity model) + `src/account.cyr` primitives (M6-B) + telnet `login` challenge/response (M6-C) + `keygen`/`register`/`whoami` CLI + telnet `whoami` (M6-D) + `From:` post header (M6-E) + per-board `.policy` / `.admins` (M6-F). Adds sigil + freelist + bigint + ct to stdlib deps; 49 → 70 tests; 140 → 375 KB binary.
 
 ---
 

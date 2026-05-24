@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-23 (M6 close — sigil-backed auth + per-board policy)
+
+agora is now a **multi-board threaded BBS with sigil-backed identity and operator-configurable per-board posting policy**. The full M6 cycle ships: six bites + one ADR landed between 0.5.0 and 0.6.0. Authenticated users can post under their handle (with a `From: <handle> <fp16>` header on disk); anonymous users can still read freely but cannot post (default policy `open` still requires auth); operators can tighten any board to `known` (registered-users-only) or `admin` (handles listed in `<board>/.admins` only).
+
+### Bites + ADR in this release
+
+- **M6-A** + [ADR 0006](docs/adr/0006-identity-model.md) — identity model: sigil Ed25519, `<store>/.users/<fp16>/` per-user dir, challenge/response wire flow (`"agora-login:" + nonce_hex` signed payload), anon-read + auth-post default, `From: <handle> <fp16>` header, 32-byte raw seed keyfile at `~/.agora/key`.
+- **M6-B** — account primitives in `src/account.cyr` (~230 LOC): fingerprint computation, handle validation, path builders, `account_register` / `account_lookup_*` / `account_resolve_handle`.
+- **M6-C** — telnet `login <handle>` + `MODE_LOGIN_AWAIT_SIG` + challenge/response wire flow + `parse_auth_sig` / `format_challenge_msg` / `nonce_random` / `nonce_to_hex` helpers.
+- **M6-D** — `agora keygen` / `agora register` / `agora whoami` CLI verbs + telnet `whoami` command + keyfile primitives (`keyfile_generate` / `keyfile_load_seed` / `seed_to_pk` / `keyfile_to_fingerprint`).
+- **M6-E** — `From:` header on authenticated posts; CLI `--as <handle>`; wire-side auth-post gate; `post_from` extractor; `list` and `read` rendering across CLI + telnet show `[handle|anon]` / `From:` lines.
+- **M6-F** — per-board posting policy via `<store>/<board>/.policy` (`open` / `known` / `admin`) + `<store>/<board>/.admins`; `BoardPolicy` enum + `board_policy_get` / `board_admin_check` / `board_can_post` decision-point primitive.
+
+### Changed
+
+- `VERSION` bumped 0.5.0 → 0.6.0.
+- `print_banner` / `cmd_version` / `render_motd` version line all bumped to 0.6.0 (CI's drift check verifies the inline literals match `VERSION`).
+- `cyrius.cyml [deps].stdlib` grew **three modules**: `sigil` (Ed25519 / SHA-256 / hex), `freelist` (sigil's heap-context primitives), `bigint` + `ct` (sigil's Ed25519 verify call chain needs the u256 + constant-time primitives — would SIGILL at runtime without them). 16 modules at 0.5.0 → 20 at 0.6.0.
+- `post_format_with_headers` signature grew `from_handle` + `from_fp` params (8 args at 0.6.0; was 6 at 0.5.0). `post_new_with_subject_reply` likewise grew the two params. Backwards-compat wrappers (`post_format_with_subject`, `post_new_with_subject`) pass 0/0 for both.
+- New session modes / globals in `src/main.cyr`: `MODE_LOGIN_AWAIT_SIG = 3`, `g_session_fp`, `g_session_handle`, `g_login_fp`, `g_login_nonce`.
+
+### Verified
+
+- **70/70 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build` (was 49 at 0.5.0; +21 tests for M6-B/C/D/E/F: fingerprint, handle validation, path builders, nonce/hex helpers, auth-sig parser, RFC 8032 test-vector-1, From-header round-trip, policy paths, anonymous-deny early-return).
+- **Bench baseline unchanged** (parser hot path is content-agnostic — M6 is application-layer):
+  | Benchmark | 0.5.0 | 0.6.0 |
+  |---|---:|---:|
+  | `telnet/plain_byte` | 10–11 ns | **10 ns** |
+  | `telnet/iac_untracked` | 63 ns | **64 ns** |
+  | `telnet/iac_tracked_agree` | 73 ns | **74 ns** |
+  | `telnet/subneg_naws` | 97–107 ns | **99 ns** |
+  | `telnet/announce_salvo` | 132 ns | **132 ns** |
+- **Security re-scan** (M6 surfaces, per CLAUDE.md Security Hardening §1-7):
+  - **No `sys_system`** — zero command-injection surface.
+  - **Buffer sizes**: all M6 `var buf[N]` allocations match their fill size (32 for pk/seed/digest, 64 for sig, 24 for fmt_int_buf, 76 for the LOGIN_MSG_LEN message, etc.).
+  - **Path resolution**: every path constructed via builders (`build_user_dir`, `build_user_file`, `board_policy_path`, `board_admins_path`) whose user-controlled tokens (`handle`, `board`) are pre-validated by `handle_valid` / `board_name_valid` at ingress. Fingerprints are derived from `sha256(pk)` and always-16-lowercase-hex by construction. File-name component is always a hard-coded literal.
+  - **Sig hex validated**: `hex_is_valid` + length check before `hex_decode` in `parse_auth_sig`. Malformed bytes → `login failed (malformed auth)`.
+  - **Keyfile**: `O_CREAT | O_EXCL` (refuses to overwrite existing) + mode 0o600 at creation. Server holds only public keys; secret material never crosses the wire.
+  - **Domain-separated signing input**: `"agora-login:"` prefix prevents the sigil keypair being tricked into signing payloads for other protocols.
+  - **Single-use nonces**: cleared on every `auth:` attempt (pass or fail), preventing replay.
+- **Dead-code audit**: DCE NOPs **675 unreachable fns** (~160 KB) — entirely sigil's PQC / keccak / hashmap_fast / thread paths we never call. None of agora's own code is unreachable from the entry points.
+- **Full clean rebuild** (`rm -rf build && cyrius deps && cyrius build`) passes clean.
+- **Version verify**: `VERSION` = `cat VERSION` = `./build/agora --version | head -1` = intended git tag `0.6.0` (manual; CI's drift-check workflow enforces this).
+- **End-to-end smoke** across every M6 bite — see per-bite entries below for the verified scenarios (keygen + register + login + post + reply + whoami + policy enforcement, both CLI and telnet sides, openssl 3.x ↔ sigil 3.1.1 Ed25519 interop confirmed).
+
+### Binary growth
+
+| Tag | Size | Cycle |
+|---|---:|---|
+| 0.1.0 | 43 KB | M0 scaffold |
+| 0.2.0 | 71 KB | M1 close |
+| 0.3.0 | 86 KB | M2 close |
+| 0.4.0 | 129 KB | M5 partial |
+| 0.5.0 | 140 KB | M5 close |
+| **0.6.0** | **375 KB** | **M6 close** |
+
++235 KB across the M6 cycle. ~165 KB of that is sigil's unreachable PQC / keccak / hashmap_fast / thread surface (NOPed under DCE); the actual M6 code adds ~70 KB across `src/account.cyr` (~280 LOC including login + keyfile + From helpers + policy primitives) and the wire/CLI integration in `src/main.cyr`. Real binary strip remains a v1.x close-out concern per state.md.
+
 ### Added — M6-F: per-board posting policy (`open` / `known` / `admin`) (2026-05-23)
 
 - **New on-disk policy files** per ADR 0006 § Specifics:
