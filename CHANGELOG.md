@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M6-F: per-board posting policy (`open` / `known` / `admin`) (2026-05-23)
+
+- **New on-disk policy files** per ADR 0006 § Specifics:
+  - **`<store>/<board>/.policy`** — one of literal `open` / `known` / `admin` (trailing CR/LF/whitespace tolerated). Missing file defaults to `open`. `<store>/.policy` for the main board.
+  - **`<store>/<board>/.admins`** — one handle per line; blank lines and `#`-comment lines ignored; leading + trailing whitespace trimmed per line. Only consulted when `.policy == admin`.
+  - Operator sets both by editing the files directly (`echo known > <store>/<board>/.policy`). No CLI verb at first cut; a future bite earns `agora policy set <board> <mode>` if real deployments demand it.
+- **New primitives in `src/board.cyr`** (~150 LOC):
+  - `BoardPolicy` enum: `POLICY_OPEN = 0`, `POLICY_KNOWN = 1`, `POLICY_ADMIN = 2`.
+  - `board_policy_path(store, board, out)` / `board_admins_path(store, board, out)` — path builders mirroring the `board_path` + dotfile-suffix shape (precedent: `.lock`, `.users/`).
+  - `board_policy_get(store, board)` — reads `.policy`, trims trailing whitespace, parses one of `open` / `known` / `admin`. Missing / unparseable → `POLICY_OPEN`.
+  - `board_admin_check(store, board, handle)` — reads `.admins` (up to 4 KB), scans line-by-line, trims per-line whitespace, skips blank + `#`-comment lines, returns 1 if `handle` matches any entry. Up to 4 KB of `.admins` = ~120 handles of typical length; lift the ceiling when a deployment hits it.
+  - `board_can_post(store, board, session_fp, session_handle)` — single decision point. Anonymous (NUL / empty `session_fp`) always denied. `open` allows any auth. `known` re-verifies the fingerprint via `account_lookup_pubkey` (guards against stale sessions whose user was unregistered out-of-band). `admin` requires non-empty handle in `.admins`.
+- **`open` vs `known` at M6** are functionally identical (every authenticated session at M6 has a locally-registered handle — `login` resolves through `<store>/.users/`). The distinction is forward-compat for federation (v2.x pillar 1): `open` would also accept federated identities not registered locally.
+- **Wire-side enforcement** in `session_execute`: `post` / `reply` commands replace the bare `g_session_fp` check with `board_can_post(...)`. Policy-aware error messages — `auth required — run 'login <handle>' first` for anonymous, `post denied by board policy (admin-only or unregistered)` for authenticated-but-denied.
+- **CLI enforcement** in `cmd_post`: same `board_can_post(...)` gate using `--as`-derived identity (or 0/0 for anonymous CLI posts). Anonymous CLI posts continue to work on `open`-policy boards (default = `open` = backwards-compat with 0.5.x); tightening the operator surface is what policy is for.
+- **Tests grew 66 → 70**: `t67_board_policy_path_main` / `t68_board_policy_path_named` / `t69_board_admins_path_named` (path builders verbatim with NUL terminators), `t70_can_post_anonymous_denied` (NUL ptr + empty cstring both reject without touching the filesystem — early-return correctness check).
+- **End-to-end smoke** (7 cases, 2 keypairs alice/bob in one store with `main` open / `closed` known / `ops` admin-with-alice-only):
+  1. alice → main (open) → allow.
+  2. bob → closed (known) → allow (bob registered).
+  3. bob → ops (admin, not listed) → DENY ("denies this post").
+  4. alice → ops (admin, listed) → allow.
+  5. Anonymous CLI → closed (known) → DENY ("requires authentication").
+  6. Tighten main to admin with no .admins file → even alice DENY (no one is admin).
+  7. Wire-side: bob logged in via challenge/response, enters ops, tries `post` → `post denied by board policy (admin-only or unregistered)`. **PASS.**
+- **Binary growth**: 370,528 B (M6-E) → final M6 size (see closeout).
+- **Backwards compat**: existing 0.5.x stores with no `.policy` files behave exactly as before (default `open`). Operators upgrade in place with zero data migration; tightening is opt-in per-board.
+
 ### Added — M6-E: `From:` header on posts + CLI `--as` + auth-post gate (2026-05-23)
 
 - **`post_format_with_headers` signature grew** `from_handle` + `from_fp` parameters (both cstrings; either-null = no header / anonymous post). Worst-case header overhead bumped to ~140 bytes accounting for the `From: <32-byte-handle> <16-hex-fp>\r\n` line. `post_new_with_subject_reply` got the same two new params; `post_format_with_subject` and `post_new_with_subject` wrappers pass 0/0 for both. Per ADR 0006 § Specifics — `From: <handle> <space> <fp16-hex>` two-token format.

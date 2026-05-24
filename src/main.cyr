@@ -474,11 +474,17 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "post") != 0) {
-        # M6-E: auth-post default per ADR 0006 § P1. Anonymous sessions
-        # may read freely but cannot post; the operator-config policies
-        # in M6-F refine this per-board.
-        if ((load8(g_session_fp) & 0xFF) == 0) {
-            send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+        # M6-E auth gate + M6-F per-board policy (.policy / .admins).
+        # board_can_post returns 1 only if both the session is
+        # authenticated AND the policy allows; otherwise we give a
+        # policy-aware error so the user knows whether to login or
+        # ask the operator.
+        if (board_can_post(g_store_buf, current_board, g_session_fp, g_session_handle) == 0) {
+            if ((load8(g_session_fp) & 0xFF) == 0) {
+                send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+            } else {
+                send_str(cfd, "post denied by board policy (admin-only or unregistered)\r\n");
+            }
             return MODE_COMMAND;
         }
         send_str(cfd, "Subject: ");
@@ -491,9 +497,13 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     # The session's `reply_to_out` global slot is set here and read
     # by handle_client when finalizing the post.
     if (line_has_prefix(line, len, "reply") != 0) {
-        # M6-E: auth-required per ADR 0006 § P1 (same gate as `post`).
-        if ((load8(g_session_fp) & 0xFF) == 0) {
-            send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+        # M6-E auth gate + M6-F per-board policy (same as `post`).
+        if (board_can_post(g_store_buf, current_board, g_session_fp, g_session_handle) == 0) {
+            if ((load8(g_session_fp) & 0xFF) == 0) {
+                send_str(cfd, "auth required — run 'login <handle>' first\r\n");
+            } else {
+                send_str(cfd, "reply denied by board policy (admin-only or unregistered)\r\n");
+            }
             return MODE_COMMAND;
         }
         var parent_id = line_parse_int(line, 5, len);
@@ -1245,6 +1255,19 @@ fn cmd_post(): i64 {
         }
         from_handle = as_handle;
         from_fp     = fp_buf;
+    }
+    # M6-F: per-board policy check. Anonymous CLI posts (no --as)
+    # still need to pass policy — `open` admits them, `known` and
+    # `admin` reject. (Anonymous CLI posts at the open default are
+    # the 0.5.x shape; tightening the operator surface is what
+    # policy is for.)
+    if (board_can_post(store, board, from_fp, from_handle) == 0) {
+        if (from_fp == 0) {
+            println("agora post: board policy requires authentication (rerun with --as <handle> --key <path>)");
+        } else {
+            println("agora post: board policy denies this post (admin-only or unregistered)");
+        }
+        return 1;
     }
     # M5-E: validate the board name unless it's the default "main".
     if (streq(board, "main") == 0) {

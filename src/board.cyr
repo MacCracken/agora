@@ -46,6 +46,35 @@ enum BoardCap {
     DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once
     BOARD_NAME_MAX = 32;     # ADR 0004 validation: ≤ 32 bytes
     BOARD_LIST_MAX = 256;    # max named boards listed at once
+    BOARD_ADMINS_MAX_BYTES = 4096;  # M6-F: max .admins file we'll read
+}
+
+# === M6-F: per-board posting policy (ADR 0006 § Specifics) ===
+#
+# `<store>/<board>/.policy` is one of `open` / `known` / `admin`.
+# (`<store>/.policy` for the main board.) Missing file = `open`.
+#
+#   open   — any authenticated session may post. At M6, since every
+#            login binds to a locally-registered handle, this is
+#            equivalent to `known`; the distinction is forward-compat
+#            for federation (v2.x pillar 1), where `open` would also
+#            accept federated identities not registered locally.
+#   known  — authenticated AND fingerprint resolves to a local
+#            registration in `<store>/.users/`. At M6 this is true
+#            whenever the session is non-anonymous (login always goes
+#            through local resolution).
+#   admin  — authenticated AND handle appears in `<store>/<board>/.admins`
+#            (one handle per line; blank + leading-`#` lines ignored).
+#
+# Operator sets policy by editing the files directly (`echo known >
+# <store>/<board>/.policy`); no CLI verb at first-cut M6-F. A future
+# bite may add `agora policy set <board> <mode>` if real deployments
+# demand it.
+
+enum BoardPolicy {
+    POLICY_OPEN  = 0;
+    POLICY_KNOWN = 1;
+    POLICY_ADMIN = 2;
 }
 
 # === ADR 0004: per-board layout ===
@@ -778,4 +807,150 @@ fn boards_list(store, out_names, max_boards): i64 {
         i = i + 1;
     }
     return count;
+}
+
+# === Per-board policy primitives (M6-F, ADR 0006) ===
+
+# Build `<board-path>/.policy` or `<board-path>/.admins` into out_buf.
+# Returns length excluding NUL.
+fn board_policy_path(store, board, out_buf): i64 {
+    var pos = board_path(store, board, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    memcpy(out_buf + pos, ".policy", 7); pos = pos + 7;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+fn board_admins_path(store, board, out_buf): i64 {
+    var pos = board_path(store, board, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    memcpy(out_buf + pos, ".admins", 7); pos = pos + 7;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# Read the policy file, parse one of `open` / `known` / `admin`,
+# return the corresponding POLICY_* enum value. Missing file or
+# unparseable contents → POLICY_OPEN (the default per ADR 0006).
+fn board_policy_get(store, board): i64 {
+    var path = alloc(PATH_MAX_BYTES);
+    board_policy_path(store, board, path);
+    var buf[32];
+    var n = file_read_all(path, &buf, 32);
+    if (n < 0) { return POLICY_OPEN; }
+    if (n == 0) { return POLICY_OPEN; }
+    # Trim trailing whitespace + CR/LF
+    var trim = 1;
+    while (trim == 1) {
+        if (n <= 0) { trim = 0; continue; }
+        var c = load8((&buf) + n - 1) & 0xFF;
+        if (c == 10) { n = n - 1; continue; }
+        if (c == 13) { n = n - 1; continue; }
+        if (c == 32) { n = n - 1; continue; }
+        if (c == 9)  { n = n - 1; continue; }
+        trim = 0;
+    }
+    if (n == 4)  { if (memeq(&buf, "open", 4)  == 1) { return POLICY_OPEN;  } }
+    if (n == 5)  { if (memeq(&buf, "known", 5) == 1) { return POLICY_KNOWN; } }
+    if (n == 5)  { if (memeq(&buf, "admin", 5) == 1) { return POLICY_ADMIN; } }
+    return POLICY_OPEN;
+}
+
+# Check if `handle` appears as an entry in `<store>/<board>/.admins`.
+# File format: one handle per line, blank lines and `#`-comment lines
+# ignored, trailing CR/LF/whitespace trimmed per line. Returns 1 if
+# present, 0 otherwise (including missing / unreadable file).
+fn board_admin_check(store, board, handle): i64 {
+    var path = alloc(PATH_MAX_BYTES);
+    board_admins_path(store, board, path);
+    var buf = alloc(BOARD_ADMINS_MAX_BYTES);
+    var n = file_read_all(path, buf, BOARD_ADMINS_MAX_BYTES);
+    if (n <= 0) { return 0; }
+
+    var hlen = strlen(handle);
+    if (hlen == 0) { return 0; }
+
+    # Scan line by line. Track line start; on '\n' (or EOF), compare.
+    var i = 0;
+    var line_start = 0;
+    var found = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        var at_eol = 0;
+        if (i >= n) { at_eol = 1; }
+        else {
+            if ((load8(buf + i) & 0xFF) == 10) { at_eol = 1; }
+        }
+        if (at_eol != 0) {
+            var line_end = i;
+            # Trim trailing CR + whitespace
+            var trim = 1;
+            while (trim == 1) {
+                if (line_end <= line_start) { trim = 0; continue; }
+                var c = load8(buf + line_end - 1) & 0xFF;
+                if (c == 13) { line_end = line_end - 1; continue; }
+                if (c == 32) { line_end = line_end - 1; continue; }
+                if (c == 9)  { line_end = line_end - 1; continue; }
+                trim = 0;
+            }
+            # Trim leading whitespace
+            var ls = line_start;
+            var trim_l = 1;
+            while (trim_l == 1) {
+                if (ls >= line_end) { trim_l = 0; continue; }
+                var c2 = load8(buf + ls) & 0xFF;
+                if (c2 == 32) { ls = ls + 1; continue; }
+                if (c2 == 9)  { ls = ls + 1; continue; }
+                trim_l = 0;
+            }
+            var line_len = line_end - ls;
+            # Skip blank lines + comment lines
+            var skip = 0;
+            if (line_len == 0) { skip = 1; }
+            if (skip == 0) {
+                if ((load8(buf + ls) & 0xFF) == 35) { skip = 1; }   # '#'
+            }
+            if (skip == 0) {
+                if (line_len == hlen) {
+                    if (memeq(buf + ls, handle, hlen) == 1) {
+                        found = 1;
+                    }
+                }
+            }
+            line_start = i + 1;
+            if (found == 1) { scanning = 0; continue; }
+        }
+        if (i >= n) { scanning = 0; continue; }
+        i = i + 1;
+    }
+    return found;
+}
+
+# Single decision point — given a session identity (fp + handle —
+# either may be 0 / empty for anonymous) decide if a post would be
+# accepted in (store, board). Returns 1 = allowed, 0 = denied.
+# Caller is responsible for surfacing the right user-visible reason.
+fn board_can_post(store, board, session_fp, session_handle): i64 {
+    # Anonymous always denied at M6 (operator override via per-board
+    # policy `anon-allowed` is a future ADR per ADR 0006 § Negative).
+    if (session_fp == 0)              { return 0; }
+    if ((load8(session_fp) & 0xFF) == 0) { return 0; }
+
+    var pol = board_policy_get(store, board);
+    if (pol == POLICY_OPEN)  { return 1; }
+    if (pol == POLICY_KNOWN) {
+        # At M6, every authenticated session is locally-registered
+        # (login resolves through `.users/`). Verify the fp still
+        # has a `public_key.bin` on disk — guards against a stale
+        # session whose user was unregistered out-of-band.
+        var pk_buf[32];
+        if (account_lookup_pubkey(store, session_fp, &pk_buf) != 0) { return 0; }
+        return 1;
+    }
+    if (pol == POLICY_ADMIN) {
+        if (session_handle == 0)               { return 0; }
+        if ((load8(session_handle) & 0xFF) == 0) { return 0; }
+        return board_admin_check(store, board, session_handle);
+    }
+    return 0;
 }

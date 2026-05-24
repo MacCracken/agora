@@ -1497,6 +1497,69 @@ fn t66_post_from_absent_is_anonymous(): i64 {
     return 0;
 }
 
+# === M6-F per-board policy path builders ===
+
+# T67: board_policy_path for main board (flat root).
+fn t67_board_policy_path_main(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = board_policy_path("/var/agora", "main", buf);
+    var expected = "/var/agora/.policy";
+    var exp_len = strlen(expected);
+    if (len != exp_len) {
+        test_fail("t67_board_policy_path_main", "length mismatch");
+        return 1;
+    }
+    if (memeq(buf, expected, exp_len) == 0) {
+        test_fail("t67_board_policy_path_main", "byte mismatch");
+        return 1;
+    }
+    test_pass("t67_board_policy_path_main");
+    return 0;
+}
+
+# T68: board_policy_path for a named board.
+fn t68_board_policy_path_named(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = board_policy_path("/var/agora", "art", buf);
+    var expected = "/var/agora/art/.policy";
+    if (memeq(buf, expected, strlen(expected)) == 0) {
+        test_fail("t68_board_policy_path_named", "byte mismatch");
+        return 1;
+    }
+    test_pass("t68_board_policy_path_named");
+    return 0;
+}
+
+# T69: board_admins_path for a named board.
+fn t69_board_admins_path_named(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var len = board_admins_path("/var/agora", "ops", buf);
+    var expected = "/var/agora/ops/.admins";
+    if (memeq(buf, expected, strlen(expected)) == 0) {
+        test_fail("t69_board_admins_path_named", "byte mismatch");
+        return 1;
+    }
+    test_pass("t69_board_admins_path_named");
+    return 0;
+}
+
+# T70: board_can_post denies anonymous sessions unconditionally
+# (no fp / empty fp). Doesn't touch the filesystem (early-return).
+fn t70_can_post_anonymous_denied(): i64 {
+    if (board_can_post("/nonexistent/store", "main", 0, 0) != 0) {
+        test_fail("t70_can_post_anonymous_denied", "expected 0 for NUL fp");
+        return 1;
+    }
+    var empty_fp[1];
+    store8(&empty_fp, 0);
+    if (board_can_post("/nonexistent/store", "main", &empty_fp, 0) != 0) {
+        test_fail("t70_can_post_anonymous_denied", "expected 0 for empty cstring fp");
+        return 1;
+    }
+    test_pass("t70_can_post_anonymous_denied");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1569,6 +1632,10 @@ fn main(): i64 {
     t64_format_with_from_header();
     t65_post_from_extracts();
     t66_post_from_absent_is_anonymous();
+    t67_board_policy_path_main();
+    t68_board_policy_path_named();
+    t69_board_admins_path_named();
+    t70_can_post_anonymous_denied();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

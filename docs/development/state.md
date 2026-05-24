@@ -67,6 +67,8 @@ Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) �
 
 **M6-E landed**: `From: <handle> <fp16>` header on authenticated posts; wire-side `auth required` gate on `post` / `reply`; CLI `--as <handle>` for op-side authored posts (validates handle ↔ key binding via store registry). `post_format_with_headers` and `post_new_with_subject_reply` grew `from_handle` + `from_fp` params; `list` renders `[handle|anon]` prefix, `read` prepends `From:` line. `post_from` extractor added to account.cyr. 3 new tests (t64-t66); 66/66 green. Test fix: t49 updated for new 8-arg signature. Binary 366 → 370 KB. End-to-end smoke verified anon + authored CLI posts + telnet auth-gate.
 
+**M6-F landed**: per-board policy via `<store>/<board>/.policy` (`open` / `known` / `admin`) + `<store>/<board>/.admins` (one handle per line). `BoardPolicy` enum + `board_policy_get` / `board_admin_check` / `board_can_post` primitives in board.cyr. Wire-side + CLI `post`/`reply` both route through `board_can_post`. Missing `.policy` → default `open` (free backwards-compat with 0.5.x). 4 new tests (t67-t70); 70/70 green. End-to-end smoke (7 cases): open allows all, known allows registered users, admin allows only handles in `.admins`, anonymous always denied, missing `.admins` under `admin` denies even registered users. **M6 cycle code-complete — only the 0.6.0 closeout remains.**
+
 **Bite plan to 0.6.0**:
 
 - **M6-B** — account primitives in `src/account.cyr`: `compute_fingerprint(pk)` (sha256-then-truncate to 16 hex), `build_user_path(store, fp)`, `account_register(store, fp, pk, handle)`, `account_lookup_by_fp(store, fp)`, `account_lookup_by_handle(store, handle)`. Unit tests for each.
