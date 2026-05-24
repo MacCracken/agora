@@ -104,7 +104,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.9.0 — PostHeaders struct ABI freeze (ADR 0008)");
+    println("v0.9.2 — final closeout sweep (CLAUDE.md §1-11; pre-1.0)");
     return 0;
 }
 
@@ -745,7 +745,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 0.9.0 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 0.9.2 — telnet BBS\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1701,7 +1701,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.9.0");
+    println("agora 0.9.2");
     return 0;
 }
 

@@ -1,5 +1,34 @@
 # Examples
 
-Runnable examples. Empty at v0.1.0 — first example earns its slot at M1 close (a smoke client that exercises the telnet listener end-to-end).
+Runnable smoke scripts for each major agora surface. Each example begins with a top-of-file comment explaining *why* it exists (per [first-party-documentation § Examples](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#examples)) and what it should output on success.
 
-Per [first-party-documentation § Examples](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#examples), every example has a top-of-file comment explaining *why*, not just *what*.
+All examples assume:
+
+- agora is built at `./build/agora` (`cyrius build src/main.cyr build/agora`).
+- A scratch store at `./bbs/` (delete between runs for a clean slate: `rm -rf ./bbs`).
+- The serve examples use port **2323** (unprivileged; no root needed).
+
+Run them in order from a fresh checkout — later examples reuse identity files from earlier ones.
+
+| # | Script | Surface | Reads / writes |
+|---|---|---|---|
+| 01 | [`01-build-and-test.sh`](01-build-and-test.sh) | Build + 80-test suite | none |
+| 02 | [`02-register-and-post.sh`](02-register-and-post.sh) | M6: keygen / register / post `--as` (the first writeable flow) | `./bbs/`, `./keys/qix` |
+| 03 | [`03-anonymous-read.sh`](03-anonymous-read.sh) | M6 default "anon-read, auth-post" — reads succeed, anon post denied | `./bbs/` |
+| 04 | [`04-concurrent-smoke.py`](04-concurrent-smoke.py) | ADR 0007 fork-per-conn: 3 simultaneous telnet sessions | `./bbs/` |
+| 05 | [`05-telnet-login.sh`](05-telnet-login.sh) | M6 challenge/response over telnet (openssl-signed) | `./bbs/`, `./keys/qix` |
+| 06 | [`06-board-policy.sh`](06-board-policy.sh) | M6-F `.policy` / `.admins` (open / known / admin) | `./bbs/` |
+
+Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
+
+---
+
+## What these are not
+
+- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness (80 tests, t01–t80). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
+- **Not benchmarks** — those live in [`benches/bench_telnet.bcyr`](../../benches/bench_telnet.bcyr).
+- **Not a tutorial** — the prose tutorial is [`docs/guides/getting-started.md`](../guides/getting-started.md). Read that first if you've never run agora.
+
+## When to add a new example
+
+When a new surface earns its slot, drop a numbered script next to the others. Number monotonically (07, 08, …) — never renumber. If a script becomes obsolete (the surface changed shape), delete the file and free its number; future readers can recover history via git.

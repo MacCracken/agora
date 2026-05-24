@@ -24,23 +24,31 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.8.2** | Sigil 3.1.1 → 3.4.3 release-notes diff (no bump; 0.7.0 deferred item discharged) | ✅ 2026-05-23 |
 | **0.8.3** | Anonymous board-create gate (audit M4 closed — all 0.7.0 audit findings now discharged) | ✅ 2026-05-23 |
 | **0.9.0** | PostHeaders struct ABI freeze (ADR 0008) | ✅ 2026-05-23 |
-| **0.9.x** | Doc-pass on guides + examples (F, 0.9.1), perf re-run + final 1.0 closeout (G, 0.9.2) | ← next cycle |
-| **1.0.0** | Iron validation on archaemenid LAN |  |
+| **0.9.1** | Guides + examples doc-pass (F) — long-deferred Tier 5 + Tier 6 rewrite + 6 runnable example scripts | ✅ 2026-05-23 |
+| **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
+| **1.0.0** | Iron validation on archaemenid LAN (workstation prep complete; iron task pending) | ← gate |
 
 ---
 
 ## In progress
 
-### 0.8.x — remaining 0.8 cycle bites
+### 1.0.0 — the cut
 
-**0.8.0 shipped just bite E** (concurrent-accept) — the structural change that closes audit M1 + M2. The other bites from the 0.8 cycle plan are queued for 0.8.x patches, in recommended order:
+The 0.8 cycle plan had 7 bites; all 7 have shipped:
 
 - ~~0.8-A — keyfile mode warn-on-load~~ **shipped at 0.8.1.**
-- ~~0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read~~ **shipped at 0.8.2.** No bump needed; bundled 3.1.1 has all relevant crypto fixes. Full rationale in [CHANGELOG 0.8.2](../../CHANGELOG.md).
+- ~~0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read~~ **shipped at 0.8.2.** No bump needed; bundled 3.1.1 has all relevant crypto fixes.
 - ~~0.8-B — anonymous board-create gate~~ **shipped at 0.8.3.** Audit M4 closed; **all 0.7.0 audit findings now discharged**.
-- ~~0.8-D / 0.9.0 — ABI freeze decision~~ **shipped at 0.9.0 via ADR 0008.** PostHeaders struct replaces the 8-arg shape; `post_format(ph, body, body_len, out, cap)` + `post_new(store, board, ph, body, body_len)` are the v1.0 public surface. Dead shims removed. Wire format byte-identical.
-- **0.9.1 (F) — guides + examples doc-pass** (deferred from M6 close + 0.7.x + 0.8.x; now finally up). Rewrite `docs/guides/getting-started.md` + `docs/examples/` to cover the 0.9.0 surface (concurrent fork, M6 auth, the 5 0.7.0 audit-hardenings, ADR 0007 concurrency, ADR 0008 ABI, 0.8.1 keyfile mode warn, 0.8.3 board-create gate).
-- **0.9.2 (G) — perf re-run + final 1.0 closeout sweep**. Re-capture bench numbers (parser hot path expected unchanged — every refactor since M1-close has been off-hot-path), full CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip, prep for 1.0 cut.
+- ~~0.8-D / 0.9.0 — ABI freeze decision~~ **shipped at 0.9.0 via ADR 0008.** PostHeaders struct as the v1.0 public surface.
+- ~~0.9.1 (F) — guides + examples doc-pass~~ **shipped at 0.9.1.** Tier 5 + Tier 6 rewritten; 6 runnable scripts; every doc-health row Fresh.
+- ~~0.9.2 (G) — final 1.0 closeout sweep~~ **shipped at 0.9.2.** CLAUDE.md "Closeout Pass" §1-11 walked end-to-end; benches re-captured within noise of M1-close; all 6 examples re-smoked.
+
+**The workstation side of the v1.0 gate is met.** What's left:
+
+- **Workstation: 1.0.0 cut itself** — VERSION bump, three inline literal bumps in `src/main.cyr`, [1.0.0] CHANGELOG entry (release narrative + v1.0 criteria checkbox), state.md / roadmap.md / doc-health.md final 1.0 sync, README status pointer.
+- **Iron: criterion #3** — telnet validation on archaemenid LAN: NUC running AGNOS serves; second LAN box connects → login → list → read → reply → quit.
+- **Iron: criterion #4** — 8-user fanout on iron via `docs/examples/04-concurrent-smoke.py` with N=8.
+- **User: git tag 1.0.0** per CLAUDE.md "do not commit or push".
 
 **Deferred from 0.7.0 (still queued; pull when a deployment asks):**
 

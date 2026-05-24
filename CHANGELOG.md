@@ -4,6 +4,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-05-23 (final 1.0 closeout sweep)
+
+Bite G of the 0.8 cycle plan, finally landed. The last release before the 1.0 cut. Full CLAUDE.md "Closeout Pass" §1-11 executed against the 0.9.x tip: tests + benchmarks re-captured (within noise of M1-close baseline; parser hot path unchanged across every release since M6), full clean build from `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` green, security re-scan clean (no `sys_system`, no unbounded buffers, no new external-input paths since 0.8.3), all six `docs/examples/` scripts re-verified end-to-end. No code changes beyond the version-literal bumps. After 0.9.2 the only remaining 1.0 gate is criterion #3 — telnet validation on archaemenid LAN.
+
+### Verified
+
+- **80/80 tests pass** (`cyrius test src/test.cyr`) — unchanged from 0.9.1.
+- **Benchmarks re-captured** (`cyrius bench benches/bench_telnet.bcyr`) — all 5 within ±2 ns of the M1-close baseline. The first run showed `announce_salvo` elevated to 163 ns avg with min=131 ns; re-run stabilized at 134 ns; the elevated avg was system noise. `BENCHMARKS.md` updated with the 0.9.2 row.
+- **Full clean build** (`rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build src/main.cyr build/agora`) → 378,440 B (identical to 0.9.1; version-string length deltas neutral).
+- **Security re-scan**: no `sys_system` / `system(` anywhere; one `var buf[32]` in `board.cyr:931` (`board_policy_get` file read) verified bounded against the 32-byte `file_read_all` cap; no TODO / FIXME / XXX / HACK markers anywhere in `src/*.cyr`.
+- **Dead-code audit**: 666 unreachable fns / 158,837 bytes NOPed by DCE — all stdlib bloat (sigil pulls map / mutex / shake256 surfaces that agora doesn't call); no agora-source dead code. Function counts: main.cyr 34, board.cyr 36, account.cyr 22, telnet.cyr 31 (123 total).
+- **Examples**: 01–06 all green against the 0.9.2 binary. 01 build+test passes. 02 register-and-post writes the From header (fp `bdccc7a4d1991a4d` on this re-run). 03 confirms anon-read works + anon-post denied. 04 3-session smoke shows no cross-talk. 05 telnet-login completes the openssl-signed challenge/response to `welcome, qix` + `whoami` confirmation. 06 all 9 policy assertions pass.
+- **Version-verify**: `VERSION` = 0.9.2, `cyrius.cyml [package].version = ${file:VERSION}`, binary reports `agora 0.9.2`, CHANGELOG header matches.
+
+### Changed
+
+- `VERSION` 0.9.1 → 0.9.2.
+- `src/main.cyr` — three inline version literals bumped (`print_banner`, `cmd_version`, `render_motd`).
+- `BENCHMARKS.md` — 0.9.2 row added to per-release history; main table refreshed; "Last Updated" stamp bumped.
+- `docs/development/state.md` / `roadmap.md` / `doc-health.md` — refreshed for the 0.9.2 ship; in-flight slot now reads "1.0.0 cut — handoff for archaemenid iron validation".
+
+### Followups queued for 1.0.0
+
+- **VERSION 0.9.2 → 1.0.0** + final CHANGELOG entry summarizing the M0–M6 + 0.7–0.9 arc.
+- **Telnet validation on archaemenid LAN** (v1.0 criterion #3) — iron NUC running AGNOS serves telnet to a second box; end-to-end: connect → log in → list boards → read a thread → post a reply → log off. User task on iron; not codeable from the workstation.
+- **8-user fanout concurrency check** (v1.0 criterion #4) — extend `docs/examples/04-concurrent-smoke.py` from N=3 to N=8 once on iron; assert no message loss / state corruption.
+
+## [0.9.1] — 2026-05-23 (guides + examples doc-pass)
+
+The long-deferred Tier 5 + Tier 6 doc-pass — `docs/guides/getting-started.md` (74-line 0.1.0-stub-verb walkthrough) and `docs/examples/README.md` (6-line placeholder) both rewritten to cover the 0.9.0 surface, plus six runnable example scripts added. Every script verified end-to-end against `./build/agora`. No code changes beyond the version-literal bumps. Bite F from the 0.8 cycle plan; closes the last `🟡 Stale` row in `docs/doc-health.md`.
+
+### Added
+
+- **`docs/guides/getting-started.md` (rewrite)** — full walkthrough: prereqs, build, tests (80/80), `agora serve 2323`, anon-read commands, M6 default policy, keygen + register + post `--as`, telnet `login` challenge/response, per-board `.policy` / `.admins` table, fork-per-conn concurrency check, cross-links to all 8 ADRs and the 6 runnable examples.
+- **`docs/examples/README.md` (rewrite)** — 6-row example index with surface + writeability columns, run order, monotonic-numbering convention for future additions.
+- **`docs/examples/01-build-and-test.sh`** — build, version-sanity vs `VERSION`, run `src/test.cyr` (80/80).
+- **`docs/examples/02-register-and-post.sh`** — first writeable flow: keygen → register `qix` → post `--as` → list → read → assert `From: qix <fp16>` on disk.
+- **`docs/examples/03-anonymous-read.sh`** — proves M6 default policy: anon list + read succeed against 02's post; anon post denied with exit 1.
+- **`docs/examples/04-concurrent-smoke.py`** — threads N (default 3) telnet sessions, asserts each gets independent banner + IAC bytes + `boards` reply (proves ADR 0007 process isolation).
+- **`docs/examples/05-telnet-login.sh`** — drives the wire challenge/response: `login qix` → wraps the 32-byte seed in PKCS#8 DER → `openssl pkeyutl -sign -rawin` → replies `auth: <hex>` → asserts `whoami` reports `qix`. Verified against openssl 3.6.2.
+- **`docs/examples/06-board-policy.sh`** — walks all three policy modes (open / known / admin) × three identity classes (anon / pac / qix), asserts every cell's expected exit code. 9/9 assertions pass.
+
+### Changed
+
+- `VERSION` 0.9.0 → 0.9.1.
+- `src/main.cyr` — three inline version literals bumped (`print_banner`, `cmd_version`, `render_motd`).
+- `docs/doc-health.md` — Tier 5 + Tier 6 rows moved from 🟡 Stale → ✅ Fresh; at-a-glance bucket counts refreshed (Stale: 2 → 0); commitment #2 closed.
+
+### Fixed (caught during example verification — doc-only)
+
+- **`getting-started.md` anonymous-post claim** — earlier draft showed `agora post` working without `--as`. M6 default is `anon-read, **auth-post**`; `board_can_post` returns 0 for any `session_fp == 0`, so anonymous CLI posts return exit 1 with `board policy requires authentication`. Guide now lists the in-session command table with per-command anon eligibility.
+- **`getting-started.md` policy-mode table** — `open` was shown as anon-permitted. Anonymous is denied across all three modes at M6 (open / known / admin); per-board anon override is queued as a future ADR per ADR 0006 § Negative.
+- **`getting-started.md` main-board path** — examples referenced `<store>/main/N.txt`; per ADR 0004 the main board is the flat store root (`<store>/N.txt`); named boards live in subdirs. Corrected.
+- **`05-telnet-login.sh` wire format** — initial draft sent `auth <hex>`; server's `parse_auth_sig` expects `auth: <hex>` (with the colon, optional space). Corrected.
+- **`05-telnet-login.sh` openssl invocation** — Ed25519 `pkeyutl -sign -rawin` is a oneshot op and rejects stdin (`unable to determine file size`). Switched to `-in <tmpfile>` and dropped the PEM conversion in favor of `-keyform DER` directly.
+
+### Verified
+
+- **80/80 tests pass** (`cyrius test src/test.cyr`).
+- **Clean build green** (`cyrius build src/main.cyr build/agora` → 378,440 B, +8 B from version-string length deltas).
+- **All 6 examples verified end-to-end** against the rebuilt 0.9.1 binary; 04 and 05 verified against a running `./build/agora serve 2323`.
+- `cyrius audit` clean.
+
+### Followups queued for 0.9.x → 1.0.0
+
+- **G / 0.9.2** — perf re-run + final 1.0 closeout sweep. CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip.
+- **1.0.0** — archaemenid LAN iron validation (criterion 3 of the v1.0 gate).
+
 ## [0.9.0] — 2026-05-23 (PostHeaders struct — pre-1.0 ABI freeze)
 
 The pre-1.0 ABI freeze. `post_format_with_headers` and `post_new_with_subject_reply` have grown from 5 → 6 → 8 positional args across M5-D / M5-F / M6-E, and the v1.x roadmap forecasts more (federated `Origin:`, content-addressed `Content-Hash:`). 0.9.0 replaces both with a single `PostHeaders` struct ptr per [ADR 0008](docs/adr/0008-post-headers-struct.md) — future headers earn a new `PH_*` offset + setter; call sites that don't use the new field don't change. Wire format is byte-identical; this is purely a call-shape refactor.

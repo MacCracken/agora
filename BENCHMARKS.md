@@ -1,22 +1,22 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-05-23 (M6 close — 0.6.0 baseline) | **Host**: Linux x86_64 (workstation; Cyrius 6.0.1) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-05-23 (0.9.2 closeout re-run — within noise of M1-close baseline) | **Host**: Linux x86_64 (workstation; Cyrius 6.0.1) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
 Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 
-## M6 close — 2026-05-23 (0.6.0)
+## 0.9.2 closeout — 2026-05-23 (pre-1.0 baseline)
 
 | Benchmark | Avg | Min | Max | What's exercised |
 |---|---:|---:|---:|---|
 | **`telnet/plain_byte`** | **10 ns** | 9 ns | 15 ns | Single ASCII byte through the ST_DATA path. Hot path for in-band data. |
 | **`telnet/iac_untracked`** | **64 ns** | 63 ns | 65 ns | `IAC WILL OPT_STATUS` — 3 bytes through ST_DATA → ST_IAC → ST_OPT → naive-refuse, with a 3-byte `IAC DONT STATUS` reply queued. |
-| **`telnet/iac_tracked_agree`** | **74 ns** | 73 ns | 74 ns | `IAC WILL SUPPRESS_GO_AHEAD` — 3 bytes through the Q machine's Q_NO → Q_YES agree path, with a 3-byte `IAC DO SGA` reply queued. |
-| **`telnet/subneg_naws`** | **99 ns** | 98 ns | 99 ns | Full NAWS subnegotiation (9 bytes: `IAC SB NAWS w_hi w_lo h_hi h_lo IAC SE`) plus `telnet_handle_sb` decoding the 4-byte payload into `TS_TERM_COLS`/`TS_TERM_ROWS`. |
-| **`telnet/announce_salvo`** | **132 ns** | 132 ns | 133 ns | One-time-per-connection: four `ts_emit_iac3` calls plus four `opt_set_us`/`opt_set_him` writes. Issued from `telnet_announce` after `accept()`. |
+| **`telnet/iac_tracked_agree`** | **75 ns** | 73 ns | 87 ns | `IAC WILL SUPPRESS_GO_AHEAD` — 3 bytes through the Q machine's Q_NO → Q_YES agree path, with a 3-byte `IAC DO SGA` reply queued. |
+| **`telnet/subneg_naws`** | **99 ns** | 98 ns | 100 ns | Full NAWS subnegotiation (9 bytes: `IAC SB NAWS w_hi w_lo h_hi h_lo IAC SE`) plus `telnet_handle_sb` decoding the 4-byte payload into `TS_TERM_COLS`/`TS_TERM_ROWS`. |
+| **`telnet/announce_salvo`** | **134 ns** | 131 ns | 141 ns | One-time-per-connection: four `ts_emit_iac3` calls plus four `opt_set_us`/`opt_set_him` writes. Issued from `telnet_announce` after `accept()`. |
 
-All numbers within noise of the M1-close baseline — M2 (ANSI MOTD), M5 (post storage / boards / threads), and M6 (sigil auth / per-board policy) are application-layer additions that don't touch the IAC parser hot path. The auth surface adds one `ed25519_verify` call per login (sub-millisecond, one-shot per session) that is not in this telnet-parser baseline; a future `bench_auth.bcyr` earns its slot at the v1.0 close-out alongside accept-rate + end-to-end latency.
+**All numbers within noise of the M1-close baseline.** M2 (ANSI MOTD), M5 (post storage / boards / threads), M6 (sigil auth / per-board policy), 0.7.0 (CLI input validation), 0.8.0 (fork-per-accept in `cmd_serve_on`), 0.8.1 (keyfile fstat), 0.8.3 (board-create gate), 0.9.0 (PostHeaders struct) and 0.9.1 (doc-pass, no code) are all off-hot-path additions. The auth surface adds one `ed25519_verify` call per login (sub-millisecond, one-shot per session) that is not in this telnet-parser baseline; a future `bench_auth.bcyr` earns its slot post-1.0 alongside accept-rate + end-to-end latency.
 
 ## Per-release history
 
@@ -24,9 +24,10 @@ All numbers within noise of the M1-close baseline — M2 (ANSI MOTD), M5 (post s
 |---|---:|---:|---:|---:|---:|
 | 0.2.0 (M1 close) | 10 ns | 63 ns | 73 ns | 97 ns | 132 ns |
 | 0.5.0 (M5 close) | 11 ns | 63 ns | 73 ns | 107 ns | 132 ns |
-| **0.6.0 (M6 close)** | **10 ns** | **64 ns** | **74 ns** | **99 ns** | **132 ns** |
+| 0.6.0 (M6 close) | 10 ns | 64 ns | 74 ns | 99 ns | 132 ns |
+| **0.9.2 (1.0 closeout)** | **10 ns** | **64 ns** | **75 ns** | **99 ns** | **134 ns** |
 
-(0.3.0 / 0.4.0 weren't benched separately — M2 / M5-partial cycles didn't touch the parser.)
+(0.3.0 / 0.4.0 weren't benched separately — M2 / M5-partial cycles didn't touch the parser. 0.7.0–0.9.1 likewise — every release between M6 and 0.9.2 added off-hot-path code (CLI input validation, fork-per-accept in `cmd_serve_on`, keyfile fstat, sigil-version diff, board-create gate, PostHeaders struct, doc-pass) — confirmed by the 0.9.2 re-run landing within ±2 ns of the M6 baseline. The first 0.9.2 run showed `announce_salvo` at 163 ns avg with min=131 ns — re-run stabilized at 134 ns; the elevated avg was system noise.)
 
 ## Derived throughput (M1 close)
 
