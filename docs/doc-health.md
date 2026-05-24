@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (post-0.8.3 ship — anonymous board-create gate; audit M4 closed; **all 0.7.0 audit findings now discharged**) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (post-0.9.0 ship — PostHeaders struct ABI freeze; ADR 0008 landed; **post API is at its v1.0 shape**) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,14 +39,14 @@ Numbers exact post-0.8.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.8.3] all entered. [0.8.3] is the anonymous board-create gate (audit M4 closed; **all 0.7.0 audit findings now discharged**; full status table in the entry). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.9.0] all entered. [0.9.0] is the PostHeaders struct ABI freeze (ADR 0008; Breaking section flags the shim removals). |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.6.0 close — 5 telnet-parser benchmarks all within noise of M1-close baseline (M2-M6 are application-layer). Per-release history table added. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.8.3`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `0.9.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
@@ -67,7 +67,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 ## Tier 3 — ADRs (`docs/adr/`)
 
-7 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
+8 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
@@ -80,6 +80,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0005-threading-via-reply-to.md` | 2026-05-23 | 🔵 Evergreen | **New at M5-F** — `Reply-To: <id>` header (same-board, ID-only); scan-on-read enumeration; RFC 5322 § 3.6.5 Re: subject prefix (no double). Rejects deep-threading via In-Reply-To+References, sidecar reply index, and cross-board values. |
 | `0006-identity-model.md` | 2026-05-23 | 🔵 Evergreen | **New at M6 cycle-open** — sigil Ed25519 as identity primitive; `<store>/.users/<fp16>/` per-user directory; challenge/response wire flow (server nonce → client Ed25519 sig); anon-read + auth-post default; `From: <handle> <fp16>` header; `~/.agora/key` for the keyfile. Rejects ML-DSA at first cut, password hashes, sigil-managed account store, users.cyml sidecar, and federated/WoT identity (deferred to v2.x pillar 1). |
 | `0007-fork-per-accept-concurrency.md` | 2026-05-23 | 🔵 Evergreen | **New at 0.8.0** — fork-per-accept concurrency; process-exit memory cleanup; non-blocking waitpid zombie reaper. Closes audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) via address-space isolation. Rejects thread-per-accept (M2 only closes with shared-state refactor), epoll event loop (yield-point burden on every byte handler), single-track-with-arena (only closes half the audit), per-conn freelist arena (kernel exit is strictly stronger free), `SIG_IGN` / `SA_NOCLDWAIT` auto-reap (sigaction trampoline trap on x86_64). |
+| `0008-post-headers-struct.md` | 2026-05-23 | 🔵 Evergreen | **New at 0.9.0** — pre-1.0 ABI freeze. `PostHeaders` struct (PH_SUBJECT / PH_REPLY_TO / PH_FROM_HANDLE / PH_FROM_FP at i64 offsets) replaces the M5-D → M5-F → M6-E positional-arg accretion (5 → 6 → 8 args). New v1.0 surface: `post_format(ph, body, body_len, out, cap)` + `post_new(store, board, ph, body, body_len)`. Future headers (federated Origin, content-hash) add `PH_*` offset + setter without changing call shape. Rejects freeze-8-arg-as-is (variant-fn proliferation), heap-buffer + offset table (pushes formatting up), varargs emulation (no win), shim retention (CLAUDE.md anti-pattern). |
 
 ---
 

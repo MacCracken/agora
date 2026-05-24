@@ -22,3 +22,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0005 | [Threading via Reply-To header](0005-threading-via-reply-to.md) | Accepted (2026-05-23) |
 | 0006 | [Identity model: sigil Ed25519, `.users/<fp>`, challenge/response login](0006-identity-model.md) | Accepted (2026-05-23) |
 | 0007 | [Concurrent connections via fork-per-accept](0007-fork-per-accept-concurrency.md) | Accepted (2026-05-23) |
+| 0008 | [Post header parameters as a struct (pre-1.0 ABI shape)](0008-post-headers-struct.md) | Accepted (2026-05-23) |

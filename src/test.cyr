@@ -1057,11 +1057,14 @@ fn t48_post_reply_to_missing_returns_zero(): i64 {
     return 0;
 }
 
-# T49: post_format_with_headers includes Reply-To when reply_to > 0,
-# omits it when 0. Round-trip via post_reply_to.
+# T49: post_format includes Reply-To when set, omits when not. Round-
+# trip via post_reply_to. 0.9.0 ABI: PostHeaders struct (ADR 0008).
 fn t49_format_with_reply_to_header(): i64 {
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    var flen = post_format_with_headers("test", 42, 0, 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "test");
+    post_headers_set_reply_to(ph, 42);
+    var flen = post_format(ph, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
     if (flen < 0) {
         test_fail("t49_format_with_reply_to_header", "format returned -1");
         return 1;
@@ -1072,7 +1075,9 @@ fn t49_format_with_reply_to_header(): i64 {
         return 1;
     }
     # Re-test without reply_to → no header → 0
-    var flen2 = post_format_with_headers("test", 0, 0, 0, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
+    var ph2 = post_headers_new();
+    post_headers_set_subject(ph2, "test");
+    var flen2 = post_format(ph2, "the body", 8, fbuf, POST_MAX_BYTES + 1024);
     if (flen2 < 0) {
         test_fail("t49_format_with_reply_to_header", "format-no-reply returned -1");
         return 1;
@@ -1415,11 +1420,14 @@ fn t63_fingerprint_of_rfc8032_v1_pk(): i64 {
 
 # === M6-E From-header round-trip ===
 
-# T64: format_with_headers writes a `From: <handle> <fp16>` line
-# when both from_handle and from_fp are non-empty cstrings.
+# T64: post_format writes a `From: <handle> <fp16>` line when both
+# from_handle and from_fp are non-empty cstrings. 0.9.0 ABI struct.
 fn t64_format_with_from_header(): i64 {
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    var flen = post_format_with_headers("subj", 0, "alice", "deadbeef12345678", "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "subj");
+    post_headers_set_from(ph, "alice", "deadbeef12345678");
+    var flen = post_format(ph, "body", 4, fbuf, POST_MAX_BYTES + 1024);
     if (flen < 0) {
         test_fail("t64_format_with_from_header", "format returned -1");
         return 1;
@@ -1447,9 +1455,13 @@ fn t64_format_with_from_header(): i64 {
 }
 
 # T65: post_from extracts handle + fp from a well-formed header block.
+# 0.9.0 ABI: PostHeaders struct.
 fn t65_post_from_extracts(): i64 {
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    var flen = post_format_with_headers("subj", 0, "bob", "0123456789abcdef", "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "subj");
+    post_headers_set_from(ph, "bob", "0123456789abcdef");
+    var flen = post_format(ph, "body", 4, fbuf, POST_MAX_BYTES + 1024);
     var hbuf[33];
     var fpbuf[17];
     var ok = post_from(fbuf, flen, &hbuf, ACCOUNT_HANDLE_BUF, &fpbuf, ACCOUNT_FP_BUF_BYTES);
@@ -1471,10 +1483,13 @@ fn t65_post_from_extracts(): i64 {
 
 # T66: post_from on a header block without From → returns 0,
 # writes empty cstrings to both out buffers (anonymous post).
+# 0.9.0 ABI: PostHeaders struct (anonymous == default-constructed).
 fn t66_post_from_absent_is_anonymous(): i64 {
     var fbuf = alloc(POST_MAX_BYTES + 1024);
-    # Anonymous (from_handle = 0): no From header written
-    var flen = post_format_with_headers("subj", 0, 0, 0, "body", 4, fbuf, POST_MAX_BYTES + 1024);
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "subj");
+    # No set_from call → from_handle / from_fp default to 0 → anonymous.
+    var flen = post_format(ph, "body", 4, fbuf, POST_MAX_BYTES + 1024);
     var hbuf[33];
     var fpbuf[17];
     # Pre-fill to detect that they get zeroed

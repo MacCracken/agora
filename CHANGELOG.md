@@ -4,6 +4,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-23 (PostHeaders struct — pre-1.0 ABI freeze)
+
+The pre-1.0 ABI freeze. `post_format_with_headers` and `post_new_with_subject_reply` have grown from 5 → 6 → 8 positional args across M5-D / M5-F / M6-E, and the v1.x roadmap forecasts more (federated `Origin:`, content-addressed `Content-Hash:`). 0.9.0 replaces both with a single `PostHeaders` struct ptr per [ADR 0008](docs/adr/0008-post-headers-struct.md) — future headers earn a new `PH_*` offset + setter; call sites that don't use the new field don't change. Wire format is byte-identical; this is purely a call-shape refactor.
+
+### Added
+
+- **[ADR 0008 — Post header parameters as a struct](docs/adr/0008-post-headers-struct.md)** — decision rationale for the freeze. Rejects (A) freeze-8-arg-as-is (variant-fn proliferation), (C) flat heap-buffer + offset table (pushes formatting up), (D) varargs emulation (no readability win), (E) keep-shims-alongside-struct (CLAUDE.md "avoid backwards-compatibility hacks"). Picks (B) PostHeaders struct as the v1.0 freeze shape.
+- **`PostHeaders` struct + setters in `src/board.cyr`** — `PH` enum with 4 offsets (PH_SUBJECT, PH_REPLY_TO, PH_FROM_HANDLE, PH_FROM_FP) + `PH_SIZE`. New fns: `post_headers_new()` (zero-init alloc), `post_headers_set_subject(ph, cstr)`, `post_headers_set_reply_to(ph, parent_id)`, `post_headers_set_from(ph, handle_cstr, fp_cstr)`.
+- **`post_format(ph, body, body_len, out_buf, out_cap)`** (5 args, was 8) — primary formatter.
+- **`post_new(store, board, ph, body, body_len)`** (5 args, was 8) — primary post writer.
+
+### Breaking
+
+- **`post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_len, out_buf, out_cap)` REMOVED.** Replaced by `post_format(ph, body, body_len, out_buf, out_cap)`. Migration: construct a `PostHeaders` struct via `post_headers_new()` + the three setters; pass it as the first arg.
+- **`post_new_with_subject_reply(store, board, subject, reply_to, from_handle, from_fp, body, body_len)` REMOVED.** Replaced by `post_new(store, board, ph, body, body_len)`. Same migration.
+- **`post_format_with_subject(subject, body, body_len, out_buf, out_cap)` REMOVED** (was a dead M5-D backwards-compat shim — zero production callers since M5-F).
+- **`post_new_with_subject(store, board, subject, body, body_len)` REMOVED** (same — dead shim).
+- **`post_new(store, board, body_buf, body_len)` (4-arg legacy form) REMOVED** — replaced by the new 5-arg struct-based variant. Old form was dead M5-A code unused since M5-D's header layer landed. CLAUDE.md "delete unused" hygiene.
+
+Migration is mechanical:
+
+```
+// Before (0.8.x)
+var flen = post_format_with_headers(subj, parent, handle, fp, body, body_len, out, cap);
+
+// After (0.9.0)
+var ph = post_headers_new();
+post_headers_set_subject(ph, subj);
+if (parent > 0) { post_headers_set_reply_to(ph, parent); }
+if (handle != 0) { post_headers_set_from(ph, handle, fp); }
+var flen = post_format(ph, body, body_len, out, cap);
+```
+
+agora is a binary, not a library — no external consumers. The shim removal is hygiene, not a real-world break.
+
+### Changed
+
+- `src/board.cyr` — `post_format_with_headers` rewritten as `post_format(ph, ...)`; `post_new_with_subject_reply` rewritten as `post_new(store, board, ph, ...)`. Dead M5-A `post_new` (4-arg body-only writer, unused since M5-D) removed.
+- `src/main.cyr` — `session_finalize_post` (telnet `post` / `reply` commit) + `cmd_post` (CLI) rewritten to construct `PostHeaders` and call `post_new`. `from_handle` / `from_fp` resolution unchanged; just plumbed through `post_headers_set_from` instead of as positional args.
+- `src/test.cyr` — t49 / t64 / t65 / t66 rewritten to use `post_headers_new` + setters + `post_format`. Test semantics unchanged; only call shape.
+
+### Verified
+
+- **80/80 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build`. Wire format byte-identical — t49 Reply-To round-trip, t64 From-header presence, t65 post_from extraction, t66 anonymous-no-From all pass with the new shape.
+- **End-to-end smoke**: `agora keygen` → `register --handle qix` → `post --subject "ABI freeze test" --as qix --key ./key` → `list` shows `1  [qix]  ABI freeze test` → `read 1` shows correct From / Subject / body. Raw `./store/1.txt` byte-for-byte matches the 0.8.x format (Subject / Date / From / blank / body).
+- Binary 378,936 B (0.8.3) → 378,432 B (0.9.0), **−504 B (−0.13%)** — refactor + dead-`post_new`-removal net-shrunk the binary even after adding the struct + 3 setters.
+- 5 telnet-parser benchmarks unchanged from M1-close baseline (post-format work is offline-of-hot-path).
+- `cyrius audit` clean.
+
+### Followups queued for 0.9.x
+
+- **F / 0.9.1** — guides + examples doc-pass (deferred from M6 close + 0.7.x + 0.8.x). Rewrite `docs/guides/getting-started.md` + `docs/examples/` for the 0.9.0 surface: build, telnet flow, CLI verbs, ADR 0007 fork-per-conn, ADR 0008 PostHeaders, all 5 0.7.0 audit-hardenings as security features.
+- **G / 0.9.2** — perf re-run + final 1.0 closeout sweep. CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip.
+- **1.0.0** — archaemenid LAN iron validation.
+
+### Future v1.x extensions (no work this cycle — flagged for ADR 0008's followups)
+
+- Federated `Origin:` header (per ADR 0006 § Negative + roadmap-future.md pillar 1): `post_headers_set_origin(ph, origin_cstr)` adds one PH offset + one setter; call sites unchanged.
+- Content-addressed `Content-Hash:` header (v2.x pillar 2): same shape.
+
 ## [0.8.3] — 2026-05-23 (anonymous board-create gate — audit M4)
 
 Closes the last audit-deferred finding from the 0.7.0 security sweep ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md) § M4). Anonymous wire sessions can no longer `enter <new-board>` to spam-create directories under the store. Existing boards stay anonymous-readable; only the **create** path is auth-gated. Matches the M6 "anon-read, auth-post" default policy shape.

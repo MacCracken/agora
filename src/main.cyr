@@ -104,7 +104,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v0.8.3 — anon board-create gate (audit M4)");
+    println("v0.9.0 — PostHeaders struct ABI freeze (ADR 0008)");
     return 0;
 }
 
@@ -678,11 +678,18 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
             from_fp     = g_session_fp;
         }
     }
+    # 0.9.0 ABI (ADR 0008): PostHeaders struct replaces the M6-E
+    # 8-arg shape. Construct headers per session state, then post_new.
+    var ph = post_headers_new();
+    post_headers_set_from(ph, from_handle, from_fp);
     var id = 0 - 1;
     if (g_reply_to > 0) {
-        id = post_new_with_subject_reply(g_store_buf, current_board, g_reply_subject, g_reply_to, from_handle, from_fp, body, body_len);
+        post_headers_set_subject(ph, g_reply_subject);
+        post_headers_set_reply_to(ph, g_reply_to);
+        id = post_new(g_store_buf, current_board, ph, body, body_len);
     } else {
-        id = post_new_with_subject_reply(g_store_buf, current_board, subject, 0, from_handle, from_fp, body, body_len);
+        post_headers_set_subject(ph, subject);
+        id = post_new(g_store_buf, current_board, ph, body, body_len);
     }
     if (id < 0) {
         send_str(cfd, "post failed (storage error)\r\n");
@@ -738,7 +745,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 0.8.3 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 0.9.0 — telnet BBS\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1399,7 +1406,12 @@ fn cmd_post(): i64 {
         println("agora post: no input on stdin (pipe in post body)");
         return 1;
     }
-    var id = post_new_with_subject_reply(store, board, subject, reply_to, from_handle, from_fp, body, total);
+    # 0.9.0 ABI (ADR 0008): PostHeaders struct.
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, subject);
+    if (reply_to > 0) { post_headers_set_reply_to(ph, reply_to); }
+    if (from_handle != 0) { post_headers_set_from(ph, from_handle, from_fp); }
+    var id = post_new(store, board, ph, body, total);
     if (id < 0) {
         println("agora post: failed to write post");
         return 1;
@@ -1689,7 +1701,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 0.8.3");
+    println("agora 0.9.0");
     return 0;
 }
 

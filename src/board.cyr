@@ -402,36 +402,6 @@ fn store_lock_release(fd): i64 {
     return 0;
 }
 
-# Write a new post: ensure store exists, claim next ID, write body
-# with O_EXCL. Returns the assigned ID on success, negative on error.
-# **M5-G**: serializes claim+write through a per-store flock so
-# concurrent writers serialize and both succeed with distinct IDs
-# rather than one losing to EEXIST.
-fn post_new(store, board, body_buf, body_len): i64 {
-    if (body_len <= 0)              { return 0 - 1; }
-    if (body_len > POST_MAX_BYTES)  { return 0 - 1; }
-
-    var rc = board_ensure(store, board);
-    if (rc != 0) { return 0 - 1; }
-
-    # Acquire the per-board write lock for the claim+write critical
-    # section. Block until acquired (cooperative serialization).
-    var lock_fd = store_lock_acquire(store, board);
-    if (lock_fd < 0) { return 0 - 1; }
-
-    var id = post_max_id(store, board) + 1;
-    var path_buf = alloc(PATH_MAX_BYTES);
-    build_post_path(store, board, id, path_buf);
-
-    var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
-    if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
-    var n = file_write(fd, body_buf, body_len);
-    file_close(fd);
-    store_lock_release(lock_fd);
-    if (n != body_len) { return 0 - 1; }
-    return id;
-}
-
 # Read a post by (board, id) into the caller-allocated buffer.
 # Returns the number of bytes read, or negative on error.
 fn post_read(store, board, id, out_buf, out_cap): i64 {
@@ -568,17 +538,67 @@ fn header_get(buf, len, name, out_buf, out_max): i64 {
     return vlen;
 }
 
+# === Post header parameter struct (0.9.0 ABI freeze, ADR 0008) ===
+#
+# Replaces the M5-D / M5-F / M6-E positional-arg accretion (5 → 6 → 8
+# args) with a single struct pointer. Adding a new header (federated
+# Origin, content-addressed Content-Hash, etc.) is a new `PH_*` offset
+# + new setter; existing callers don't change.
+#
+# Field semantics — same as the pre-0.9.0 8-arg shape; only the call
+# shape changes. Wire format is byte-identical.
+#
+#   PH_SUBJECT     = 0  → no Subject line written
+#   PH_REPLY_TO    = 0  → no Reply-To line written (per ADR 0005)
+#   PH_FROM_*      either null → anonymous post (no From line)
+#                  both non-null → "From: <handle> <fp16>" line
+enum PH {
+    PH_SUBJECT     = 0;     # cstring ptr (or 0 for empty)
+    PH_REPLY_TO    = 8;     # i64 parent ID (or 0 for non-reply)
+    PH_FROM_HANDLE = 16;    # cstring ptr (or 0 for anonymous)
+    PH_FROM_FP     = 24;    # cstring ptr (or 0 for anonymous, paired with FROM_HANDLE)
+    PH_SIZE        = 32;
+}
+
+# Allocate a fresh zero-initialized PostHeaders block. All fields
+# default to 0 (= empty Subject, no Reply-To, anonymous From).
+fn post_headers_new(): i64 {
+    var ph = alloc(PH_SIZE);
+    memset(ph, 0, PH_SIZE);
+    return ph;
+}
+
+fn post_headers_set_subject(ph, subject_cstr): i64 {
+    store64(ph + PH_SUBJECT, subject_cstr);
+    return 0;
+}
+
+fn post_headers_set_reply_to(ph, parent_id): i64 {
+    store64(ph + PH_REPLY_TO, parent_id);
+    return 0;
+}
+
+# Both nullable; the formatter only emits the From line when both are
+# non-null + non-empty (preserves the M6-E anonymous-by-default shape).
+fn post_headers_set_from(ph, handle_cstr, fp_cstr): i64 {
+    store64(ph + PH_FROM_HANDLE, handle_cstr);
+    store64(ph + PH_FROM_FP, fp_cstr);
+    return 0;
+}
+
 # Compose a post file with Subject + Date + optional Reply-To +
 # optional From headers + blank line + body. Writes into out_buf at
 # offset 0; returns total bytes written, or -1 if it wouldn't fit
 # in out_cap.
 #
-# Subject may be empty (NUL string or strlen == 0). `reply_to == 0`
-# means "regular post, no Reply-To header"; `reply_to > 0` writes
-# the header line per ADR 0005. `from_handle == 0 OR from_fp == 0`
-# means "anonymous post, no From header"; both non-null cstrings
-# writes the `From: <handle> <fp16>` line per ADR 0006.
-fn post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_len, out_buf, out_cap): i64 {
+# 0.9.0 ABI freeze (ADR 0008): replaces the M6-E 8-arg shape with a
+# single PostHeaders struct ptr. Wire output byte-identical.
+fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
+    var subject     = load64(ph + PH_SUBJECT);
+    var reply_to    = load64(ph + PH_REPLY_TO);
+    var from_handle = load64(ph + PH_FROM_HANDLE);
+    var from_fp     = load64(ph + PH_FROM_FP);
+
     var pos = 0;
     var slen = 0;
     if (subject != 0) { slen = strlen(subject); }
@@ -640,26 +660,11 @@ fn post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_
     return pos;
 }
 
-# Backwards-compat alias for M5-D callers (no Reply-To, no From).
-fn post_format_with_subject(subject, body, body_len, out_buf, out_cap): i64 {
-    return post_format_with_headers(subject, 0, 0, 0, body, body_len, out_buf, out_cap);
-}
-
-# post_new with a Subject header (ADR 0003). Formats Subject + Date +
-# body into a temporary buffer, then writes the result via the same
-# EXCL-claim path as post_new. Returns the assigned ID or -1.
-# **M5-G**: format happens outside the lock (pure per-call work);
-# claim+write is inside.
-fn post_new_with_subject(store, board, subject, body, body_len): i64 {
-    return post_new_with_subject_reply(store, board, subject, 0, 0, 0, body, body_len);
-}
-
-# Write a new post with Subject + (optional) Reply-To + (optional)
-# From. Same EXCL + flock semantics as M5-G's `post_new_with_subject`;
-# the format call grows one header field per non-default param.
-# M6-E adds from_handle / from_fp: both non-null cstrings → write
-# `From: <handle> <fp16>`; either null → anonymous post (no From).
-fn post_new_with_subject_reply(store, board, subject, reply_to, from_handle, from_fp, body, body_len): i64 {
+# Write a new post via the PostHeaders struct (0.9.0 ABI shape, ADR 0008).
+# Same EXCL + flock semantics as the M5-G claim+write path; format
+# happens outside the lock (pure per-call work), claim+write inside.
+# Returns the assigned ID on success, negative on error.
+fn post_new(store, board, ph, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
 
@@ -668,7 +673,7 @@ fn post_new_with_subject_reply(store, board, subject, reply_to, from_handle, fro
 
     var fcap = POST_MAX_BYTES + 1024;
     var fbuf = alloc(fcap);
-    var flen = post_format_with_headers(subject, reply_to, from_handle, from_fp, body, body_len, fbuf, fcap);
+    var flen = post_format(ph, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
     var lock_fd = store_lock_acquire(store, board);

@@ -23,8 +23,8 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.8.1** | Keyfile mode warn-on-load (audit L1 closed) | ✅ 2026-05-23 |
 | **0.8.2** | Sigil 3.1.1 → 3.4.3 release-notes diff (no bump; 0.7.0 deferred item discharged) | ✅ 2026-05-23 |
 | **0.8.3** | Anonymous board-create gate (audit M4 closed — all 0.7.0 audit findings now discharged) | ✅ 2026-05-23 |
-| **0.9.0** | ABI freeze decision (likely new ADR 0008 — `post_format_with_headers` shape) |  |
-| **0.9.x** | Doc-pass on guides + examples (F), perf re-run + final 1.0 closeout (G) |  |
+| **0.9.0** | PostHeaders struct ABI freeze (ADR 0008) | ✅ 2026-05-23 |
+| **0.9.x** | Doc-pass on guides + examples (F, 0.9.1), perf re-run + final 1.0 closeout (G, 0.9.2) | ← next cycle |
 | **1.0.0** | Iron validation on archaemenid LAN |  |
 
 ---
@@ -37,10 +37,10 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 - ~~0.8-A — keyfile mode warn-on-load~~ **shipped at 0.8.1.**
 - ~~0.8-C — sigil 3.1.1 → 3.4.3 release-notes diff read~~ **shipped at 0.8.2.** No bump needed; bundled 3.1.1 has all relevant crypto fixes. Full rationale in [CHANGELOG 0.8.2](../../CHANGELOG.md).
-- ~~0.8-B — anonymous board-create gate~~ **shipped at 0.8.3.** `session_execute` enter handler gates the create-path on session auth; existing-board enter stays anonymous-readable. CLI path was already gated. Audit M4 closed; **all 0.7.0 audit findings now discharged**.
-- **0.8-D / 0.9.0 — ABI freeze decision** (likely new ADR 0008). `post_format_with_headers` is at 8 args; decide whether to freeze the current shape OR refactor to a params-struct before 1.0. Earns a minor bump (0.9.0) because the answer affects the public function signature.
-- **0.8-F / 0.9.1 — guides + examples doc-pass** (deferred from M6 close + 0.7.x). Rewrite `docs/guides/getting-started.md` + `docs/examples/` to cover the 0.8.x surface (concurrent fork, M6 auth, the 5 0.7.0 audit-hardenings, ADR 0007 concurrency, 0.8.1 keyfile mode warn).
-- **0.8-G / 0.9.2 — perf re-run + final closeout sweep**. Re-capture bench numbers (parser hot path expected unchanged — fork is pre-IAC), full CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip, prep for 1.0 cut.
+- ~~0.8-B — anonymous board-create gate~~ **shipped at 0.8.3.** Audit M4 closed; **all 0.7.0 audit findings now discharged**.
+- ~~0.8-D / 0.9.0 — ABI freeze decision~~ **shipped at 0.9.0 via ADR 0008.** PostHeaders struct replaces the 8-arg shape; `post_format(ph, body, body_len, out, cap)` + `post_new(store, board, ph, body, body_len)` are the v1.0 public surface. Dead shims removed. Wire format byte-identical.
+- **0.9.1 (F) — guides + examples doc-pass** (deferred from M6 close + 0.7.x + 0.8.x; now finally up). Rewrite `docs/guides/getting-started.md` + `docs/examples/` to cover the 0.9.0 surface (concurrent fork, M6 auth, the 5 0.7.0 audit-hardenings, ADR 0007 concurrency, ADR 0008 ABI, 0.8.1 keyfile mode warn, 0.8.3 board-create gate).
+- **0.9.2 (G) — perf re-run + final 1.0 closeout sweep**. Re-capture bench numbers (parser hot path expected unchanged — every refactor since M1-close has been off-hot-path), full CLAUDE.md "Closeout Pass" §1-11 against the 0.9.x tip, prep for 1.0 cut.
 
 **Deferred from 0.7.0 (still queued; pull when a deployment asks):**
 
@@ -98,7 +98,7 @@ Six pillars for the v2.x sovereignty layer — identity continuity (sigil-portab
 
 - [`docs/development/state.md`](state.md) — live state snapshot (current version, binary size, in-flight slot, **next-session boot guide**).
 - [`docs/development/roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars (post-v1.0, unpinned).
-- [`docs/adr/`](../adr/) — **seven ADRs as of 0.8.0** (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / **fork-per-accept concurrency**). 0.7.0 added no new ADR (the audit doc is the record); 0.8.0 added ADR 0007.
+- [`docs/adr/`](../adr/) — **eight ADRs as of 0.9.0** (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / **PostHeaders struct ABI**). 0.7.0 added no new ADR (the audit doc is the record); 0.8.0 added ADR 0007; 0.9.0 added ADR 0008.
 - [`docs/audit/`](../audit/) — security audit ledger; first entry 2026-05-23 (0.7.0 sweep).
 - [`docs/doc-health.md`](../doc-health.md) — fresh/stale ledger across the whole doc tree.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
