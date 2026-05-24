@@ -1817,6 +1817,36 @@ fn t79_mode_is_loose(): i64 {
     return 0;
 }
 
+# === 0.8.3 audit-M4 regression (t80) ===
+# Audit doc: docs/audit/2026-05-23-audit.md § M4.
+
+# B-1 — board_exists treats "main" as always-existing and rejects
+# missing-named-board lookups on a nonexistent store.
+fn t80_board_exists_main_and_missing(): i64 {
+    # "main" is the implicit flat root — always counts as existing
+    # regardless of the store dir's state.
+    if (board_exists("/nonexistent/store/that/should/not/exist", "main") != 1) {
+        test_fail("t80_board_exists_main_and_missing", "main not treated as always-existing");
+        return 1;
+    }
+    if (board_exists("/", "main") != 1) {
+        test_fail("t80_board_exists_main_and_missing", "main rejected for / store");
+        return 1;
+    }
+    # A named board under a guaranteed-missing path → 0.
+    if (board_exists("/nonexistent/store/that/should/not/exist", "qix") != 0) {
+        test_fail("t80_board_exists_main_and_missing", "missing named board reported as existing");
+        return 1;
+    }
+    # /tmp definitely exists; a path with a long-random suffix definitely doesn't.
+    if (board_exists("/tmp", "pac-zax-dig-jst-9q8w7e6r5t4y3u2i1o-not-here") != 0) {
+        test_fail("t80_board_exists_main_and_missing", "missing named board under /tmp reported as existing");
+        return 1;
+    }
+    test_pass("t80_board_exists_main_and_missing");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1902,6 +1932,7 @@ fn main(): i64 {
     t77_parse_post_id_rejects_overlong_digits();
     t78_parse_post_id_accepts_18_digits();
     t79_mode_is_loose();
+    t80_board_exists_main_and_missing();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

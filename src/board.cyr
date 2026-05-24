@@ -245,6 +245,24 @@ fn store_ensure(path): i64 {
     return rc;
 }
 
+# Existence check for the (store, board) pair (0.8.3 audit M4).
+# Used by the wire-side `enter` command to gate auto-create on the
+# session's auth state — anonymous sessions can enter existing
+# boards but cannot create new ones. CLI verbs route through
+# board_can_post which already denies anon before any mkdir runs.
+#
+# "main" is the implicit flat root — always counts as existing
+# (a fresh store's main board materializes at first post). For a
+# named board, builds the directory path and runs is_dir.
+#
+# Returns 1 if the board exists (or is "main"), 0 otherwise.
+fn board_exists(store, board): i64 {
+    if (streq(board, "main") != 0) { return 1; }
+    var path = alloc(PATH_MAX_BYTES);
+    board_path(store, board, path);
+    return is_dir(str_from(path));
+}
+
 # Ensure the (store, board) path exists. For board == "main" this
 # is equivalent to store_ensure(store); for named boards it ensures
 # `<store>` first, then `<store>/<name>` second (one-level mkdir,

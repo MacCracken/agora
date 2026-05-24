@@ -6,7 +6,7 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-05-23 (post-0.8.2 ship; sigil 3.1.1 → 3.4.3 release-notes diff read — 0.7.0 deferred item discharged; no sigil bump needed; bundled 3.1.1 stays through 1.0) | **Refresh cadence**: every release; ideally bumped by the release post-hook.
+> **Last refresh**: 2026-05-23 (post-0.8.3 ship; anonymous board-create gate — audit M4 closed; **all 0.7.0 audit findings now closed**; next bite is D ABI freeze at 0.9.0) | **Refresh cadence**: every release; ideally bumped by the release post-hook.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
 
@@ -16,7 +16,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 **What to know after a fresh agent boot:**
 
-1. **Where we are**: agora is a **multi-user, multi-board threaded BBS with sigil-backed auth, per-board posting policy, audit-hardened input, and concurrent connection handling** at v0.8.0. M6 + 0.7.0 security sweep + 0.8.0 concurrent-accept all closed. The path to 1.0 is now down to: audit followups (M4 anon-board-create gate, L1 keyfile mode warn), sigil version diff read, doc-pass on stale guides + examples, ABI freeze decision, and iron validation on archaemenid LAN.
+1. **Where we are**: agora is a **multi-user, multi-board threaded BBS with sigil-backed auth, per-board posting policy, audit-hardened input, concurrent connection handling, keyfile mode warnings, and anonymous-board-create gating** at v0.8.3. **Every 0.7.0 audit finding is now closed**; the 0.8.x patch sweep is complete. The path to 1.0 is down to: **D ABI freeze decision (likely ADR 0008 — earns 0.9.0)**, F guides + examples doc-pass (0.9.1), G perf re-run + final closeout (0.9.2), then 1.0 iron validation on archaemenid LAN.
 2. **Where to read first**: this file (state.md), then [`roadmap.md`](roadmap.md) for the release plan, then [`CLAUDE.md`](../../CLAUDE.md) for project rules. Decisions live in [`../adr/`](../adr/) — **seven ADRs** as of 0.8.0 (ADR 0007 fork-per-accept landed this cycle). Audit findings live in [`../audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md) — read it before touching the IAC parser, post storage, or auth surface. Concurrency model lives in [`../adr/0007-fork-per-accept-concurrency.md`](../adr/0007-fork-per-accept-concurrency.md) — read it before touching `cmd_serve_on`.
 3. **What's next**: the 0.8 cycle had 7 bites in the original plan (A L1 keyfile mode, B M4 anon-board-create, C sigil 3.1.1→3.4.3 diff, D ABI freeze decision, **E concurrent-accept ✅**, F doc-pass, G perf re-run + closeout). 0.8.0 shipped **just E**; the user can pick the next bite (A/B/C/D/F/G) at any time, or batch them as 0.8.1+ patches. Recommended order: small wins first (A → C → B → D → F → G) before the 1.0 cut.
 4. **What to build / test**: `cyrius build src/main.cyr build/agora` (clean → 378 KB), `cyrius test src/test.cyr` (78/78 pass), `cyrius bench benches/bench_telnet.bcyr` (5 baselines unchanged from M1-close — fork happens before the IAC byte path), `./build/agora serve 2323` (telnet to localhost:2323; **NOW MULTI-USER** — open as many simultaneous connections as your kernel allows). Concurrency smoke: `python3 /tmp/agora-concurrent-smoke.py 2323 3` (script in the 0.8.0 work tree; verifies 3 independent sessions). M6 CLI: `./build/agora keygen --key ~/.agora/key` + `./build/agora register --handle <h> --store <s>` + `./build/agora whoami --store <s>`.
@@ -28,8 +28,8 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `0.8.2` (2026-05-23) |
-| **Cycle** | M0 / M1 / M2 / M5 / M6 + 0.7.0 security sweep + 0.8.0 concurrent-accept (E) + 0.8.1 keyfile mode warn (A) + **0.8.2 sigil diff read — no bump (C)** all closed. **0.8.x remaining: B audit-M4 anon board-create (0.8.3); D ABI freeze earns 0.9.0; F doc-pass / G perf re-run = 0.9.x.** Then 1.0 ships on archaemenid iron. |
+| **Released** | `0.8.3` (2026-05-23) |
+| **Cycle** | M0 / M1 / M2 / M5 / M6 + 0.7.0 security sweep + 0.8.0 concurrent-accept (E) + 0.8.1 keyfile mode warn (A) + 0.8.2 sigil diff read (C) + **0.8.3 anon board-create gate (B)** all closed. **All 0.7.0 audit findings discharged.** Next: D ABI freeze earns 0.9.0; F doc-pass / G perf re-run = 0.9.x; then 1.0 ships on archaemenid iron. |
 | **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
 | **Source of truth** | `VERSION` file at repo root |
 
@@ -129,6 +129,7 @@ Reference reading before the cycle: [`../audit/2026-05-23-audit.md`](../audit/20
 
 ## Recent shipped
 
+- **0.8.3** (2026-05-23) — anonymous board-create gate (audit M4 closed). Wire-side `enter <name>` now denies the create case for anonymous sessions (`auth required to create new boards`); existing-board enter stays anonymous-readable. New `board_exists(store, board)` helper in `src/board.cyr` + ~12 LOC auth gate in `session_execute` enter handler. CLI path was already gated via `cmd_post`'s `board_can_post`. **All 0.7.0 audit findings now closed.** 80 tests (+1 t80 for the existence check); 378,936 B (+520 B / +0.14%).
 - **0.8.2** (2026-05-23) — sigil 3.1.1 → 3.4.3 release-notes diff read (0.7.0 audit deferred item discharged). **No sigil bump needed**: 0 CRITICAL/HIGH affecting agora's consumed surface; constant-time discipline maintained; Ed25519 malleability fix already in 3.1.1; the one MEDIUM (thread-safety on module-global crypto scratch) doesn't apply to agora's fork-per-conn single-threaded use. 3.2-3.4 improvements (parallel batch, alloc-free verify, NI self-test) don't touch our call pattern. 79/79 tests unchanged; +16 B binary (version literals only).
 - **0.8.1** (2026-05-23) — keyfile mode warn-on-load (audit L1 closed). `keyfile_load_seed` opens + fstats + warns to stderr if `mode & 0o077 != 0`; loads anyway (containerized deployments may legitimately use world-readable mounts). New `mode_is_loose` pure-bit helper + `keyfile_warn_loose_mode` fstat wrapper in `src/account.cyr`. 79 tests (+1 t79 for the mode-bit math); 378,400 B (+880 B / +0.23%).
 - **0.8.0** (2026-05-23) — concurrent accept via fork-per-connection ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)). Audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) both close via process isolation. Loop: drain zombies → accept → fork → child runs handle_client + exit / parent loops. **agora is now a truly multi-user telnet BBS** — open as many concurrent sessions as the kernel allows. +336 B binary (+0.09%); no new stdlib deps; tests unchanged at 78/78 (E is in the accept loop, not in unit-testable code). Audit M4 (anonymous board-create) carried forward to 0.8-B.

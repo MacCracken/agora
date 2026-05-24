@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-05-23 (post-0.8.2 ship — sigil 3.1.1 → 3.4.3 diff read; 0.7.0 deferred discharged; no sigil bump; docs-only patch) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-23 (post-0.8.3 ship — anonymous board-create gate; audit M4 closed; **all 0.7.0 audit findings now discharged**) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -39,14 +39,14 @@ Numbers exact post-0.8.0; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | Landing page — etymology + status pointer + roadmap pointer + doc map. Roadmap table extracted to `docs/development/roadmap.md`. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.8.2] all entered. [0.8.2] is the sigil diff-read audit-followup (docs-only; no sigil bump; rationale documented inline). |
+| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [0.8.3] all entered. [0.8.3] is the anonymous board-create gate (audit M4 closed; **all 0.7.0 audit findings now discharged**; full status table in the entry). |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.6.0 close — 5 telnet-parser benchmarks all within noise of M1-close baseline (M2-M6 are application-layer). Per-release history table added. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `0.8.2`. Bumped via release flow. |
+| `VERSION` | 2026-05-23 | ✅ Fresh | `0.8.3`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---

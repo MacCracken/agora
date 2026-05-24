@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-05-23 (anonymous board-create gate — audit M4)
+
+Closes the last audit-deferred finding from the 0.7.0 security sweep ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md) § M4). Anonymous wire sessions can no longer `enter <new-board>` to spam-create directories under the store. Existing boards stay anonymous-readable; only the **create** path is auth-gated. Matches the M6 "anon-read, auth-post" default policy shape.
+
+### Security
+
+- **Audit M4 closed** — anonymous board-create gate. In `session_execute` enter handler: if `board_exists(store, name) == 0` AND the session is anonymous (`g_session_fp` empty), reject with `auth required to create new boards — run 'login <handle>' first` instead of proceeding to `board_ensure` / `mkdir`. CLI path was already gated (`cmd_post` runs `board_can_post` before `post_new_with_subject_reply`'s `board_ensure`, and `board_can_post` denies anon for any policy mode).
+
+### Changed
+
+- `src/board.cyr` — new `board_exists(store, board)` helper: returns 1 for `"main"` (the implicit flat root, always counts as existing) or any named board whose directory is present via `is_dir`; 0 otherwise.
+- `src/main.cyr` — `session_execute` enter handler grew the audit-M4 gate. ~12 LOC: anon detection (`g_session_fp` empty cstring) + `board_exists` lookup + early-return error on the create case. Existing-board enter unaffected.
+- `src/test.cyr` — new `t80_board_exists_main_and_missing` (80 tests total): covers `main` always-existing, missing named board under nonexistent store, missing named board under `/tmp` (a definitely-existing dir).
+
+### Verified
+
+- **80/80 tests pass** from a clean `rm -rf build && cyrius deps && cyrius build` (+1 test for the existence check).
+- **End-to-end smoke** (`/tmp/agora-m4-smoke.sh`): (1) anon `enter qixboard` → "auth required to create new boards" ✓; (2) post-login `enter zaxboard` → "entered zaxboard" + dir actually created on disk ✓. Uses openssl 3.6 `pkeyutl -sign -rawin` to generate the Ed25519 sig against the parked challenge (same shape as the M6-C / M6-D smokes).
+- Binary 378,416 B (0.8.2) → 378,936 B (0.8.3), +520 B (+0.14%) for the `board_exists` helper + the auth gate + t80 test scaffolding.
+- 5 telnet-parser benchmarks unchanged from M1-close baseline (gate only runs on `enter`, never on byte-path).
+- `cyrius audit` clean.
+
+### Audit status (0.7.0 sweep)
+
+All actionable findings now closed:
+
+| Severity | Finding | Status |
+|---|---|---|
+| HIGH | H1 — CLI subject CRLF injection | ✅ 0.7.0 |
+| HIGH | H2 — cmd_list/cmd_read --board path-traversal | ✅ 0.7.0 |
+| HIGH | H3 — `post_from` re-validate handle/fp | ✅ 0.7.0 |
+| MEDIUM | M1 — bump-allocator memory growth | ✅ 0.8.0 (ADR 0007 fork-per-accept) |
+| MEDIUM | M2 — login-challenge slot collision | ✅ 0.8.0 (ADR 0007 fork-per-accept) |
+| MEDIUM | M3 — parse_post_id overflow guard | ✅ 0.7.0 |
+| MEDIUM | M4 — anonymous board-create gate | ✅ **0.8.3** |
+| MEDIUM | M6 — 30s parked-login deadline | ✅ 0.7.0 |
+| LOW | L1 — keyfile mode warn-on-load | ✅ 0.8.1 |
+| — | sigil 3.1.1 → 3.4.3 diff (deferred research) | ✅ 0.8.2 (no bump) |
+
+Next bite (0.9.0) opens the ABI freeze decision (D — likely new ADR 0008 on `post_format_with_headers` signature shape).
+
 ## [0.8.2] — 2026-05-23 (sigil 3.1.1 → 3.4.3 release-notes diff — audit-followup, no bump)
 
 Audit-followup release discharging the "sigil 3.1.1 → 3.4.3 release-notes diff read" item from the 0.7.0 audit's `Deferred to 0.8 v1-hardening` queue ([`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md) § "Deferred"). **No sigil bump needed**; bundled 3.1.1 stays pinned through cyrius 6.0.1's lib snapshot.
