@@ -2419,6 +2419,147 @@ fn t105_pa_holds_and_guards(): i64 {
     return 0;
 }
 
+# === 1.1.0 Port Authority interactive layer (t106-t111, ADR 0009) ===
+
+fn t106_pa_move_turns(): i64 {
+    var st = pa_new(31, DOOR_PRACTICE, 3);
+    pa_start(st);
+    var gx = load64(st + PA_GX);
+    var dest = pa_nth_warp(gx, 0, 0);
+    if (dest < 0) { test_fail("t106_pa_move_turns", "no warp from 0"); return 1; }
+    var t0 = load64(st + PA_TURNS);
+    if (pa_move(st, dest) != 0)            { test_fail("t106_pa_move_turns", "move failed"); return 1; }
+    if (load64(st + PA_SECTOR) != dest)    { test_fail("t106_pa_move_turns", "sector");      return 1; }
+    if (load64(st + PA_TURNS) != t0 - 1)   { test_fail("t106_pa_move_turns", "turn spent");  return 1; }
+    if (pa_move(st, load64(st + PA_SECTOR)) != (0 - 1)) { test_fail("t106_pa_move_turns", "self move"); return 1; }
+    store64(st + PA_TURNS, 0);
+    var d2 = pa_nth_warp(gx, load64(st + PA_SECTOR), 0);
+    if (d2 >= 0) {
+        if (pa_move(st, d2) != (0 - 2)) { test_fail("t106_pa_move_turns", "out of turns"); return 1; }
+    }
+    store64(st + PA_DAY, 1);
+    pa_end_day(st);
+    if (load64(st + PA_DAY) != 2)                  { test_fail("t106_pa_move_turns", "day advance");  return 1; }
+    if (load64(st + PA_TURNS) != PA_TURNS_PER_DAY) { test_fail("t106_pa_move_turns", "turns refill"); return 1; }
+    store64(st + PA_DAY, 3);
+    pa_end_day(st);
+    if (load64(st + PA_OVER) != 1) { test_fail("t106_pa_move_turns", "not finished"); return 1; }
+    test_pass("t106_pa_move_turns");
+    return 0;
+}
+
+fn t107_pa_combat(): i64 {
+    var st = pa_new(8, DOOR_PRACTICE, PA_DEF_DAYS);
+    store64(st + PA_FIGHTERS, 1000);
+    store64(st + PA_PEND, 10);
+    var cr0 = load64(st + PA_CREDITS);
+    if (pa_fight(st) != 1)              { test_fail("t107_pa_combat", "should win big"); return 1; }
+    if (load64(st + PA_CREDITS) <= cr0) { test_fail("t107_pa_combat", "no loot");       return 1; }
+    if (load64(st + PA_FIGHTERS) < 0)   { test_fail("t107_pa_combat", "fighters neg");  return 1; }
+    store64(st + PA_FIGHTERS, 3);
+    store64(st + PA_SHIELDS, 0);
+    var destroyed = 0;
+    var n = 0;
+    while (n < 80) {
+        if (load64(st + PA_OVER) == 0) {
+            store64(st + PA_PEND, 200);
+            pa_fight(st);
+            if (load64(st + PA_FIGHTERS) < 0) { test_fail("t107_pa_combat", "fighters neg loop"); return 1; }
+            if (load64(st + PA_OVER) == 2) { destroyed = 1; }
+        }
+        n = n + 1;
+    }
+    if (destroyed == 0) { test_fail("t107_pa_combat", "never destroyed"); return 1; }
+    test_pass("t107_pa_combat");
+    return 0;
+}
+
+fn t108_pa_dock(): i64 {
+    var st = pa_new(8, DOOR_PRACTICE, PA_DEF_DAYS);
+    store64(st + PA_CREDITS, 100000);
+    var h0 = load64(st + PA_HOLDS);
+    if (pa_buy_holds(st) != 0)                          { test_fail("t108_pa_dock", "holds");        return 1; }
+    if (load64(st + PA_HOLDS) != h0 + PA_HOLD_BLOCK)    { test_fail("t108_pa_dock", "hold block");   return 1; }
+    var f0 = load64(st + PA_FIGHTERS);
+    if (pa_buy_fighters(st) != 0)                       { test_fail("t108_pa_dock", "fighters");     return 1; }
+    if (load64(st + PA_FIGHTERS) != f0 + PA_FIGHTER_BLOCK) { test_fail("t108_pa_dock", "fight block");return 1; }
+    var s0 = load64(st + PA_SHIELDS);
+    if (pa_buy_shields(st) != 0)                        { test_fail("t108_pa_dock", "shields");      return 1; }
+    if (load64(st + PA_SHIELDS) != s0 + PA_SHIELD_BLOCK){ test_fail("t108_pa_dock", "shield block"); return 1; }
+    store64(st + PA_CREDITS, 0);
+    if (pa_buy_holds(st) != (0 - 5))                    { test_fail("t108_pa_dock", "credit guard"); return 1; }
+    test_pass("t108_pa_dock");
+    return 0;
+}
+
+fn t109_pa_planet(): i64 {
+    var st = pa_new(8, DOOR_PRACTICE, PA_DEF_DAYS);
+    if (load64(st + PA_PLANET) != (0 - 1)) { test_fail("t109_pa_planet", "planet not -1 init"); return 1; }
+    store64(st + PA_SECTOR, 5);
+    if (pa_establish_planet(st) != 0)        { test_fail("t109_pa_planet", "establish");        return 1; }
+    if (load64(st + PA_PLANET) != 5)         { test_fail("t109_pa_planet", "planet sector");    return 1; }
+    if (pa_establish_planet(st) != (0 - 1))  { test_fail("t109_pa_planet", "double establish"); return 1; }
+    store64(st + PA_CREDITS, 5000);
+    if (pa_planet_deposit(st, 2000) != 0)    { test_fail("t109_pa_planet", "deposit");          return 1; }
+    if (load64(st + PA_CREDITS) != 3000)     { test_fail("t109_pa_planet", "credits post-dep"); return 1; }
+    if (load64(st + PA_PLANET_CR) != 2000)   { test_fail("t109_pa_planet", "planet cr");        return 1; }
+    if (pa_planet_withdraw(st, 500) != 0)    { test_fail("t109_pa_planet", "withdraw");         return 1; }
+    if (load64(st + PA_PLANET_CR) != 1500)   { test_fail("t109_pa_planet", "planet cr post-wd");return 1; }
+    if (load64(st + PA_CREDITS) != 3500)     { test_fail("t109_pa_planet", "credits post-wd");  return 1; }
+    test_pass("t109_pa_planet");
+    return 0;
+}
+
+fn t110_pa_save_load(): i64 {
+    var st = pa_new(0 - 222, DOOR_SOLO, 25);
+    rng_seed(st + PA_RNG, 0 - 333);
+    store64(st + PA_DAY, 9);
+    store64(st + PA_SECTOR, 17);
+    store64(st + PA_CREDITS, 8888);
+    store64(st + PA_HOLDS, 60);
+    store64(st + PA_FIGHTERS, 120);
+    store64(st + PA_SHIELDS, 40);
+    store64(st + PA_TURNS, 33);
+    store64(st + PA_PLANET, 17);
+    store64(st + PA_PLANET_CR, 5000);
+    pa_set_cargo(st, 0, 7);
+    pa_set_cargo(st, 2, 3);
+    var buf = alloc(PA_SAVE_CAP);
+    var n = pa_save_format(st, buf, PA_SAVE_CAP);
+    var st2 = pa_load_parse(buf, n);
+    if (st2 == 0)                              { test_fail("t110_pa_save_load", "parse null"); return 1; }
+    if (load64(st2 + PA_SEED) != (0 - 222))    { test_fail("t110_pa_save_load", "seed");      return 1; }
+    if (load64(st2 + PA_RNG) != (0 - 333))     { test_fail("t110_pa_save_load", "rng");       return 1; }
+    if (load64(st2 + PA_DAY) != 9)             { test_fail("t110_pa_save_load", "day");       return 1; }
+    if (load64(st2 + PA_MAXDAYS) != 25)        { test_fail("t110_pa_save_load", "maxdays");   return 1; }
+    if (load64(st2 + PA_SECTOR) != 17)         { test_fail("t110_pa_save_load", "sector");    return 1; }
+    if (load64(st2 + PA_CREDITS) != 8888)      { test_fail("t110_pa_save_load", "credits");   return 1; }
+    if (load64(st2 + PA_FIGHTERS) != 120)      { test_fail("t110_pa_save_load", "fighters");  return 1; }
+    if (load64(st2 + PA_SHIELDS) != 40)        { test_fail("t110_pa_save_load", "shields");   return 1; }
+    if (load64(st2 + PA_PLANET) != 17)         { test_fail("t110_pa_save_load", "planet");    return 1; }
+    if (load64(st2 + PA_PLANET_CR) != 5000)    { test_fail("t110_pa_save_load", "planet cr"); return 1; }
+    if (load64(st2 + PA_MODE) != DOOR_SOLO)    { test_fail("t110_pa_save_load", "mode");      return 1; }
+    if (pa_cargo(st2, 0) != 7)                 { test_fail("t110_pa_save_load", "cargo0");    return 1; }
+    if (pa_cargo(st2, 2) != 3)                 { test_fail("t110_pa_save_load", "cargo2");    return 1; }
+    test_pass("t110_pa_save_load");
+    return 0;
+}
+
+fn t111_pa_feed_render(): i64 {
+    var st = pa_new(13, DOOR_PRACTICE, PA_DEF_DAYS);
+    pa_start(st);
+    var buf = alloc(4096);
+    if (pa_render(st, buf, 4096) <= 0)       { test_fail("t111_pa_feed_render", "main render"); return 1; }
+    pa_feed(st, "m", 1);
+    if (load64(st + PA_SCREEN) != PSCR_MOVE) { test_fail("t111_pa_feed_render", "m->move");     return 1; }
+    if (pa_render(st, buf, 4096) <= 0)       { test_fail("t111_pa_feed_render", "move render"); return 1; }
+    pa_feed(st, "x", 1);
+    if (load64(st + PA_SCREEN) != PSCR_MAIN) { test_fail("t111_pa_feed_render", "x->main");     return 1; }
+    if (pa_feed(st, "q", 1) != 1)            { test_fail("t111_pa_feed_render", "q exits");     return 1; }
+    test_pass("t111_pa_feed_render");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -2530,6 +2671,12 @@ fn main(): i64 {
     t103_pa_galaxy_structure();
     t104_pa_trade();
     t105_pa_holds_and_guards();
+    t106_pa_move_turns();
+    t107_pa_combat();
+    t108_pa_dock();
+    t109_pa_planet();
+    t110_pa_save_load();
+    t111_pa_feed_render();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

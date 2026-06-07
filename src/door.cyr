@@ -346,6 +346,23 @@ fn door_parse_int(buf, len): i64 {
     return val;
 }
 
+# Lowercase the first non-space byte of a line (a single menu key).
+# Returns 0 for a blank line (bare Enter).
+fn door_key(line, len): i64 {
+    var i = 0;
+    var k = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(line + i) & 0xFF;
+        if (c == 32) { i = i + 1; continue; }
+        k = c;
+        if (k >= 65) { if (k <= 90) { k = k + 32; } }   # A-Z → a-z
+        scanning = 0;
+    }
+    return k;
+}
+
 # === Positional save serialization (newline-separated i64 records) ===
 #
 # A game writes a short version header then a FIXED sequence of i64
