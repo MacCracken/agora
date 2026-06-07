@@ -1,0 +1,297 @@
+# port_authority.cyr — Port Authority (1.1.0, ADR 0009).
+#
+# A dark-sci-fi space-trade-and-combat run, homage to the TradeWars
+# 2002 *style* (NOT a copy): warp the sector grid, arbitrage commodity
+# spreads between ports, fight raiders, upgrade your ship at the HQ
+# spire, and build a fortune before the quarter closes. Commodities are
+# re-themed (Reactor Ore / Biomass / Hardware / Contraband), the engine
+# is the classic port-class buy/sell spread.
+#
+# Bite 3 = the PURE galaxy + port-economy + trade core: deterministic
+# galaxy generation (warps + ports), the ship state, cargo accounting,
+# and buy/sell against port trade-flags. Navigation/turns, combat, the
+# HQ upgrade dock, planets, render, the feed machine, and save/load land
+# in bite 4.
+#
+# No socket/filesystem here. Depends on door.cyr (rng_*, helpers).
+
+# === Config ===
+
+enum PAConfig {
+    PA_SECTORS        = 50;       # sectors in the galaxy
+    PA_COMM           = 4;        # commodities
+    PA_MAX_WARPS      = 6;        # warp links per sector
+    PA_START_CREDITS  = 2000;
+    PA_START_HOLDS    = 20;       # cargo capacity
+    PA_START_FIGHTERS = 30;
+    PA_START_SHIELDS  = 0;
+    PA_TURNS_PER_DAY  = 60;
+    PA_DEF_DAYS       = 30;
+}
+
+# Port trade-flag per commodity: 0 = not traded here, 1 = port SELLS
+# (you buy it cheap), 2 = port BUYS (you sell it dear).
+enum PAFlag {
+    PF_NONE  = 0;
+    PF_SELLS = 1;
+    PF_BUYS  = 2;
+}
+
+# === Galaxy (generated once per run, shared by the ship) ===
+#
+# GX_WARPS → PA_SECTORS*PA_MAX_WARPS i64 (each = dest sector or -1).
+# GX_PORTS → PA_SECTORS * stride i64, stride = 1 + PA_COMM*2:
+#   [0] has_port (0/1); then per commodity c: [1+c*2]=flag, [2+c*2]=price.
+enum GX {
+    GX_WARPS = 0;
+    GX_PORTS = 8;
+    GX_SIZE  = 16;
+}
+
+fn pa_comm_name(c): i64 {
+    if (c == 0) { return "Reactor Ore"; }
+    if (c == 1) { return "Biomass"; }
+    if (c == 2) { return "Hardware"; }
+    if (c == 3) { return "Contraband"; }
+    return "?";
+}
+
+fn pa_comm_min(c): i64 {
+    if (c == 0) { return 10; }
+    if (c == 1) { return 25; }
+    if (c == 2) { return 60; }
+    if (c == 3) { return 120; }
+    return 1;
+}
+
+fn pa_comm_max(c): i64 {
+    if (c == 0) { return 40; }
+    if (c == 1) { return 90; }
+    if (c == 2) { return 200; }
+    if (c == 3) { return 600; }
+    return 1;
+}
+
+fn pa_port_stride(): i64 {
+    return 1 + PA_COMM * 2;
+}
+
+# Deterministically build the galaxy from a seed. Sector 0 is the HQ
+# spire (no trade port — it's the upgrade dock). Other sectors have a
+# port ~60% of the time; each port trades each commodity as none/sells/
+# buys, with sell-prices low in the band and buy-prices high (the spread
+# you arbitrage). Returns the galaxy object pointer.
+fn pa_galaxy_new(seed): i64 {
+    var gx = alloc(GX_SIZE);
+    var warps = alloc(PA_SECTORS * PA_MAX_WARPS * 8);
+    var ports = alloc(PA_SECTORS * pa_port_stride() * 8);
+    store64(gx + GX_WARPS, warps);
+    store64(gx + GX_PORTS, ports);
+    var rng = alloc(8);
+    rng_seed(rng, seed);
+
+    var s = 0;
+    while (s < PA_SECTORS) {
+        var nwarps = rng_range(rng, 2, PA_MAX_WARPS);
+        var w = 0;
+        while (w < PA_MAX_WARPS) {
+            var dest = 0 - 1;
+            if (w < nwarps) {
+                dest = rng_below(rng, PA_SECTORS);
+                if (dest == s) { dest = (s + 1) % PA_SECTORS; }
+            }
+            store64(warps + (s * PA_MAX_WARPS + w) * 8, dest);
+            w = w + 1;
+        }
+        s = s + 1;
+    }
+
+    var stride = pa_port_stride();
+    s = 0;
+    while (s < PA_SECTORS) {
+        var base = ports + s * stride * 8;
+        var hasport = 0;
+        if (s != 0) { if (rng_chance(rng, 60) == 1) { hasport = 1; } }
+        store64(base, hasport);
+        var c = 0;
+        while (c < PA_COMM) {
+            var flag = 0;
+            var price = 0;
+            if (hasport == 1) {
+                flag = rng_range(rng, 0, 2);
+                if (flag != 0) {
+                    var lo = pa_comm_min(c);
+                    var hi = pa_comm_max(c);
+                    var third = (hi - lo) / 3;
+                    if (flag == 1) { price = rng_range(rng, lo, lo + third); }
+                    else           { price = rng_range(rng, hi - third, hi); }
+                }
+            }
+            store64(base + (1 + c * 2) * 8, flag);
+            store64(base + (2 + c * 2) * 8, price);
+            c = c + 1;
+        }
+        s = s + 1;
+    }
+    return gx;
+}
+
+# === Galaxy accessors ===
+
+fn pa_has_port(gx, sector): i64 {
+    return load64(load64(gx + GX_PORTS) + sector * pa_port_stride() * 8);
+}
+
+fn pa_port_flag(gx, sector, c): i64 {
+    return load64(load64(gx + GX_PORTS) + (sector * pa_port_stride() + 1 + c * 2) * 8);
+}
+
+fn pa_port_price(gx, sector, c): i64 {
+    return load64(load64(gx + GX_PORTS) + (sector * pa_port_stride() + 2 + c * 2) * 8);
+}
+
+fn pa_warp(gx, sector, w): i64 {
+    return load64(load64(gx + GX_WARPS) + (sector * PA_MAX_WARPS + w) * 8);
+}
+
+# 1 if `dest` is one warp hop from `sector`.
+fn pa_warp_connected(gx, sector, dest): i64 {
+    var w = 0;
+    var found = 0;
+    while (w < PA_MAX_WARPS) {
+        if (pa_warp(gx, sector, w) == dest) { found = 1; }
+        w = w + 1;
+    }
+    return found;
+}
+
+# Count of live warp links out of a sector.
+fn pa_warp_count(gx, sector): i64 {
+    var w = 0;
+    var n = 0;
+    while (w < PA_MAX_WARPS) {
+        if (pa_warp(gx, sector, w) >= 0) { n = n + 1; }
+        w = w + 1;
+    }
+    return n;
+}
+
+# === Ship / player state ===
+#
+# One alloc(PA_SIZE) block. PA_CARGO is an inline PA_COMM i64 array.
+enum PA {
+    PA_SEED     = 0;
+    PA_RNG      = 8;      # live combat/event PRNG cell (durable)
+    PA_DAY      = 16;
+    PA_MAXDAYS  = 24;
+    PA_SECTOR   = 32;     # current sector
+    PA_CREDITS  = 40;
+    PA_HOLDS    = 48;     # cargo capacity
+    PA_FIGHTERS = 56;
+    PA_SHIELDS  = 64;
+    PA_TURNS    = 72;     # warp turns left today
+    PA_MODE     = 80;
+    PA_OVER     = 88;     # 0 play / 1 finished / 2 destroyed
+    PA_CARGO    = 96;     # PA_COMM i64 → 96..127
+    # runtime-only (set by pa_start; not serialized):
+    PA_GX       = 128;    # ptr → galaxy
+    PA_SCREEN   = 136;
+    PA_PEND     = 144;
+    PA_MSG      = 152;
+    PA_SIZE     = 160;
+}
+
+fn pa_new(seed, mode, max_days): i64 {
+    var st = alloc(PA_SIZE);
+    memset(st, 0, PA_SIZE);
+    store64(st + PA_SEED, seed);
+    rng_seed(st + PA_RNG, seed);
+    store64(st + PA_DAY, 1);
+    store64(st + PA_MAXDAYS, max_days);
+    store64(st + PA_SECTOR, 0);
+    store64(st + PA_CREDITS, PA_START_CREDITS);
+    store64(st + PA_HOLDS, PA_START_HOLDS);
+    store64(st + PA_FIGHTERS, PA_START_FIGHTERS);
+    store64(st + PA_SHIELDS, PA_START_SHIELDS);
+    store64(st + PA_TURNS, PA_TURNS_PER_DAY);
+    store64(st + PA_MODE, mode);
+    store64(st + PA_OVER, 0);
+    return st;
+}
+
+# === Cargo accounting ===
+
+fn pa_cargo(st, c): i64 {
+    return load64(st + PA_CARGO + c * 8);
+}
+
+fn pa_set_cargo(st, c, v): i64 {
+    store64(st + PA_CARGO + c * 8, v);
+    return 0;
+}
+
+fn pa_cargo_used(st): i64 {
+    var t = 0;
+    var i = 0;
+    while (i < PA_COMM) {
+        t = t + pa_cargo(st, i);
+        i = i + 1;
+    }
+    return t;
+}
+
+fn pa_holds_free(st): i64 {
+    return load64(st + PA_HOLDS) - pa_cargo_used(st);
+}
+
+# Rough net worth for scoring: credits + cargo at floor value + ship
+# assets (fighters + holds capitalized).
+fn pa_net_worth(st): i64 {
+    var w = load64(st + PA_CREDITS);
+    var i = 0;
+    while (i < PA_COMM) {
+        w = w + pa_cargo(st, i) * pa_comm_min(i);
+        i = i + 1;
+    }
+    w = w + load64(st + PA_FIGHTERS) * 5;
+    w = w + load64(st + PA_HOLDS) * 50;
+    return w;
+}
+
+# === Trade ===
+#
+# Buy a commodity the current port SELLS; sell one it BUYS. Status:
+#   0 ok / -1 bad commodity / -2 no port here / -3 port doesn't trade
+#   that side / -4 bad qty / -5 not enough credits / -6 no holds /
+#   -7 not holding that many.
+fn pa_buy(st, c, qty): i64 {
+    if (c < 0)        { return 0 - 1; }
+    if (c >= PA_COMM) { return 0 - 1; }
+    if (qty <= 0)     { return 0 - 4; }
+    var gx = load64(st + PA_GX);
+    var sector = load64(st + PA_SECTOR);
+    if (pa_has_port(gx, sector) == 0)         { return 0 - 2; }
+    if (pa_port_flag(gx, sector, c) != PF_SELLS) { return 0 - 3; }
+    var price = pa_port_price(gx, sector, c);
+    var cost = price * qty;
+    if (cost > load64(st + PA_CREDITS)) { return 0 - 5; }
+    if (qty > pa_holds_free(st))        { return 0 - 6; }
+    store64(st + PA_CREDITS, load64(st + PA_CREDITS) - cost);
+    pa_set_cargo(st, c, pa_cargo(st, c) + qty);
+    return 0;
+}
+
+fn pa_sell(st, c, qty): i64 {
+    if (c < 0)        { return 0 - 1; }
+    if (c >= PA_COMM) { return 0 - 1; }
+    if (qty <= 0)     { return 0 - 4; }
+    var gx = load64(st + PA_GX);
+    var sector = load64(st + PA_SECTOR);
+    if (pa_has_port(gx, sector) == 0)          { return 0 - 2; }
+    if (pa_port_flag(gx, sector, c) != PF_BUYS) { return 0 - 3; }
+    if (qty > pa_cargo(st, c)) { return 0 - 7; }
+    var price = pa_port_price(gx, sector, c);
+    store64(st + PA_CREDITS, load64(st + PA_CREDITS) + price * qty);
+    pa_set_cargo(st, c, pa_cargo(st, c) - qty);
+    return 0;
+}

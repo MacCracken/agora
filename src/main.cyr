@@ -21,6 +21,7 @@ include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
 include "src/smuggler.cyr"
+include "src/port_authority.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.

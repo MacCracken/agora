@@ -279,3 +279,117 @@ fn door_save_read(store, fp16, game, out_buf, cap): i64 {
     door_save_path(store, fp16, game, path);
     return file_read_all(path, out_buf, cap);
 }
+
+# === Shared render helpers (used by all door games) ===
+#
+# Self-contained ANSI/text buffer composers — NO darshana dependency,
+# so a game's render layer is exercisable from the unit harness (which
+# does not include darshana). Each writes into a caller buffer at `pos`
+# and returns the new position. Output is telnet-NVT CRLF.
+
+fn emit_cstr(buf, pos, s): i64 {
+    var n = strlen(s);
+    memcpy(buf + pos, s, n);
+    return pos + n;
+}
+
+fn emit_int(buf, pos, val): i64 {
+    var tmp[24];
+    var n = fmt_int_buf(val, &tmp);
+    memcpy(buf + pos, &tmp, n);
+    return pos + n;
+}
+
+# ESC [ <code> m  — one SGR escape (e.g. 36 = cyan, 0 = reset).
+fn emit_sgr(buf, pos, code): i64 {
+    store8(buf + pos, 27); pos = pos + 1;   # ESC
+    store8(buf + pos, 91); pos = pos + 1;   # '['
+    pos = emit_int(buf, pos, code);
+    store8(buf + pos, 109); pos = pos + 1;  # 'm'
+    return pos;
+}
+
+fn emit_reset(buf, pos): i64 {
+    return emit_sgr(buf, pos, 0);
+}
+
+fn emit_crlf(buf, pos): i64 {
+    store8(buf + pos, 13); pos = pos + 1;
+    store8(buf + pos, 10); pos = pos + 1;
+    return pos;
+}
+
+# === Input + save parsing helpers ===
+
+# Parse a non-negative integer from buf[0..len): skip leading spaces,
+# read digits, stop at the first non-digit. Returns the value, or
+# (0 - 1) if no digits are present (blank/garbage line).
+fn door_parse_int(buf, len): i64 {
+    var i = 0;
+    var got = 0;
+    var val = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(buf + i) & 0xFF;
+        if (c == 32) {
+            if (got == 0) { i = i + 1; continue; }   # skip leading space
+            scanning = 0; continue;                   # space ends the number
+        }
+        if (c < 48) { scanning = 0; continue; }
+        if (c > 57) { scanning = 0; continue; }
+        val = val * 10 + (c - 48);
+        got = 1;
+        i = i + 1;
+    }
+    if (got == 0) { return 0 - 1; }
+    return val;
+}
+
+# === Positional save serialization (newline-separated i64 records) ===
+#
+# A game writes a short version header then a FIXED sequence of i64
+# fields with save_put_i64, and reads them back in the same order with
+# save_get_i64 (which advances a cursor cell). Both handle negatives —
+# game RNG cells and seeds are signed 64-bit.
+
+# Append "<decimal>\n" to buf at pos. Returns the new pos.
+fn save_put_i64(buf, pos, val): i64 {
+    var tmp[24];
+    var n = fmt_int_buf(val, &tmp);
+    memcpy(buf + pos, &tmp, n);
+    pos = pos + n;
+    store8(buf + pos, 10);   # '\n'
+    pos = pos + 1;
+    return pos;
+}
+
+# Read the signed integer at buf[*cur_ptr], advance *cur_ptr past the
+# trailing newline. Returns the value.
+fn save_get_i64(buf, len, cur_ptr): i64 {
+    var i = load64(cur_ptr);
+    var neg = 0;
+    if (i < len) {
+        if ((load8(buf + i) & 0xFF) == 45) { neg = 1; i = i + 1; }   # '-'
+    }
+    var val = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(buf + i) & 0xFF;
+        if (c < 48) { scanning = 0; continue; }
+        if (c > 57) { scanning = 0; continue; }
+        val = val * 10 + (c - 48);
+        i = i + 1;
+    }
+    var skipping = 1;
+    while (skipping == 1) {
+        if (i >= len) { skipping = 0; continue; }
+        var c2 = load8(buf + i) & 0xFF;
+        i = i + 1;
+        if (c2 == 10) { skipping = 0; continue; }
+    }
+    store64(cur_ptr, i);
+    if (neg == 1) { return 0 - val; }
+    return val;
+}

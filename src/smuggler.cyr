@@ -47,8 +47,15 @@ enum SL {
     SL_CAP     = 72;    # stash capacity (units)
     SL_MODE    = 80;    # DoorMode (practice/solo) for save behavior
     SL_OVER    = 88;    # 0 playing, 1 finished, 2 dead
-    SL_INV     = 96;    # SL_GOODS i64 slots → 96..159
-    SL_SIZE    = 160;
+    SL_RNG     = 96;    # live encounter PRNG cell (durable, so resume continues)
+    SL_INV     = 104;   # SL_GOODS i64 slots → 104..167
+    # runtime-only (set by sl_start, NOT serialized):
+    SL_SCREEN  = 168;   # current sub-screen (enum SLScreen)
+    SL_PEND    = 176;   # per-screen scratch (good idx / cop toughness)
+    SL_PRICES  = 184;   # ptr → SL_GOODS i64 price table for current day
+    SL_EVENT   = 192;   # ptr → 2 i64 (event kind, good)
+    SL_MSG     = 200;   # ptr → 256-byte transient message buffer
+    SL_SIZE    = 208;
 }
 
 # === Construction ===
@@ -68,6 +75,7 @@ fn sl_new(seed, mode, max_days): i64 {
     store64(st + SL_CAP,     SL_START_CAP);
     store64(st + SL_MODE,    mode);
     store64(st + SL_OVER,    0);
+    rng_seed(st + SL_RNG, seed);   # live encounter stream (price gen has its own)
     return st;
 }
 
@@ -294,5 +302,758 @@ fn sl_gen_prices(seed, day, prices_out, event_out): i64 {
         store64(prices_out + i * 8, price);
         i = i + 1;
     }
+    return 0;
+}
+
+# ============================================================
+# Bite 2 — interactive layer: travel, encounters, shops, the
+# feed-line screen machine, render, save/load.
+# ============================================================
+
+enum SLScreen {
+    SCR_MAIN     = 0;
+    SCR_BUY      = 1;
+    SCR_BUYQTY   = 2;
+    SCR_SELL     = 3;
+    SCR_SELLQTY  = 4;
+    SCR_JET      = 5;
+    SCR_SHARK    = 6;
+    SCR_SHARKPAY = 7;
+    SCR_SHARKBOR = 8;
+    SCR_BANK     = 9;
+    SCR_BANKDEP  = 10;
+    SCR_BANKWD   = 11;
+    SCR_FIXER    = 12;
+    SCR_ENC      = 13;     # cops: fight or run
+    SCR_OVER     = 14;     # game over
+}
+
+enum SLShop {
+    SL_CAP_STEP = 40;      # capacity bought per fixer purchase
+    SL_GUN_MAX  = 5;       # max guns you can carry
+}
+
+enum SLSave {
+    SL_SAVE_CAP = 512;     # save-buffer size (22 short lines)
+}
+
+# === Runtime helpers ===
+
+# Lowercase the first non-space byte of the line (a menu key). Returns
+# 0 for a blank line (bare Enter).
+fn sl_key(line, len): i64 {
+    var i = 0;
+    var k = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(line + i) & 0xFF;
+        if (c == 32) { i = i + 1; continue; }
+        k = c;
+        if (k >= 65) { if (k <= 90) { k = k + 32; } }   # A-Z → a-z
+        scanning = 0;
+    }
+    return k;
+}
+
+# Set the transient one-line status message (rendered under the screen).
+fn sl_msg(st, s): i64 {
+    var m = load64(st + SL_MSG);
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+# Regenerate the current day's price table + event into the state's
+# runtime buffers (deterministic in seed+day).
+fn sl_regen_prices(st): i64 {
+    sl_gen_prices(load64(st + SL_SEED), load64(st + SL_DAY),
+                  load64(st + SL_PRICES), load64(st + SL_EVENT));
+    return 0;
+}
+
+# Allocate + initialize the runtime fields (call once after sl_new or
+# sl_load_parse, before sl_render / sl_feed).
+fn sl_start(st): i64 {
+    store64(st + SL_PEND, 0);
+    store64(st + SL_PRICES, alloc(SL_GOODS * 8));
+    store64(st + SL_EVENT,  alloc(16));
+    store64(st + SL_MSG,    alloc(256));
+    store8(load64(st + SL_MSG), 0);
+    sl_regen_prices(st);
+    store64(st + SL_SCREEN, SCR_MAIN);
+    if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); }
+    return 0;
+}
+
+# === Shop offers + mutators (the fixer) ===
+
+fn sl_offer_cap_cost(st): i64 {
+    return load64(st + SL_CAP) * 6;
+}
+
+fn sl_offer_gun_cost(): i64 {
+    return 500;
+}
+
+fn sl_offer_heal_cost(st): i64 {
+    return (100 - load64(st + SL_HEALTH)) * 15;
+}
+
+# 0 ok / (0-2) not enough cash
+fn sl_buy_capacity(st): i64 {
+    var cost = sl_offer_cap_cost(st);
+    if (cost > load64(st + SL_CASH)) { return 0 - 2; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - cost);
+    store64(st + SL_CAP, load64(st + SL_CAP) + SL_CAP_STEP);
+    return 0;
+}
+
+# 0 ok / (0-2) cash / (0-6) maxed out
+fn sl_buy_gun(st): i64 {
+    if (load64(st + SL_GUNS) >= SL_GUN_MAX) { return 0 - 6; }
+    var cost = sl_offer_gun_cost();
+    if (cost > load64(st + SL_CASH)) { return 0 - 2; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - cost);
+    store64(st + SL_GUNS, load64(st + SL_GUNS) + 1);
+    return 0;
+}
+
+# 0 ok / (0-2) cash / (0-7) already full
+fn sl_heal(st): i64 {
+    var cost = sl_offer_heal_cost(st);
+    if (cost <= 0)                   { return 0 - 7; }
+    if (cost > load64(st + SL_CASH)) { return 0 - 2; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - cost);
+    store64(st + SL_HEALTH, 100);
+    return 0;
+}
+
+# === Travel + day advance ===
+#
+# Jetting to a district burns a day, compounds the debt, and rolls a
+# fresh market. Past the last day the run is over. 0 ok / (0-1) bad
+# destination.
+fn sl_travel(st, dest): i64 {
+    if (dest < 0)             { return 0 - 1; }
+    if (dest >= SL_DISTRICTS) { return 0 - 1; }
+    store64(st + SL_LOC, dest);
+    store64(st + SL_DAY, load64(st + SL_DAY) + 1);
+    sl_accrue_debt(st);
+    if (load64(st + SL_DAY) > load64(st + SL_MAXDAYS)) {
+        store64(st + SL_OVER, 1);
+        return 0;
+    }
+    sl_regen_prices(st);
+    return 0;
+}
+
+# === Arrival encounters ===
+#
+# Rolls an arrival event off the live stream. Mugging + lucky-find
+# resolve immediately (state mutated); cops require a player choice, so
+# this parks SCR_ENC and the toughness in SL_PEND. Returns:
+#   0 none, 1 cops (SCR_ENC parked), 2 mugging done, 3 lucky find done.
+fn sl_roll_encounter(st): i64 {
+    var rng = st + SL_RNG;
+    var carry = sl_capacity_used(st);
+    var chance = 18;
+    if (carry > 50) { chance = 30; }
+    if (rng_chance(rng, chance) == 0) { return 0; }
+    var kind = rng_below(rng, 3);          # 0 cops, 1 mugging, 2 lucky
+    if (kind == 0) {
+        var toughness = rng_range(rng, 1, 3);
+        store64(st + SL_PEND, toughness);
+        store64(st + SL_SCREEN, SCR_ENC);
+        return 1;
+    }
+    if (kind == 1) {
+        var cash = load64(st + SL_CASH);
+        var loss = cash * rng_range(rng, 10, 40) / 100;
+        store64(st + SL_CASH, cash - loss);
+        return 2;
+    }
+    var g = rng_below(rng, 4);             # a cheaper good turns up
+    var amt = rng_range(rng, 3, 12);
+    var freecap = sl_capacity_free(st);
+    if (amt > freecap) { amt = freecap; }
+    if (amt > 0) { sl_set_inv(st, g, sl_inv(st, g) + amt); }
+    return 3;
+}
+
+# Fight the cops. Win odds rise with guns, fall with toughness. Win →
+# a graze; lose → heavy hit, cash cut, half your product dumped.
+# Returns 1 won / 0 lost; sets SL_OVER=2 on death.
+fn sl_fight(st): i64 {
+    var rng = st + SL_RNG;
+    var toughness = load64(st + SL_PEND);
+    var guns = load64(st + SL_GUNS);
+    var odds = 25 + guns * 20 - toughness * 10;
+    odds = iclamp(odds, 5, 90);
+    var won = rng_chance(rng, odds);
+    if (won == 1) {
+        var hp = load64(st + SL_HEALTH) - rng_range(rng, 0, 15);
+        store64(st + SL_HEALTH, iclamp(hp, 0, 100));
+        store64(st + SL_PEND, 0);
+        if (load64(st + SL_HEALTH) <= 0) { store64(st + SL_OVER, 2); }
+        return 1;
+    }
+    var hp2 = load64(st + SL_HEALTH) - rng_range(rng, 20, 50);
+    store64(st + SL_HEALTH, iclamp(hp2, 0, 100));
+    var cash = load64(st + SL_CASH);
+    store64(st + SL_CASH, cash - cash * rng_range(rng, 20, 60) / 100);
+    var i = 0;
+    while (i < SL_GOODS) {
+        var held = sl_inv(st, i);
+        if (held > 0) { sl_set_inv(st, i, held / 2); }
+        i = i + 1;
+    }
+    store64(st + SL_PEND, 0);
+    if (load64(st + SL_HEALTH) <= 0) { store64(st + SL_OVER, 2); }
+    return 0;
+}
+
+# Run from the cops. Success → clean escape; failure → a hit + lose a
+# third of your product (but keep your cash). Returns 1 escaped / 0
+# caught; sets SL_OVER=2 on death.
+fn sl_run(st): i64 {
+    var rng = st + SL_RNG;
+    var toughness = load64(st + SL_PEND);
+    var odds = 60 - toughness * 10;
+    odds = iclamp(odds, 15, 80);
+    var escaped = rng_chance(rng, odds);
+    if (escaped == 0) {
+        var hp = load64(st + SL_HEALTH) - rng_range(rng, 10, 30);
+        store64(st + SL_HEALTH, iclamp(hp, 0, 100));
+        var i = 0;
+        while (i < SL_GOODS) {
+            var held = sl_inv(st, i);
+            if (held > 0) { sl_set_inv(st, i, held - held / 3); }
+            i = i + 1;
+        }
+        if (load64(st + SL_HEALTH) <= 0) { store64(st + SL_OVER, 2); }
+    }
+    store64(st + SL_PEND, 0);
+    return escaped;
+}
+
+# === Win / score / rank ===
+
+fn sl_is_over(st): i64 {
+    if (load64(st + SL_OVER) != 0) { return 1; }
+    return 0;
+}
+
+# Final score = net worth, or 0 if you died holding the bag.
+fn sl_final_score(st): i64 {
+    if (load64(st + SL_OVER) == 2) { return 0; }
+    return sl_net_worth(st);
+}
+
+fn sl_rank(score): i64 {
+    if (score < 0)      { return "Busted Flat"; }
+    if (score < 5000)   { return "Corner Hustler"; }
+    if (score < 25000)  { return "Mid-Level Mover"; }
+    if (score < 100000) { return "District Boss"; }
+    if (score < 500000) { return "Kingpin"; }
+    return "Untouchable";
+}
+
+# === Save / load (positional text via door framework) ===
+
+fn sl_save_format(st, buf, cap): i64 {
+    var pos = 0;
+    memcpy(buf + pos, "SLDG1\n", 6); pos = pos + 6;
+    pos = save_put_i64(buf, pos, load64(st + SL_SEED));
+    pos = save_put_i64(buf, pos, load64(st + SL_RNG));
+    pos = save_put_i64(buf, pos, load64(st + SL_DAY));
+    pos = save_put_i64(buf, pos, load64(st + SL_MAXDAYS));
+    pos = save_put_i64(buf, pos, load64(st + SL_LOC));
+    pos = save_put_i64(buf, pos, load64(st + SL_CASH));
+    pos = save_put_i64(buf, pos, load64(st + SL_BANK));
+    pos = save_put_i64(buf, pos, load64(st + SL_DEBT));
+    pos = save_put_i64(buf, pos, load64(st + SL_HEALTH));
+    pos = save_put_i64(buf, pos, load64(st + SL_GUNS));
+    pos = save_put_i64(buf, pos, load64(st + SL_CAP));
+    pos = save_put_i64(buf, pos, load64(st + SL_MODE));
+    pos = save_put_i64(buf, pos, load64(st + SL_OVER));
+    var i = 0;
+    while (i < SL_GOODS) {
+        pos = save_put_i64(buf, pos, sl_inv(st, i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+# Parse a save buffer into a fresh state. Returns the state ptr, or 0
+# on a bad header. Runtime fields are NOT set — caller runs sl_start().
+fn sl_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "SLDG1\n", 6) == 0) { return 0; }
+    var st = alloc(SL_SIZE);
+    memset(st, 0, SL_SIZE);
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + SL_SEED,    save_get_i64(buf, len, cur));
+    store64(st + SL_RNG,     save_get_i64(buf, len, cur));
+    store64(st + SL_DAY,     save_get_i64(buf, len, cur));
+    store64(st + SL_MAXDAYS, save_get_i64(buf, len, cur));
+    store64(st + SL_LOC,     save_get_i64(buf, len, cur));
+    store64(st + SL_CASH,    save_get_i64(buf, len, cur));
+    store64(st + SL_BANK,    save_get_i64(buf, len, cur));
+    store64(st + SL_DEBT,    save_get_i64(buf, len, cur));
+    store64(st + SL_HEALTH,  save_get_i64(buf, len, cur));
+    store64(st + SL_GUNS,    save_get_i64(buf, len, cur));
+    store64(st + SL_CAP,     save_get_i64(buf, len, cur));
+    store64(st + SL_MODE,    save_get_i64(buf, len, cur));
+    store64(st + SL_OVER,    save_get_i64(buf, len, cur));
+    var i = 0;
+    while (i < SL_GOODS) {
+        sl_set_inv(st, i, save_get_i64(buf, len, cur));
+        i = i + 1;
+    }
+    return st;
+}
+
+# === Render (pure → buffer; main.cyr send_buf's it) ===
+
+fn sl_render_status(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "== SMUGGLER'S LEDGER ==");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Day ");
+    pos = emit_int(buf, pos, load64(st + SL_DAY));
+    pos = emit_cstr(buf, pos, "/");
+    pos = emit_int(buf, pos, load64(st + SL_MAXDAYS));
+    pos = emit_cstr(buf, pos, "   ");
+    pos = emit_cstr(buf, pos, sl_district_name(load64(st + SL_LOC)));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Cash ");
+    pos = emit_int(buf, pos, load64(st + SL_CASH));
+    pos = emit_cstr(buf, pos, "   Bank ");
+    pos = emit_int(buf, pos, load64(st + SL_BANK));
+    pos = emit_cstr(buf, pos, "   Debt ");
+    pos = emit_int(buf, pos, load64(st + SL_DEBT));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "HP ");
+    pos = emit_int(buf, pos, load64(st + SL_HEALTH));
+    pos = emit_cstr(buf, pos, "   Guns ");
+    pos = emit_int(buf, pos, load64(st + SL_GUNS));
+    pos = emit_cstr(buf, pos, "   Coat ");
+    pos = emit_int(buf, pos, sl_capacity_used(st));
+    pos = emit_cstr(buf, pos, "/");
+    pos = emit_int(buf, pos, load64(st + SL_CAP));
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn sl_render_market(st, buf, pos): i64 {
+    var prices = load64(st + SL_PRICES);
+    pos = emit_sgr(buf, pos, 33);
+    pos = emit_cstr(buf, pos, " #  GOODS       PRICE   HELD");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    var i = 0;
+    while (i < SL_GOODS) {
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, i + 1);
+        pos = emit_cstr(buf, pos, "  ");
+        var name = sl_good_name(i);
+        pos = emit_cstr(buf, pos, name);
+        var pad = 11 - strlen(name);
+        while (pad > 0) { store8(buf + pos, 32); pos = pos + 1; pad = pad - 1; }
+        var pr = load64(prices + i * 8);
+        if (pr <= 0) { pos = emit_cstr(buf, pos, "  --"); }
+        else         { pos = emit_int(buf, pos, pr); }
+        pos = emit_cstr(buf, pos, "      ");
+        pos = emit_int(buf, pos, sl_inv(st, i));
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn sl_render_districts(st, buf, pos): i64 {
+    var i = 0;
+    while (i < SL_DISTRICTS) {
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, i + 1);
+        pos = emit_cstr(buf, pos, "  ");
+        pos = emit_cstr(buf, pos, sl_district_name(i));
+        if (i == load64(st + SL_LOC)) { pos = emit_cstr(buf, pos, "  (here)"); }
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn sl_render(st, buf, cap): i64 {
+    var pos = 0;
+    var screen = load64(st + SL_SCREEN);
+    pos = sl_render_status(st, buf, pos);
+    pos = emit_crlf(buf, pos);
+
+    if (screen == SCR_OVER) {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "-- RUN OVER --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        var score = sl_final_score(st);
+        pos = emit_cstr(buf, pos, "Final score: ");
+        pos = emit_int(buf, pos, score);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Rank: ");
+        pos = emit_cstr(buf, pos, sl_rank(score));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        return pos;
+    }
+    if (screen == SCR_MAIN) {
+        pos = sl_render_market(st, buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[B]uy  [S]ell  [J]et  [L]oanshark  ban[K]  [F]ixer  [Q]uit");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_BUY) {
+        pos = sl_render_market(st, buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Buy which? 1-8  (x cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_SELL) {
+        pos = sl_render_market(st, buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Sell which? 1-8  (x cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_BUYQTY) {
+        pos = emit_cstr(buf, pos, "How many ");
+        pos = emit_cstr(buf, pos, sl_good_name(load64(st + SL_PEND)));
+        pos = emit_cstr(buf, pos, " to buy?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_SELLQTY) {
+        pos = emit_cstr(buf, pos, "How many ");
+        pos = emit_cstr(buf, pos, sl_good_name(load64(st + SL_PEND)));
+        pos = emit_cstr(buf, pos, " to sell?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_JET) {
+        pos = sl_render_districts(st, buf, pos);
+        pos = emit_cstr(buf, pos, "Jet where? 1-8  (x cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_SHARK) {
+        pos = emit_cstr(buf, pos, "The shark eyes your debt of ");
+        pos = emit_int(buf, pos, load64(st + SL_DEBT));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[P]ay  [B]orrow   (x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_SHARKPAY) {
+        pos = emit_cstr(buf, pos, "Pay how much?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_SHARKBOR) {
+        pos = emit_cstr(buf, pos, "Borrow how much?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_BANK) {
+        pos = emit_cstr(buf, pos, "Cash ");
+        pos = emit_int(buf, pos, load64(st + SL_CASH));
+        pos = emit_cstr(buf, pos, "   Bank ");
+        pos = emit_int(buf, pos, load64(st + SL_BANK));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[D]eposit  [W]ithdraw   (x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_BANKDEP) {
+        pos = emit_cstr(buf, pos, "Deposit how much?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_BANKWD) {
+        pos = emit_cstr(buf, pos, "Withdraw how much?  (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_FIXER) {
+        pos = emit_cstr(buf, pos, "[C]apacity +");
+        pos = emit_int(buf, pos, SL_CAP_STEP);
+        pos = emit_cstr(buf, pos, " (");
+        pos = emit_int(buf, pos, sl_offer_cap_cost(st));
+        pos = emit_cstr(buf, pos, ")   [G]un (");
+        pos = emit_int(buf, pos, sl_offer_gun_cost());
+        pos = emit_cstr(buf, pos, ")   [H]eal (");
+        pos = emit_int(buf, pos, sl_offer_heal_cost(st));
+        pos = emit_cstr(buf, pos, ")");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "(x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == SCR_ENC) {
+        pos = emit_sgr(buf, pos, 31);
+        pos = emit_cstr(buf, pos, "!! THE LAW !!");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_int(buf, pos, load64(st + SL_PEND));
+        pos = emit_cstr(buf, pos, " badge(s) closing in.  [F]ight or [R]un?");
+        pos = emit_crlf(buf, pos);
+    }
+
+    var msg = load64(st + SL_MSG);
+    if ((load8(msg) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, msg);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+# === Feed-line screen machine (pure logic; control: 0 stay / 1 exit) ===
+#
+# One handler per screen so each has its own variable scope (cyrius
+# vars are function-scoped — reusing a name across branches in one
+# function collides).
+
+fn sl_feed_main(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 113) { return 1; }                                    # q quit
+    if (k == 98)  { store64(st + SL_SCREEN, SCR_BUY);   return 0; } # b
+    if (k == 115) { store64(st + SL_SCREEN, SCR_SELL);  return 0; } # s
+    if (k == 106) { store64(st + SL_SCREEN, SCR_JET);   return 0; } # j
+    if (k == 108) { store64(st + SL_SCREEN, SCR_SHARK); return 0; } # l
+    if (k == 107) { store64(st + SL_SCREEN, SCR_BANK);  return 0; } # k
+    if (k == 102) { store64(st + SL_SCREEN, SCR_FIXER); return 0; } # f
+    sl_msg(st, "Unknown command.");
+    return 0;
+}
+
+fn sl_feed_buy(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 56) {
+        var g = k - 49;
+        var price = load64(load64(st + SL_PRICES) + g * 8);
+        if (price <= 0) {
+            sl_msg(st, "Not on the street today.");
+            store64(st + SL_SCREEN, SCR_MAIN);
+            return 0;
+        }
+        store64(st + SL_PEND, g);
+        store64(st + SL_SCREEN, SCR_BUYQTY);
+        return 0;
+    } }
+    sl_msg(st, "Pick 1-8, or x.");
+    return 0;
+}
+
+fn sl_feed_buyqty(st, line, len): i64 {
+    var qty = door_parse_int(line, len);
+    if (qty < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    var g = load64(st + SL_PEND);
+    var price = load64(load64(st + SL_PRICES) + g * 8);
+    var rc = sl_buy(st, g, price, qty);
+    if (rc == 0)       { sl_msg(st, "Bought."); }
+    if (rc == (0 - 2)) { sl_msg(st, "Not enough cash."); }
+    if (rc == (0 - 3)) { sl_msg(st, "No room in your coat."); }
+    if (rc == (0 - 4)) { sl_msg(st, "Bad amount."); }
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_sell(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 56) {
+        var g = k - 49;
+        if (sl_inv(st, g) <= 0) {
+            sl_msg(st, "You're not holding that.");
+            store64(st + SL_SCREEN, SCR_MAIN);
+            return 0;
+        }
+        store64(st + SL_PEND, g);
+        store64(st + SL_SCREEN, SCR_SELLQTY);
+        return 0;
+    } }
+    sl_msg(st, "Pick 1-8, or x.");
+    return 0;
+}
+
+fn sl_feed_sellqty(st, line, len): i64 {
+    var qty = door_parse_int(line, len);
+    if (qty < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    var g = load64(st + SL_PEND);
+    var price = load64(load64(st + SL_PRICES) + g * 8);
+    var rc = sl_sell(st, g, price, qty);
+    if (rc == 0)       { sl_msg(st, "Sold."); }
+    if (rc == (0 - 4)) { sl_msg(st, "No market for that here today."); }
+    if (rc == (0 - 5)) { sl_msg(st, "You don't have that many."); }
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_jet(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 56) {
+        var dest = k - 49;
+        if (dest == load64(st + SL_LOC)) {
+            sl_msg(st, "You're already there.");
+            store64(st + SL_SCREEN, SCR_MAIN);
+            return 0;
+        }
+        sl_travel(st, dest);
+        if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); return 0; }
+        var enc = sl_roll_encounter(st);
+        if (enc == 1) { sl_msg(st, "The cops have eyes on you!"); return 0; }
+        if (enc == 2) { sl_msg(st, "You got jumped - they grabbed some cash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+        if (enc == 3) { sl_msg(st, "Lucky find - someone ditched a stash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    } }
+    sl_msg(st, "Pick a district 1-8, or x.");
+    return 0;
+}
+
+fn sl_feed_shark(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 112) { store64(st + SL_SCREEN, SCR_SHARKPAY); return 0; }
+    if (k == 98)  { store64(st + SL_SCREEN, SCR_SHARKBOR); return 0; }
+    sl_msg(st, "[P]ay, [B]orrow, or x.");
+    return 0;
+}
+
+fn sl_feed_sharkpay(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    var rc = sl_repay(st, amt);
+    if (rc == 0) { sl_msg(st, "Paid the shark."); }
+    else         { sl_msg(st, "You can't pay that."); }
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_sharkbor(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    sl_borrow(st, amt);
+    sl_msg(st, "The shark fronts you the cash.");
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_bank(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 100) { store64(st + SL_SCREEN, SCR_BANKDEP); return 0; }
+    if (k == 119) { store64(st + SL_SCREEN, SCR_BANKWD); return 0; }
+    sl_msg(st, "[D]eposit, [W]ithdraw, or x.");
+    return 0;
+}
+
+fn sl_feed_bankdep(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    var rc = sl_deposit(st, amt);
+    if (rc == 0) { sl_msg(st, "Stashed in the vault."); }
+    else         { sl_msg(st, "Not that much on you."); }
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_bankwd(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    var rc = sl_withdraw(st, amt);
+    if (rc == 0) { sl_msg(st, "Pulled from the vault."); }
+    else         { sl_msg(st, "The vault doesn't have that."); }
+    store64(st + SL_SCREEN, SCR_MAIN);
+    return 0;
+}
+
+fn sl_feed_fixer(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+    if (k == 99) {
+        var rc = sl_buy_capacity(st);
+        if (rc == 0) { sl_msg(st, "Bigger coat, more room."); }
+        else         { sl_msg(st, "Not enough cash."); }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    }
+    if (k == 103) {
+        var rg = sl_buy_gun(st);
+        if (rg == 0)       { sl_msg(st, "You're packing now."); }
+        if (rg == (0 - 2)) { sl_msg(st, "Not enough cash."); }
+        if (rg == (0 - 6)) { sl_msg(st, "You can't carry more iron."); }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    }
+    if (k == 104) {
+        var rh = sl_heal(st);
+        if (rh == 0)       { sl_msg(st, "Patched up, good as new."); }
+        if (rh == (0 - 2)) { sl_msg(st, "Not enough cash."); }
+        if (rh == (0 - 7)) { sl_msg(st, "You're already healthy."); }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    }
+    sl_msg(st, "[C]apacity, [G]un, [H]eal, or x.");
+    return 0;
+}
+
+fn sl_feed_enc(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 102) {
+        var won = sl_fight(st);
+        if (load64(st + SL_OVER) == 2) { sl_msg(st, "You bled out in the gutter."); store64(st + SL_SCREEN, SCR_OVER); return 0; }
+        if (won == 1) { sl_msg(st, "You shook them off."); }
+        else          { sl_msg(st, "They worked you over and took a cut."); }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    }
+    if (k == 114) {
+        var esc = sl_run(st);
+        if (load64(st + SL_OVER) == 2) { sl_msg(st, "You didn't make it."); store64(st + SL_SCREEN, SCR_OVER); return 0; }
+        if (esc == 1) { sl_msg(st, "You lost them in the alleys."); }
+        else          { sl_msg(st, "They caught you - you dropped product."); }
+        store64(st + SL_SCREEN, SCR_MAIN);
+        return 0;
+    }
+    sl_msg(st, "[F]ight or [R]un?");
+    return 0;
+}
+
+# Dispatch one input line to the current screen. Returns 0 to stay in
+# the game, 1 to exit back to the BBS.
+fn sl_feed(st, line, len): i64 {
+    sl_msg(st, "");
+    var screen = load64(st + SL_SCREEN);
+    if (screen == SCR_OVER)     { return 1; }
+    if (screen == SCR_MAIN)     { return sl_feed_main(st, line, len); }
+    if (screen == SCR_BUY)      { return sl_feed_buy(st, line, len); }
+    if (screen == SCR_BUYQTY)   { return sl_feed_buyqty(st, line, len); }
+    if (screen == SCR_SELL)     { return sl_feed_sell(st, line, len); }
+    if (screen == SCR_SELLQTY)  { return sl_feed_sellqty(st, line, len); }
+    if (screen == SCR_JET)      { return sl_feed_jet(st, line, len); }
+    if (screen == SCR_SHARK)    { return sl_feed_shark(st, line, len); }
+    if (screen == SCR_SHARKPAY) { return sl_feed_sharkpay(st, line, len); }
+    if (screen == SCR_SHARKBOR) { return sl_feed_sharkbor(st, line, len); }
+    if (screen == SCR_BANK)     { return sl_feed_bank(st, line, len); }
+    if (screen == SCR_BANKDEP)  { return sl_feed_bankdep(st, line, len); }
+    if (screen == SCR_BANKWD)   { return sl_feed_bankwd(st, line, len); }
+    if (screen == SCR_FIXER)    { return sl_feed_fixer(st, line, len); }
+    if (screen == SCR_ENC)      { return sl_feed_enc(st, line, len); }
     return 0;
 }

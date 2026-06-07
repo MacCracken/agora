@@ -12,6 +12,7 @@ include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
 include "src/smuggler.cyr"
+include "src/port_authority.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -2117,6 +2118,307 @@ fn t93_sl_price_ranges(): i64 {
     return 0;
 }
 
+# === 1.1.0 Smuggler's Ledger interactive layer (t94-t100, ADR 0009) ===
+
+fn t94_sl_save_load(): i64 {
+    var st = sl_new(0 - 123456789, DOOR_SOLO, 20);   # negative seed
+    rng_seed(st + SL_RNG, 0 - 987654321);            # negative rng cell
+    store64(st + SL_DAY, 7);
+    store64(st + SL_LOC, 5);
+    store64(st + SL_CASH, 4242);
+    store64(st + SL_BANK, 999);
+    store64(st + SL_DEBT, 1500);
+    store64(st + SL_HEALTH, 73);
+    store64(st + SL_GUNS, 2);
+    store64(st + SL_CAP, 180);
+    sl_set_inv(st, 0, 11);
+    sl_set_inv(st, 3, 4);
+    sl_set_inv(st, 7, 1);
+    var buf = alloc(SL_SAVE_CAP);
+    var n = sl_save_format(st, buf, SL_SAVE_CAP);
+    if (n <= 0) { test_fail("t94_sl_save_load", "format len"); return 1; }
+    var st2 = sl_load_parse(buf, n);
+    if (st2 == 0) { test_fail("t94_sl_save_load", "parse null"); return 1; }
+    if (load64(st2 + SL_SEED) != (0 - 123456789)) { test_fail("t94_sl_save_load", "seed"); return 1; }
+    if (load64(st2 + SL_RNG) != (0 - 987654321))  { test_fail("t94_sl_save_load", "rng");  return 1; }
+    if (load64(st2 + SL_DAY) != 7)       { test_fail("t94_sl_save_load", "day");     return 1; }
+    if (load64(st2 + SL_MAXDAYS) != 20)  { test_fail("t94_sl_save_load", "maxdays"); return 1; }
+    if (load64(st2 + SL_LOC) != 5)       { test_fail("t94_sl_save_load", "loc");     return 1; }
+    if (load64(st2 + SL_CASH) != 4242)   { test_fail("t94_sl_save_load", "cash");    return 1; }
+    if (load64(st2 + SL_BANK) != 999)    { test_fail("t94_sl_save_load", "bank");    return 1; }
+    if (load64(st2 + SL_DEBT) != 1500)   { test_fail("t94_sl_save_load", "debt");    return 1; }
+    if (load64(st2 + SL_HEALTH) != 73)   { test_fail("t94_sl_save_load", "health");  return 1; }
+    if (load64(st2 + SL_GUNS) != 2)      { test_fail("t94_sl_save_load", "guns");    return 1; }
+    if (load64(st2 + SL_CAP) != 180)     { test_fail("t94_sl_save_load", "cap");     return 1; }
+    if (load64(st2 + SL_MODE) != DOOR_SOLO) { test_fail("t94_sl_save_load", "mode"); return 1; }
+    if (sl_inv(st2, 0) != 11) { test_fail("t94_sl_save_load", "inv0"); return 1; }
+    if (sl_inv(st2, 3) != 4)  { test_fail("t94_sl_save_load", "inv3"); return 1; }
+    if (sl_inv(st2, 7) != 1)  { test_fail("t94_sl_save_load", "inv7"); return 1; }
+    if (sl_inv(st2, 1) != 0)  { test_fail("t94_sl_save_load", "inv1 zero"); return 1; }
+    test_pass("t94_sl_save_load");
+    return 0;
+}
+
+fn t95_sl_travel(): i64 {
+    var st = sl_new(3, DOOR_PRACTICE, 5);
+    sl_start(st);
+    var debt0 = load64(st + SL_DEBT);
+    if (sl_travel(st, 2) != 0)    { test_fail("t95_sl_travel", "travel rc"); return 1; }
+    if (load64(st + SL_LOC) != 2) { test_fail("t95_sl_travel", "loc");       return 1; }
+    if (load64(st + SL_DAY) != 2) { test_fail("t95_sl_travel", "day");       return 1; }
+    if (load64(st + SL_DEBT) != debt0 + debt0 * SL_DEBT_RATE / 100) { test_fail("t95_sl_travel", "debt accrued"); return 1; }
+    if (sl_travel(st, 99) != (0 - 1)) { test_fail("t95_sl_travel", "bad dest"); return 1; }
+    sl_travel(st, 1);   # day 3
+    sl_travel(st, 2);   # day 4
+    sl_travel(st, 1);   # day 5
+    if (load64(st + SL_OVER) != 0) { test_fail("t95_sl_travel", "over too early"); return 1; }
+    sl_travel(st, 2);   # day 6 > 5 -> finished
+    if (load64(st + SL_OVER) != 1) { test_fail("t95_sl_travel", "not finished"); return 1; }
+    test_pass("t95_sl_travel");
+    return 0;
+}
+
+fn t96_sl_shops(): i64 {
+    var st = sl_new(1, DOOR_PRACTICE, SL_DEF_DAYS);
+    store64(st + SL_CASH, 100000);
+    var cap0 = load64(st + SL_CAP);
+    if (sl_buy_capacity(st) != 0)                    { test_fail("t96_sl_shops", "cap buy");        return 1; }
+    if (load64(st + SL_CAP) != cap0 + SL_CAP_STEP)   { test_fail("t96_sl_shops", "cap step");       return 1; }
+    if (sl_buy_gun(st) != 0)                         { test_fail("t96_sl_shops", "gun buy");        return 1; }
+    if (load64(st + SL_GUNS) != 1)                   { test_fail("t96_sl_shops", "gun count");      return 1; }
+    if (sl_heal(st) != (0 - 7))                      { test_fail("t96_sl_shops", "heal full guard");return 1; }
+    store64(st + SL_HEALTH, 50);
+    if (sl_heal(st) != 0)                            { test_fail("t96_sl_shops", "heal");           return 1; }
+    if (load64(st + SL_HEALTH) != 100)               { test_fail("t96_sl_shops", "healed full");    return 1; }
+    var g = 1;
+    while (g < SL_GUN_MAX) { sl_buy_gun(st); g = g + 1; }
+    if (sl_buy_gun(st) != (0 - 6))                   { test_fail("t96_sl_shops", "gun max");        return 1; }
+    store64(st + SL_CASH, 0);
+    if (sl_buy_capacity(st) != (0 - 2))              { test_fail("t96_sl_shops", "cap cash guard"); return 1; }
+    test_pass("t96_sl_shops");
+    return 0;
+}
+
+fn t97_sl_combat_bounds(): i64 {
+    var st = sl_new(7, DOOR_PRACTICE, SL_DEF_DAYS);
+    sl_start(st);
+    store64(st + SL_HEALTH, 8);
+    store64(st + SL_GUNS, 0);
+    var died = 0;
+    var n = 0;
+    while (n < 60) {
+        if (load64(st + SL_OVER) == 0) {
+            store64(st + SL_PEND, 3);
+            sl_fight(st);
+            var hp = load64(st + SL_HEALTH);
+            if (hp < 0)   { test_fail("t97_sl_combat_bounds", "hp negative"); return 1; }
+            if (hp > 100) { test_fail("t97_sl_combat_bounds", "hp over 100"); return 1; }
+            if (load64(st + SL_OVER) == 2) { died = 1; }
+        }
+        n = n + 1;
+    }
+    if (died == 0)                   { test_fail("t97_sl_combat_bounds", "never died at hp8"); return 1; }
+    if (load64(st + SL_HEALTH) != 0) { test_fail("t97_sl_combat_bounds", "dead but hp!=0");   return 1; }
+    test_pass("t97_sl_combat_bounds");
+    return 0;
+}
+
+fn t98_sl_feed_nav(): i64 {
+    var st = sl_new(11, DOOR_PRACTICE, SL_DEF_DAYS);
+    sl_start(st);
+    sl_feed(st, "b", 1);
+    if (load64(st + SL_SCREEN) != SCR_BUY)  { test_fail("t98_sl_feed_nav", "b->buy");  return 1; }
+    sl_feed(st, "x", 1);
+    if (load64(st + SL_SCREEN) != SCR_MAIN) { test_fail("t98_sl_feed_nav", "x->main"); return 1; }
+    store64(load64(st + SL_PRICES) + 0, 20);   # pin good 0's price for determinism
+    sl_feed(st, "b", 1);
+    sl_feed(st, "1", 1);
+    if (load64(st + SL_SCREEN) != SCR_BUYQTY) { test_fail("t98_sl_feed_nav", "1->buyqty"); return 1; }
+    sl_feed(st, "10", 2);
+    if (sl_inv(st, 0) != 10)                  { test_fail("t98_sl_feed_nav", "bought 10");   return 1; }
+    if (load64(st + SL_CASH) != 1800)         { test_fail("t98_sl_feed_nav", "cash after");  return 1; }
+    if (load64(st + SL_SCREEN) != SCR_MAIN)   { test_fail("t98_sl_feed_nav", "back to main");return 1; }
+    if (sl_feed(st, "q", 1) != 1)             { test_fail("t98_sl_feed_nav", "q exits");     return 1; }
+    test_pass("t98_sl_feed_nav");
+    return 0;
+}
+
+fn t99_sl_rank_tiers(): i64 {
+    if (streq(sl_rank(0 - 100), "Busted Flat") == 0)  { test_fail("t99_sl_rank_tiers", "neg"); return 1; }
+    if (streq(sl_rank(100), "Corner Hustler") == 0)   { test_fail("t99_sl_rank_tiers", "100"); return 1; }
+    if (streq(sl_rank(30000), "District Boss") == 0)  { test_fail("t99_sl_rank_tiers", "30k"); return 1; }
+    if (streq(sl_rank(1000000), "Untouchable") == 0)  { test_fail("t99_sl_rank_tiers", "1M");  return 1; }
+    test_pass("t99_sl_rank_tiers");
+    return 0;
+}
+
+fn t100_sl_render_nonempty(): i64 {
+    var st = sl_new(5, DOOR_PRACTICE, SL_DEF_DAYS);
+    sl_start(st);
+    var buf = alloc(4096);
+    if (sl_render(st, buf, 4096) <= 0) { test_fail("t100_sl_render_nonempty", "main empty"); return 1; }
+    store64(st + SL_OVER, 1);
+    store64(st + SL_SCREEN, SCR_OVER);
+    if (sl_render(st, buf, 4096) <= 0) { test_fail("t100_sl_render_nonempty", "over empty"); return 1; }
+    test_pass("t100_sl_render_nonempty");
+    return 0;
+}
+
+# === 1.1.0 Port Authority galaxy + economy core (t101-t105, ADR 0009) ===
+
+fn t101_pa_new_defaults(): i64 {
+    var st = pa_new(99, DOOR_SOLO, PA_DEF_DAYS);
+    if (load64(st + PA_CREDITS) != PA_START_CREDITS)   { test_fail("t101_pa_new_defaults", "credits"); return 1; }
+    if (load64(st + PA_HOLDS) != PA_START_HOLDS)       { test_fail("t101_pa_new_defaults", "holds");   return 1; }
+    if (load64(st + PA_FIGHTERS) != PA_START_FIGHTERS) { test_fail("t101_pa_new_defaults", "fighters");return 1; }
+    if (load64(st + PA_SECTOR) != 0)                   { test_fail("t101_pa_new_defaults", "sector");  return 1; }
+    if (load64(st + PA_TURNS) != PA_TURNS_PER_DAY)     { test_fail("t101_pa_new_defaults", "turns");   return 1; }
+    if (pa_cargo_used(st) != 0)                        { test_fail("t101_pa_new_defaults", "cargo");   return 1; }
+    test_pass("t101_pa_new_defaults");
+    return 0;
+}
+
+fn t102_pa_galaxy_determinism(): i64 {
+    var g1 = pa_galaxy_new(555);
+    var g2 = pa_galaxy_new(555);
+    var s = 0;
+    while (s < PA_SECTORS) {
+        if (pa_has_port(g1, s) != pa_has_port(g2, s)) { test_fail("t102_pa_galaxy_determinism", "port differs"); return 1; }
+        var w = 0;
+        while (w < PA_MAX_WARPS) {
+            if (pa_warp(g1, s, w) != pa_warp(g2, s, w)) { test_fail("t102_pa_galaxy_determinism", "warp differs"); return 1; }
+            w = w + 1;
+        }
+        var c = 0;
+        while (c < PA_COMM) {
+            if (pa_port_flag(g1, s, c) != pa_port_flag(g2, s, c))   { test_fail("t102_pa_galaxy_determinism", "flag differs");  return 1; }
+            if (pa_port_price(g1, s, c) != pa_port_price(g2, s, c)) { test_fail("t102_pa_galaxy_determinism", "price differs"); return 1; }
+            c = c + 1;
+        }
+        s = s + 1;
+    }
+    test_pass("t102_pa_galaxy_determinism");
+    return 0;
+}
+
+fn t103_pa_galaxy_structure(): i64 {
+    var gx = pa_galaxy_new(2024);
+    if (pa_has_port(gx, 0) != 0) { test_fail("t103_pa_galaxy_structure", "HQ sector has a port"); return 1; }
+    var ports_seen = 0;
+    var s = 0;
+    while (s < PA_SECTORS) {
+        if (pa_warp_count(gx, s) < 1)            { test_fail("t103_pa_galaxy_structure", "sector with no warps"); return 1; }
+        if (pa_warp_count(gx, s) > PA_MAX_WARPS) { test_fail("t103_pa_galaxy_structure", "too many warps");       return 1; }
+        if (pa_has_port(gx, s) == 1) {
+            ports_seen = ports_seen + 1;
+            var c = 0;
+            while (c < PA_COMM) {
+                var flag = pa_port_flag(gx, s, c);
+                if (flag != 0) {
+                    var pr = pa_port_price(gx, s, c);
+                    if (pr < pa_comm_min(c)) { test_fail("t103_pa_galaxy_structure", "price below band"); return 1; }
+                    if (pr > pa_comm_max(c)) { test_fail("t103_pa_galaxy_structure", "price above band"); return 1; }
+                }
+                c = c + 1;
+            }
+        }
+        s = s + 1;
+    }
+    if (ports_seen < 1) { test_fail("t103_pa_galaxy_structure", "no ports at all"); return 1; }
+    test_pass("t103_pa_galaxy_structure");
+    return 0;
+}
+
+fn t104_pa_trade(): i64 {
+    var st = pa_new(12345, DOOR_PRACTICE, PA_DEF_DAYS);
+    var gx = pa_galaxy_new(12345);
+    store64(st + PA_GX, gx);
+    # find any (sector, commodity) the port SELLS
+    var sell_sector = 0 - 1;
+    var sell_c = 0;
+    var s = 0;
+    while (s < PA_SECTORS) {
+        if (pa_has_port(gx, s) == 1) {
+            var c = 0;
+            while (c < PA_COMM) {
+                if (pa_port_flag(gx, s, c) == PF_SELLS) {
+                    if (sell_sector < 0) { sell_sector = s; sell_c = c; }
+                }
+                c = c + 1;
+            }
+        }
+        s = s + 1;
+    }
+    if (sell_sector < 0) { test_fail("t104_pa_trade", "no sell port"); return 1; }
+    store64(st + PA_SECTOR, sell_sector);
+    var price = pa_port_price(gx, sell_sector, sell_c);
+    var cr0 = load64(st + PA_CREDITS);
+    if (pa_buy(st, sell_c, 3) != 0)                 { test_fail("t104_pa_trade", "buy failed");     return 1; }
+    if (pa_cargo(st, sell_c) != 3)                  { test_fail("t104_pa_trade", "cargo after buy");return 1; }
+    if (load64(st + PA_CREDITS) != cr0 - price * 3) { test_fail("t104_pa_trade", "credits buy");    return 1; }
+    if (pa_sell(st, sell_c, 1) != (0 - 3))          { test_fail("t104_pa_trade", "sell wrong flag");return 1; }
+    store64(st + PA_SECTOR, 0);                      # HQ = no port
+    if (pa_buy(st, sell_c, 1) != (0 - 2))           { test_fail("t104_pa_trade", "buy no port");    return 1; }
+
+    # find a BUY port, stock the ship, sell into it
+    var buy_sector = 0 - 1;
+    var buy_c = 0;
+    var s2 = 0;
+    while (s2 < PA_SECTORS) {
+        if (pa_has_port(gx, s2) == 1) {
+            var c2 = 0;
+            while (c2 < PA_COMM) {
+                if (pa_port_flag(gx, s2, c2) == PF_BUYS) {
+                    if (buy_sector < 0) { buy_sector = s2; buy_c = c2; }
+                }
+                c2 = c2 + 1;
+            }
+        }
+        s2 = s2 + 1;
+    }
+    if (buy_sector < 0) { test_fail("t104_pa_trade", "no buy port"); return 1; }
+    store64(st + PA_SECTOR, buy_sector);
+    pa_set_cargo(st, buy_c, 10);
+    var bprice = pa_port_price(gx, buy_sector, buy_c);
+    var cr1 = load64(st + PA_CREDITS);
+    if (pa_sell(st, buy_c, 4) != 0)                    { test_fail("t104_pa_trade", "sell failed");     return 1; }
+    if (pa_cargo(st, buy_c) != 6)                      { test_fail("t104_pa_trade", "cargo after sell");return 1; }
+    if (load64(st + PA_CREDITS) != cr1 + bprice * 4)   { test_fail("t104_pa_trade", "credits sell");    return 1; }
+    test_pass("t104_pa_trade");
+    return 0;
+}
+
+fn t105_pa_holds_and_guards(): i64 {
+    var st = pa_new(7, DOOR_PRACTICE, PA_DEF_DAYS);
+    var gx = pa_galaxy_new(7);
+    store64(st + PA_GX, gx);
+    # find a sell port
+    var sec = 0 - 1;
+    var cc = 0;
+    var s = 0;
+    while (s < PA_SECTORS) {
+        if (pa_has_port(gx, s) == 1) {
+            var c = 0;
+            while (c < PA_COMM) {
+                if (pa_port_flag(gx, s, c) == PF_SELLS) { if (sec < 0) { sec = s; cc = c; } }
+                c = c + 1;
+            }
+        }
+        s = s + 1;
+    }
+    if (sec < 0) { test_fail("t105_pa_holds_and_guards", "no sell port"); return 1; }
+    store64(st + PA_SECTOR, sec);
+    # holds guard: buy more than capacity (cheap price 1 to dodge credit cap)
+    store64(load64(gx + GX_PORTS) + (sec * pa_port_stride() + 2 + cc * 2) * 8, 1);   # price = 1
+    store64(st + PA_CREDITS, 1000000);
+    if (pa_buy(st, cc, PA_START_HOLDS + 5) != (0 - 6)) { test_fail("t105_pa_holds_and_guards", "holds guard"); return 1; }
+    if (pa_buy(st, cc, PA_START_HOLDS) != 0)           { test_fail("t105_pa_holds_and_guards", "fill holds");  return 1; }
+    if (pa_holds_free(st) != 0)                        { test_fail("t105_pa_holds_and_guards", "free not 0");  return 1; }
+    if (pa_buy(st, 99, 1) != (0 - 1))                  { test_fail("t105_pa_holds_and_guards", "bad comm");    return 1; }
+    test_pass("t105_pa_holds_and_guards");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -2216,6 +2518,18 @@ fn main(): i64 {
     t91_sl_finances();
     t92_sl_price_determinism();
     t93_sl_price_ranges();
+    t94_sl_save_load();
+    t95_sl_travel();
+    t96_sl_shops();
+    t97_sl_combat_bounds();
+    t98_sl_feed_nav();
+    t99_sl_rank_tiers();
+    t100_sl_render_nonempty();
+    t101_pa_new_defaults();
+    t102_pa_galaxy_determinism();
+    t103_pa_galaxy_structure();
+    t104_pa_trade();
+    t105_pa_holds_and_guards();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
