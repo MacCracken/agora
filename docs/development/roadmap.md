@@ -27,12 +27,13 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.9.1** | Guides + examples doc-pass (F) — long-deferred Tier 5 + Tier 6 rewrite + 6 runnable example scripts | ✅ 2026-05-23 |
 | **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
 | **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
+| **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
 
 ---
 
 ## In progress
 
-**No active cycle.** agora 1.0.0 shipped 2026-05-23 — iron-validated on archaemenid; all six v1.0 criteria met. The git tag itself is the user's call per CLAUDE.md "do not commit or push". Post-1.0 directions live below + in [`roadmap-future.md`](roadmap-future.md), all unpinned.
+**No active cycle.** agora 1.1.0 shipped 2026-06-07 — a BBS **door / games** subsystem ([ADR 0009](../adr/0009-door-games-subsystem.md)) with three text games (Smuggler's Ledger, Port Authority, The Handler), each pure-module + unit-tested (80 → 121 tests) and verified playable over telnet. Built on 1.0.0 (2026-05-23, iron-validated on archaemenid). The git tag itself is the user's call per CLAUDE.md "do not commit or push". Post-1.x directions live below + in [`roadmap-future.md`](roadmap-future.md), all unpinned — including the door games' **Persistent Universe** (shared-world multiplayer) + **leaderboards**.
 
 **Deferred from 0.7.0 (still queued; pull when a deployment asks):**
 

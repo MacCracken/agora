@@ -1,0 +1,977 @@
+# handler.cyr — The Handler (1.1.0, ADR 0009).
+#
+# A Cold-War-flavored espionage-deduction door game. You are a section
+# chief running a network of field agents from a desk: read cable
+# traffic, cross-reference the paperwork, and find the mole before the
+# network burns. From a user-supplied v1.0 design spec; adapted to
+# agora (in-process, sigil identity instead of DOS drop files, flat
+# files instead of SQLite, instant render instead of teletype cps).
+#
+# THIS FILE — bite 5: the PURE core. The data model (agents, cities,
+# the cable Registry), deterministic generation (agent init, mole
+# selection, daily cable traffic), and the deduction engine: a cable
+# is "discrepant" when its routing metadata contradicts ground truth
+# (relay city != the agent's true city, a stale date, or an unverified
+# cipher). The mole applies ONE discrepancy class CONSISTENTLY, so its
+# cables accumulate a detectable pattern; honest low-reliability agents
+# only ever throw isolated one-off clerical errors (the false
+# positives). Cross-reference = counting an agent's discrepant cables.
+#
+# The daily loop, the six dispatch actions, the filing room, supervisor
+# confidence / audit, render, the feed machine, save/load, and the
+# standings file land in bite 6. No socket/filesystem here.
+# Depends on door.cyr (rng_*, helpers) included before this file.
+
+# === Config ===
+
+enum THConfig {
+    TH_AGENTS       = 5;
+    TH_CITIES       = 4;
+    TH_DEF_DAYS     = 30;
+    TH_START_CONF   = 70;        # supervisor confidence (0 = recalled)
+    TH_START_BUDGET = 5000;
+    TH_DISPATCH_PTS = 4;         # dispatch points per turn
+    TH_REG_MAX      = 256;       # registry cable ceiling
+    TH_MOLE_CHANCE  = 70;        # % chance a campaign actually has a mole
+    TH_MOLE_RATE    = 70;        # % of the mole's cables that are dirty
+}
+
+# Agent status.
+enum THStatus {
+    AGS_ACTIVE    = 0;
+    AGS_QUIET     = 1;
+    AGS_EXTRACTED = 2;
+    AGS_DEAD      = 3;
+    AGS_FLAGGED   = 4;
+}
+
+# Per-agent record (array of TH_AGENTS inside the state).
+enum AG {
+    AG_TRUST  = 0;     # 0..100
+    AG_STRESS = 8;
+    AG_COVER  = 16;    # cover integrity 0..100
+    AG_CITY   = 24;    # current/true city
+    AG_PAY    = 32;    # pay rate
+    AG_RELIAB = 40;    # reliability (hidden) 0..100 — drives clerical errors
+    AG_MOLE   = 48;    # 1 if turned (hidden)
+    AG_DISC   = 56;    # discrepancy class: 0 city / 1 date / 2 cipher
+    AG_STATUS = 64;    # THStatus
+    AG_SIZE   = 72;
+}
+
+# Cable record (array of TH_REG_MAX in the registry). The routing
+# metadata IS the gameplay — CB_VIA / CB_DATEOK / CB_CIPHER vs the
+# agent's ground truth is what the deduction reads.
+enum CB {
+    CB_AGENT    = 0;
+    CB_DAY      = 8;
+    CB_KIND     = 16;   # 0 report / 1 expense / 2 intercept / 3 memo
+    CB_VIA      = 24;   # claimed relay city
+    CB_TRUECITY = 32;   # agent's actual city that day (ground truth)
+    CB_CIPHER   = 40;   # 1 verified / 0 unverified
+    CB_DATEOK   = 48;   # 1 date matches / 0 stale (24h)
+    CB_AMOUNT   = 56;   # expense amount (0 if N/A)
+    CB_NR       = 64;   # routing number (flavor)
+    CB_ANOM     = 72;   # ground-truth planted-anomaly flag (not shown)
+    CB_SIZE     = 80;
+}
+
+# Per-campaign state.
+enum TH {
+    TH_SEED     = 0;
+    TH_RNG      = 8;     # live generation PRNG (durable)
+    TH_DAY      = 16;
+    TH_MAXDAYS  = 24;
+    TH_CONF     = 32;    # supervisor confidence
+    TH_AUDIT    = 40;    # audit risk
+    TH_BUDGET   = 48;
+    TH_POINTS   = 56;    # dispatch points left this turn
+    TH_MOLEIDX  = 64;    # which agent is the mole (-1 = none)
+    TH_MODE     = 72;
+    TH_OVER     = 80;    # 0 play / 1 finished / 2 recalled (loss)
+    TH_REGCOUNT = 88;    # cables filed in the registry
+    TH_AGENTS_P = 96;    # ptr → TH_AGENTS * AG_SIZE
+    TH_REG_P    = 104;   # ptr → TH_REG_MAX * CB_SIZE
+    # runtime-only (set by th_start; not serialized):
+    TH_SCREEN   = 112;
+    TH_PEND     = 120;
+    TH_CURSOR   = 128;   # cable-reader index
+    TH_MSG      = 136;
+    TH_SIZE     = 144;
+}
+
+# === Tables ===
+
+fn th_city_name(c): i64 {
+    if (c == 0) { return "PRAGUE"; }
+    if (c == 1) { return "VIENNA"; }
+    if (c == 2) { return "BERLIN"; }
+    if (c == 3) { return "BUDAPEST"; }
+    return "?";
+}
+
+fn th_agent_name(i): i64 {
+    if (i == 0) { return "AMBER"; }
+    if (i == 1) { return "COBALT"; }
+    if (i == 2) { return "GARNET"; }
+    if (i == 3) { return "ONYX"; }
+    if (i == 4) { return "JADE"; }
+    return "?";
+}
+
+fn th_kind_name(k): i64 {
+    if (k == 0) { return "FIELD REPORT"; }
+    if (k == 1) { return "EXPENSE FILING"; }
+    if (k == 2) { return "INTERCEPT"; }
+    if (k == 3) { return "SUPERVISOR MEMO"; }
+    return "CABLE";
+}
+
+# === Accessors ===
+
+fn th_agent(st, i): i64 {
+    return load64(st + TH_AGENTS_P) + i * AG_SIZE;
+}
+
+fn th_cable_at(st, i): i64 {
+    return load64(st + TH_REG_P) + i * CB_SIZE;
+}
+
+fn th_registry_count(st): i64 {
+    return load64(st + TH_REGCOUNT);
+}
+
+fn th_has_mole(st): i64 {
+    if (load64(st + TH_MOLEIDX) >= 0) { return 1; }
+    return 0;
+}
+
+# === Construction ===
+
+fn th_new(seed, mode, max_days): i64 {
+    var st = alloc(TH_SIZE);
+    memset(st, 0, TH_SIZE);
+    store64(st + TH_SEED, seed);
+    rng_seed(st + TH_RNG, seed);
+    store64(st + TH_DAY, 1);
+    store64(st + TH_MAXDAYS, max_days);
+    store64(st + TH_CONF, TH_START_CONF);
+    store64(st + TH_AUDIT, 0);
+    store64(st + TH_BUDGET, TH_START_BUDGET);
+    store64(st + TH_POINTS, TH_DISPATCH_PTS);
+    store64(st + TH_MODE, mode);
+    store64(st + TH_OVER, 0);
+    store64(st + TH_REGCOUNT, 0);
+    store64(st + TH_AGENTS_P, alloc(TH_AGENTS * AG_SIZE));
+    store64(st + TH_REG_P, alloc(TH_REG_MAX * CB_SIZE));
+
+    var rng = st + TH_RNG;
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        store64(a + AG_TRUST,  rng_range(rng, 40, 70));
+        store64(a + AG_STRESS, 0);
+        store64(a + AG_COVER,  rng_range(rng, 50, 90));
+        store64(a + AG_CITY,   rng_below(rng, TH_CITIES));
+        store64(a + AG_PAY,    rng_range(rng, 100, 300));
+        store64(a + AG_RELIAB, rng_range(rng, 55, 100));
+        store64(a + AG_MOLE,   0);
+        store64(a + AG_DISC,   rng_below(rng, 3));
+        store64(a + AG_STATUS, AGS_ACTIVE);
+        i = i + 1;
+    }
+
+    var mole = 0 - 1;
+    if (rng_chance(rng, TH_MOLE_CHANCE) == 1) {
+        mole = rng_below(rng, TH_AGENTS);
+        store64(th_agent(st, mole) + AG_MOLE, 1);
+    }
+    store64(st + TH_MOLEIDX, mole);
+    return st;
+}
+
+# === Daily cable generation ===
+#
+# Each active agent files one cable for the current day. Cables default
+# clean (relay = true city, current date, cipher verified). The mole
+# dirties TH_MOLE_RATE% of its cables with its FIXED discrepancy class
+# (a consistent pattern). Honest agents throw a rare one-off clerical
+# error scaled by (100 - reliability) — a random class, never a
+# pattern (the false positives). Deterministic on the live PRNG.
+fn th_gen_day(st): i64 {
+    var rng = st + TH_RNG;
+    var day = load64(st + TH_DAY);
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        if (load64(a + AG_STATUS) == AGS_ACTIVE) {
+            var n = load64(st + TH_REGCOUNT);
+            if (n < TH_REG_MAX) {
+                var cb = th_cable_at(st, n);
+                var truecity = load64(a + AG_CITY);
+                store64(cb + CB_AGENT, i);
+                store64(cb + CB_DAY, day);
+                store64(cb + CB_KIND, rng_below(rng, 4));
+                store64(cb + CB_VIA, truecity);
+                store64(cb + CB_TRUECITY, truecity);
+                store64(cb + CB_CIPHER, 1);
+                store64(cb + CB_DATEOK, 1);
+                store64(cb + CB_NR, 400 + n);
+                var amt = 0;
+                if (load64(cb + CB_KIND) == 1) { amt = rng_range(rng, 50, 500); }
+                store64(cb + CB_AMOUNT, amt);
+                store64(cb + CB_ANOM, 0);
+
+                var anomalous = 0;
+                var dclass = load64(a + AG_DISC);
+                if (load64(a + AG_MOLE) == 1) {
+                    if (rng_chance(rng, TH_MOLE_RATE) == 1) { anomalous = 1; }
+                } else {
+                    var clerical = (100 - load64(a + AG_RELIAB)) / 6;
+                    if (rng_chance(rng, clerical) == 1) {
+                        anomalous = 1;
+                        dclass = rng_below(rng, 3);
+                    }
+                }
+                if (anomalous == 1) {
+                    store64(cb + CB_ANOM, 1);
+                    if (dclass == 0) { store64(cb + CB_VIA, (truecity + 1) % TH_CITIES); }
+                    if (dclass == 1) { store64(cb + CB_DATEOK, 0); }
+                    if (dclass == 2) { store64(cb + CB_CIPHER, 0); }
+                }
+                store64(st + TH_REGCOUNT, n + 1);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === Deduction engine ===
+#
+# A cable is discrepant when its routing metadata contradicts ground
+# truth: relay city != true city, OR a stale date, OR an unverified
+# cipher. This is exactly what the player's CROSS-REFERENCE action
+# surfaces by comparing a cable's header against the agent's known
+# location / the codebook state.
+fn th_cable_discrepant(cb): i64 {
+    if (load64(cb + CB_VIA) != load64(cb + CB_TRUECITY)) { return 1; }
+    if (load64(cb + CB_DATEOK) == 0) { return 1; }
+    if (load64(cb + CB_CIPHER) == 0) { return 1; }
+    return 0;
+}
+
+# Suspicion = how many of an agent's filed cables are discrepant. The
+# mole's count climbs; honest agents stay near zero. This is the number
+# the cross-reference action reports and the player flags on.
+fn th_agent_suspicion(st, agent): i64 {
+    var count = 0;
+    var i = 0;
+    var n = load64(st + TH_REGCOUNT);
+    while (i < n) {
+        var cb = th_cable_at(st, i);
+        if (load64(cb + CB_AGENT) == agent) {
+            if (th_cable_discrepant(cb) == 1) { count = count + 1; }
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+# Count of an agent's cables filed (any). Lets the UI show "N of M
+# discrepant" so a long-lived honest agent isn't mistaken for clean.
+fn th_agent_cable_count(st, agent): i64 {
+    var count = 0;
+    var i = 0;
+    var n = load64(st + TH_REGCOUNT);
+    while (i < n) {
+        if (load64(th_cable_at(st, i) + CB_AGENT) == agent) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# ============================================================
+# Bite 6 — daily loop, dispatch actions, deduction/accuse, the
+# feed-line screen machine, render, save/load, standings line.
+# ============================================================
+
+enum HScreen {
+    HSCR_MAIN     = 0;
+    HSCR_CABLES   = 1;
+    HSCR_READ     = 2;
+    HSCR_ROSTER   = 3;
+    HSCR_XREF     = 4;
+    HSCR_ORDERS   = 5;    # pick an agent to order
+    HSCR_AGENTACT = 6;    # move / extract / fund the picked agent
+    HSCR_MOVECITY = 7;
+    HSCR_FUNDAMT  = 8;
+    HSCR_ACCUSE   = 9;    # name the mole
+    HSCR_OVER     = 10;
+}
+
+enum THCost {
+    TH_MOVE_COST    = 200;
+    TH_EXTRACT_COST = 800;
+}
+
+enum THSave {
+    TH_SAVE_CAP = 32768;
+}
+
+fn th_msg(st, s): i64 {
+    var m = load64(st + TH_MSG);
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+# Cables filed for the current day (the queue), and the registry index
+# of the idx-th such cable (or -1).
+fn th_today_count(st): i64 {
+    var day = load64(st + TH_DAY);
+    var n = load64(st + TH_REGCOUNT);
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (load64(th_cable_at(st, i) + CB_DAY) == day) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn th_nth_today(st, idx): i64 {
+    var day = load64(st + TH_DAY);
+    var n = load64(st + TH_REGCOUNT);
+    var seen = 0;
+    var i = 0;
+    var result = 0 - 1;
+    while (i < n) {
+        if (load64(th_cable_at(st, i) + CB_DAY) == day) {
+            if (seen == idx) { result = i; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+# === Dispatch actions ===
+# Status: 0 ok / -1 bad arg / -2 no points / -3 no budget / -4 agent not active.
+
+fn th_order_move(st, agent, city): i64 {
+    if (agent < 0)          { return 0 - 1; }
+    if (agent >= TH_AGENTS) { return 0 - 1; }
+    if (city < 0)           { return 0 - 1; }
+    if (city >= TH_CITIES)  { return 0 - 1; }
+    var a = th_agent(st, agent);
+    if (load64(a + AG_STATUS) != AGS_ACTIVE)  { return 0 - 4; }
+    if (load64(st + TH_POINTS) <= 0)          { return 0 - 2; }
+    if (TH_MOVE_COST > load64(st + TH_BUDGET)){ return 0 - 3; }
+    store64(st + TH_BUDGET, load64(st + TH_BUDGET) - TH_MOVE_COST);
+    store64(st + TH_POINTS, load64(st + TH_POINTS) - 1);
+    store64(a + AG_CITY, city);
+    return 0;
+}
+
+fn th_order_extract(st, agent): i64 {
+    if (agent < 0)          { return 0 - 1; }
+    if (agent >= TH_AGENTS) { return 0 - 1; }
+    var a = th_agent(st, agent);
+    if (load64(a + AG_STATUS) != AGS_ACTIVE)     { return 0 - 4; }
+    if (load64(st + TH_POINTS) <= 0)             { return 0 - 2; }
+    if (TH_EXTRACT_COST > load64(st + TH_BUDGET)){ return 0 - 3; }
+    store64(st + TH_BUDGET, load64(st + TH_BUDGET) - TH_EXTRACT_COST);
+    store64(st + TH_POINTS, load64(st + TH_POINTS) - 1);
+    store64(a + AG_STATUS, AGS_EXTRACTED);
+    return 0;
+}
+
+# Authorize funds to an agent: spends budget + a dispatch point, lifts
+# trust. Over 3x the agent's pay rate is a sloppy justification and
+# raises audit risk.
+fn th_authorize_funds(st, agent, amount): i64 {
+    if (agent < 0)          { return 0 - 1; }
+    if (agent >= TH_AGENTS) { return 0 - 1; }
+    if (amount <= 0)        { return 0 - 1; }
+    if (load64(st + TH_POINTS) <= 0)     { return 0 - 2; }
+    if (amount > load64(st + TH_BUDGET)) { return 0 - 3; }
+    var a = th_agent(st, agent);
+    store64(st + TH_BUDGET, load64(st + TH_BUDGET) - amount);
+    store64(st + TH_POINTS, load64(st + TH_POINTS) - 1);
+    store64(a + AG_TRUST, iclamp(load64(a + AG_TRUST) + amount / 100, 0, 100));
+    if (amount > load64(a + AG_PAY) * 3) {
+        store64(st + TH_AUDIT, iclamp(load64(st + TH_AUDIT) + 15, 0, 100));
+    }
+    return 0;
+}
+
+# Flag an agent as the mole. Correct → confidence surges, mole burned
+# (1). Wrong → an honest agent is burned, confidence collapses (0); a
+# collapse to 0 ends the campaign (recalled). Caller passes a valid
+# agent index.
+fn th_accuse(st, agent): i64 {
+    var a = th_agent(st, agent);
+    store64(a + AG_STATUS, AGS_FLAGGED);
+    if (load64(a + AG_MOLE) == 1) {
+        store64(st + TH_CONF, iclamp(load64(st + TH_CONF) + 25, 0, 100));
+        store64(st + TH_MOLEIDX, 0 - 1);
+        return 1;
+    }
+    store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - 30, 0, 100));
+    if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); }
+    return 0;
+}
+
+# === Day rollover ===
+#
+# An unflagged mole slowly erodes supervisor confidence; high audit
+# risk triggers scrutiny that also costs confidence. Confidence at 0 =
+# recalled (loss). Past the quarter = finished. Otherwise refill
+# dispatch points and file the next day's traffic.
+fn th_next_day(st): i64 {
+    if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); return 0; }
+    if (load64(st + TH_MOLEIDX) >= 0) {
+        store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - 3, 0, 100));
+    }
+    if (load64(st + TH_AUDIT) >= 80) {
+        store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - 5, 0, 100));
+        store64(st + TH_AUDIT, iclamp(load64(st + TH_AUDIT) - 20, 0, 100));
+    }
+    if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); return 0; }
+    store64(st + TH_DAY, load64(st + TH_DAY) + 1);
+    store64(st + TH_POINTS, TH_DISPATCH_PTS);
+    if (load64(st + TH_DAY) > load64(st + TH_MAXDAYS)) { store64(st + TH_OVER, 1); return 0; }
+    th_gen_day(st);
+    return 0;
+}
+
+# === Win / score / rank ===
+
+fn th_is_over(st): i64 {
+    if (load64(st + TH_OVER) != 0) { return 1; }
+    return 0;
+}
+
+# Network value: living-agent trust + half-trust for safely extracted
+# agents + supervisor confidence. Recalled = 0.
+fn th_score(st): i64 {
+    if (load64(st + TH_OVER) == 2) { return 0; }
+    var s = 0;
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        var status = load64(a + AG_STATUS);
+        if (status == AGS_ACTIVE)    { s = s + load64(a + AG_TRUST); }
+        if (status == AGS_EXTRACTED) { s = s + load64(a + AG_TRUST) / 2; }
+        i = i + 1;
+    }
+    s = s + load64(st + TH_CONF) * 5;
+    return s;
+}
+
+fn th_rank(score): i64 {
+    if (score < 150) { return "Probationary"; }
+    if (score < 350) { return "Handler"; }
+    if (score < 600) { return "Senior Handler"; }
+    if (score < 900) { return "Spymaster"; }
+    return "Director's Chair";
+}
+
+# Format one standings line "<handle>\t<score>\t<rank>\n" into buf
+# (pure; main.cyr appends it to the shared standings file with flock).
+fn th_format_standing(st, handle, buf): i64 {
+    var pos = 0;
+    pos = emit_cstr(buf, pos, handle);
+    store8(buf + pos, 9); pos = pos + 1;
+    pos = emit_int(buf, pos, th_score(st));
+    store8(buf + pos, 9); pos = pos + 1;
+    pos = emit_cstr(buf, pos, th_rank(th_score(st)));
+    store8(buf + pos, 10); pos = pos + 1;
+    return pos;
+}
+
+# === Save / load ===
+
+fn th_save_format(st, buf, cap): i64 {
+    var pos = 0;
+    memcpy(buf + pos, "THDG1\n", 6); pos = pos + 6;
+    pos = save_put_i64(buf, pos, load64(st + TH_SEED));
+    pos = save_put_i64(buf, pos, load64(st + TH_RNG));
+    pos = save_put_i64(buf, pos, load64(st + TH_DAY));
+    pos = save_put_i64(buf, pos, load64(st + TH_MAXDAYS));
+    pos = save_put_i64(buf, pos, load64(st + TH_CONF));
+    pos = save_put_i64(buf, pos, load64(st + TH_AUDIT));
+    pos = save_put_i64(buf, pos, load64(st + TH_BUDGET));
+    pos = save_put_i64(buf, pos, load64(st + TH_POINTS));
+    pos = save_put_i64(buf, pos, load64(st + TH_MOLEIDX));
+    pos = save_put_i64(buf, pos, load64(st + TH_MODE));
+    pos = save_put_i64(buf, pos, load64(st + TH_OVER));
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        pos = save_put_i64(buf, pos, load64(a + AG_TRUST));
+        pos = save_put_i64(buf, pos, load64(a + AG_STRESS));
+        pos = save_put_i64(buf, pos, load64(a + AG_COVER));
+        pos = save_put_i64(buf, pos, load64(a + AG_CITY));
+        pos = save_put_i64(buf, pos, load64(a + AG_PAY));
+        pos = save_put_i64(buf, pos, load64(a + AG_RELIAB));
+        pos = save_put_i64(buf, pos, load64(a + AG_MOLE));
+        pos = save_put_i64(buf, pos, load64(a + AG_DISC));
+        pos = save_put_i64(buf, pos, load64(a + AG_STATUS));
+        i = i + 1;
+    }
+    var n = load64(st + TH_REGCOUNT);
+    pos = save_put_i64(buf, pos, n);
+    var j = 0;
+    while (j < n) {
+        var cb = th_cable_at(st, j);
+        pos = save_put_i64(buf, pos, load64(cb + CB_AGENT));
+        pos = save_put_i64(buf, pos, load64(cb + CB_DAY));
+        pos = save_put_i64(buf, pos, load64(cb + CB_KIND));
+        pos = save_put_i64(buf, pos, load64(cb + CB_VIA));
+        pos = save_put_i64(buf, pos, load64(cb + CB_TRUECITY));
+        pos = save_put_i64(buf, pos, load64(cb + CB_CIPHER));
+        pos = save_put_i64(buf, pos, load64(cb + CB_DATEOK));
+        pos = save_put_i64(buf, pos, load64(cb + CB_AMOUNT));
+        pos = save_put_i64(buf, pos, load64(cb + CB_NR));
+        pos = save_put_i64(buf, pos, load64(cb + CB_ANOM));
+        j = j + 1;
+    }
+    return pos;
+}
+
+fn th_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "THDG1\n", 6) == 0) { return 0; }
+    var st = alloc(TH_SIZE);
+    memset(st, 0, TH_SIZE);
+    store64(st + TH_AGENTS_P, alloc(TH_AGENTS * AG_SIZE));
+    store64(st + TH_REG_P, alloc(TH_REG_MAX * CB_SIZE));
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + TH_SEED,    save_get_i64(buf, len, cur));
+    store64(st + TH_RNG,     save_get_i64(buf, len, cur));
+    store64(st + TH_DAY,     save_get_i64(buf, len, cur));
+    store64(st + TH_MAXDAYS, save_get_i64(buf, len, cur));
+    store64(st + TH_CONF,    save_get_i64(buf, len, cur));
+    store64(st + TH_AUDIT,   save_get_i64(buf, len, cur));
+    store64(st + TH_BUDGET,  save_get_i64(buf, len, cur));
+    store64(st + TH_POINTS,  save_get_i64(buf, len, cur));
+    store64(st + TH_MOLEIDX, save_get_i64(buf, len, cur));
+    store64(st + TH_MODE,    save_get_i64(buf, len, cur));
+    store64(st + TH_OVER,    save_get_i64(buf, len, cur));
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        store64(a + AG_TRUST,  save_get_i64(buf, len, cur));
+        store64(a + AG_STRESS, save_get_i64(buf, len, cur));
+        store64(a + AG_COVER,  save_get_i64(buf, len, cur));
+        store64(a + AG_CITY,   save_get_i64(buf, len, cur));
+        store64(a + AG_PAY,    save_get_i64(buf, len, cur));
+        store64(a + AG_RELIAB, save_get_i64(buf, len, cur));
+        store64(a + AG_MOLE,   save_get_i64(buf, len, cur));
+        store64(a + AG_DISC,   save_get_i64(buf, len, cur));
+        store64(a + AG_STATUS, save_get_i64(buf, len, cur));
+        i = i + 1;
+    }
+    var n = save_get_i64(buf, len, cur);
+    store64(st + TH_REGCOUNT, n);
+    var j = 0;
+    while (j < n) {
+        var cb = th_cable_at(st, j);
+        store64(cb + CB_AGENT,    save_get_i64(buf, len, cur));
+        store64(cb + CB_DAY,      save_get_i64(buf, len, cur));
+        store64(cb + CB_KIND,     save_get_i64(buf, len, cur));
+        store64(cb + CB_VIA,      save_get_i64(buf, len, cur));
+        store64(cb + CB_TRUECITY, save_get_i64(buf, len, cur));
+        store64(cb + CB_CIPHER,   save_get_i64(buf, len, cur));
+        store64(cb + CB_DATEOK,   save_get_i64(buf, len, cur));
+        store64(cb + CB_AMOUNT,   save_get_i64(buf, len, cur));
+        store64(cb + CB_NR,       save_get_i64(buf, len, cur));
+        store64(cb + CB_ANOM,     save_get_i64(buf, len, cur));
+        j = j + 1;
+    }
+    return st;
+}
+
+# === Runtime init ===
+
+fn th_start(st): i64 {
+    store64(st + TH_PEND, 0);
+    store64(st + TH_CURSOR, 0);
+    store64(st + TH_MSG, alloc(256));
+    store8(load64(st + TH_MSG), 0);
+    store64(st + TH_SCREEN, HSCR_MAIN);
+    if (load64(st + TH_REGCOUNT) == 0) { th_gen_day(st); }
+    if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); }
+    return 0;
+}
+
+# === Render ===
+
+fn th_render_status(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "== THE HANDLER ==");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Day ");
+    pos = emit_int(buf, pos, load64(st + TH_DAY));
+    pos = emit_cstr(buf, pos, "/");
+    pos = emit_int(buf, pos, load64(st + TH_MAXDAYS));
+    pos = emit_cstr(buf, pos, "  Confidence ");
+    pos = emit_int(buf, pos, load64(st + TH_CONF));
+    pos = emit_cstr(buf, pos, "%  Audit ");
+    pos = emit_int(buf, pos, load64(st + TH_AUDIT));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Budget ");
+    pos = emit_int(buf, pos, load64(st + TH_BUDGET));
+    pos = emit_cstr(buf, pos, "  Dispatch pts ");
+    pos = emit_int(buf, pos, load64(st + TH_POINTS));
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn th_render_roster(st, buf, pos): i64 {
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, i + 1);
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_cstr(buf, pos, th_agent_name(i));
+        pos = emit_cstr(buf, pos, "  ");
+        pos = emit_cstr(buf, pos, th_city_name(load64(a + AG_CITY)));
+        pos = emit_cstr(buf, pos, "  trust ");
+        pos = emit_int(buf, pos, load64(a + AG_TRUST));
+        var status = load64(a + AG_STATUS);
+        if (status == AGS_EXTRACTED) { pos = emit_cstr(buf, pos, " [OUT]"); }
+        if (status == AGS_DEAD)      { pos = emit_cstr(buf, pos, " [DEAD]"); }
+        if (status == AGS_FLAGGED)   { pos = emit_cstr(buf, pos, " [FLAGGED]"); }
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn th_render_xref(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "CROSS-REFERENCE  (discrepant / filed):");
+    pos = emit_crlf(buf, pos);
+    var i = 0;
+    while (i < TH_AGENTS) {
+        pos = emit_cstr(buf, pos, "  ");
+        pos = emit_cstr(buf, pos, th_agent_name(i));
+        pos = emit_cstr(buf, pos, "  ");
+        pos = emit_int(buf, pos, th_agent_suspicion(st, i));
+        pos = emit_cstr(buf, pos, " / ");
+        pos = emit_int(buf, pos, th_agent_cable_count(st, i));
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn th_render_cables(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "CABLE QUEUE - day ");
+    pos = emit_int(buf, pos, load64(st + TH_DAY));
+    pos = emit_crlf(buf, pos);
+    var cnt = th_today_count(st);
+    var idx = 0;
+    while (idx < cnt) {
+        var cb = th_cable_at(st, th_nth_today(st, idx));
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, idx + 1);
+        pos = emit_cstr(buf, pos, ") ");
+        pos = emit_cstr(buf, pos, th_agent_name(load64(cb + CB_AGENT)));
+        pos = emit_cstr(buf, pos, " - ");
+        pos = emit_cstr(buf, pos, th_kind_name(load64(cb + CB_KIND)));
+        pos = emit_crlf(buf, pos);
+        idx = idx + 1;
+    }
+    return pos;
+}
+
+fn th_render_cable(st, buf, pos, cb): i64 {
+    pos = emit_cstr(buf, pos, "-----------------------------------------");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, " NR ");
+    pos = emit_int(buf, pos, load64(cb + CB_NR));
+    pos = emit_cstr(buf, pos, "   FROM ");
+    pos = emit_cstr(buf, pos, th_agent_name(load64(cb + CB_AGENT)));
+    pos = emit_cstr(buf, pos, "   ");
+    pos = emit_cstr(buf, pos, th_kind_name(load64(cb + CB_KIND)));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, " VIA ");
+    pos = emit_cstr(buf, pos, th_city_name(load64(cb + CB_VIA)));
+    pos = emit_cstr(buf, pos, "   DAY ");
+    pos = emit_int(buf, pos, load64(cb + CB_DAY));
+    if (load64(cb + CB_DATEOK) == 0) { pos = emit_cstr(buf, pos, " (STALE)"); }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, " CIPHER ");
+    if (load64(cb + CB_CIPHER) == 1) { pos = emit_cstr(buf, pos, "VERIFIED"); }
+    else                             { pos = emit_cstr(buf, pos, "UNVERIFIED"); }
+    if (load64(cb + CB_AMOUNT) > 0) {
+        pos = emit_cstr(buf, pos, "   AMT ");
+        pos = emit_int(buf, pos, load64(cb + CB_AMOUNT));
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "-----------------------------------------");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn th_render(st, buf, cap): i64 {
+    var pos = 0;
+    var screen = load64(st + TH_SCREEN);
+    pos = th_render_status(st, buf, pos);
+    pos = emit_crlf(buf, pos);
+
+    if (screen == HSCR_OVER) {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "-- CASE CLOSED --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        if (load64(st + TH_OVER) == 2) {
+            pos = emit_cstr(buf, pos, "RECALLED. The Director has relieved you.");
+            pos = emit_crlf(buf, pos);
+        }
+        var score = th_score(st);
+        pos = emit_cstr(buf, pos, "Network value: ");
+        pos = emit_int(buf, pos, score);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Standing: ");
+        pos = emit_cstr(buf, pos, th_rank(score));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        return pos;
+    }
+    if (screen == HSCR_MAIN) {
+        pos = emit_cstr(buf, pos, "Cables waiting: ");
+        pos = emit_int(buf, pos, th_today_count(st));
+        pos = emit_crlf(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[C]ables [R]oster [X]cross-ref [O]rders [A]ccuse [E]nd-day [Q]uit");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_CABLES) {
+        pos = th_render_cables(st, buf, pos);
+        pos = emit_cstr(buf, pos, "Read which? (number, x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_READ) {
+        var ri = th_nth_today(st, load64(st + TH_CURSOR));
+        if (ri >= 0) { pos = th_render_cable(st, buf, pos, th_cable_at(st, ri)); }
+        pos = emit_cstr(buf, pos, "[N]ext   [X] back");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_ROSTER) {
+        pos = th_render_roster(st, buf, pos);
+        pos = emit_cstr(buf, pos, "(any key back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_XREF) {
+        pos = th_render_xref(st, buf, pos);
+        pos = emit_cstr(buf, pos, "(any key back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_ORDERS) {
+        pos = th_render_roster(st, buf, pos);
+        pos = emit_cstr(buf, pos, "Order which agent? 1-5 (x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_AGENTACT) {
+        pos = emit_cstr(buf, pos, "Agent ");
+        pos = emit_cstr(buf, pos, th_agent_name(load64(st + TH_PEND)));
+        pos = emit_cstr(buf, pos, ":  [M]ove  [E]xtract  [F]und   (x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_MOVECITY) {
+        var c = 0;
+        while (c < TH_CITIES) {
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_int(buf, pos, c + 1);
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_cstr(buf, pos, th_city_name(c));
+            pos = emit_crlf(buf, pos);
+            c = c + 1;
+        }
+        pos = emit_cstr(buf, pos, "Relocate to? 1-4 (x back)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_FUNDAMT) {
+        pos = emit_cstr(buf, pos, "Authorize how many credits? (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
+    if (screen == HSCR_ACCUSE) {
+        pos = th_render_roster(st, buf, pos);
+        pos = emit_sgr(buf, pos, 31);
+        pos = emit_cstr(buf, pos, "Name the mole. Be certain. 1-5 (x back)");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+
+    var msg = load64(st + TH_MSG);
+    if ((load8(msg) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, msg);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+# === Feed-line screen machine ===
+
+fn th_feed_main(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 113) { return 1; }                                       # q
+    if (k == 99)  { store64(st + TH_SCREEN, HSCR_CABLES); return 0; } # c
+    if (k == 114) { store64(st + TH_SCREEN, HSCR_ROSTER); return 0; } # r
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_XREF);   return 0; } # x
+    if (k == 111) { store64(st + TH_SCREEN, HSCR_ORDERS); return 0; } # o
+    if (k == 97)  { store64(st + TH_SCREEN, HSCR_ACCUSE); return 0; } # a
+    if (k == 101) {                                                   # e end day
+        th_next_day(st);
+        if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
+        th_msg(st, "A new day. Overnight traffic filed.");
+        return 0;
+    }
+    th_msg(st, "Unknown command.");
+    return 0;
+}
+
+fn th_feed_cables(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 57) {
+        var idx = k - 49;
+        if (idx < th_today_count(st)) {
+            store64(st + TH_CURSOR, idx);
+            store64(st + TH_SCREEN, HSCR_READ);
+            return 0;
+        }
+    } }
+    th_msg(st, "No such cable.");
+    return 0;
+}
+
+fn th_feed_read(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 110) {
+        var nxt = load64(st + TH_CURSOR) + 1;
+        if (nxt < th_today_count(st)) { store64(st + TH_CURSOR, nxt); return 0; }
+        store64(st + TH_SCREEN, HSCR_CABLES);
+        return 0;
+    }
+    store64(st + TH_SCREEN, HSCR_CABLES);
+    return 0;
+}
+
+fn th_feed_roster(st, line, len): i64 {
+    store64(st + TH_SCREEN, HSCR_MAIN);
+    return 0;
+}
+
+fn th_feed_xref(st, line, len): i64 {
+    store64(st + TH_SCREEN, HSCR_MAIN);
+    return 0;
+}
+
+fn th_feed_orders(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 53) {
+        store64(st + TH_PEND, k - 49);
+        store64(st + TH_SCREEN, HSCR_AGENTACT);
+        return 0;
+    } }
+    th_msg(st, "Pick an agent 1-5, or x.");
+    return 0;
+}
+
+fn th_feed_agentact(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k == 109) { store64(st + TH_SCREEN, HSCR_MOVECITY); return 0; }   # m
+    if (k == 101) {                                                       # e extract
+        var rc = th_order_extract(st, load64(st + TH_PEND));
+        if (rc == 0)       { th_msg(st, "Extraction ordered."); }
+        if (rc == (0 - 2)) { th_msg(st, "No dispatch points left."); }
+        if (rc == (0 - 3)) { th_msg(st, "Not enough budget."); }
+        if (rc == (0 - 4)) { th_msg(st, "Agent not active."); }
+        store64(st + TH_SCREEN, HSCR_MAIN);
+        return 0;
+    }
+    if (k == 102) { store64(st + TH_SCREEN, HSCR_FUNDAMT); return 0; }    # f
+    th_msg(st, "[M]ove, [E]xtract, [F]und, or x.");
+    return 0;
+}
+
+fn th_feed_movecity(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 52) {
+        var rc = th_order_move(st, load64(st + TH_PEND), k - 49);
+        if (rc == 0)       { th_msg(st, "Dispatch order sent."); }
+        if (rc == (0 - 2)) { th_msg(st, "No dispatch points left."); }
+        if (rc == (0 - 3)) { th_msg(st, "Not enough budget."); }
+        if (rc == (0 - 4)) { th_msg(st, "Agent not active."); }
+        store64(st + TH_SCREEN, HSCR_MAIN);
+        return 0;
+    } }
+    th_msg(st, "Pick a city 1-4, or x.");
+    return 0;
+}
+
+fn th_feed_fundamt(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    if (amt < 0) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    var rc = th_authorize_funds(st, load64(st + TH_PEND), amt);
+    if (rc == 0)       { th_msg(st, "Funds authorized."); }
+    if (rc == (0 - 1)) { th_msg(st, "Invalid amount."); }
+    if (rc == (0 - 2)) { th_msg(st, "No dispatch points left."); }
+    if (rc == (0 - 3)) { th_msg(st, "Not enough budget."); }
+    store64(st + TH_SCREEN, HSCR_MAIN);
+    return 0;
+}
+
+fn th_feed_accuse(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
+    if (k >= 49) { if (k <= 53) {
+        var correct = th_accuse(st, k - 49);
+        if (correct == 1) { th_msg(st, "CONFIRMED. The mole is burned. The network holds."); }
+        else              { th_msg(st, "WRONG. An honest agent burned; the Director is furious."); }
+        if (load64(st + TH_OVER) == 2) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
+        store64(st + TH_SCREEN, HSCR_MAIN);
+        return 0;
+    } }
+    th_msg(st, "Name the mole 1-5, or x.");
+    return 0;
+}
+
+# Dispatch one input line to the current screen. 0 stay / 1 exit.
+fn th_feed(st, line, len): i64 {
+    th_msg(st, "");
+    var screen = load64(st + TH_SCREEN);
+    if (screen == HSCR_OVER)     { return 1; }
+    if (screen == HSCR_MAIN)     { return th_feed_main(st, line, len); }
+    if (screen == HSCR_CABLES)   { return th_feed_cables(st, line, len); }
+    if (screen == HSCR_READ)     { return th_feed_read(st, line, len); }
+    if (screen == HSCR_ROSTER)   { return th_feed_roster(st, line, len); }
+    if (screen == HSCR_XREF)     { return th_feed_xref(st, line, len); }
+    if (screen == HSCR_ORDERS)   { return th_feed_orders(st, line, len); }
+    if (screen == HSCR_AGENTACT) { return th_feed_agentact(st, line, len); }
+    if (screen == HSCR_MOVECITY) { return th_feed_movecity(st, line, len); }
+    if (screen == HSCR_FUNDAMT)  { return th_feed_fundamt(st, line, len); }
+    if (screen == HSCR_ACCUSE)   { return th_feed_accuse(st, line, len); }
+    return 0;
+}

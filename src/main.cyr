@@ -22,6 +22,7 @@ include "src/account.cyr"
 include "src/door.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
+include "src/handler.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -53,6 +54,7 @@ enum SessMode {
     MODE_POSTING_SUBJECT  = 1;
     MODE_POSTING          = 2;
     MODE_LOGIN_AWAIT_SIG  = 3;   # M6-C: parked challenge, waiting for `auth:`
+    MODE_DOOR             = 4;   # 1.1.0: in a door game; lines route to the game
 }
 
 # Operator-supplied MOTD, loaded once in cmd_serve before the
@@ -95,6 +97,19 @@ var g_session_handle = 0;             # alloc'd in handle_client (ACCOUNT_HANDLE
 var g_login_fp    = 0;                # alloc'd in handle_client (ACCOUNT_FP_BUF_BYTES)
 var g_login_nonce = 0;                # alloc'd in handle_client (ACCOUNT_NONCE_BUF_BYTES)
 
+# 1.1.0 door subsystem (ADR 0009). Active game id (DoorGame enum),
+# heap pointer to the running game state, and the play mode (DoorMode).
+# Per-session in effect via fork-per-accept, like g_session_* above;
+# initialized in handle_client. GAME_NONE = no game active.
+var g_door_game  = 0;
+var g_door_state = 0;
+var g_door_mode  = 0;
+
+enum DoorRuntime {
+    DOOR_FRAME_CAP = 8192;        # per-frame render buffer
+    DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
+}
+
 # 0.7.0 audit M6 — explicit 30 s deadline on a parked login challenge.
 # Set to `clock_now_ms()` when `login` parks the nonce; checked at
 # MODE_LOGIN_AWAIT_SIG dispatch. Independent of `RECV_TIMEOUT_SECS`
@@ -107,7 +122,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.0.0 — civic-marketplace BBS for AGNOS; iron-validated on archaemenid");
+    println("v1.1.0 — civic-marketplace BBS for AGNOS; now with door games");
     return 0;
 }
 
@@ -285,6 +300,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
+        send_str(cfd, "  play <game>     door game: smuggler | port | handler  [practice|solo]\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -637,6 +653,100 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         return MODE_COMMAND;
     }
 
+    # 1.1.0: `play <game> [mode]` — launch a door game (ADR 0009).
+    if (line_has_prefix(line, len, "play") != 0) {
+        # token 1 = game name, token 2 = mode (optional, default practice)
+        var p = 4;
+        var sk = 1;
+        while (sk == 1) {
+            if (p >= len) { sk = 0; }
+            else { if ((load8(line + p) & 0xFF) != 32) { sk = 0; } else { p = p + 1; } }
+        }
+        var gstart = p;
+        var ge = 1;
+        while (ge == 1) {
+            if (p >= len) { ge = 0; }
+            else { if ((load8(line + p) & 0xFF) == 32) { ge = 0; } else { p = p + 1; } }
+        }
+        var glen = p - gstart;
+        if (glen <= 0) {
+            send_str(cfd, "usage: play <smuggler|port|handler> [practice|solo]\r\n");
+            return MODE_COMMAND;
+        }
+        if (glen > 15) { glen = 15; }
+        var gbuf = alloc(16);
+        memcpy(gbuf, line + gstart, glen);
+        store8(gbuf + glen, 0);
+        var sk2 = 1;
+        while (sk2 == 1) {
+            if (p >= len) { sk2 = 0; }
+            else { if ((load8(line + p) & 0xFF) != 32) { sk2 = 0; } else { p = p + 1; } }
+        }
+        var mstart = p;
+        var me = 1;
+        while (me == 1) {
+            if (p >= len) { me = 0; }
+            else { if ((load8(line + p) & 0xFF) == 32) { me = 0; } else { p = p + 1; } }
+        }
+        var mlen = p - mstart;
+        if (mlen > 15) { mlen = 15; }
+        var mbuf = alloc(16);
+        if (mlen > 0) { memcpy(mbuf, line + mstart, mlen); }
+        store8(mbuf + mlen, 0);
+
+        var game = GAME_NONE;
+        if (streq(gbuf, "smuggler") != 0) { game = GAME_SMUGGLER; }
+        if (streq(gbuf, "port") != 0)     { game = GAME_PORT; }
+        if (streq(gbuf, "handler") != 0)  { game = GAME_HANDLER; }
+        if (game == GAME_NONE) {
+            send_str(cfd, "unknown game. try: play smuggler | play port | play handler\r\n");
+            return MODE_COMMAND;
+        }
+        var dmode = DOOR_PRACTICE;
+        if (streq(mbuf, "solo") != 0)     { dmode = DOOR_SOLO; }
+        if (streq(mbuf, "universe") != 0) { dmode = DOOR_UNIVERSE; }
+
+        if (dmode == DOOR_UNIVERSE) {
+            send_str(cfd, "Persistent Universe (shared multiplayer) is on the roadmap — not in this build.\r\n");
+            send_str(cfd, "Play 'practice' (ephemeral) or 'solo' (saved) for now.\r\n");
+            return MODE_COMMAND;
+        }
+        if (dmode == DOOR_SOLO) {
+            if ((load8(g_session_fp) & 0xFF) == 0) {
+                send_str(cfd, "solo play saves progress — log in first ('login <handle>').\r\n");
+                return MODE_COMMAND;
+            }
+        }
+
+        g_door_game = game;
+        g_door_mode = dmode;
+        var seed = clock_now_ns();
+        var loaded = 0;
+        if (dmode == DOOR_SOLO) {
+            var nm = door_game_name(game);
+            if (door_save_exists(g_store_buf, g_session_fp, nm) == 1) {
+                var lbuf = alloc(DOOR_SAVE_CAP);
+                var ln = door_save_read(g_store_buf, g_session_fp, nm, lbuf, DOOR_SAVE_CAP);
+                if (ln > 0) {
+                    if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(lbuf, ln); }
+                    if (game == GAME_PORT)     { g_door_state = pa_load_parse(lbuf, ln); }
+                    if (game == GAME_HANDLER)  { g_door_state = th_load_parse(lbuf, ln); }
+                    if (g_door_state != 0) { loaded = 1; }
+                }
+            }
+        }
+        if (loaded == 0) {
+            if (game == GAME_SMUGGLER) { g_door_state = sl_new(seed, dmode, SL_DEF_DAYS); }
+            if (game == GAME_PORT)     { g_door_state = pa_new(seed, dmode, PA_DEF_DAYS); }
+            if (game == GAME_HANDLER)  { g_door_state = th_new(seed, dmode, TH_DEF_DAYS); }
+        }
+        if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
+        if (game == GAME_PORT)     { pa_start(g_door_state); }
+        if (game == GAME_HANDLER)  { th_start(g_door_state); }
+        door_send_frame(cfd);
+        return MODE_DOOR;
+    }
+
     if (line_has_prefix(line, len, "quit") != 0) {
         send_str(cfd, "bye\r\n");
         store64(quit_out, 1);
@@ -655,6 +765,103 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 
     send_str(cfd, "unknown command — type 'help' for the list\r\n");
     return MODE_COMMAND;
+}
+
+# === 1.1.0 door subsystem glue (ADR 0009) ===
+#
+# The games are pure modules (render into a buffer, consume one line);
+# these helpers own the socket I/O + persistence that the MODE_DOOR
+# dispatch and the `play` command call.
+
+fn door_game_name(game): i64 {
+    if (game == GAME_SMUGGLER) { return "smuggler"; }
+    if (game == GAME_PORT)     { return "port"; }
+    if (game == GAME_HANDLER)  { return "handler"; }
+    return "game";
+}
+
+# Render the active game's current frame and send it to the client.
+fn door_send_frame(cfd): i64 {
+    var buf = alloc(DOOR_FRAME_CAP);
+    var n = 0;
+    if (g_door_game == GAME_SMUGGLER) { n = sl_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_PORT)     { n = pa_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_HANDLER)  { n = th_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (n > 0) { send_buf(cfd, buf, n); }
+    return 0;
+}
+
+# Feed one input line to the active game. Returns 1 if the game exited.
+fn door_feed_line(cfd, line, line_len): i64 {
+    if (g_door_game == GAME_SMUGGLER) { return sl_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_PORT)     { return pa_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
+    return 1;
+}
+
+fn door_is_over(): i64 {
+    if (g_door_game == GAME_SMUGGLER) { return sl_is_over(g_door_state); }
+    if (g_door_game == GAME_PORT)     { return pa_is_over(g_door_state); }
+    if (g_door_game == GAME_HANDLER)  { return th_is_over(g_door_state); }
+    return 0;
+}
+
+# Append a Handler campaign result to the shared standings file under
+# <store>/.games/handler/standings, serialized across forked sessions
+# by file_append_locked (ADR 0009 § Multiplayer — first shared-disk use).
+fn door_append_standing(cfd): i64 {
+    var dir1 = alloc(PATH_MAX_BYTES);
+    var slen = strlen(g_store_buf);
+    memcpy(dir1, g_store_buf, slen);
+    store8(dir1 + slen, 47);
+    memcpy(dir1 + slen + 1, ".games", 6);
+    store8(dir1 + slen + 7, 0);
+    store_ensure(dir1);
+
+    var dir2 = alloc(PATH_MAX_BYTES);
+    var d1len = strlen(dir1);
+    memcpy(dir2, dir1, d1len);
+    store8(dir2 + d1len, 47);
+    memcpy(dir2 + d1len + 1, "handler", 7);
+    store8(dir2 + d1len + 8, 0);
+    store_ensure(dir2);
+
+    var path = alloc(PATH_MAX_BYTES);
+    var d2len = strlen(dir2);
+    memcpy(path, dir2, d2len);
+    store8(path + d2len, 47);
+    memcpy(path + d2len + 1, "standings", 9);
+    store8(path + d2len + 10, 0);
+
+    var sbuf = alloc(256);
+    var slen2 = th_format_standing(g_door_state, g_session_handle, sbuf);
+    file_append_locked(path, sbuf, slen2);
+    return 0;
+}
+
+# On leaving a door: persist a solo checkpoint (logged-in, mid-game),
+# and post a Handler standing on a finished campaign.
+fn door_save_on_exit(cfd): i64 {
+    if (g_door_mode == DOOR_SOLO) {
+        if ((load8(g_session_fp) & 0xFF) != 0) {
+            if (door_is_over() == 0) {
+                var buf = alloc(DOOR_SAVE_CAP);
+                var n = 0;
+                if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
+            }
+        }
+    }
+    if (g_door_game == GAME_HANDLER) {
+        if (th_is_over(g_door_state) == 1) {
+            if ((load8(g_session_handle) & 0xFF) != 0) {
+                door_append_standing(cfd);
+            }
+        }
+    }
+    return 0;
 }
 
 # Finalize a post-compose flow: write the accumulated body + subject
@@ -748,7 +955,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.0.0 — telnet BBS\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.1.0 — telnet BBS + door games\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -830,6 +1037,11 @@ fn handle_client(cfd): i64 {
     store8(g_session_handle, 0);
     store8(g_login_fp,       0);
     store8(g_login_nonce,    0);
+
+    # 1.1.0 door state: no game active at connect.
+    g_door_game  = GAME_NONE;
+    g_door_state = 0;
+    g_door_mode  = DOOR_PRACTICE;
 
     var mode    = MODE_COMMAND;
     var last_cr = 0;
@@ -982,6 +1194,23 @@ fn handle_client(cfd): i64 {
                         send_prompt(cfd, current_board);
                         i = i + 1; continue;
                     }
+                    else { if (mode == MODE_DOOR) {
+                        # 1.1.0: route the completed line to the active
+                        # game. ctrl==1 means the game exited → save +
+                        # back to the BBS prompt; else paint the next frame.
+                        var dctrl = door_feed_line(cfd, line, line_pos);
+                        line_pos = 0;
+                        if (dctrl == 1) {
+                            door_save_on_exit(cfd);
+                            g_door_state = 0;
+                            g_door_game = GAME_NONE;
+                            mode = MODE_COMMAND;
+                            send_prompt(cfd, current_board);
+                        } else {
+                            door_send_frame(cfd);
+                        }
+                        i = i + 1; continue;
+                    }
                     else { if (mode == MODE_POSTING_SUBJECT) {
                         # M5-D: capture the typed Subject line, then
                         # transition into MODE_POSTING for the body.
@@ -1019,7 +1248,7 @@ fn handle_client(cfd): i64 {
                             store8(post + post_pos, 10); post_pos = post_pos + 1;
                         }
                         line_pos = 0;
-                    } } }
+                    } } } }
                 } else {
                     # === Printable byte: echo + append to line ===
                     if (line_pos < LINE_BUF_CAP - 1) {
@@ -1704,7 +1933,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.0.0");
+    println("agora 1.1.0");
     return 0;
 }
 

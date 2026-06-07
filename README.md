@@ -2,7 +2,7 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: **v1.0.0 shipped 2026-05-23** — iron-validated on archaemenid (NUC running AGNOS). Multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
+**Status**: **v1.1.0 — 2026-06-07** adds a BBS **door / games** subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three in-session text games — **Smuggler's Ledger** (contraband run), **Port Authority** (space trade + combat), and **The Handler** (espionage deduction) — reachable from any telnet session via `play <game> [practice|solo]`. Built on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
 
 ## Etymology
 
@@ -33,7 +33,7 @@ End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting
 ## Architecture
 
 ```
-agora binary (~378 KB static ELF at 1.0.0)
+agora binary (~484 KB static ELF at 1.1.0)
 ├── src/main.cyr            argv dispatch + telnet handle_client + session helpers
 │                           + login flow + CLI keygen/register/whoami
 │                           + fork-per-accept loop (ADR 0007)
@@ -45,7 +45,11 @@ agora binary (~378 KB static ELF at 1.0.0)
 ├── src/account.cyr         sigil Ed25519 + fingerprint + handle validation
 │                           + keyfile + nonce / sig parse + From-header
 │                           (ADR 0006, M6)
-└── src/test.cyr            80-test conformance suite
+├── src/door.cyr            door framework: PRNG + int helpers + save IO
+├── src/smuggler.cyr        Smuggler's Ledger (door game)
+├── src/port_authority.cyr  Port Authority (door game)
+├── src/handler.cyr         The Handler (door game)   (all four: ADR 0009)
+└── src/test.cyr            121-test conformance suite
 ```
 
 Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darshana (SGR) + sigil + freelist + bigint + ct (the ed25519 call chain). No external deps beyond cyrius.
@@ -58,7 +62,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darsha
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — six runnable smoke scripts covering build / auth / concurrency / policy.
+- [`docs/examples/`](docs/examples/) — seven runnable smoke scripts covering build / auth / concurrency / policy / door games (`07-play-door.sh`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (10 ns/byte hot path, unchanged across every release since M1-close).
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.
 - [`CLAUDE.md`](CLAUDE.md) — durable rules for agent sessions.

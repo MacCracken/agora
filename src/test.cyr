@@ -13,6 +13,7 @@ include "src/account.cyr"
 include "src/door.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
+include "src/handler.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -2560,6 +2561,235 @@ fn t111_pa_feed_render(): i64 {
     return 0;
 }
 
+# === 1.1.0 The Handler core: model + generation + deduction (t112-t116, ADR 0009) ===
+
+fn t112_th_determinism(): i64 {
+    var a = th_new(424242, DOOR_SOLO, TH_DEF_DAYS);
+    var b = th_new(424242, DOOR_SOLO, TH_DEF_DAYS);
+    if (load64(a + TH_MOLEIDX) != load64(b + TH_MOLEIDX)) { test_fail("t112_th_determinism", "mole differs"); return 1; }
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var ag = th_agent(a, i);
+        var bg = th_agent(b, i);
+        if (load64(ag + AG_CITY) != load64(bg + AG_CITY))     { test_fail("t112_th_determinism", "city differs");   return 1; }
+        if (load64(ag + AG_RELIAB) != load64(bg + AG_RELIAB)) { test_fail("t112_th_determinism", "reliab differs"); return 1; }
+        if (load64(ag + AG_DISC) != load64(bg + AG_DISC))     { test_fail("t112_th_determinism", "disc differs");   return 1; }
+        i = i + 1;
+    }
+    test_pass("t112_th_determinism");
+    return 0;
+}
+
+fn t113_th_mole_invariant(): i64 {
+    var st = th_new(31337, DOOR_SOLO, TH_DEF_DAYS);
+    var mole = load64(st + TH_MOLEIDX);
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var is_mole = load64(th_agent(st, i) + AG_MOLE);
+        if (i == mole) {
+            if (is_mole != 1) { test_fail("t113_th_mole_invariant", "mole flag missing"); return 1; }
+        } else {
+            if (is_mole != 0) { test_fail("t113_th_mole_invariant", "non-mole flagged"); return 1; }
+        }
+        i = i + 1;
+    }
+    test_pass("t113_th_mole_invariant");
+    return 0;
+}
+
+fn t114_th_suspicion_separation(): i64 {
+    var st = th_new(900, DOOR_SOLO, TH_DEF_DAYS);
+    # force a known mole (agent 0, city-relay class) and clean honest agents
+    store64(th_agent(st, 0) + AG_MOLE, 1);
+    store64(th_agent(st, 0) + AG_DISC, 0);
+    store64(st + TH_MOLEIDX, 0);
+    var i = 1;
+    while (i < TH_AGENTS) {
+        store64(th_agent(st, i) + AG_MOLE, 0);
+        store64(th_agent(st, i) + AG_RELIAB, 100);   # no clerical noise
+        i = i + 1;
+    }
+    var day = 1;
+    while (day <= 20) {
+        store64(st + TH_DAY, day);
+        th_gen_day(st);
+        day = day + 1;
+    }
+    var mole_susp = th_agent_suspicion(st, 0);
+    if (mole_susp < 8) { test_fail("t114_th_suspicion_separation", "mole suspicion too low"); return 1; }
+    var j = 1;
+    while (j < TH_AGENTS) {
+        if (th_agent_suspicion(st, j) >= mole_susp) { test_fail("t114_th_suspicion_separation", "honest >= mole"); return 1; }
+        j = j + 1;
+    }
+    if (th_registry_count(st) < 80) { test_fail("t114_th_suspicion_separation", "registry too small"); return 1; }
+    test_pass("t114_th_suspicion_separation");
+    return 0;
+}
+
+fn t115_th_discrepant(): i64 {
+    var cb = alloc(CB_SIZE);
+    memset(cb, 0, CB_SIZE);
+    store64(cb + CB_VIA, 2);
+    store64(cb + CB_TRUECITY, 2);
+    store64(cb + CB_CIPHER, 1);
+    store64(cb + CB_DATEOK, 1);
+    if (th_cable_discrepant(cb) != 0) { test_fail("t115_th_discrepant", "clean flagged"); return 1; }
+    store64(cb + CB_VIA, 3);                                  # city conflict
+    if (th_cable_discrepant(cb) != 1) { test_fail("t115_th_discrepant", "city not flagged"); return 1; }
+    store64(cb + CB_VIA, 2);
+    store64(cb + CB_DATEOK, 0);                               # stale
+    if (th_cable_discrepant(cb) != 1) { test_fail("t115_th_discrepant", "stale not flagged"); return 1; }
+    store64(cb + CB_DATEOK, 1);
+    store64(cb + CB_CIPHER, 0);                               # cipher
+    if (th_cable_discrepant(cb) != 1) { test_fail("t115_th_discrepant", "cipher not flagged"); return 1; }
+    test_pass("t115_th_discrepant");
+    return 0;
+}
+
+fn t116_th_no_mole_clean(): i64 {
+    var st = th_new(12321, DOOR_SOLO, TH_DEF_DAYS);
+    store64(st + TH_MOLEIDX, 0 - 1);
+    var i = 0;
+    while (i < TH_AGENTS) {
+        store64(th_agent(st, i) + AG_MOLE, 0);
+        store64(th_agent(st, i) + AG_RELIAB, 100);
+        i = i + 1;
+    }
+    var day = 1;
+    while (day <= 20) {
+        store64(st + TH_DAY, day);
+        th_gen_day(st);
+        day = day + 1;
+    }
+    var j = 0;
+    while (j < TH_AGENTS) {
+        if (th_agent_suspicion(st, j) != 0) { test_fail("t116_th_no_mole_clean", "clean agent flagged"); return 1; }
+        j = j + 1;
+    }
+    test_pass("t116_th_no_mole_clean");
+    return 0;
+}
+
+# === 1.1.0 The Handler interactive layer (t117-t121, ADR 0009) ===
+
+fn t117_th_actions(): i64 {
+    var st = th_new(50, DOOR_SOLO, TH_DEF_DAYS);
+    th_start(st);
+    store64(th_agent(st, 1) + AG_STATUS, AGS_ACTIVE);
+    store64(th_agent(st, 1) + AG_CITY, 0);
+    var pts0 = load64(st + TH_POINTS);
+    var bud0 = load64(st + TH_BUDGET);
+    if (th_order_move(st, 1, 2) != 0)                       { test_fail("t117_th_actions", "move");      return 1; }
+    if (load64(th_agent(st, 1) + AG_CITY) != 2)            { test_fail("t117_th_actions", "city");      return 1; }
+    if (load64(st + TH_POINTS) != pts0 - 1)               { test_fail("t117_th_actions", "points");    return 1; }
+    if (load64(st + TH_BUDGET) != bud0 - TH_MOVE_COST)    { test_fail("t117_th_actions", "budget");    return 1; }
+    store64(th_agent(st, 2) + AG_TRUST, 50);
+    store64(th_agent(st, 2) + AG_PAY, 100);
+    if (th_authorize_funds(st, 2, 1000) != 0)             { test_fail("t117_th_actions", "fund");      return 1; }
+    if (load64(th_agent(st, 2) + AG_TRUST) <= 50)         { test_fail("t117_th_actions", "trust up");  return 1; }
+    if (load64(st + TH_AUDIT) < 15)                       { test_fail("t117_th_actions", "audit");     return 1; }
+    if (th_order_extract(st, 3) != 0)                     { test_fail("t117_th_actions", "extract");   return 1; }
+    if (load64(th_agent(st, 3) + AG_STATUS) != AGS_EXTRACTED) { test_fail("t117_th_actions", "extracted"); return 1; }
+    store64(st + TH_POINTS, 0);
+    if (th_order_move(st, 1, 0) != (0 - 2))               { test_fail("t117_th_actions", "no points"); return 1; }
+    test_pass("t117_th_actions");
+    return 0;
+}
+
+fn t118_th_accuse(): i64 {
+    var st = th_new(50, DOOR_SOLO, TH_DEF_DAYS);
+    var i = 0;
+    while (i < TH_AGENTS) { store64(th_agent(st, i) + AG_MOLE, 0); i = i + 1; }
+    store64(th_agent(st, 2) + AG_MOLE, 1);
+    store64(st + TH_MOLEIDX, 2);
+    store64(st + TH_CONF, 60);
+    if (th_accuse(st, 0) != 0)                              { test_fail("t118_th_accuse", "wrong not 0");   return 1; }
+    if (load64(st + TH_CONF) != 30)                        { test_fail("t118_th_accuse", "wrong conf");    return 1; }
+    if (load64(th_agent(st, 0) + AG_STATUS) != AGS_FLAGGED){ test_fail("t118_th_accuse", "not flagged");   return 1; }
+    if (th_accuse(st, 2) != 1)                             { test_fail("t118_th_accuse", "correct not 1"); return 1; }
+    if (load64(st + TH_MOLEIDX) != (0 - 1))               { test_fail("t118_th_accuse", "moleidx clear"); return 1; }
+    if (load64(st + TH_CONF) != 55)                       { test_fail("t118_th_accuse", "correct conf");  return 1; }
+    store64(st + TH_CONF, 20);
+    th_accuse(st, 1);
+    if (load64(st + TH_OVER) != 2)                        { test_fail("t118_th_accuse", "not recalled");  return 1; }
+    test_pass("t118_th_accuse");
+    return 0;
+}
+
+fn t119_th_nextday_score(): i64 {
+    var st = th_new(77, DOOR_SOLO, 3);
+    th_start(st);
+    store64(st + TH_MOLEIDX, 0 - 1);
+    var i = 0;
+    while (i < TH_AGENTS) { store64(th_agent(st, i) + AG_MOLE, 0); i = i + 1; }
+    store64(st + TH_POINTS, 1);
+    th_next_day(st);
+    if (load64(st + TH_DAY) != 2)                       { test_fail("t119_th_nextday_score", "day");          return 1; }
+    if (load64(st + TH_POINTS) != TH_DISPATCH_PTS)     { test_fail("t119_th_nextday_score", "points refill"); return 1; }
+    th_next_day(st);
+    if (load64(st + TH_OVER) != 0)                     { test_fail("t119_th_nextday_score", "over early");    return 1; }
+    th_next_day(st);
+    if (load64(st + TH_OVER) != 1)                     { test_fail("t119_th_nextday_score", "not finished");  return 1; }
+    if (th_score(st) <= 0)                             { test_fail("t119_th_nextday_score", "score");         return 1; }
+    var st2 = th_new(77, DOOR_SOLO, 30);
+    th_start(st2);
+    store64(st2 + TH_CONF, 0);
+    th_next_day(st2);
+    if (load64(st2 + TH_OVER) != 2)                    { test_fail("t119_th_nextday_score", "not recalled");  return 1; }
+    test_pass("t119_th_nextday_score");
+    return 0;
+}
+
+fn t120_th_save_load(): i64 {
+    var st = th_new(0 - 7, DOOR_SOLO, 18);
+    th_start(st);
+    th_next_day(st);
+    th_next_day(st);
+    store64(st + TH_CONF, 44);
+    store64(st + TH_BUDGET, 3210);
+    store64(th_agent(st, 1) + AG_TRUST, 88);
+    var regn = th_registry_count(st);
+    var buf = alloc(TH_SAVE_CAP);
+    var n = th_save_format(st, buf, TH_SAVE_CAP);
+    var st2 = th_load_parse(buf, n);
+    if (st2 == 0)                                         { test_fail("t120_th_save_load", "parse null"); return 1; }
+    if (load64(st2 + TH_SEED) != (0 - 7))                { test_fail("t120_th_save_load", "seed");       return 1; }
+    if (load64(st2 + TH_CONF) != 44)                     { test_fail("t120_th_save_load", "conf");       return 1; }
+    if (load64(st2 + TH_BUDGET) != 3210)                 { test_fail("t120_th_save_load", "budget");     return 1; }
+    if (load64(st2 + TH_MAXDAYS) != 18)                  { test_fail("t120_th_save_load", "maxdays");    return 1; }
+    if (load64(st2 + TH_MOLEIDX) != load64(st + TH_MOLEIDX)) { test_fail("t120_th_save_load", "moleidx");return 1; }
+    if (th_registry_count(st2) != regn)                  { test_fail("t120_th_save_load", "regcount");   return 1; }
+    if (load64(th_agent(st2, 1) + AG_TRUST) != 88)       { test_fail("t120_th_save_load", "agent trust");return 1; }
+    if (load64(th_cable_at(st2, 0) + CB_VIA) != load64(th_cable_at(st, 0) + CB_VIA))     { test_fail("t120_th_save_load", "cable via");   return 1; }
+    if (load64(th_cable_at(st2, 0) + CB_AGENT) != load64(th_cable_at(st, 0) + CB_AGENT)) { test_fail("t120_th_save_load", "cable agent"); return 1; }
+    test_pass("t120_th_save_load");
+    return 0;
+}
+
+fn t121_th_feed_render(): i64 {
+    var st = th_new(123, DOOR_SOLO, TH_DEF_DAYS);
+    th_start(st);
+    var buf = alloc(8192);
+    if (th_render(st, buf, 8192) <= 0)        { test_fail("t121_th_feed_render", "main render"); return 1; }
+    th_feed(st, "c", 1);
+    if (load64(st + TH_SCREEN) != HSCR_CABLES){ test_fail("t121_th_feed_render", "c->cables");   return 1; }
+    if (th_render(st, buf, 8192) <= 0)        { test_fail("t121_th_feed_render", "cables render");return 1; }
+    th_feed(st, "1", 1);
+    if (load64(st + TH_SCREEN) != HSCR_READ)  { test_fail("t121_th_feed_render", "read");        return 1; }
+    if (th_render(st, buf, 8192) <= 0)        { test_fail("t121_th_feed_render", "read render"); return 1; }
+    th_feed(st, "x", 1);
+    th_feed(st, "x", 1);
+    if (load64(st + TH_SCREEN) != HSCR_MAIN)  { test_fail("t121_th_feed_render", "back main");   return 1; }
+    th_feed(st, "x", 1);
+    if (load64(st + TH_SCREEN) != HSCR_XREF)  { test_fail("t121_th_feed_render", "x->xref");     return 1; }
+    th_feed(st, "z", 1);
+    if (load64(st + TH_SCREEN) != HSCR_MAIN)  { test_fail("t121_th_feed_render", "xref back");   return 1; }
+    if (th_feed(st, "q", 1) != 1)             { test_fail("t121_th_feed_render", "q exits");     return 1; }
+    test_pass("t121_th_feed_render");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -2677,6 +2907,16 @@ fn main(): i64 {
     t109_pa_planet();
     t110_pa_save_load();
     t111_pa_feed_render();
+    t112_th_determinism();
+    t113_th_mole_invariant();
+    t114_th_suspicion_separation();
+    t115_th_discrepant();
+    t116_th_no_mole_clean();
+    t117_th_actions();
+    t118_th_accuse();
+    t119_th_nextday_score();
+    t120_th_save_load();
+    t121_th_feed_render();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

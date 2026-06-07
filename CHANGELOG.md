@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-07 (door games: Smuggler's Ledger, Port Authority, The Handler)
+
+**agora grows a door.** The classic BBS tradition of in-session text games arrives as a first-class subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three games reachable from any telnet session via `play <game> [practice|solo]`. Each game is a **pure state machine** (renders into a buffer, consumes one input line at a time) — `main.cyr` owns all socket I/O and persistence — so the entire economy / combat / deduction core is unit-tested without binding a port. 80 → **121 tests**; binary 378,456 → **484,184 B** (+105,728 B for the three games + framework). End-to-end telnet smoke drives all three games launch → play → exit.
+
+### Added
+
+- **Door framework** (`src/door.cyr`) — a seedable **xorshift64 PRNG** (solo runs are replayable, tests pin a known stream; the stdlib only ships a non-reproducible CSPRNG), integer helpers (`imin`/`imax`/`iclamp`/`iabs`/`ipow` + an arithmetic-safe logical-shift), `game_name_valid` (the save-slot path-traversal guard), per-user save path builders + dir-ensure + read/write under `<store>/.users/<fp16>/games/<game>.sav`, self-contained ANSI render helpers, and newline-positional save serialization.
+- **Smuggler's Ledger** (`src/smuggler.cyr`) — a buy-low/sell-high contraband run across eight gritty metro districts over 30 days. Homage to the Dope Wars *style*, not a copy: **abstract smuggling goods, no real drug names**. Deterministic daily market with spike/crash events, a compounding loanshark debt, a bank vault, cops (fight/run), muggings, lucky finds, the fixer (capacity / guns / clinic), and net-worth rank tiers.
+- **Port Authority** (`src/port_authority.cyr`) — a dark-sci-fi space-trade-and-combat run, homage to the TradeWars 2002 *style*. Deterministic galaxy (50 sectors, warp graph, port classes), four **re-themed** commodities on the classic buy/sell spread, warp navigation with turns-per-day, raider combat (fight/flee), the HQ upgrade dock (holds / fighters / shields), a planet credit-vault, and rank tiers.
+- **The Handler** (`src/handler.cyr`) — a Cold-War espionage-deduction game from a user-supplied v1.0 spec. Run a five-agent network: daily cable traffic whose routing metadata *is* the gameplay, and a **mole whose paperwork leaves a consistent, genuinely-solvable discrepancy pattern** (relay city / stale date / cipher) while honest low-reliability agents only throw isolated clerical errors. Daily turn loop; dispatch actions (move / extract / authorize-funds / cross-reference / accuse); supervisor confidence + audit risk; recall/finish end states; and a shared **standings file** (`<store>/.games/handler/standings`, `flock`'d append — agora's first shared-disk feature).
+- **`play <game> [practice|solo]`** telnet command + a new `MODE_DOOR` session sub-mode. Practice = ephemeral, anonymous-OK; Solo = login-gated persistent save. Universe (shared multiplayer) prints a roadmap stub.
+- **[ADR 0009](docs/adr/0009-door-games-subsystem.md)** — door subsystem architecture: the pure-module split, the PRNG choice, the `.users/<fp16>/games/` storage layout, and The Handler's platform adaptations (sigil identity in place of DOS drop files, flat files in place of SQLite, instant render in place of the 2400-baud teletype, all per its own spec cut-line).
+- 41 new unit tests (t81–t121) + `docs/examples/07-play-door.sh`.
+
+### Roadmapped
+
+- **Persistent Universe** (shared-world multiplayer) for all three games and **leaderboards** beyond The Handler's standings ([`docs/development/roadmap-future.md`](docs/development/roadmap-future.md)). Plus The Handler's v2 community layer (intercepted rival traffic, inter-section sabotage, world-event track, legacy ranks) and Port Authority's deep TW endgame (multiple planets, citadels, mining, deployed fighters/mines, alliances).
+
 ## [1.0.0] — 2026-05-23 (civic-marketplace BBS for AGNOS; iron-validated on archaemenid)
 
 **agora 1.0.0.** The Greek **ἀγορά** — civic-marketplace, public assembly — open as the BBS userland for AGNOS deployments. Cross-platform telnet listener, multi-user concurrent sessions via fork-per-accept, sigil-backed Ed25519 challenge/response auth, multi-board threaded posts, per-board operator policy, audit-hardened input across both wire and CLI, frozen pre-1.0 ABI. Iron-validated on **archaemenid** (the project's reference AGNOS NUC): single-session telnet login round-trip (criterion #3) and 8-user concurrent fanout (criterion #4) both green at this tag.
