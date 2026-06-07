@@ -8,15 +8,15 @@
 
 ---
 
-## Door games — post-1.1.0 directions
+## Door games — Persistent Universe pulled into 1.2.0
 
-The 1.1.0 door subsystem ([ADR 0009](../adr/0009-door-games-subsystem.md)) shipped Practice (ephemeral) + Solo (login-gated save) for all three games. Deferred, pull-forward on player demand:
+The door subsystem's **shared-world multiplayer + leaderboards have graduated from "unpinned future" to the active 1.2.0 cycle** — see [`roadmap.md`](roadmap.md) § In progress and [ADR 0010](../adr/0010-persistent-universe.md). 1.2.0 covers the `flock`'d world-transaction framework, Port Authority's shared galaxy (depletable ports, player planets, deployed fighters/mines, async PvP, alliances), Smuggler's shared economy (prices + heat move with all players), The Handler's shared layer (per-city alerts, intercept pool, anonymous-tip sabotage), and leaderboards for all three games.
 
-- **Persistent Universe (shared-world multiplayer)** — all three games currently stub `play <game> universe` with a roadmap notice. The shared world cannot use in-memory globals (fork-per-accept, ADR 0007); it lands as on-disk shared state with `flock` serialization (the Handler standings file is the first instance of that pattern). Smuggler's Ledger → a shared metro economy / rival smugglers; Port Authority → the true TradeWars shared galaxy with PvP, alliances, deployed fighters/mines; The Handler → rival sections in one service (intercepted traffic, inter-section sabotage).
-- **Leaderboards** beyond The Handler's standings — a shared high-score surface per game (append-only, `flock`'d), attributed to the sigil handle; the natural companion to Solo mode.
-- **The Handler v2 community layer** (from its spec's own cut-line) — intercepted rival cable traffic, anonymous-tip sabotage of a rival's audit risk, a global world-event track, persistent legacy ranks across campaigns.
-- **Port Authority deep endgame** — multiple planets with citadels + mining, sector-deployed fighters/mines, the full TW ship-upgrade tree, alliances.
-- **The Handler teletype effect** — the spec's 2400-baud slow-print with spacebar-skip, deferred at 1.1.0 because the server's char-at-a-time + line-mode model makes mid-print input interception awkward; revisit if a raw-mode input path lands.
+Still unpinned **beyond** 1.2.0:
+
+- **The Handler — global world-event track + persistent legacy ranks** across campaigns (the slow-burn crisis layer + Probationary → Director's-Chair progression posted on the board).
+- **Port Authority — deep endgame**: planet citadels + mining tiers, the full ship-upgrade tree beyond holds / fighters / shields.
+- **The Handler — 2400-baud teletype effect** (slow-print cables + spacebar-skip), deferred since 1.1.0; needs a raw-mode input path (the server is char-at-a-time + line-mode today).
 
 ---
 

@@ -28,16 +28,29 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
 | **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
 | **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
+| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 in progress |
 
 ---
 
 ## In progress
 
-**No active cycle.** agora 1.1.0 shipped 2026-06-07 — a BBS **door / games** subsystem ([ADR 0009](../adr/0009-door-games-subsystem.md)) with three text games (Smuggler's Ledger, Port Authority, The Handler), each pure-module + unit-tested (80 → 121 tests) and verified playable over telnet. Built on 1.0.0 (2026-05-23, iron-validated on archaemenid). The git tag itself is the user's call per CLAUDE.md "do not commit or push". Post-1.x directions live below + in [`roadmap-future.md`](roadmap-future.md), all unpinned — including the door games' **Persistent Universe** (shared-world multiplayer) + **leaderboards**.
+**1.2.0 — Persistent Universe (active cycle).** Shared-world multiplayer for the three door games — taking up the work roadmapped after 1.1.0. **Everything before 1.2.0 is shipped history** (the 0.x line → the 1.0.0 BBS cut → the 1.1.0 door / games subsystem — see *Closed milestones* + [`CHANGELOG.md`](../../CHANGELOG.md)); 1.2.0 is the forward cycle.
 
-**Deferred from 0.7.0 (still queued; pull when a deployment asks):**
+Design: [ADR 0010](../adr/0010-persistent-universe.md) — a per-game shared world dir under `<store>/.games/<game>/world/`, mutated through a `flock`'d **lock → read → compute → write** "world transaction" with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives; the I/O lives in `door.cyr` + `main.cyr`). Universe requires login; Practice + Solo (shipped 1.1.0) are unchanged. Async/indirect PvP (act against the state another player left behind), not real-time. Daily-turn budgets keep it fair.
+
+**1.2.0 bite plan** (ADR 0010 § Phasing — start narrow, prove the concurrency pattern first):
+
+1. **World-transaction framework** in `door.cyr` — world dir + `flock` lock + read/write-snapshot (temp + `rename`) + the transaction wrapper + a **multi-process concurrency smoke** (two clients hammering one world; assert no lost updates / no corruption).
+2. **Port Authority shared galaxy** — generated-once world, depletable port stock (your buying moves the next player's price), player-owned planets. The canonical Universe slice.
+3. **PA deployments + async PvP** — sector-deployed fighters/mines, combat vs left-behind assets, alliances.
+4. **Smuggler's shared economy** (district prices + heat move with all players) + **The Handler shared layer** (per-city alerts, intercept pool, anonymous-tip sabotage).
+5. **Leaderboards** — generalize the 1.1.0 Handler standings file to all three games.
+6. **Closeout** — VERSION → 1.2.0, docs, `08-*` example, clean DCE build.
+
+**Deferred (pull when a deployment asks):**
 
 - `agora policy set <board> <mode>` + `agora admins {add,rm,list}` CLI verbs (operators currently edit `.policy` / `.admins` files directly).
+- Door directions still unpinned beyond 1.2.0 (Handler world-event track + legacy ranks, PA citadels/mining deep endgame, the 2400-baud teletype effect) live in [`roadmap-future.md`](roadmap-future.md) § Door games.
 
 ---
 
@@ -61,6 +74,8 @@ Detail per release lives in [`CHANGELOG.md`](../../CHANGELOG.md); per-bite narra
 - **M6** (0.6.0) — six-bite sigil-backed auth + per-board policy. ADR 0006 (identity model) + `src/account.cyr` primitives (M6-B) + telnet `login` challenge/response (M6-C) + `keygen`/`register`/`whoami` CLI + telnet `whoami` (M6-D) + `From:` post header (M6-E) + per-board `.policy` / `.admins` (M6-F). Adds sigil + freelist + bigint + ct to stdlib deps; 49 → 70 tests; 140 → 375 KB binary.
 - **0.7.0 security sweep** (0.7.0) — first dedicated audit cycle. Full report at [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md). Zero CRITICAL. 5 fixes landed: H1 CLI subject CRLF injection (`cmd_post`), H2 cmd_list/cmd_read --board path-traversal, H3 `post_from` re-validates handle + fp on read (defense vs. tampered user files), M3 `parse_post_id` 18-digit overflow guard, M6 30s explicit deadline on parked login challenge (deferred from M6-C). 4 items queued for 0.8 (concurrent-accept + per-conn memory arenas; anonymous board-create gate; keyfile mode warn-on-load; sigil 3.1.1 → 3.4.3 diff). 70 → 78 tests; 375 → 377 KB binary (+0.6%); no new stdlib deps.
 - **0.8.0 concurrent-accept** (0.8.0) — fork-per-connection accept loop via [ADR 0007](../adr/0007-fork-per-accept-concurrency.md). Audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) both close via process isolation — kernel reclaims per-child memory at `sys_exit`; globals are per-process post-fork. Loop: `sys_waitpid(-1, NULL, WNOHANG)` reaper → `sock_accept` → `sys_fork` → child runs handle_client + `sys_exit(0)` / parent loops. Audit M4 (anonymous board-create) carried forward to 0.8-B — independent of concurrency model. 78 tests unchanged (E is in the accept loop, not unit-testable code); 377 → 378 KB binary (+0.09%); no new stdlib deps.
+- **1.0.0 v1 cut** (2026-05-23) — all six v1.0 criteria met, iron-validated on archaemenid (single-session telnet round-trip #3 + 8-user fanout #4). Closes the 0.x line (0.8.x audit followups + 0.9.0 ABI freeze [ADR 0008] + 0.9.1 doc-pass + 0.9.2 closeout). 80 tests; 378,456 B.
+- **1.1.0 door / games** (2026-06-07) — door subsystem ([ADR 0009](../adr/0009-door-games-subsystem.md)): three pure-module text games (Smuggler's Ledger, Port Authority, The Handler) + `play` verb + `MODE_DOOR`; Practice + Solo modes; Handler standings (first shared-disk feature). The solvable-mole deduction (t114) is the novel core. 80 → 121 tests; 378,456 → 484,184 B. Universe mode stubbed → **taken up by 1.2.0** (this is the work now in progress above).
 
 ---
 

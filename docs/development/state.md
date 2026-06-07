@@ -57,7 +57,7 @@ Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) �
 
 ## In-flight slot
 
-**Post-1.1.0 work — no active cycle.** The **1.1.0 door / games subsystem** shipped 2026-06-07 (Smuggler's Ledger + Port Authority + The Handler; ADR 0009; `play <game> [practice|solo]` + MODE_DOOR; 121/121 tests; verified playable over telnet). Door **Persistent Universe** (shared multiplayer) + **leaderboards** are roadmapped ([`roadmap-future.md`](roadmap-future.md) § Door games). The slot description below is the prior post-1.0 state, retained for context.
+**1.2.0 — Persistent Universe (active cycle).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** — the 0.x line → the 1.0.0 BBS cut → the **1.1.0** door / games subsystem (Smuggler's Ledger + Port Authority + The Handler; ADR 0009; 121/121 tests; verified playable over telnet). Design for 1.2.0 is locked in [ADR 0010](../adr/0010-persistent-universe.md): a per-game world dir under `<store>/.games/<game>/world/`, mutated via a `flock`'d lock→read→compute→write transaction with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives); Universe requires login; async/indirect PvP, not real-time. Bite plan + scope in [`roadmap.md`](roadmap.md) § In progress (start with the world-transaction framework + a multi-process concurrency smoke, then Port Authority's shared galaxy). **No 1.2.0 code yet — VERSION stays `1.1.0` until the cut.** The slot description below is prior post-1.0 context, retained.
 
 agora 1.0.0 shipped 2026-05-23 with all six v1.0 criteria met, iron-validated on archaemenid. The next session inherits an empty slot. Open directions, all unpinned (pull on consumer pressure):
 
