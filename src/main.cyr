@@ -1478,6 +1478,69 @@ fn first_positional_after_verb(): i64 {
     return 0;
 }
 
+# k-th non-flag positional after the verb (0-based), skipping
+# `--flag value` pairs. Returns 0 if absent. Used by the worldbench /
+# worldread diagnostic verbs that take two positionals (game + count).
+fn nth_positional(k): i64 {
+    args_init();
+    var n = argc();
+    var i = 2;
+    var seen = 0;
+    var result = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= n) { scanning = 0; continue; }
+        var arg = argv(i);
+        var is_flag = 0;
+        if (strlen(arg) >= 2) {
+            if ((load8(arg) & 0xFF) == 45) {
+                if ((load8(arg + 1) & 0xFF) == 45) { is_flag = 1; }
+            }
+        }
+        if (is_flag == 1) { i = i + 2; continue; }
+        if (seen == k) { result = arg; scanning = 0; continue; }
+        seen = seen + 1;
+        i = i + 1;
+    }
+    return result;
+}
+
+# === 1.2.0 world-framework diagnostics (ADR 0010 § Phasing bite 1) ===
+#
+# `agora worldbench <game> <count> [--store X]` runs `count` flock'd
+# world transactions (+1 each). `agora worldread <game> [--store X]`
+# prints the world counter. Run many `worldbench` processes against one
+# store concurrently, then `worldread` — a correct framework yields
+# exactly (procs × count) with no lost updates (see 08-world-concurrency.sh).
+fn cmd_worldbench(): i64 {
+    var store = parse_store(DEFAULT_STORE);
+    var game = nth_positional(0);
+    if (game == 0) { println("usage: agora worldbench <game> <count> [--store X]"); return 1; }
+    var count_s = nth_positional(1);
+    var count = 0;
+    if (count_s != 0) { count = atoi(count_s); }
+    var i = 0;
+    while (i < count) {
+        world_txn_add(store, game, 1);
+        i = i + 1;
+    }
+    println("worldbench done");
+    return 0;
+}
+
+fn cmd_worldread(): i64 {
+    var store = parse_store(DEFAULT_STORE);
+    var game = nth_positional(0);
+    if (game == 0) { println("usage: agora worldread <game> [--store X]"); return 1; }
+    var buf = alloc(8);
+    var n = world_read(store, game, buf, 8);
+    var v = 0;
+    if (n == 8) { v = load64(buf); }
+    fmt_int(v);
+    println("");
+    return 0;
+}
+
 # Walk argv looking for --subject <text>. Returns the text cstring
 # if found, else 0 (null). M5-D adds this to the CLI for piped /
 # scripted post creation; the in-session telnet flow uses the
@@ -1958,6 +2021,8 @@ fn main(): i64 {
     if (streq(verb, "whoami")   != 0) { return cmd_whoami(); }
     if (streq(verb, "keygen")   != 0) { return cmd_keygen(); }
     if (streq(verb, "register") != 0) { return cmd_register(); }
+    if (streq(verb, "worldbench") != 0) { return cmd_worldbench(); }
+    if (streq(verb, "worldread") != 0) { return cmd_worldread(); }
     println("agora: unknown command");
     print_help();
     return 2;

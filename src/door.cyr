@@ -410,3 +410,138 @@ fn save_get_i64(buf, len, cur_ptr): i64 {
     if (neg == 1) { return 0 - val; }
     return val;
 }
+
+# === 1.2.0 world-transaction framework (ADR 0010) ===
+#
+# Shared-world multiplayer state lives on disk (fork-per-accept means
+# no shared memory — ADR 0007) and is mutated through a flock'd
+# transaction: lock → read snapshot → compute → write → unlock. This
+# section provides the lock + snapshot I/O; games supply the pure
+# transform. Layout:
+#   <store>/.games/<game>/world/snapshot   — the shared world blob
+#   <store>/.games/<game>/world/.lock      — flock target
+# `game` is validated (game_name_valid) at every entry point — it is
+# the only path-traversal guard, same as the save-file paths above.
+
+fn world_games_root(store, out_buf): i64 {
+    var slen = strlen(store);
+    memcpy(out_buf, store, slen);
+    var pos = slen;
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    memcpy(out_buf + pos, ".games", 6); pos = pos + 6;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+fn world_game_dir(store, game, out_buf): i64 {
+    var pos = world_games_root(store, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;
+    var glen = strlen(game);
+    memcpy(out_buf + pos, game, glen); pos = pos + glen;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# <store>/.games/<game>/world
+fn world_dir(store, game, out_buf): i64 {
+    var pos = world_game_dir(store, game, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;
+    memcpy(out_buf + pos, "world", 5); pos = pos + 5;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# <store>/.games/<game>/world/<name>
+fn world_file(store, game, name, out_buf): i64 {
+    var pos = world_dir(store, game, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;
+    var nlen = strlen(name);
+    memcpy(out_buf + pos, name, nlen); pos = pos + nlen;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# mkdir-ladder store → .games → .games/<game> → .games/<game>/world.
+fn world_dir_ensure(store, game): i64 {
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var rc = store_ensure(store);
+    if (rc != 0) { return rc; }
+    var path = alloc(PATH_MAX_BYTES);
+    world_games_root(store, path);
+    rc = store_ensure(path);
+    if (rc != 0) { return rc; }
+    world_game_dir(store, game, path);
+    rc = store_ensure(path);
+    if (rc != 0) { return rc; }
+    world_dir(store, game, path);
+    return store_ensure(path);
+}
+
+# Acquire the per-world exclusive lock. Ensures the world dir, opens
+# (creating) <world>/.lock, takes an exclusive flock (blocks until any
+# other holder releases — the cross-process serialization point).
+# Returns the lock fd, or (0 - 1) on invalid game / open / lock error.
+fn world_lock_acquire(store, game): i64 {
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
+    var path = alloc(PATH_MAX_BYTES);
+    world_file(store, game, ".lock", path);
+    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
+    return fd;
+}
+
+fn world_lock_release(fd): i64 {
+    file_unlock(fd);
+    file_close(fd);
+    return 0;
+}
+
+# Read the world snapshot into out_buf (cap bytes). Returns bytes read,
+# or 0 if the world has no snapshot yet (a fresh/empty world). Invalid
+# game → 0.
+fn world_read(store, game, out_buf, cap): i64 {
+    if (game_name_valid(game) == 0) { return 0; }
+    var path = alloc(PATH_MAX_BYTES);
+    world_file(store, game, "snapshot", path);
+    var n = file_read_all(path, out_buf, cap);
+    if (n < 0) { return 0; }
+    return n;
+}
+
+# Overwrite the world snapshot. Caller holds the world lock across the
+# read→compute→write, so a plain O_TRUNC write is correct against
+# cooperating processes. Returns 0 on success, negative on error.
+fn world_write(store, game, buf, len): i64 {
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
+    var path = alloc(PATH_MAX_BYTES);
+    world_file(store, game, "snapshot", path);
+    var n = file_write_all(path, buf, len);
+    if (n != len) { return 0 - 1; }
+    return 0;
+}
+
+# The canonical world transaction, in its simplest form: an atomic
+# read-modify-write of an i64 counter stored as the whole snapshot.
+# lock → read (0 if absent) → add delta → write → unlock. Returns the
+# new value, or (0 - 1) on lock/IO failure. Two processes calling this
+# concurrently serialize on the flock — no lost updates. Games wrap
+# their own (snapshot → pure transform → snapshot) the same way; this
+# counter is both the framework's proof-of-correctness vehicle and a
+# genuinely useful primitive (world turn counter / next-entity id).
+fn world_txn_add(store, game, delta): i64 {
+    var fd = world_lock_acquire(store, game);
+    if (fd < 0) { return 0 - 1; }
+    var buf = alloc(8);
+    var cur = 0;
+    var n = world_read(store, game, buf, 8);
+    if (n == 8) { cur = load64(buf); }
+    cur = cur + delta;
+    store64(buf, cur);
+    var wrc = world_write(store, game, buf, 8);
+    world_lock_release(fd);
+    if (wrc != 0) { return 0 - 1; }
+    return cur;
+}

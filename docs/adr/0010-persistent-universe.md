@@ -1,6 +1,6 @@
 # 0010 — Persistent Universe (shared-world multiplayer for door games)
 
-> **Status**: Proposed (1.2.0 design sketch)
+> **Status**: Proposed (1.2.0 design sketch) — **bite 1 (world-transaction framework) shipped + concurrency-smoke-green 2026-06-07**
 > **Date**: 2026-06-07
 
 ## Context
@@ -24,7 +24,7 @@ The open question 1.2.0 answers: **how does a shared, concurrently-mutated game 
   1. `flock` the world lock (`<store>/.games/<game>/world/.lock`);
   2. read the current world snapshot from disk;
   3. compute the next world + the player's result with a **pure transform** `(world, player, action) → (world', result)`;
-  4. write the world back atomically (temp file + `rename`, atomic on one filesystem);
+  4. write the world back under the held lock (the 1.2.0 bite-1 framework does an in-place `O_TRUNC` write, correct against cooperating lock-holders — proven by `08-world-concurrency.sh`; a temp-file + `rename` or event-log upgrade for crash-during-*write* safety is deferred, see Alternatives);
   5. release the lock.
   The lock/read/write I/O lives in new `door.cyr` world helpers + `main.cyr`; the transform is pure game code, unit-testable exactly like the 1.1.0 `*_feed` functions.
 - **Coarse lock first.** One lock per game-world for the first cut — correct and simple at human-paced BBS scale (and fork-per-accept already serializes heavily). Per-sector / per-record locks are a later optimization if contention shows up; they bring lock-ordering hazards, so they wait for evidence.

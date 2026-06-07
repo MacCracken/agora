@@ -2790,6 +2790,37 @@ fn t121_th_feed_render(): i64 {
     return 0;
 }
 
+# === 1.2.0 world-transaction framework (t122-t123, ADR 0010) ===
+
+fn t122_world_paths(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    world_dir("store", "port", buf);
+    if (streq(buf, "store/.games/port/world") == 0)            { test_fail("t122_world_paths", "dir");  return 1; }
+    var fb = alloc(PATH_MAX_BYTES);
+    world_file("store", "port", "snapshot", fb);
+    if (streq(fb, "store/.games/port/world/snapshot") == 0)    { test_fail("t122_world_paths", "file"); return 1; }
+    # traversal guard: invalid game name → lock refused before any fs touch
+    if (world_lock_acquire("store", "../etc") >= 0)            { test_fail("t122_world_paths", "traversal"); return 1; }
+    test_pass("t122_world_paths");
+    return 0;
+}
+
+# Single-process transaction round-trip (resets first, so it's
+# deterministic regardless of prior /tmp state). Cross-process
+# no-lost-updates is proven by docs/examples/08-world-concurrency.sh.
+fn t123_world_txn_roundtrip(): i64 {
+    var z = alloc(8);
+    store64(z, 0);
+    if (world_write("/tmp/agora-worldtest-t123", "bench", z, 8) != 0) { test_fail("t123_world_txn_roundtrip", "reset");  return 1; }
+    if (world_txn_add("/tmp/agora-worldtest-t123", "bench", 5) != 5)  { test_fail("t123_world_txn_roundtrip", "add5");   return 1; }
+    if (world_txn_add("/tmp/agora-worldtest-t123", "bench", 3) != 8)  { test_fail("t123_world_txn_roundtrip", "add3");   return 1; }
+    var rb = alloc(8);
+    if (world_read("/tmp/agora-worldtest-t123", "bench", rb, 8) != 8) { test_fail("t123_world_txn_roundtrip", "readlen"); return 1; }
+    if (load64(rb) != 8)                                              { test_fail("t123_world_txn_roundtrip", "readval"); return 1; }
+    test_pass("t123_world_txn_roundtrip");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -2912,6 +2943,8 @@ fn main(): i64 {
     t114_th_suspicion_separation();
     t115_th_discrepant();
     t116_th_no_mole_clean();
+    t122_world_paths();
+    t123_world_txn_roundtrip();
     t117_th_actions();
     t118_th_accuse();
     t119_th_nextday_score();

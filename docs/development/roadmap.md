@@ -40,7 +40,7 @@ Design: [ADR 0010](../adr/0010-persistent-universe.md) — a per-game shared wor
 
 **1.2.0 bite plan** (ADR 0010 § Phasing — start narrow, prove the concurrency pattern first):
 
-1. **World-transaction framework** in `door.cyr` — world dir + `flock` lock + read/write-snapshot (temp + `rename`) + the transaction wrapper + a **multi-process concurrency smoke** (two clients hammering one world; assert no lost updates / no corruption).
+1. **World-transaction framework** in `door.cyr` ✅ (2026-06-07) — world dir + `flock` lock + snapshot read/write + `world_txn_add` + diagnostic `worldbench`/`worldread` verbs. Concurrency smoke green: 16 procs × 500 txns → exactly 8000, no lost updates (`08-world-concurrency.sh`); t122/t123 unit (123/123). Snapshot write is in-place `O_TRUNC` under the held lock; temp+rename/event-log crash-hardening deferred (ADR 0010).
 2. **Port Authority shared galaxy** — generated-once world, depletable port stock (your buying moves the next player's price), player-owned planets. The canonical Universe slice.
 3. **PA deployments + async PvP** — sector-deployed fighters/mines, combat vs left-behind assets, alliances.
 4. **Smuggler's shared economy** (district prices + heat move with all players) + **The Handler shared layer** (per-city alerts, intercept pool, anonymous-tip sabotage).

@@ -19,6 +19,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 05 | [`05-telnet-login.sh`](05-telnet-login.sh) | M6 challenge/response over telnet (openssl-signed) | `./bbs/`, `./keys/qix` |
 | 06 | [`06-board-policy.sh`](06-board-policy.sh) | M6-F `.policy` / `.admins` (open / known / admin) | `./bbs/` |
 | 07 | [`07-play-door.sh`](07-play-door.sh) | 1.1.0 door games: plays Smuggler's Ledger / Port Authority / The Handler over telnet (practice mode) — ADR 0009 | none |
+| 08 | [`08-world-concurrency.sh`](08-world-concurrency.sh) | 1.2.0 world-transaction framework: N processes hammer one shared world, assert no lost updates — ADR 0010 | `/tmp/agora-world-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 
@@ -26,7 +27,7 @@ Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avo
 
 ## What these are not
 
-- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness (80 tests, t01–t80). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
+- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness (123 tests, t01–t123 as of 1.2.0 bite 1). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
 - **Not benchmarks** — those live in [`benches/bench_telnet.bcyr`](../../benches/bench_telnet.bcyr).
 - **Not a tutorial** — the prose tutorial is [`docs/guides/getting-started.md`](../guides/getting-started.md). Read that first if you've never run agora.
 
