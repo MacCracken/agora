@@ -1,0 +1,298 @@
+# smuggler.cyr — Smuggler's Ledger (1.1.0, ADR 0009).
+#
+# A buy-low/sell-high contraband run across a gritty metro, homage to
+# the Drug Wars / Dope Wars *style* (NOT a copy): abstract smuggling
+# goods, no real drug names. You have a fixed number of days to turn a
+# stake into a fortune while servicing a loanshark's compounding debt,
+# dodging the cops, and not getting your throat cut for the cash in
+# your coat.
+#
+# This file is the PURE economy + finance core (bite 1): the game
+# state struct, the static goods/district tables, deterministic
+# per-day price generation (seedable PRNG → replayable runs +
+# unit-testable), and the buy/sell/bank/loan mutators. The travel +
+# encounter + upgrade + render + input + save layer lands in bite 2.
+#
+# No socket or filesystem here — every function is testable from
+# src/test.cyr without binding a port (CLAUDE.md: pure is testable).
+# Depends on door.cyr (rng_*, iclamp, ...) included before this file.
+
+# === Config ===
+
+enum SLConfig {
+    SL_GOODS      = 8;        # contraband types
+    SL_DISTRICTS  = 8;        # metro districts you can jet between
+    SL_START_CASH = 2000;     # opening stake
+    SL_START_DEBT = 5500;     # what the shark fronted you
+    SL_START_CAP  = 100;      # coat/stash capacity (units)
+    SL_START_HP   = 100;      # health
+    SL_DEF_DAYS   = 30;       # default run length
+    SL_DEBT_RATE  = 10;       # loanshark interest, +10% per day (integer)
+    SL_PRICE_MIX  = 0x9E3779B1;  # per-day seed mixer (positive 32-bit)
+}
+
+# Per-run game state. One alloc(SL_SIZE) block, 8-byte fields, manual
+# offsets (the PostHeaders / TelnetState pattern). SL_INV is an inline
+# array of SL_GOODS i64 counts.
+enum SL {
+    SL_SEED    = 0;     # run RNG seed (drives per-day price streams)
+    SL_DAY     = 8;     # current day, 1..SL_MAXDAYS
+    SL_MAXDAYS = 16;
+    SL_LOC     = 24;    # current district index
+    SL_CASH    = 32;    # cash on hand (vulnerable to muggings)
+    SL_BANK    = 40;    # banked cash (safe; no interest — just a vault)
+    SL_DEBT    = 48;    # loanshark debt (compounds daily)
+    SL_HEALTH  = 56;    # 0..100; 0 = dead
+    SL_GUNS    = 64;    # weapon power (raises fight win odds)
+    SL_CAP     = 72;    # stash capacity (units)
+    SL_MODE    = 80;    # DoorMode (practice/solo) for save behavior
+    SL_OVER    = 88;    # 0 playing, 1 finished, 2 dead
+    SL_INV     = 96;    # SL_GOODS i64 slots → 96..159
+    SL_SIZE    = 160;
+}
+
+# === Construction ===
+
+fn sl_new(seed, mode, max_days): i64 {
+    var st = alloc(SL_SIZE);
+    memset(st, 0, SL_SIZE);
+    store64(st + SL_SEED,    seed);
+    store64(st + SL_DAY,     1);
+    store64(st + SL_MAXDAYS, max_days);
+    store64(st + SL_LOC,     0);
+    store64(st + SL_CASH,    SL_START_CASH);
+    store64(st + SL_BANK,    0);
+    store64(st + SL_DEBT,    SL_START_DEBT);
+    store64(st + SL_HEALTH,  SL_START_HP);
+    store64(st + SL_GUNS,    0);
+    store64(st + SL_CAP,     SL_START_CAP);
+    store64(st + SL_MODE,    mode);
+    store64(st + SL_OVER,    0);
+    return st;
+}
+
+# === Static tables ===
+#
+# Eight abstract smuggling goods, ordered cheap-and-common → rare-and-
+# dear, each with a [min,max] street-price band. Names are flavor and
+# trivially swappable.
+
+fn sl_good_name(i): i64 {
+    if (i == 0) { return "loosies"; }    # cut/loose cigarettes
+    if (i == 1) { return "hooch"; }      # untaxed liquor
+    if (i == 2) { return "kicks"; }      # knock-off sneakers
+    if (i == 3) { return "parts"; }      # stolen parts
+    if (i == 4) { return "chips"; }      # counterfeit chips
+    if (i == 5) { return "meds"; }       # bootleg meds
+    if (i == 6) { return "papers"; }     # forged papers
+    if (i == 7) { return "ice"; }        # hot jewelry
+    return "?";
+}
+
+fn sl_good_min(i): i64 {
+    if (i == 0) { return 15; }
+    if (i == 1) { return 40; }
+    if (i == 2) { return 100; }
+    if (i == 3) { return 250; }
+    if (i == 4) { return 500; }
+    if (i == 5) { return 800; }
+    if (i == 6) { return 1500; }
+    if (i == 7) { return 3000; }
+    return 1;
+}
+
+fn sl_good_max(i): i64 {
+    if (i == 0) { return 60; }
+    if (i == 1) { return 180; }
+    if (i == 2) { return 400; }
+    if (i == 3) { return 900; }
+    if (i == 4) { return 1800; }
+    if (i == 5) { return 3500; }
+    if (i == 6) { return 6000; }
+    if (i == 7) { return 12000; }
+    return 1;
+}
+
+fn sl_district_name(i): i64 {
+    if (i == 0) { return "The Docks"; }
+    if (i == 1) { return "Rustline"; }
+    if (i == 2) { return "Tent City"; }
+    if (i == 3) { return "Northgate"; }
+    if (i == 4) { return "Cathedral Hill"; }
+    if (i == 5) { return "Riverside"; }
+    if (i == 6) { return "The Heights"; }
+    if (i == 7) { return "Uptown"; }
+    return "?";
+}
+
+# === Inventory / accounting ===
+
+fn sl_inv(st, good): i64 {
+    return load64(st + SL_INV + good * 8);
+}
+
+fn sl_set_inv(st, good, v): i64 {
+    store64(st + SL_INV + good * 8, v);
+    return 0;
+}
+
+fn sl_capacity_used(st): i64 {
+    var total = 0;
+    var i = 0;
+    while (i < SL_GOODS) {
+        total = total + sl_inv(st, i);
+        i = i + 1;
+    }
+    return total;
+}
+
+fn sl_capacity_free(st): i64 {
+    return load64(st + SL_CAP) - sl_capacity_used(st);
+}
+
+# Net worth = cash + bank − debt (the final-score quantity).
+fn sl_net_worth(st): i64 {
+    return load64(st + SL_CASH) + load64(st + SL_BANK) - load64(st + SL_DEBT);
+}
+
+# === Trade mutators ===
+#
+# Buy/sell take the CURRENT day's price for the good (the caller pulls
+# it from the generated price table). Status codes:
+#   0       ok
+#   (0 - 1) bad good index
+#   (0 - 2) not enough cash
+#   (0 - 3) not enough capacity
+#   (0 - 4) bad quantity / good unavailable (price <= 0)
+#   (0 - 5) selling more than held
+
+fn sl_buy(st, good, price, qty): i64 {
+    if (good < 0)         { return 0 - 1; }
+    if (good >= SL_GOODS) { return 0 - 1; }
+    if (qty <= 0)         { return 0 - 4; }
+    if (price <= 0)       { return 0 - 4; }
+    var cost = price * qty;
+    if (cost > load64(st + SL_CASH))  { return 0 - 2; }
+    if (qty > sl_capacity_free(st))   { return 0 - 3; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - cost);
+    sl_set_inv(st, good, sl_inv(st, good) + qty);
+    return 0;
+}
+
+fn sl_sell(st, good, price, qty): i64 {
+    if (good < 0)         { return 0 - 1; }
+    if (good >= SL_GOODS) { return 0 - 1; }
+    if (qty <= 0)         { return 0 - 4; }
+    if (price <= 0)       { return 0 - 4; }
+    if (qty > sl_inv(st, good)) { return 0 - 5; }
+    store64(st + SL_CASH, load64(st + SL_CASH) + price * qty);
+    sl_set_inv(st, good, sl_inv(st, good) - qty);
+    return 0;
+}
+
+# === Finance: bank vault + loanshark ===
+#
+# Bank protects cash from muggings (no interest). The shark's debt
+# compounds every day you carry it.
+
+fn sl_deposit(st, amt): i64 {
+    if (amt <= 0)                    { return 0 - 1; }
+    if (amt > load64(st + SL_CASH))  { return 0 - 2; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - amt);
+    store64(st + SL_BANK, load64(st + SL_BANK) + amt);
+    return 0;
+}
+
+fn sl_withdraw(st, amt): i64 {
+    if (amt <= 0)                    { return 0 - 1; }
+    if (amt > load64(st + SL_BANK))  { return 0 - 2; }
+    store64(st + SL_BANK, load64(st + SL_BANK) - amt);
+    store64(st + SL_CASH, load64(st + SL_CASH) + amt);
+    return 0;
+}
+
+# Pay debt down from cash. Overpayment is clamped to the debt balance.
+fn sl_repay(st, amt): i64 {
+    if (amt <= 0)                    { return 0 - 1; }
+    if (amt > load64(st + SL_CASH))  { return 0 - 2; }
+    var d = load64(st + SL_DEBT);
+    var pay = amt;
+    if (pay > d) { pay = d; }
+    store64(st + SL_CASH, load64(st + SL_CASH) - pay);
+    store64(st + SL_DEBT, d - pay);
+    return 0;
+}
+
+# Take more from the shark — cash up, debt up.
+fn sl_borrow(st, amt): i64 {
+    if (amt <= 0) { return 0 - 1; }
+    store64(st + SL_CASH, load64(st + SL_CASH) + amt);
+    store64(st + SL_DEBT, load64(st + SL_DEBT) + amt);
+    return 0;
+}
+
+# Apply one day of loanshark interest (+SL_DEBT_RATE%).
+fn sl_accrue_debt(st): i64 {
+    var d = load64(st + SL_DEBT);
+    if (d <= 0) { return 0; }
+    store64(st + SL_DEBT, d + d * SL_DEBT_RATE / 100);
+    return 0;
+}
+
+# === Deterministic per-day market ===
+#
+# Mix the run seed with the day so each day is its own reproducible
+# stream — a stored seed replays the whole run, and tests can pin a
+# known market.
+fn sl_day_seed(seed, day): i64 {
+    return seed + day * SL_PRICE_MIX;
+}
+
+# Fill prices_out[0..SL_GOODS) with the day's street prices (0 means
+# "not on the street today"). event_out[0] = kind (0 none / 1 spike /
+# 2 crash), event_out[1] = affected good index. Deterministic in
+# (seed, day). The event good is always available so the spike/crash
+# is visible. Returns 0.
+fn sl_gen_prices(seed, day, prices_out, event_out): i64 {
+    var rng = alloc(8);
+    rng_seed(rng, sl_day_seed(seed, day));
+
+    var ev_kind = 0;
+    var ev_good = 0;
+    if (rng_chance(rng, 35) == 1) {           # 35% of days carry an event
+        ev_good = rng_below(rng, SL_GOODS);
+        if (rng_chance(rng, 50) == 1) { ev_kind = 1; }   # spike
+        else                          { ev_kind = 2; }   # crash
+    }
+    store64(event_out + 0, ev_kind);
+    store64(event_out + 8, ev_good);
+
+    var i = 0;
+    while (i < SL_GOODS) {
+        var avail = rng_chance(rng, 85);      # ~85% on the street each day
+        if (ev_kind != 0) {
+            if (i == ev_good) { avail = 1; }  # force the event good present
+        }
+        var price = 0;
+        if (avail == 1) {
+            var lo = sl_good_min(i);
+            var hi = sl_good_max(i);
+            price = rng_range(rng, lo, hi);
+            if (ev_kind != 0) {
+                if (i == ev_good) {
+                    if (ev_kind == 1) {
+                        var mult = rng_range(rng, 3, 6);   # spike: 3-6x the ceiling
+                        price = hi * mult;
+                    }
+                    if (ev_kind == 2) {
+                        price = lo / rng_range(rng, 3, 6); # crash: fraction of the floor
+                        if (price < 1) { price = 1; }
+                    }
+                }
+            }
+        }
+        store64(prices_out + i * 8, price);
+        i = i + 1;
+    }
+    return 0;
+}

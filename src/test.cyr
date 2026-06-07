@@ -11,6 +11,7 @@ include "src/telnet.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
+include "src/smuggler.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -1990,6 +1991,132 @@ fn t86_door_save_path(): i64 {
     return 0;
 }
 
+# === 1.1.0 Smuggler's Ledger economy core (t87-t93, ADR 0009) ===
+# Pure economy/finance coverage for src/smuggler.cyr.
+
+fn t87_sl_new_defaults(): i64 {
+    var st = sl_new(42, DOOR_SOLO, SL_DEF_DAYS);
+    if (load64(st + SL_CASH) != SL_START_CASH)   { test_fail("t87_sl_new_defaults", "cash");    return 1; }
+    if (load64(st + SL_DEBT) != SL_START_DEBT)   { test_fail("t87_sl_new_defaults", "debt");    return 1; }
+    if (load64(st + SL_DAY) != 1)                { test_fail("t87_sl_new_defaults", "day");     return 1; }
+    if (load64(st + SL_CAP) != SL_START_CAP)     { test_fail("t87_sl_new_defaults", "cap");     return 1; }
+    if (load64(st + SL_HEALTH) != SL_START_HP)   { test_fail("t87_sl_new_defaults", "hp");      return 1; }
+    if (sl_capacity_used(st) != 0)               { test_fail("t87_sl_new_defaults", "inv");     return 1; }
+    if (sl_net_worth(st) != SL_START_CASH - SL_START_DEBT) { test_fail("t87_sl_new_defaults", "networth"); return 1; }
+    test_pass("t87_sl_new_defaults");
+    return 0;
+}
+
+fn t88_sl_buy_sell(): i64 {
+    var st = sl_new(1, DOOR_PRACTICE, SL_DEF_DAYS);
+    if (sl_buy(st, 0, 20, 10) != 0)     { test_fail("t88_sl_buy_sell", "buy failed");     return 1; }
+    if (load64(st + SL_CASH) != 1800)   { test_fail("t88_sl_buy_sell", "cash after buy"); return 1; }
+    if (sl_inv(st, 0) != 10)            { test_fail("t88_sl_buy_sell", "inv after buy");  return 1; }
+    if (sl_capacity_used(st) != 10)     { test_fail("t88_sl_buy_sell", "cap used");       return 1; }
+    if (sl_sell(st, 0, 30, 5) != 0)     { test_fail("t88_sl_buy_sell", "sell failed");    return 1; }
+    if (load64(st + SL_CASH) != 1950)   { test_fail("t88_sl_buy_sell", "cash after sell");return 1; }
+    if (sl_inv(st, 0) != 5)             { test_fail("t88_sl_buy_sell", "inv after sell"); return 1; }
+    test_pass("t88_sl_buy_sell");
+    return 0;
+}
+
+fn t89_sl_buy_sell_guards(): i64 {
+    var st = sl_new(1, DOOR_PRACTICE, SL_DEF_DAYS);
+    if (sl_buy(st, 0, 100000, 1) != (0 - 2)) { test_fail("t89_sl_buy_sell_guards", "cash guard"); return 1; }
+    if (sl_buy(st, 99, 10, 1) != (0 - 1))    { test_fail("t89_sl_buy_sell_guards", "good guard"); return 1; }
+    if (sl_buy(st, 0, 0, 1) != (0 - 4))      { test_fail("t89_sl_buy_sell_guards", "price guard");return 1; }
+    if (sl_buy(st, 0, 10, 0) != (0 - 4))     { test_fail("t89_sl_buy_sell_guards", "qty guard");  return 1; }
+    if (sl_buy(st, 0, 1, 200) != (0 - 3))    { test_fail("t89_sl_buy_sell_guards", "cap guard");  return 1; }
+    if (sl_sell(st, 0, 10, 1) != (0 - 5))    { test_fail("t89_sl_buy_sell_guards", "sell guard"); return 1; }
+    test_pass("t89_sl_buy_sell_guards");
+    return 0;
+}
+
+fn t90_sl_capacity(): i64 {
+    var st = sl_new(1, DOOR_PRACTICE, SL_DEF_DAYS);
+    if (sl_buy(st, 1, 1, 100) != 0)       { test_fail("t90_sl_capacity", "fill failed");    return 1; }
+    if (sl_capacity_free(st) != 0)        { test_fail("t90_sl_capacity", "free not 0");     return 1; }
+    if (sl_buy(st, 2, 1, 1) != (0 - 3))   { test_fail("t90_sl_capacity", "overfill allowed");return 1; }
+    test_pass("t90_sl_capacity");
+    return 0;
+}
+
+fn t91_sl_finances(): i64 {
+    var st = sl_new(1, DOOR_PRACTICE, SL_DEF_DAYS);
+    if (sl_deposit(st, 500) != 0)      { test_fail("t91_sl_finances", "deposit");        return 1; }
+    if (load64(st + SL_CASH) != 1500)  { test_fail("t91_sl_finances", "cash post-dep");   return 1; }
+    if (load64(st + SL_BANK) != 500)   { test_fail("t91_sl_finances", "bank post-dep");   return 1; }
+    if (sl_withdraw(st, 200) != 0)     { test_fail("t91_sl_finances", "withdraw");        return 1; }
+    if (load64(st + SL_CASH) != 1700)  { test_fail("t91_sl_finances", "cash post-wd");    return 1; }
+    if (sl_repay(st, 1000) != 0)       { test_fail("t91_sl_finances", "repay");           return 1; }
+    if (load64(st + SL_DEBT) != 4500)  { test_fail("t91_sl_finances", "debt post-repay"); return 1; }
+    if (load64(st + SL_CASH) != 700)   { test_fail("t91_sl_finances", "cash post-repay"); return 1; }
+    sl_accrue_debt(st);
+    if (load64(st + SL_DEBT) != 4950)  { test_fail("t91_sl_finances", "debt accrual");    return 1; }
+    if (sl_borrow(st, 1000) != 0)      { test_fail("t91_sl_finances", "borrow");          return 1; }
+    if (load64(st + SL_DEBT) != 5950)  { test_fail("t91_sl_finances", "debt post-borrow");return 1; }
+    if (load64(st + SL_CASH) != 1700)  { test_fail("t91_sl_finances", "cash post-borrow");return 1; }
+    test_pass("t91_sl_finances");
+    return 0;
+}
+
+fn t92_sl_price_determinism(): i64 {
+    var p1 = alloc(SL_GOODS * 8);
+    var p2 = alloc(SL_GOODS * 8);
+    var e1 = alloc(16);
+    var e2 = alloc(16);
+    sl_gen_prices(777, 3, p1, e1);
+    sl_gen_prices(777, 3, p2, e2);
+    var i = 0;
+    while (i < SL_GOODS) {
+        if (load64(p1 + i * 8) != load64(p2 + i * 8)) {
+            test_fail("t92_sl_price_determinism", "price differs same seed/day");
+            return 1;
+        }
+        i = i + 1;
+    }
+    if (load64(e1) != load64(e2))         { test_fail("t92_sl_price_determinism", "event kind differs"); return 1; }
+    if (load64(e1 + 8) != load64(e2 + 8)) { test_fail("t92_sl_price_determinism", "event good differs"); return 1; }
+    test_pass("t92_sl_price_determinism");
+    return 0;
+}
+
+fn t93_sl_price_ranges(): i64 {
+    var prices = alloc(SL_GOODS * 8);
+    var ev = alloc(16);
+    var saw_unavail = 0;
+    var saw_spike = 0;
+    var saw_crash = 0;
+    var day = 1;
+    while (day <= 400) {
+        sl_gen_prices(20260607, day, prices, ev);
+        var kind = load64(ev);
+        var egood = load64(ev + 8);
+        if (kind == 1) { saw_spike = 1; }
+        if (kind == 2) { saw_crash = 1; }
+        var i = 0;
+        while (i < SL_GOODS) {
+            var pr = load64(prices + i * 8);
+            if (pr == 0) { saw_unavail = 1; }
+            else {
+                var is_event = 0;
+                if (kind != 0) { if (i == egood) { is_event = 1; } }
+                if (is_event == 0) {
+                    if (pr < sl_good_min(i)) { test_fail("t93_sl_price_ranges", "below min"); return 1; }
+                    if (pr > sl_good_max(i)) { test_fail("t93_sl_price_ranges", "above max"); return 1; }
+                }
+            }
+            i = i + 1;
+        }
+        day = day + 1;
+    }
+    if (saw_unavail == 0) { test_fail("t93_sl_price_ranges", "no unavailable good seen"); return 1; }
+    if (saw_spike == 0)   { test_fail("t93_sl_price_ranges", "no spike seen");            return 1; }
+    if (saw_crash == 0)   { test_fail("t93_sl_price_ranges", "no crash seen");            return 1; }
+    test_pass("t93_sl_price_ranges");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -2082,6 +2209,13 @@ fn main(): i64 {
     t84_int_helpers();
     t85_game_name_valid();
     t86_door_save_path();
+    t87_sl_new_defaults();
+    t88_sl_buy_sell();
+    t89_sl_buy_sell_guards();
+    t90_sl_capacity();
+    t91_sl_finances();
+    t92_sl_price_determinism();
+    t93_sl_price_ranges();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
