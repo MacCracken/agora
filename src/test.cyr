@@ -10,6 +10,7 @@
 include "src/telnet.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
+include "src/door.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -1862,6 +1863,133 @@ fn t80_board_exists_main_and_missing(): i64 {
     return 0;
 }
 
+# === 1.1.0 door framework (t81-t86, ADR 0009) ===
+# Pure-logic coverage for src/door.cyr: PRNG determinism + bounds,
+# the logical-shift helper, integer helpers, the save-slot name
+# validator (path-traversal guard), and the save-path builders.
+
+# Same seed → identical stream; distinct seeds → distinct streams.
+fn t81_rng_deterministic(): i64 {
+    var a = alloc(8);
+    var b = alloc(8);
+    rng_seed(a, 12345);
+    rng_seed(b, 12345);
+    var i = 0;
+    while (i < 32) {
+        if (rng_next(a) != rng_next(b)) {
+            test_fail("t81_rng_deterministic", "same seed diverged");
+            return 1;
+        }
+        i = i + 1;
+    }
+    var c = alloc(8);
+    var d = alloc(8);
+    rng_seed(c, 999983);
+    rng_seed(d, 12345);
+    if (rng_next(c) == rng_next(d)) {
+        test_fail("t81_rng_deterministic", "distinct seeds collided");
+        return 1;
+    }
+    test_pass("t81_rng_deterministic");
+    return 0;
+}
+
+# rng_range stays in [lo,hi]; degenerate ranges + rng_below(<=1) are 0;
+# a [0,1] roll eventually shows both ends (no stuck low bit).
+fn t82_rng_range_bounds(): i64 {
+    var s = alloc(8);
+    rng_seed(s, 4242);
+    var i = 0;
+    while (i < 500) {
+        var r = rng_range(s, 5, 10);
+        if (r < 5)  { test_fail("t82_rng_range_bounds", "below lo");  return 1; }
+        if (r > 10) { test_fail("t82_rng_range_bounds", "above hi");  return 1; }
+        i = i + 1;
+    }
+    if (rng_range(s, 7, 7) != 7) { test_fail("t82_rng_range_bounds", "degenerate range"); return 1; }
+    if (rng_below(s, 1) != 0)    { test_fail("t82_rng_range_bounds", "below(1) not 0");   return 1; }
+    if (rng_below(s, 0) != 0)    { test_fail("t82_rng_range_bounds", "below(0) not 0");   return 1; }
+    var saw0 = 0;
+    var saw1 = 0;
+    var j = 0;
+    while (j < 200) {
+        var v = rng_range(s, 0, 1);
+        if (v == 0) { saw0 = 1; }
+        if (v == 1) { saw1 = 1; }
+        j = j + 1;
+    }
+    if (saw0 == 0) { test_fail("t82_rng_range_bounds", "never saw 0"); return 1; }
+    if (saw1 == 0) { test_fail("t82_rng_range_bounds", "never saw 1"); return 1; }
+    test_pass("t82_rng_range_bounds");
+    return 0;
+}
+
+# lshr is a true logical shift even on a negative (all-ones) cell.
+fn t83_lshr_logical(): i64 {
+    if (lshr(0 - 1, 63) != 1) { test_fail("t83_lshr_logical", "all-ones>>63 != 1"); return 1; }
+    if (lshr(1024, 5)  != 32) { test_fail("t83_lshr_logical", "1024>>5 != 32");     return 1; }
+    if (lshr(255, 4)   != 15) { test_fail("t83_lshr_logical", "255>>4 != 15");      return 1; }
+    if (lshr(8, 0)     != 8)  { test_fail("t83_lshr_logical", "k=0 passthrough");   return 1; }
+    if (lshr(0 - 1, 1) < 0)   { test_fail("t83_lshr_logical", "top bit not cleared"); return 1; }
+    test_pass("t83_lshr_logical");
+    return 0;
+}
+
+fn t84_int_helpers(): i64 {
+    if (imin(3, 7) != 3)            { test_fail("t84_int_helpers", "imin");      return 1; }
+    if (imin(7, 3) != 3)            { test_fail("t84_int_helpers", "imin rev");  return 1; }
+    if (imax(3, 7) != 7)            { test_fail("t84_int_helpers", "imax");      return 1; }
+    if (iclamp(5, 0, 10) != 5)      { test_fail("t84_int_helpers", "clamp mid"); return 1; }
+    if (iclamp(0 - 3, 0, 10) != 0)  { test_fail("t84_int_helpers", "clamp lo");  return 1; }
+    if (iclamp(99, 0, 10) != 10)    { test_fail("t84_int_helpers", "clamp hi");  return 1; }
+    if (iabs(0 - 5) != 5)           { test_fail("t84_int_helpers", "iabs neg");  return 1; }
+    if (iabs(5) != 5)               { test_fail("t84_int_helpers", "iabs pos");  return 1; }
+    if (ipow(2, 10) != 1024)        { test_fail("t84_int_helpers", "pow 2^10");  return 1; }
+    if (ipow(5, 0) != 1)            { test_fail("t84_int_helpers", "pow x^0");   return 1; }
+    if (ipow(3, 3) != 27)           { test_fail("t84_int_helpers", "pow 3^3");   return 1; }
+    test_pass("t84_int_helpers");
+    return 0;
+}
+
+# game_name_valid is the only traversal guard on <game>.sav.
+fn t85_game_name_valid(): i64 {
+    if (game_name_valid("smuggler") != 1)       { test_fail("t85_game_name_valid", "smuggler");        return 1; }
+    if (game_name_valid("port-authority") != 1) { test_fail("t85_game_name_valid", "port-authority");  return 1; }
+    if (game_name_valid("handler") != 1)        { test_fail("t85_game_name_valid", "handler");         return 1; }
+    if (game_name_valid("game_2") != 1)         { test_fail("t85_game_name_valid", "game_2");          return 1; }
+    if (game_name_valid("a") != 1)              { test_fail("t85_game_name_valid", "a");               return 1; }
+    if (game_name_valid("") != 0)               { test_fail("t85_game_name_valid", "empty");           return 1; }
+    if (game_name_valid("Bad") != 0)            { test_fail("t85_game_name_valid", "uppercase");       return 1; }
+    if (game_name_valid(".hidden") != 0)        { test_fail("t85_game_name_valid", "dot");             return 1; }
+    if (game_name_valid("../etc") != 0)         { test_fail("t85_game_name_valid", "traversal");       return 1; }
+    if (game_name_valid("a/b") != 0)            { test_fail("t85_game_name_valid", "slash");           return 1; }
+    if (game_name_valid("-x") != 0)             { test_fail("t85_game_name_valid", "lead dash");       return 1; }
+    if (game_name_valid("_y") != 0)             { test_fail("t85_game_name_valid", "lead underscore"); return 1; }
+    if (game_name_valid("aaaaaaaaaabbbbbbbbbbccccccccccddd") != 0) { test_fail("t85_game_name_valid", "33 chars"); return 1; }
+    test_pass("t85_game_name_valid");
+    return 0;
+}
+
+# Save-path builders assemble the expected <store>/.users/<fp>/games tree.
+fn t86_door_save_path(): i64 {
+    var buf = alloc(PATH_MAX_BYTES);
+    var n = door_save_path("store", "aabbccddeeff0011", "smuggler", buf);
+    if (streq(buf, "store/.users/aabbccddeeff0011/games/smuggler.sav") == 0) {
+        test_fail("t86_door_save_path", "save path mismatch");
+        return 1;
+    }
+    if (n != 48) { test_fail("t86_door_save_path", "save path length"); return 1; }
+    var dbuf = alloc(PATH_MAX_BYTES);
+    var dn = door_games_dir("store", "aabbccddeeff0011", dbuf);
+    if (streq(dbuf, "store/.users/aabbccddeeff0011/games") == 0) {
+        test_fail("t86_door_save_path", "games dir mismatch");
+        return 1;
+    }
+    if (dn != 35) { test_fail("t86_door_save_path", "games dir length"); return 1; }
+    test_pass("t86_door_save_path");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -1948,6 +2076,12 @@ fn main(): i64 {
     t78_parse_post_id_accepts_18_digits();
     t79_mode_is_loose();
     t80_board_exists_main_and_missing();
+    t81_rng_deterministic();
+    t82_rng_range_bounds();
+    t83_lshr_logical();
+    t84_int_helpers();
+    t85_game_name_valid();
+    t86_door_save_path();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

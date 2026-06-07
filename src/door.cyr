@@ -1,0 +1,281 @@
+# door.cyr — shared BBS door / games framework (1.1.0, ADR 0009).
+#
+# agora's "door" subsystem hosts text games that run inside a telnet
+# session (classic BBS doors). Three games ship on this framework:
+#   - Smuggler's Ledger  (src/smuggler.cyr)       — buy-low/sell-high run
+#   - Port Authority     (src/port_authority.cyr) — space trade + combat
+#   - The Handler        (src/handler.cyr)        — espionage deduction
+#
+# Architecture (ADR 0009): each game is a PURE state machine — it
+# renders frames into a caller-supplied buffer and consumes one input
+# line at a time, never touching the socket. main.cyr's MODE_DOOR
+# dispatch owns all send_buf I/O and the save-file load/store. This
+# mirrors render_motd (pure → testable) and the CLAUDE.md rule "pure
+# parsing is testable; socket I/O is wired".
+#
+# This module provides the shared, content-free infrastructure:
+#   - a deterministic seedable PRNG (xorshift64) so a save can store
+#     its seed and a test can pin a known stream (the stdlib only has
+#     the kernel CSPRNG, which is non-reproducible — wrong for games)
+#   - integer helpers (imin/imax/iclamp/iabs/ipow) the stdlib lacks
+#     (lib/math.cyr's are f64-only and not in cyrius.cyml deps)
+#   - a logical-shift-right helper correct whether cyrius `>>` is
+#     arithmetic or logical
+#   - game-name validation + per-user save path builders + dir-ensure
+#     + save read/write, reusing account.cyr/board.cyr primitives so
+#     the alphabet validators remain the only path-traversal defense
+#
+# Save layout (per ADR 0009): <store>/.users/<fp16>/games/<game>.sav
+# — under the dot-prefixed .users/ tree so it dodges board / post
+# enumeration exactly like account.cyr's per-user files.
+#
+# Deps resolved upstream in main.cyr / test.cyr include order:
+#   board.cyr   — PERM_FILE, PATH_MAX_BYTES, store_ensure, fp16_valid
+#   account.cyr — build_user_dir, account_dir_ensure
+#   lib/io.cyr  — file_open/_read_all/_write_all/_exists, O_* flags
+#   lib/chrono.cyr — clock_now_ns (PRNG entropy seed)
+
+# === Constants ===
+
+enum DoorCap {
+    GAME_NAME_MAX  = 32;       # save-slot name ceiling (matches BOARD_NAME_MAX)
+    SAVE_MAX_BYTES = 65536;    # max save-file size we read/write at once
+    RNG_NONZERO    = 0x2545F491;  # nonzero fallback seed (xorshift fixed-point is 0)
+}
+
+# Per-game play mode. Practice = ephemeral (anon-OK, no save); Solo =
+# login-gated persistent save; Universe = shared multiplayer world
+# (roadmapped — see roadmap-future.md, stubbed at 1.1.0).
+enum DoorMode {
+    DOOR_PRACTICE = 0;
+    DOOR_SOLO     = 1;
+    DOOR_UNIVERSE = 2;
+}
+
+# Door catalog ids (enum, not globals — gvar_toks budget).
+enum DoorGame {
+    GAME_NONE     = 0;
+    GAME_SMUGGLER = 1;
+    GAME_PORT     = 2;
+    GAME_HANDLER  = 3;
+}
+
+# === Integer helpers ===
+#
+# The cyrius stdlib ships no integer min/max/clamp/abs/pow (math.cyr's
+# are f64-only and not even in cyrius.cyml deps). Games run on pure
+# integer economy math for determinism + cross-arch reproducibility.
+
+fn imin(a, b): i64 {
+    if (a < b) { return a; }
+    return b;
+}
+
+fn imax(a, b): i64 {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn iclamp(x, lo, hi): i64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+fn iabs(x): i64 {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+# Integer power. exp < 0 yields 1 (no fractional results in i64).
+# Overflow wraps silently — callers bound the exponent.
+fn ipow(base, exp): i64 {
+    var result = 1;
+    var e = exp;
+    while (e > 0) {
+        result = result * base;
+        e = e - 1;
+    }
+    return result;
+}
+
+# === Logical shift right ===
+#
+# cyrius `>>` may be arithmetic (sign-extending) or logical; this
+# helper is correct either way. We arithmetic-shift then mask off the
+# top k bits, so the result equals an unsigned shift regardless. Used
+# by the PRNG (xorshift needs a true logical shift on a signed cell).
+fn lshr(x, k): i64 {
+    if (k <= 0)  { return x; }
+    if (k >= 64) { return 0; }
+    var shifted = x >> k;
+    var keep = 64 - k;
+    var mask = (1 << keep) - 1;
+    return shifted & mask;
+}
+
+# === Deterministic PRNG (xorshift64) ===
+#
+# State is one i64 cell (8 bytes); pass its address. xorshift64 uses
+# only shifts + xor (no 64-bit multiply constants near the sign
+# boundary), so it dodges literal-range and signed-multiply concerns.
+# Quality is ample for game economy/events; it is NOT cryptographic.
+
+# Seed the cell. A zero seed is forced nonzero (xorshift's fixed
+# point is 0 — it would stay 0 forever).
+fn rng_seed(state_ptr, seed): i64 {
+    var s = seed;
+    if (s == 0) { s = RNG_NONZERO; }
+    store64(state_ptr, s);
+    return 0;
+}
+
+# Seed from the monotonic clock — for Practice/arcade nondeterminism.
+# Solo/replayable games seed from a value stored in the save instead.
+fn rng_seed_from_clock(state_ptr): i64 {
+    return rng_seed(state_ptr, clock_now_ns());
+}
+
+# Advance the state and return the next 64-bit value (may be negative).
+fn rng_next(state_ptr): i64 {
+    var x = load64(state_ptr);
+    if (x == 0) { x = RNG_NONZERO; }
+    x = x ^ (x << 13);
+    x = x ^ lshr(x, 7);
+    x = x ^ (x << 17);
+    store64(state_ptr, x);
+    return x;
+}
+
+# Uniform-ish value in [0, n). Returns 0 for n <= 1. Folds the sign
+# off the raw output; the residual modulo bias is negligible for the
+# small ranges games use.
+fn rng_below(state_ptr, n): i64 {
+    if (n <= 1) { return 0; }
+    var x = rng_next(state_ptr);
+    if (x < 0) { x = 0 - x; }
+    if (x < 0) { x = 0; }     # i64-min: (0 - min) stays min; clamp it
+    return x % n;
+}
+
+# Inclusive integer in [lo, hi]. Returns lo if hi <= lo.
+fn rng_range(state_ptr, lo, hi): i64 {
+    if (hi <= lo) { return lo; }
+    var span = hi - lo + 1;
+    return lo + rng_below(state_ptr, span);
+}
+
+# Percentage roll: returns 1 with probability pct/100, else 0.
+fn rng_chance(state_ptr, pct): i64 {
+    if (pct <= 0)   { return 0; }
+    if (pct >= 100) { return 1; }
+    if (rng_below(state_ptr, 100) < pct) { return 1; }
+    return 0;
+}
+
+# === Game-name validation ===
+#
+# Same alphabet as board_name_valid (account/board path-traversal
+# defense): 1..GAME_NAME_MAX bytes, first byte [a-z0-9], rest
+# [a-z0-9-_]; leading '.'/'-'/'_' and any '/' rejected. This IS the
+# only traversal guard on the <game>.sav filename — there is no
+# separate '../' scanner anywhere in the tree.
+fn game_name_valid(name): i64 {
+    if (name == 0) { return 0; }
+    var len = strlen(name);
+    if (len < 1)            { return 0; }
+    if (len > GAME_NAME_MAX) { return 0; }
+    var c0 = load8(name) & 0xFF;
+    var c0_ok = 0;
+    if (c0 >= 97) { if (c0 <= 122) { c0_ok = 1; } }   # a-z
+    if (c0 >= 48) { if (c0 <= 57)  { c0_ok = 1; } }   # 0-9
+    if (c0_ok == 0) { return 0; }
+    var i = 1;
+    while (i < len) {
+        var c = load8(name + i) & 0xFF;
+        var ok = 0;
+        if (c >= 97) { if (c <= 122) { ok = 1; } }    # a-z
+        if (c >= 48) { if (c <= 57)  { ok = 1; } }    # 0-9
+        if (c == 45) { ok = 1; }                       # '-'
+        if (c == 95) { ok = 1; }                       # '_'
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# === Save path builders ===
+#
+# door_games_dir → <store>/.users/<fp16>/games
+# door_save_path → <store>/.users/<fp16>/games/<game>.sav
+# Both write a NUL-terminated path into out_buf (≥ PATH_MAX_BYTES) and
+# return the length excluding NUL. Callers that take external input
+# MUST pre-validate fp16 (fp16_valid) and game (game_name_valid); the
+# save read/write wrappers below do this. The builders themselves are
+# pure string assembly so the test suite can assert their output.
+fn door_games_dir(store, fp16, out_buf): i64 {
+    var pos = build_user_dir(store, fp16, out_buf);   # <store>/.users/<fp16> + NUL
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    memcpy(out_buf + pos, "games", 5); pos = pos + 5;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+fn door_save_path(store, fp16, game, out_buf): i64 {
+    var pos = door_games_dir(store, fp16, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    var glen = strlen(game);
+    memcpy(out_buf + pos, game, glen); pos = pos + glen;
+    memcpy(out_buf + pos, ".sav", 4); pos = pos + 4;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# === Save directory / IO ===
+#
+# door_dir_ensure mkdir-ladders store → .users → <fp16> → games,
+# treating EEXIST as success (via store_ensure / account_dir_ensure).
+fn door_dir_ensure(store, fp16): i64 {
+    var rc = account_dir_ensure(store, fp16);          # store, .users, <fp16>
+    if (rc != 0) { return rc; }
+    var path = alloc(PATH_MAX_BYTES);
+    door_games_dir(store, fp16, path);
+    return store_ensure(path);
+}
+
+# 1 if a save slot exists for (store, fp16, game), else 0. Invalid
+# fp16/game → 0 (treated as absent).
+fn door_save_exists(store, fp16, game): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0; }
+    if (game_name_valid(game) == 0) { return 0; }
+    var path = alloc(PATH_MAX_BYTES);
+    door_save_path(store, fp16, game, path);
+    return file_exists(path);
+}
+
+# Write `len` bytes from buf to the save slot (O_TRUNC overwrite).
+# Validates fp16 + game (traversal guard), ensures the dir ladder,
+# then writes. Returns 0 on success, negative on any error.
+fn door_save_write(store, fp16, game, buf, len): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0 - 1; }
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var rc = door_dir_ensure(store, fp16);
+    if (rc != 0) { return rc; }
+    var path = alloc(PATH_MAX_BYTES);
+    door_save_path(store, fp16, game, path);
+    var n = file_write_all(path, buf, len);
+    if (n != len) { return 0 - 1; }
+    return 0;
+}
+
+# Read the save slot into out_buf (cap bytes). Returns bytes read, or
+# negative on missing file / invalid id. Single-owner file, so a plain
+# read (no flock) is correct — shared world state lands later with the
+# file_append_locked pattern (ADR 0009 § Multiplayer, roadmapped).
+fn door_save_read(store, fp16, game, out_buf, cap): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0 - 1; }
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var path = alloc(PATH_MAX_BYTES);
+    door_save_path(store, fp16, game, path);
+    return file_read_all(path, out_buf, cap);
+}
