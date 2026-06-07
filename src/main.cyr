@@ -1541,10 +1541,6 @@ fn cmd_worldread(): i64 {
     return 0;
 }
 
-# Walk argv looking for --subject <text>. Returns the text cstring
-# if found, else 0 (null). M5-D adds this to the CLI for piped /
-# scripted post creation; the in-session telnet flow uses the
-# Subject prompt instead.
 fn parse_subject_flag(): i64 {
     args_init();
     var n = argc();

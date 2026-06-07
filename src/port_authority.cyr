@@ -1036,3 +1036,4 @@ fn pa_feed(st, line, len): i64 {
     if (screen == PSCR_COMBAT)    { return pa_feed_combat(st, line, len); }
     return 0;
 }
+

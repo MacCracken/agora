@@ -545,3 +545,22 @@ fn world_txn_add(store, game, delta): i64 {
     if (wrc != 0) { return 0 - 1; }
     return cur;
 }
+
+# Decode a 16-char lowercase-hex fingerprint to an i64 id (the 64-bit
+# value the hex represents). Used to key shared-world ownership by
+# player without storing 16-byte strings in the i64 record stream. The
+# fp is already a truncated hash, so id collisions are negligible at BBS
+# scale. Non-hex bytes contribute 0. Caller validates with fp16_valid.
+fn hex16_to_i64(fp): i64 {
+    var v = 0;
+    var i = 0;
+    while (i < 16) {
+        var c = load8(fp + i) & 0xFF;
+        var d = 0;
+        if (c >= 48) { if (c <= 57)  { d = c - 48; } }   # 0-9
+        if (c >= 97) { if (c <= 102) { d = c - 87; } }   # a-f
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    return v;
+}
