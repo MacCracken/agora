@@ -6,7 +6,7 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-06-07 (**1.1.0 — door / games subsystem**: Smuggler's Ledger + Port Authority + The Handler, ADR 0009; 80 → 121 tests; clean DCE build 484,184 B; all three games verified playable over telnet via `07-play-door.sh`). Prior: **1.0.0** cut 2026-05-23 (iron-validated on archaemenid). | **Refresh cadence**: every release; ideally bumped by the release post-hook.
+> **Last refresh**: 2026-06-07 (**1.2.0 in progress** — Persistent Universe, ADR 0010: bite 1 world-transaction framework **shipped** [123/123, race-proven]; **bite 2+ deferred to a future release** pending the sigil/cyrius toolchain fix — pin capped at 6.0.52, ≥6.0.53 SIGILLs crypto). Prior: **1.1.0** door / games subsystem shipped (ADR 0009; Smuggler's Ledger + Port Authority + The Handler; 484,184 B); **1.0.0** cut 2026-05-23 (iron-validated on archaemenid). | **Refresh cadence**: every release; ideally bumped by the release post-hook.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
 
@@ -34,7 +34,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 |---|---|
 | **Released** | `1.1.0` (2026-06-07) — **door / games subsystem** (ADR 0009). Built on `1.0.0` (2026-05-23, iron-validated on archaemenid). |
 | **Cycle** | M0–M6 + 0.7.0 security sweep + 0.8.0-0.8.3 audit followups + 0.9.0 ABI freeze + 0.9.1 doc-pass + 0.9.2 closeout + **1.0.0 ship** all closed. **Every v1.0 criterion met** (M0-M6 ✅, cyrius audit ✅, archaemenid telnet ✅ via `05-telnet-login.sh`, 8-user fanout ✅ via `04-concurrent-smoke.py 2323 8`, 0.7.0 audit ✅, RFC conformance ✅). Next: post-1.0 work — v2.x sovereignty pillars + backlogged M3 / M4 + operator CLI + cross-platform ports, all unpinned. |
-| **Toolchain pin** | cyrius `6.0.1` (in `cyrius.cyml [package].cyrius`) |
+| **Toolchain pin** | cyrius `6.0.52` (in `cyrius.cyml [package].cyrius`). **Capped at 6.0.52**: versions **≥ 6.0.53 SIGILL the sigil/sha256 crypto path** (test t50 `compute_fingerprint` onward) — a sigil/stdlib regression confirmed by a full 6.0.1→6.0.87 bisect (≤6.0.52 pass all tests; ≥6.0.53 crash). Do not bump past 6.0.52 until the sigil issue is fixed upstream. |
 | **Source of truth** | `VERSION` file at repo root |
 
 ## Build artifacts
@@ -57,7 +57,15 @@ Binary growth across cycles: 43 KB scaffold (0.1.0) → 71 KB M1 close (0.2.0) �
 
 ## In-flight slot
 
-**1.2.0 — Persistent Universe (active cycle).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** — the 0.x line → the 1.0.0 BBS cut → the **1.1.0** door / games subsystem (Smuggler's Ledger + Port Authority + The Handler; ADR 0009; 121/121 tests; verified playable over telnet). Design for 1.2.0 is locked in [ADR 0010](../adr/0010-persistent-universe.md): a per-game world dir under `<store>/.games/<game>/world/`, mutated via a `flock`'d lock→read→compute→write transaction with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives); Universe requires login; async/indirect PvP, not real-time. Bite plan + scope in [`roadmap.md`](roadmap.md) § In progress. **Bite 1 (world-transaction framework) shipped 2026-06-07** — `door.cyr` world dir + `flock` lock + snapshot read/write + `world_txn_add` + `worldbench`/`worldread` diagnostic verbs; proven race-free by `08-world-concurrency.sh` (16 procs × 500 → exactly 8000) + t122/t123 unit. Next: Port Authority's shared galaxy (bite 2). **VERSION stays `1.1.0` until the 1.2.0 cut** (123/123 tests at this point; binary not re-measured — feature still in progress). The slot description below is prior post-1.0 context, retained.
+**1.2.0 — Persistent Universe (active cycle).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** — the 0.x line → the 1.0.0 BBS cut → the **1.1.0** door / games subsystem (Smuggler's Ledger + Port Authority + The Handler; ADR 0009; 121/121 tests; verified playable over telnet). Design for 1.2.0 is locked in [ADR 0010](../adr/0010-persistent-universe.md): a per-game world dir under `<store>/.games/<game>/world/`, mutated via a `flock`'d lock→read→compute→write transaction with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives); Universe requires login; async/indirect PvP, not real-time. Bite plan + scope in [`roadmap.md`](roadmap.md) § In progress.
+
+**Bite 1 (world-transaction framework) shipped 2026-06-07** — `door.cyr` world dir + `flock` lock + snapshot read/write + `world_txn_add` + `worldbench`/`worldread` diagnostic verbs; proven race-free by `08-world-concurrency.sh` (16 procs × 500 → exactly 8000) + t122/t123 unit. **123/123 tests.**
+
+**Bite 2+ (PA shared galaxy and the rest of Persistent Universe) DEFERRED to a future release** — blocked on the cyrius toolchain, not on design:
+- **sigil/crypto SIGILL** on cyrius ≥ 6.0.53 (pin is capped at 6.0.52, see Version table) — a fix here is the gating dependency.
+- **array-in-loop codegen bug** observed while building the PA shared-galaxy economy: an array accessor returned a correct value when called directly but 0 inside a sibling function's nested loop (context-dependent), and `store64(var + i*8, …)` collapsed all writes onto the base index. The bite-2 PA-world code was authored, hit this, and was cleanly reverted; the design is fully preserved in [ADR 0010](../adr/0010-persistent-universe.md).
+
+When the sigil issue is resolved upstream, resume from bite 2 (PA shared galaxy) per ADR 0010 § Phasing and re-verify the array codegen on the then-current toolchain. **VERSION stays `1.1.0`** (1.2.0 not cut). The slot description below is prior post-1.0 context, retained.
 
 agora 1.0.0 shipped 2026-05-23 with all six v1.0 criteria met, iron-validated on archaemenid. The next session inherits an empty slot. Open directions, all unpinned (pull on consumer pressure):
 

@@ -28,17 +28,19 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
 | **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
 | **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
-| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 in progress |
+| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 bite 1 done; **bite 2+ deferred to a future release** (sigil/cyrius toolchain — see In progress) |
 
 ---
 
 ## In progress
 
-**1.2.0 — Persistent Universe (active cycle).** Shared-world multiplayer for the three door games — taking up the work roadmapped after 1.1.0. **Everything before 1.2.0 is shipped history** (the 0.x line → the 1.0.0 BBS cut → the 1.1.0 door / games subsystem — see *Closed milestones* + [`CHANGELOG.md`](../../CHANGELOG.md)); 1.2.0 is the forward cycle.
+**1.2.0 — Persistent Universe (bite 1 shipped; bite 2+ deferred to a future release).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** (the 0.x line → the 1.0.0 BBS cut → the 1.1.0 door / games subsystem — see *Closed milestones* + [`CHANGELOG.md`](../../CHANGELOG.md)).
+
+> **⏸ Deferred — blocked on the cyrius toolchain, not on design.** Bite 1 (the world-transaction framework) is done and race-proven. Bites 2+ wait on two toolchain issues: (1) **sigil/crypto SIGILL on cyrius ≥ 6.0.53** — the pin is capped at **6.0.52** ([`state.md`](state.md) Version table); a fix is the gating dependency. (2) An **array-in-loop codegen bug** seen while building the PA shared-galaxy economy (an accessor returned the right value directly but 0 inside a sibling loop; `store64(var + i*8, …)` dropped the index). The bite-2 PA-world code was authored, hit this, and was cleanly reverted — the full design survives in [ADR 0010](../adr/0010-persistent-universe.md). Resume from bite 2 once sigil is fixed upstream, re-verifying the codegen on the then-current toolchain.
 
 Design: [ADR 0010](../adr/0010-persistent-universe.md) — a per-game shared world dir under `<store>/.games/<game>/world/`, mutated through a `flock`'d **lock → read → compute → write** "world transaction" with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives; the I/O lives in `door.cyr` + `main.cyr`). Universe requires login; Practice + Solo (shipped 1.1.0) are unchanged. Async/indirect PvP (act against the state another player left behind), not real-time. Daily-turn budgets keep it fair.
 
-**1.2.0 bite plan** (ADR 0010 § Phasing — start narrow, prove the concurrency pattern first):
+**1.2.0 bite plan** (ADR 0010 § Phasing — bite 1 ✅; **bites 2–6 deferred to a future release**, see the note above):
 
 1. **World-transaction framework** in `door.cyr` ✅ (2026-06-07) — world dir + `flock` lock + snapshot read/write + `world_txn_add` + diagnostic `worldbench`/`worldread` verbs. Concurrency smoke green: 16 procs × 500 txns → exactly 8000, no lost updates (`08-world-concurrency.sh`); t122/t123 unit (123/123). Snapshot write is in-place `O_TRUNC` under the held lock; temp+rename/event-log crash-hardening deferred (ADR 0010).
 2. **Port Authority shared galaxy** — generated-once world, depletable port stock (your buying moves the next player's price), player-owned planets. The canonical Universe slice.
