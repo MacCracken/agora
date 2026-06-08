@@ -30,16 +30,17 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
 | **1.1.1** | The Handler **field pressure** (single-player depth: cover erosion + agent burnout + mole-local leak; Extract/Fund now load-bearing) + **toolchain unblock** cyrius 6.0.52 → 6.1.5 (sigil SIGILL cleared) | ✅ 2026-06-08 |
 | **1.2.0** | **Persistent Universe** — shared-world multiplayer for all three door games (ADR 0010): flock'd world transactions, PA shared galaxy + async-PvP garrisons, Smuggler shared heat, Handler shared city alerts, cross-game leaderboards | ✅ 2026-06-08 |
-| **1.3.0** | **Chat area + Eliza** — a live multi-user chat surface (the classic BBS teleconference / CB simulator) with **Eliza**, a pure-module Rogerian chatbot, as its anchor inhabitant. Builds on the 1.2.0 `flock`'d shared-disk framework; Eliza is also a `play eliza` door. No new deps. | 📋 planned |
+| **1.3.0** | **Chat area + Eliza** — a live multi-user chat surface (the classic BBS teleconference / CB simulator, [ADR 0011](../adr/0011-chat-area.md)) with **Eliza**, a pure-module Rogerian chatbot, as its anchor inhabitant. Builds on the 1.2.0 `flock`'d shared-disk framework; Eliza is also a `play eliza` door + a private `/eliza` side-channel. No new deps. | 🚧 in progress (chat surface landed; Eliza next) |
+| **1.3.1** | **PARRY** (Colby, 1972) — the paranoid foil to Eliza, dropped onto the same reusable decomposition/reassembly chatbot engine: `play parry` + `/parry`. Engine factored at 1.3.0 so PARRY adds only a script + keyword table, no engine rework. | 📋 planned |
 | **1.4.0** | **Descent link** — bridge a logged-in agora session into the sibling **Yeoman's Descent** MUD (`../cyrius-yeomans-descent`) as a door/portal over the shared telnet substrate, carrying sigil identity across. The BBS becomes the front door to the MUD. | 📋 planned |
 
 ---
 
 ## In progress
 
-**No active cycle — 1.2.0 Persistent Universe shipped 2026-06-08.** All six ADR 0010 bites landed (world-transaction framework → PA shared galaxy → PA async-PvP garrisons → Smuggler shared heat + Handler shared city alerts → cross-game leaderboards → cut). Both original toolchain blockers are retired on 6.1.5 (sigil/crypto SIGILL; the array-in-loop codegen bug, re-cleared on the real Universe code via t129). 141/141 tests; 678,776 B; smokes `08`/`09`/`10`. Detail: [ADR 0010](../adr/0010-persistent-universe.md) + CHANGELOG [1.2.0] + [`state.md`](state.md) "Recent shipped".
+**1.3.0 Chat area + Eliza — in progress.** Bite 1 (the chat surface, [ADR 0011](../adr/0011-chat-area.md)) is landed: per-channel `flock`'d **ring transcript** under `<store>/.chat/<channel>/`, a new `MODE_CHAT` with **live-tail by sequence number** on the `CHAT_POLL_SECS` recv-timeout tick (a `-EAGAIN` read in chat flushes new lines instead of disconnecting), `chat [channel]` / `/leave` / `/help`, login-gated. 141 → **148 tests** (t142-t148, the pure transcript helpers); 678,776 → **691,088 B**; cross-session delivery + live-tail proven by `11-chat.sh` (two logged-in sessions). **Bite 2 next: Eliza** — `src/eliza.cyr` pure decomposition/reassembly engine, reachable as a `play eliza` door + a private `/eliza` side-channel (answers only the addressing user, writes nothing to the shared transcript). **Bite 3: closeout** (VERSION → 1.3.0, doc sync).
 
-**Next planned (see *Planned* below):** 1.3.0 Chat area + Eliza; 1.4.0 Descent link (BBS → MUD gateway). Deeper Universe (PA alliances/mines, Handler intercepts/sabotage, Smuggler aggregate price pressure) stays unpinned until a deployment asks.
+**Next planned (see *Planned* below):** 1.3.1 PARRY (same engine, paranoid script); 1.4.0 Descent link (BBS → MUD gateway). Deeper Universe (PA alliances/mines, Handler intercepts/sabotage, Smuggler aggregate price pressure) and further chatbot personalities ([`roadmap-future.md`](roadmap-future.md) § Chatbot personalities) stay unpinned until pulled.
 
 **Deferred (pull when a deployment asks):**
 

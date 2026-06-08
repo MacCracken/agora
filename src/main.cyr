@@ -23,6 +23,7 @@ include "src/door.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
+include "src/chat.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -55,6 +56,19 @@ enum SessMode {
     MODE_POSTING          = 2;
     MODE_LOGIN_AWAIT_SIG  = 3;   # M6-C: parked challenge, waiting for `auth:`
     MODE_DOOR             = 4;   # 1.1.0: in a door game; lines route to the game
+    MODE_CHAT             = 5;   # 1.3.0: in a chat channel; lines say to the room (ADR 0011)
+}
+
+# 1.3.0 chat runtime (ADR 0011). These are main.cyr socket concerns —
+# the pure transcript params (caps, scrollback) live in chat.cyr's
+# ChatCap. While in MODE_CHAT the socket recv timeout drops to
+# CHAT_POLL_SECS so an idle recv (EWOULDBLOCK) becomes a live-tail tick
+# instead of a disconnect; accumulated true-silence is bounded by
+# CHAT_IDLE_SECS so an idle chatter can't pin a forked worker forever.
+enum ChatRuntime {
+    CHAT_POLL_SECS  = 2;        # recv timeout in chat = live-tail tick cadence
+    CHAT_IDLE_SECS  = 900;      # 15 min of pure silence ends a chat session
+    EWOULDBLOCK_ERR = 11;       # sys_read return on SO_RCVTIMEO fire (EAGAIN)
 }
 
 # Operator-supplied MOTD, loaded once in cmd_serve before the
@@ -111,6 +125,17 @@ var g_door_mode  = 0;
 # around each input line reads into this buffer and writes it back, so
 # concurrent players serialize on the world lock with no lost updates.
 var g_uni_world = 0;
+
+# 1.3.0 chat (ADR 0011). Per-session chat state, per-session-in-effect
+# via fork-per-accept like g_session_* / g_door_*; initialized in
+# handle_client. g_chat_channel is the joined channel name buffer (empty
+# = not in chat); g_chat_seen is the highest transcript seq this session
+# has shown (the live-tail watermark — keyed on absolute seq, not a byte
+# offset, so the ring's front-trim never desyncs it); g_chat_idle
+# accumulates seconds of pure silence to bound an idle chatter.
+var g_chat_channel = 0;             # alloc'd in handle_client (CHAT_CHANNEL_MAX + 1)
+var g_chat_seen    = 0;
+var g_chat_idle    = 0;
 
 enum DoorRuntime {
     DOOR_FRAME_CAP = 8192;        # per-frame render buffer
@@ -310,6 +335,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
         send_str(cfd, "  play <game>     door game: smuggler | port | handler  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
+        send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -830,6 +856,62 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         return MODE_COMMAND;
     }
 
+    # 1.3.0: `chat [channel]` — join a live chat channel (ADR 0011).
+    # Login-gated: a chat presence is a persistent-ish actor (needs an
+    # identity), same rule as Universe. Default channel "lobby".
+    if (line_has_prefix(line, len, "chat") != 0) {
+        if ((load8(g_session_fp) & 0xFF) == 0) {
+            send_str(cfd, "chat needs an identity — log in first ('login <handle>').\r\n");
+            return MODE_COMMAND;
+        }
+        var ci = 4;
+        var csk = 1;
+        while (csk == 1) {
+            if (ci >= len) { csk = 0; }
+            else { if ((load8(line + ci) & 0xFF) != 32) { csk = 0; } else { ci = ci + 1; } }
+        }
+        var chan = alloc(CHAT_CHANNEL_MAX + 1);
+        if (ci >= len) {
+            memcpy(chan, "lobby", 5); store8(chan + 5, 0);
+        } else {
+            var clen = len - ci;
+            if (clen > CHAT_CHANNEL_MAX) {
+                send_str(cfd, "channel name too long (max 32 bytes)\r\n");
+                return MODE_COMMAND;
+            }
+            memcpy(chan, line + ci, clen); store8(chan + clen, 0);
+            if (chat_channel_valid(chan) == 0) {
+                send_str(cfd, "invalid channel name (lowercase ASCII + digits + '-' / '_', 1-32 bytes)\r\n");
+                return MODE_COMMAND;
+            }
+        }
+        if (chat_dir_ensure(g_store_buf, chan) != 0) {
+            send_str(cfd, "could not open channel\r\n");
+            return MODE_COMMAND;
+        }
+        memcpy(g_chat_channel, chan, strlen(chan) + 1);
+        # Banner + scrollback (last CHAT_SCROLLBACK_LINES); set the
+        # live-tail watermark to the latest seq so only NEW lines stream.
+        send_str(cfd, "\r\n-- chat: #");
+        send_str(cfd, g_chat_channel);
+        send_str(cfd, " --  (type a line to talk; /help for commands, /leave to exit)\r\n");
+        var lbuf = alloc(CHAT_LOG_BUF);
+        var ln = chat_log_read(g_store_buf, g_chat_channel, lbuf, CHAT_LOG_CAP);
+        var seenp = alloc(8);
+        store64(seenp, 0);
+        if (ln > 0) {
+            var ob = alloc(CHAT_TAIL_CAP);
+            var ol = chat_emit_tail_k(lbuf, ln, CHAT_SCROLLBACK_LINES, ob, CHAT_TAIL_CAP, seenp);
+            if (ol > 0) { send_buf(cfd, ob, ol); }
+        }
+        g_chat_seen = load64(seenp);
+        g_chat_idle = 0;
+        # Drop the recv timeout to the live-tail poll cadence so an idle
+        # recv becomes a tail tick (handle_client) instead of a hangup.
+        sock_set_recv_timeout(cfd, CHAT_POLL_SECS, 0);
+        return MODE_CHAT;
+    }
+
     if (line_has_prefix(line, len, "quit") != 0) {
         send_str(cfd, "bye\r\n");
         store64(quit_out, 1);
@@ -861,6 +943,54 @@ fn door_game_name(game): i64 {
     if (game == GAME_PORT)     { return "port"; }
     if (game == GAME_HANDLER)  { return "handler"; }
     return "game";
+}
+
+# === 1.3.0 chat glue (ADR 0011) ===
+#
+# The transcript layer is pure + storage (chat.cyr); these own the
+# socket I/O the MODE_CHAT dispatch + live-tail tick call.
+
+# Render every transcript line newer than this session's watermark and
+# send it, advancing g_chat_seen. Called on each idle poll tick and
+# right after the session says a line (so the speaker sees their own
+# line in canonical form). No-op when nothing is new.
+fn chat_flush_tail(cfd): i64 {
+    var buf = alloc(CHAT_LOG_BUF);
+    var n = chat_log_read(g_store_buf, g_chat_channel, buf, CHAT_LOG_CAP);
+    if (n <= 0) { return 0; }
+    var out = alloc(CHAT_TAIL_CAP);
+    var seenp = alloc(8);
+    store64(seenp, g_chat_seen);
+    var olen = chat_emit_since(buf, n, g_chat_seen, out, CHAT_TAIL_CAP, seenp);
+    if (olen > 0) { send_buf(cfd, out, olen); }
+    g_chat_seen = load64(seenp);
+    return 0;
+}
+
+# Dispatch a '/'-prefixed chat command. Returns 0 = stay in chat,
+# 1 = leave chat (back to the BBS prompt), 2 = quit the session.
+fn chat_cmd_dispatch(cfd, line, len): i64 {
+    if (line_has_prefix(line, len, "/leave") != 0) {
+        send_str(cfd, "left #");
+        send_str(cfd, g_chat_channel);
+        send_str(cfd, ".\r\n");
+        return 1;
+    }
+    if (line_has_prefix(line, len, "/quit") != 0) {
+        send_str(cfd, "bye\r\n");
+        return 2;
+    }
+    if (line_has_prefix(line, len, "/exit") != 0) {
+        send_str(cfd, "bye\r\n");
+        return 2;
+    }
+    if (line_has_prefix(line, len, "/help") != 0) {
+        send_str(cfd, "chat commands:  /leave (back to BBS)   /help   /quit (log off)\r\n");
+        send_str(cfd, "anything else you type is said to the room.\r\n");
+        return 0;
+    }
+    send_str(cfd, "unknown chat command — /help for the list\r\n");
+    return 0;
 }
 
 # === 1.2.0 Universe world transaction (ADR 0010 bites 2-4) ===
@@ -1348,6 +1478,12 @@ fn handle_client(cfd): i64 {
     g_door_state = 0;
     g_door_mode  = DOOR_PRACTICE;
 
+    # 1.3.0 chat state: not in a channel at connect.
+    g_chat_channel = alloc(CHAT_CHANNEL_MAX + 1);
+    store8(g_chat_channel, 0);
+    g_chat_seen = 0;
+    g_chat_idle = 0;
+
     var mode    = MODE_COMMAND;
     var last_cr = 0;
     var quit    = alloc(8);
@@ -1361,10 +1497,30 @@ fn handle_client(cfd): i64 {
         # n == 0   : peer closed cleanly (EOF). Graceful exit.
         # n  < 0   : socket error or SO_RCVTIMEO fired. Treat as
         #            disconnect — slowloris defense.
+        #
+        # 1.3.0 (ADR 0011): in MODE_CHAT the recv timeout is the live-
+        # tail tick, not a disconnect. An EWOULDBLOCK read (the short
+        # CHAT_POLL_SECS timeout firing on no input) flushes any new
+        # transcript lines and keeps the session. We only flush when the
+        # input line is empty (line_pos == 0) so a half-typed line isn't
+        # garbled by inbound chatter. Accumulated pure silence is bounded
+        # by CHAT_IDLE_SECS so an idle chatter can't pin the worker.
         if (n <= 0) {
+            if (mode == MODE_CHAT) {
+                if (n == (0 - EWOULDBLOCK_ERR)) {
+                    if (line_pos == 0) { chat_flush_tail(cfd); }
+                    g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
+                    if (g_chat_idle >= CHAT_IDLE_SECS) {
+                        send_str(cfd, "\r\n(idle — leaving chat)\r\n");
+                        done = 1;
+                    }
+                    continue;
+                }
+            }
             done = 1;
             continue;
         }
+        g_chat_idle = 0;
         if (load64(quit) != 0) { done = 1; continue; }
 
         var i = 0;
@@ -1516,6 +1672,43 @@ fn handle_client(cfd): i64 {
                         }
                         i = i + 1; continue;
                     }
+                    else { if (mode == MODE_CHAT) {
+                        # 1.3.0 (ADR 0011): a completed line in chat is
+                        # either a '/'-command or a message said to the room.
+                        var clen = line_pos;
+                        line_pos = 0;
+                        var handled = 0;
+                        if (clen > 0) {
+                            if ((load8(line) & 0xFF) == 47) {     # leading '/'
+                                handled = 1;
+                                var cc = chat_cmd_dispatch(cfd, line, clen);
+                                if (cc == 1) {
+                                    # /leave — restore the command-mode recv
+                                    # timeout, drop the channel, back to BBS.
+                                    sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
+                                    store8(g_chat_channel, 0);
+                                    g_chat_seen = 0;
+                                    mode = MODE_COMMAND;
+                                    send_prompt(cfd, current_board);
+                                }
+                                if (cc == 2) { store64(quit, 1); }
+                            }
+                        }
+                        if (handled == 0) {
+                            # Ordinary line → sanitise + say to the room,
+                            # then flush so the speaker sees the canonical
+                            # "<handle> text" line (and any interleaved ones).
+                            if (clen > 0) {
+                                var tbuf = alloc(CHAT_MSG_MAX + 1);
+                                var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
+                                if (tlen > 0) {
+                                    chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
+                                }
+                            }
+                            chat_flush_tail(cfd);
+                        }
+                        i = i + 1; continue;
+                    }
                     else { if (mode == MODE_POSTING_SUBJECT) {
                         # M5-D: capture the typed Subject line, then
                         # transition into MODE_POSTING for the body.
@@ -1553,8 +1746,8 @@ fn handle_client(cfd): i64 {
                             store8(post + post_pos, 10); post_pos = post_pos + 1;
                         }
                         line_pos = 0;
-                    } } } }
-                } else {
+                    } } } } }
+} else {
                     # === Printable byte: echo + append to line ===
                     if (line_pos < LINE_BUF_CAP - 1) {
                         store8(line + line_pos, db);

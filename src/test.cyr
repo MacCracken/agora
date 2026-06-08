@@ -14,6 +14,7 @@ include "src/door.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
+include "src/chat.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -3236,6 +3237,157 @@ fn t141_lb_line_score(): i64 {
 }
 
 
+# === 1.3.0 chat area pure helpers (t142-t148, ADR 0011) ===
+
+# Channel names reuse the door-game alphabet: 1..32, [a-z0-9] lead,
+# [a-z0-9-_] tail, no '/', no leading dot. Unlike boards, "main" is OK.
+fn t142_chat_channel_valid(): i64 {
+    if (chat_channel_valid("lobby") != 1)   { test_fail("t142_chat_channel_valid", "lobby"); return 1; }
+    if (chat_channel_valid("main") != 1)     { test_fail("t142_chat_channel_valid", "main allowed"); return 1; }
+    if (chat_channel_valid("dev-2_a") != 1)  { test_fail("t142_chat_channel_valid", "alnum-dash-us"); return 1; }
+    if (chat_channel_valid("") != 0)         { test_fail("t142_chat_channel_valid", "empty"); return 1; }
+    if (chat_channel_valid("-bad") != 0)     { test_fail("t142_chat_channel_valid", "lead dash"); return 1; }
+    if (chat_channel_valid(".hidden") != 0)  { test_fail("t142_chat_channel_valid", "lead dot"); return 1; }
+    if (chat_channel_valid("a/b") != 0)      { test_fail("t142_chat_channel_valid", "slash"); return 1; }
+    if (chat_channel_valid("UP") != 0)       { test_fail("t142_chat_channel_valid", "uppercase"); return 1; }
+    test_pass("t142_chat_channel_valid");
+    return 0;
+}
+
+# format_line writes "<seq>\t<handle>\t<text>\n"; line_seq parses the
+# leading seq back; last_seq returns the seq of the final line.
+fn t143_chat_format_seq(): i64 {
+    var out = alloc(64);
+    var n = chat_format_line(7, "qix", "hi", 2, out);
+    # "7\tqix\thi\n" = 1+1+3+1+2+1 = 9
+    if (n != 9)                          { test_fail("t143_chat_format_seq", "len"); return 1; }
+    if (chat_line_seq(out, 0, n) != 7)   { test_fail("t143_chat_format_seq", "seq"); return 1; }
+    if ((load8(out + 1) & 0xFF) != 9)    { test_fail("t143_chat_format_seq", "tab1"); return 1; }
+    if ((load8(out + n - 1) & 0xFF) != 10) { test_fail("t143_chat_format_seq", "nl"); return 1; }
+    # two-line buffer → last_seq is the second line's seq
+    var buf = alloc(128);
+    var p = chat_format_line(3, "a", "x", 1, buf);
+    p = p + chat_format_line(42, "b", "y", 1, buf + p);
+    if (chat_last_seq(buf, p) != 42)     { test_fail("t143_chat_format_seq", "last_seq"); return 1; }
+    if (chat_last_seq(buf, 0) != 0)      { test_fail("t143_chat_format_seq", "empty"); return 1; }
+    test_pass("t143_chat_format_seq");
+    return 0;
+}
+
+# render_one turns a stored "seq\thandle\ttext" span into the display
+# line "<handle> text\r\n"; a span with no handle field renders nothing.
+fn t144_chat_render_one(): i64 {
+    var line = "5\tqix\thello";
+    var out = alloc(64);
+    var n = chat_render_one(line, 0, strlen(line), out);
+    # "<qix> hello\r\n" = 1+3+1+1+5+2 = 13
+    if (n != 13)                       { test_fail("t144_chat_render_one", "len"); return 1; }
+    if ((load8(out) & 0xFF) != 60)     { test_fail("t144_chat_render_one", "lt"); return 1; }
+    if (memeq(out, "<qix> hello", 11) == 0) { test_fail("t144_chat_render_one", "body"); return 1; }
+    if ((load8(out + 11) & 0xFF) != 13) { test_fail("t144_chat_render_one", "cr"); return 1; }
+    if ((load8(out + 12) & 0xFF) != 10) { test_fail("t144_chat_render_one", "lf"); return 1; }
+    # malformed (only a seq, no tab) → 0
+    var bad = "99";
+    if (chat_render_one(bad, 0, strlen(bad), out) != 0) { test_fail("t144_chat_render_one", "malformed"); return 1; }
+    test_pass("t144_chat_render_one");
+    return 0;
+}
+
+# emit_since renders only lines with seq > since and reports the new
+# watermark (max seq seen) — the live-tail core.
+fn t145_chat_emit_since(): i64 {
+    var buf = alloc(128);
+    var p = chat_format_line(1, "a", "one", 3, buf);
+    p = p + chat_format_line(2, "b", "two", 3, buf + p);
+    p = p + chat_format_line(3, "c", "three", 5, buf + p);
+    var out = alloc(1024);
+    var seenp = alloc(8);
+    # since=1 → only seq 2 and 3 render. (outcap must exceed
+    # CHAT_LINE_DISP_MAX per render line — production uses CHAT_TAIL_CAP.)
+    store64(seenp, 0);
+    var ol = chat_emit_since(buf, p, 1, out, 1024, seenp);
+    if (load64(seenp) != 3)            { test_fail("t145_chat_emit_since", "watermark"); return 1; }
+    # "<b> two\r\n<c> three\r\n" = 9 + 11 = 20
+    if (ol != 20)                      { test_fail("t145_chat_emit_since", "since1 len"); return 1; }
+    if (memeq(out, "<b> two\r\n<c> three\r\n", 20) == 0) { test_fail("t145_chat_emit_since", "since1 body"); return 1; }
+    # since=3 → nothing new, watermark stays 3
+    store64(seenp, 3);
+    if (chat_emit_since(buf, p, 3, out, 1024, seenp) != 0) { test_fail("t145_chat_emit_since", "since3"); return 1; }
+    if (load64(seenp) != 3)            { test_fail("t145_chat_emit_since", "since3 wm"); return 1; }
+    test_pass("t145_chat_emit_since");
+    return 0;
+}
+
+# trim_to_cap drops whole front lines until len <= cap, landing on a
+# line boundary and keeping the maximum tail that fits.
+fn t146_chat_trim(): i64 {
+    var buf = alloc(64);
+    # three 5-byte lines: "aaaa\nbbbb\ncccc\n" = 15
+    memcpy(buf, "aaaa\nbbbb\ncccc\n", 15);
+    # cap 15 → unchanged
+    if (chat_trim_to_cap(buf, 15, 15) != 15) { test_fail("t146_chat_trim", "nocap"); return 1; }
+    # cap 10: drop=5 lands exactly on line-2 start → keep "bbbb\ncccc\n"
+    memcpy(buf, "aaaa\nbbbb\ncccc\n", 15);
+    var nl = chat_trim_to_cap(buf, 15, 10);
+    if (nl != 10)                            { test_fail("t146_chat_trim", "len10"); return 1; }
+    if (memeq(buf, "bbbb\ncccc\n", 10) == 0) { test_fail("t146_chat_trim", "tail10"); return 1; }
+    # cap 9: must shed >5 → drop two lines → keep "cccc\n" (5)
+    memcpy(buf, "aaaa\nbbbb\ncccc\n", 15);
+    var n9 = chat_trim_to_cap(buf, 15, 9);
+    if (n9 != 5)                             { test_fail("t146_chat_trim", "len9"); return 1; }
+    if (memeq(buf, "cccc\n", 5) == 0)        { test_fail("t146_chat_trim", "tail9"); return 1; }
+    test_pass("t146_chat_trim");
+    return 0;
+}
+
+# text_sanitize keeps only printable ASCII (32..126); drops control,
+# tab, CR/LF, ESC, high bytes; caps at `cap`.
+fn t147_chat_sanitize(): i64 {
+    var out = alloc(64);
+    # embed TAB(9), ESC(27), NUL(0), DEL(127), high(200) among printables
+    var src = alloc(16);
+    store8(src + 0, 104);   # h
+    store8(src + 1, 9);     # TAB (drop)
+    store8(src + 2, 105);   # i
+    store8(src + 3, 27);    # ESC (drop)
+    store8(src + 4, 33);    # !
+    store8(src + 5, 0);     # NUL (drop)
+    store8(src + 6, 127);   # DEL (drop)
+    store8(src + 7, 200);   # high (drop)
+    var n = chat_text_sanitize(src, 8, out, 64);
+    if (n != 3)                        { test_fail("t147_chat_sanitize", "len"); return 1; }
+    if (memeq(out, "hi!", 3) == 0)     { test_fail("t147_chat_sanitize", "body"); return 1; }
+    # cap clamps output
+    var n2 = chat_text_sanitize("abcdef", 6, out, 4);
+    if (n2 != 4)                       { test_fail("t147_chat_sanitize", "cap"); return 1; }
+    test_pass("t147_chat_sanitize");
+    return 0;
+}
+
+# tail_k_start / emit_tail_k pick the last k lines for join scrollback
+# and report the latest seq as the watermark.
+fn t148_chat_scrollback(): i64 {
+    var buf = alloc(128);
+    var p = chat_format_line(1, "a", "x", 1, buf);
+    p = p + chat_format_line(2, "b", "y", 1, buf + p);
+    p = p + chat_format_line(3, "c", "z", 1, buf + p);
+    # last 2 of 3 lines
+    var start = chat_tail_k_start(buf, p, 2);
+    if (chat_line_seq(buf, start, p) != 2) { test_fail("t148_chat_scrollback", "k2 start"); return 1; }
+    # k >= line count → from 0
+    if (chat_tail_k_start(buf, p, 9) != 0) { test_fail("t148_chat_scrollback", "k all"); return 1; }
+    var out = alloc(1024);
+    var seenp = alloc(8);
+    store64(seenp, 0);
+    var ol = chat_emit_tail_k(buf, p, 2, out, 1024, seenp);
+    if (load64(seenp) != 3)                { test_fail("t148_chat_scrollback", "watermark"); return 1; }
+    # "<b> y\r\n<c> z\r\n" = 7 + 7 = 14
+    if (ol != 14)                          { test_fail("t148_chat_scrollback", "len"); return 1; }
+    if (memeq(out, "<b> y\r\n<c> z\r\n", 14) == 0) { test_fail("t148_chat_scrollback", "body"); return 1; }
+    test_pass("t148_chat_scrollback");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -3383,6 +3535,13 @@ fn main(): i64 {
     t139_slw_heat();
     t140_thw_alert();
     t141_lb_line_score();
+    t142_chat_channel_valid();
+    t143_chat_format_seq();
+    t144_chat_render_one();
+    t145_chat_emit_since();
+    t146_chat_trim();
+    t147_chat_sanitize();
+    t148_chat_scrollback();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
