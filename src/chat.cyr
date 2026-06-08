@@ -252,14 +252,21 @@ fn chat_emit_since(buf, len, since, out, outcap, seq_ptr): i64 {
             }
             if (le > pos) {
                 var sq = chat_line_seq(buf, pos, le);
-                if (sq > maxseq) { maxseq = sq; }
                 if (sq > since) {
+                    # A NEW line: render only if it fits. If it doesn't,
+                    # stop WITHOUT advancing the watermark past it, so the
+                    # next tick re-sends it (don't drop-but-advance — that
+                    # silently loses messages under burst).
                     if (ol + CHAT_LINE_DISP_MAX <= outcap) {
                         ol = ol + chat_render_one(buf, pos, le, out + ol);
+                        if (sq > maxseq) { maxseq = sq; }
+                    } else {
+                        go = 0;
                     }
                 }
+                # else: already-seen line (sq <= since); maxseq already >= it.
             }
-            pos = le + 1;
+            if (go == 1) { pos = le + 1; }
         }
     }
     store64(seq_ptr, maxseq);

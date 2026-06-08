@@ -58,6 +58,7 @@ enum DoorGame {
     GAME_SMUGGLER = 1;
     GAME_PORT     = 2;
     GAME_HANDLER  = 3;
+    GAME_ELIZA    = 4;   # 1.3.0 (ADR 0011): the DOCTOR chatbot as a door
 }
 
 # === Integer helpers ===

@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-06-08 (**1.2.0 Persistent Universe CUT** — all 6 ADR 0010 bites: world-txn framework, PA shared galaxy + async-PvP garrisons, Smuggler heat, Handler alerts, cross-game leaderboards [`scores <game>`]. VERSION → 1.2.0; three inline main.cyr literals; CHANGELOG [1.2.0]; ADR 0010 → Accepted/all-bites; state.md + roadmap.md synced; 141 tests; 678,776 B; smokes 08/09/10. Roadmap: **1.3.0 Eliza+chat**, **1.4.0 Descent/MUD link** both planned. Earlier same day: 1.2.0 bite 2, and 1.1.1). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-06-08 (**1.3.0 Chat area + Eliza CUT** — all 3 ADR 0011 bites: the chat surface [`src/chat.cyr`, `MODE_CHAT`, seq-number live-tail], Eliza [`src/eliza.cyr`, `play eliza` door + private `/eliza` side-channel], closeout. VERSION → 1.3.0; three inline main.cyr literals; CHANGELOG [1.3.0]; **new ADR 0011**; toolchain pin 6.1.5 → 6.1.9; state.md + roadmap.md + roadmap-future.md synced; 155 tests; 730,792 B; **new smokes 11**[chat]**/12**[eliza]. Pre-cut multi-agent adversarial review fixed 3 defects. Roadmap: **1.3.1 PARRY**, **1.4.0 Descent link**, **QUEST** [LORD homage door] all queued. Earlier same day: **1.2.0 Persistent Universe** [ADR 0010]). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -24,7 +24,7 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 | ✅ **Fresh / touched in current cycle** | 11 | Refreshed at 0.9.1: this file, state.md, roadmap.md, CHANGELOG, VERSION, three inlined literals in main.cyr, **rewritten** `docs/guides/getting-started.md`, **rewritten** `docs/examples/README.md`, plus **six new runnable example scripts** (01 build-and-test, 02 register-and-post, 03 anonymous-read, 04 concurrent-smoke.py, 05 telnet-login, 06 board-policy). Every example verified end-to-end against `./build/agora`. |
 | 🟡 **Stale — refresh in place** | 0 | **Closed at 0.9.1.** The two long-deferred rows (getting-started.md from M6-close → 0.7.x → 0.8.x; examples/README.md same trajectory) have both shipped fresh content. |
 | 🟠 **Read-through outstanding** | 0 | None. |
-| 🔵 **Probably evergreen** | 10 | All ten ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / PostHeaders ABI / door-games subsystem / **persistent universe**). 1.1.0 added ADR 0009; 1.2.0 added ADR 0010 (now Accepted, bites 1-2 shipped). |
+| 🔵 **Probably evergreen** | 11 | All eleven ADRs (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / PostHeaders ABI / door-games subsystem / persistent universe / **chat area**). 1.1.0 added ADR 0009; 1.2.0 added ADR 0010; **1.3.0 added ADR 0011**. |
 | 📦 **Archive — frozen by design** | 0 | None. |
 | ❓ **Open strategic question** | 0 | All design candidates settled through 0.9.0 (ADR 0008 closed the ABI question that opened in the 0.8-D slot). Next open question will surface when v1.x post-iron-validation work begins (deferred CLI verbs for policy / admins management may warrant an ADR if scope expands). |
 
@@ -45,15 +45,15 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 1.0 cut.** Status pointer: "v1.0.0 shipped, iron-validated on archaemenid; all v1.0 criteria met". Planned-architecture box replaced with the actual 4-source-file architecture; examples + benchmarks links added. |
-| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → **[1.2.0]** entered. [1.2.0] = Persistent Universe (all 6 ADR 0010 bites) + Eliza/Descent roadmap notes; [1.1.1] Handler field pressure + 6.1.5 unblock; [1.1.0] door games; [1.0.0] release-narrative. |
+| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → **[1.3.0]** entered. [1.3.0] = Chat area + Eliza (ADR 0011) + toolchain 6.1.5→6.1.9 + the review-fix Fixed section; [1.2.0] Persistent Universe (ADR 0010); [1.1.1] Handler field pressure; [1.1.0] door games; [1.0.0] release-narrative. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 closeout — 5 telnet-parser benchmarks all within ±2 ns of M1-close baseline (every release between M6 and 0.9.2 was off-hot-path). 0.9.2 row added to per-release history. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-06-08 | ✅ Fresh | `1.2.0`. Bumped via release flow. |
-| `cyrius.cyml` | 2026-06-08 | ✅ Fresh | Toolchain pin **`6.1.5`** (lifted from 6.0.52 on 2026-06-08 — sigil/sha256 SIGILL on ≥6.0.53 resolved upstream; verified on 6.1.4 then aligned to 6.1.5 with the local toolchain; see state.md Version table). Deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
+| `VERSION` | 2026-06-08 | ✅ Fresh | `1.3.0`. Bumped via release flow. |
+| `cyrius.cyml` | 2026-06-08 | ✅ Fresh | Toolchain pin **`6.1.9`** (realigned 6.1.5 → 6.1.9 at the 1.3.0 cut; earlier lifted from the 6.0.52 sigil-SIGILL cap; see state.md Version table). Deps list = 20 stdlib modules (no new deps at 1.3.0 — chat + Eliza are pure). |
 
 ---
 
@@ -63,9 +63,9 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.2.0 CUT** — Persistent Universe (all 3 games + leaderboards; 141 tests; 678,776 B). Released / Build-artifacts / Tests / In-flight (now "no active cycle" + next directions) / Recent-shipped / Source-surface rows synced. |
-| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: **1.2.0 ✅**, 1.3.0 Chat+Eliza (planned), **new 1.4.0 Descent/MUD link** (planned). "In progress" → no active cycle. Planned section has Eliza + Descent-link designs with open ADR questions. |
-| `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
+| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.3.0 CUT** — Chat area + Eliza (155 tests; 730,792 B; pin 6.1.9). Refresh line / Released / Toolchain / Build-artifacts / Tests / In-flight (3-bite summary + 1.3.1/1.4.0/QUEST next directions) / Recent-shipped / Source-surface (+chat.cyr, +eliza.cyr) rows synced. |
+| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: **1.3.0 ✅**, **new 1.3.1 PARRY** (planned), 1.4.0 Descent link (planned). "In progress" → no active cycle (1.3.0 shipped). Planned section + the PARRY note (descriptor-refactor first step). |
+| `roadmap-future.md` | 2026-06-08 | ✅ Fresh | **Touched at 1.3.0** — added § **Chatbot personalities** (ALICE / Racter / MegaHAL / Jabberwacky beyond Eliza+PARRY) and the **QUEST** LORD-homage door spec under § Door games (full 12-level Great-Work arc + Emerald-Tablet spine). Plus the original six unpinned v2.x sovereignty pillars. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
 
@@ -73,7 +73,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 
 ## Tier 3 — ADRs (`docs/adr/`)
 
-8 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
+11 ADRs. Re-read pass per minor closeout; ADRs document decisions, not status.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
@@ -87,6 +87,9 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `0006-identity-model.md` | 2026-05-23 | 🔵 Evergreen | **New at M6 cycle-open** — sigil Ed25519 as identity primitive; `<store>/.users/<fp16>/` per-user directory; challenge/response wire flow (server nonce → client Ed25519 sig); anon-read + auth-post default; `From: <handle> <fp16>` header; `~/.agora/key` for the keyfile. Rejects ML-DSA at first cut, password hashes, sigil-managed account store, users.cyml sidecar, and federated/WoT identity (deferred to v2.x pillar 1). |
 | `0007-fork-per-accept-concurrency.md` | 2026-05-23 | 🔵 Evergreen | **New at 0.8.0** — fork-per-accept concurrency; process-exit memory cleanup; non-blocking waitpid zombie reaper. Closes audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) via address-space isolation. Rejects thread-per-accept (M2 only closes with shared-state refactor), epoll event loop (yield-point burden on every byte handler), single-track-with-arena (only closes half the audit), per-conn freelist arena (kernel exit is strictly stronger free), `SIG_IGN` / `SA_NOCLDWAIT` auto-reap (sigaction trampoline trap on x86_64). |
 | `0008-post-headers-struct.md` | 2026-05-23 | 🔵 Evergreen | **New at 0.9.0** — pre-1.0 ABI freeze. `PostHeaders` struct (PH_SUBJECT / PH_REPLY_TO / PH_FROM_HANDLE / PH_FROM_FP at i64 offsets) replaces the M5-D → M5-F → M6-E positional-arg accretion (5 → 6 → 8 args). New v1.0 surface: `post_format(ph, body, body_len, out, cap)` + `post_new(store, board, ph, body, body_len)`. Future headers (federated Origin, content-hash) add `PH_*` offset + setter without changing call shape. Rejects freeze-8-arg-as-is (variant-fn proliferation), heap-buffer + offset table (pushes formatting up), varargs emulation (no win), shim retention (CLAUDE.md anti-pattern). |
+| `0009-door-games-subsystem.md` | 2026-06-07 | 🔵 Evergreen | **New at 1.1.0** — the door / games subsystem. Three pure-module text games (`*_render` into a buffer, `*_feed` one line → 0 stay / 1 exit) on a shared `door.cyr` framework; `play <game>` + `MODE_DOOR`; main.cyr owns all socket I/O + persistence. Practice (ephemeral) + Solo (login-gated save). |
+| `0010-persistent-universe.md` | 2026-06-08 | 🔵 Evergreen | **New at 1.2.0** — shared-world multiplayer. Per-game world dir mutated through a `flock`'d lock → read → pure-transform → write "world transaction"; the game logic stays pure. PA shared galaxy + async-PvP garrisons, Smuggler heat, Handler alerts, cross-game leaderboards. Rejects in-memory shared state (fork-per-accept forbids it), a coordinator daemon, SQLite, per-game bespoke locking. |
+| `0011-chat-area.md` | 2026-06-08 | 🔵 Evergreen | **New at 1.3.0** — the live chat area. Per-channel `flock`'d **ring transcript**, live-tailed **by absolute sequence number** (rotation-safe vs a byte offset; no stdlib lseek) on the recv-timeout poll tick (`-EAGAIN` flushes rather than disconnects). Login-gated. Eliza as a private `/eliza` side-channel (not an always-present room bot — no write-arbitration, no transcript noise). Rejects poll-on-input-only, byte-offset tail, unbounded transcript, a chat daemon, char-at-a-time chat. |
 
 ---
 
@@ -121,6 +124,8 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `08-world-concurrency.sh` | 2026-06-07 | ✅ Fresh | **New at 1.2.0 bite 1.** Hammers one `flock`'d world with N concurrent processes × M `world_txn_add`s; asserts the final counter equals N×M (no lost updates). Proves the ADR 0010 transaction framework race-free. |
 | `09-universe-port.sh` | 2026-06-08 | ✅ Fresh | **New at 1.2.0 bite 2.** Two players log in (sigil challenge/response) and `play port universe`: asserts a shared deterministic galaxy, exclusive planet ownership across sessions, world-snapshot persistence, and login-gating. Proves the PA shared galaxy end-to-end over telnet. |
 | `10-leaderboard.sh` | 2026-06-08 | ✅ Fresh | **New at 1.2.0 bite 5.** Logs in, plays Port Authority solo to the close of the quarter, leaves (posting the score), then asserts `scores port` lists the run. Proves the cross-game leaderboard end-to-end. |
+| `11-chat.sh` | 2026-06-08 | ✅ Fresh | **New at 1.3.0 bite 1.** Two logged-in sessions (sigil challenge/response) join `#lobby`: asserts session B sees A's line in **scrollback** (cross-session delivery via the `flock`'d transcript) AND A sees B's line via the **live-tail poll tick**. Proves the ADR 0011 chat interleaving over the wire. |
+| `12-eliza.sh` | 2026-06-08 | ✅ Fresh | **New at 1.3.0 bite 2.** Drives both Eliza surfaces: the `play eliza` door (no login) decomposes "I am sad" → "How long have you been sad?"; the private `/eliza` side-channel answers in-chat AND the private line is asserted **absent** from the room transcript (privacy guarantee). |
 
 ---
 

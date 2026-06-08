@@ -1,0 +1,852 @@
+# eliza.cyr — ELIZA (Weizenbaum 1966, DOCTOR script) as a pure-module
+# door + chatbot engine (1.3.0, ADR 0011).
+#
+# Two reachable surfaces (ADR 0011): a `play eliza` DOOR (the
+# ez_new/ez_start/ez_feed/ez_render door contract, ADR 0009 shape,
+# practice-only — a conversation has no save state worth persisting),
+# and a private `/eliza` side-channel inside the chat area (main.cyr
+# calls ez_feed then reads the response — it is sent ONLY to the
+# addressing user, never written to the shared transcript).
+#
+# Architecture: a reusable decomposition/reassembly CORE plus the
+# DOCTOR *script*. PARRY (Colby 1972, 1.3.1) reuses the core primitives
+# AS-IS — ez_normalize, ez_reflect (same English pronoun set), ez_scan
+# (generic walk over a keyword id+rank table), ez_counter_next, the
+# memory ring, ez_fill, and the door/side-channel shells — and supplies
+# its own script: the keyword table (ez_kw_id / ez_kw_rank), the
+# per-keyword response set (ez_resp_*), the opener/goodbye, and the
+# NONE/memory templates. The one piece still DOCTOR-shaped is the
+# dispatch: ez_respond / ez_resp_none are a hand-written if-chain over
+# script content rather than a data-driven descriptor. Factoring that
+# into a script-descriptor (keyword table + response-fn table + strings,
+# passed through ez_new) is the recommended FIRST step of the 1.3.1
+# PARRY bite — after which a new personality is purely a new descriptor.
+# The engine pipeline, per input line:
+#   normalize  → lowercase, punctuation→space, keep apostrophes, cap
+#   reflect    → whole-word pronoun swap (I<->you, my<->your, am->are…)
+#   rank-scan  → the highest-ranked keyword present wins (leftmost ties)
+#   reassemble → fill the keyword's next cyclic template with the
+#                reflected remainder (round-robin per keyword)
+#   memory     → the MY keyword stashes "your X"; a NONE turn resurfaces
+#                the oldest stashed line ("Earlier you said your X.")
+#   NONE       → generic deflections when nothing matched
+#
+# Pure: no socket, no disk. Unit-tested with canned exchanges
+# (reflection, keyword ranking, decomposition). The DOCTOR script here
+# follows Weizenbaum's CACM 9(1) 1966 listing. Object-position "you"
+# reflects to "me" and the subject clauses "you are"/"you were" to
+# "I am"/"I was" (ez_reflect lookahead); the few keywords whose whole
+# decomposition would read ungrammatically when spliced (am/are/you/can)
+# are kept canned instead — the same fidelity tradeoff faithful ports
+# make.
+#
+# Deps resolved upstream in main.cyr / test.cyr include order:
+#   door.cyr   — emit_cstr, emit_crlf (render helpers)
+#   lib/*      — strlen, memcpy, memeq, load8/store8, alloc, fmt_int_buf
+
+# === Constants ===
+
+enum EzCap {
+    EZ_IN_MAX    = 256;    # normalized-input ceiling (adversarial bound)
+    EZ_REFL_CAP  = 512;    # reflected-remainder buffer
+    EZ_RESP_CAP  = 1024;   # response buffer — `out` must be >= this
+    EZ_MEM_SLOTS = 4;      # memory ring depth
+    EZ_MEM_SLOT  = 200;    # bytes per memory slot
+    EZ_DEF_DAYS  = 1;      # door contract arg (unused — no turns)
+}
+
+# Door state struct (8-byte i64 fields; pointers held in fields).
+enum EZ {
+    EZ_OVER    = 0;        # 0 talking, 1 said goodbye
+    EZ_RESP    = 8;        # ptr -> response buffer (EZ_RESP_CAP)
+    EZ_RESPLEN = 16;       # current response length
+    EZ_CTRS    = 24;       # ptr -> i64[KW_COUNT] per-keyword cycle counters
+    EZ_NONECTR = 32;       # NONE-deflection cycle counter
+    EZ_MEM     = 40;       # ptr -> byte[EZ_MEM_SLOTS * EZ_MEM_SLOT]
+    EZ_MEMLEN  = 48;       # ptr -> i64[EZ_MEM_SLOTS] per-slot length
+    EZ_MEMHEAD = 56;       # ring head (oldest)
+    EZ_MEMCNT  = 64;       # stored count
+    EZ_MEMCTR  = 72;       # memory-template cycle counter
+    EZ_SIZE    = 80;
+}
+
+# Keyword ids. KW_NONE = no keyword. KW_COUNT bounds the counter array.
+enum EzKw {
+    KW_NONE     = 0;
+    KW_SORRY    = 1;
+    KW_REMEMBER = 2;
+    KW_IF       = 3;
+    KW_DREAM    = 4;
+    KW_PERHAPS  = 5;
+    KW_HELLO    = 6;
+    KW_COMPUTER = 7;
+    KW_NAME     = 8;
+    KW_AM       = 9;
+    KW_ARE      = 10;
+    KW_YOUR     = 11;
+    KW_WAS      = 12;
+    KW_I        = 13;
+    KW_YOU      = 14;
+    KW_YES      = 15;
+    KW_NO       = 16;
+    KW_MY       = 17;
+    KW_CAN      = 18;
+    KW_WHAT     = 19;
+    KW_BECAUSE  = 20;
+    KW_WHY      = 21;
+    KW_EVERYONE = 22;
+    KW_ALWAYS   = 23;
+    KW_LIKE     = 24;
+    KW_FAMILY   = 25;
+    KW_COUNT    = 26;
+}
+
+# === Low-level string helpers ===
+
+# Copy NUL-terminated `s` to out; return its length.
+fn ez_puts(out, s): i64 {
+    var n = strlen(s);
+    memcpy(out, s, n);
+    return n;
+}
+
+fn ez_canned(out, s): i64 {
+    return ez_puts(out, s);
+}
+
+# Emit prefix + reflected-remainder + suffix into out; return length.
+fn ez_fill(out, pre, rbuf, rlen, suf): i64 {
+    var o = 0;
+    o = o + ez_puts(out + o, pre);
+    memcpy(out + o, rbuf, rlen);
+    o = o + rlen;
+    o = o + ez_puts(out + o, suf);
+    return o;
+}
+
+# 1 if the wlen-byte word at w exactly equals NUL-terminated literal.
+fn ez_word_is(w, wlen, lit): i64 {
+    var n = strlen(lit);
+    if (wlen != n) { return 0; }
+    return memeq(w, lit, n);
+}
+
+# Index of the first non-space at/after start (<= len).
+fn ez_skip_sp(buf, start, len): i64 {
+    var i = start;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if ((load8(buf + i) & 0xFF) == 32) { i = i + 1; continue; }
+        go = 0;
+    }
+    return i;
+}
+
+# Index of the first space at/after start, i.e. end of the word (<= len).
+fn ez_word_end(buf, start, len): i64 {
+    var i = start;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if ((load8(buf + i) & 0xFF) == 32) { go = 0; continue; }
+        i = i + 1;
+    }
+    return i;
+}
+
+# Lowercase the first word of line[0..len) into out (cap bytes); return
+# its length. Used for the quit pre-scan.
+fn ez_word_lower(line, len, out, cap): i64 {
+    var i = ez_skip_sp(line, 0, len);
+    var o = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        var c = load8(line + i) & 0xFF;
+        if (c == 32) { go = 0; continue; }
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }   # A-Z -> a-z
+        if (o < cap) { store8(out + o, c); o = o + 1; }
+        i = i + 1;
+    }
+    return o;
+}
+
+# === Normalize ===
+#
+# Lowercase a-z, keep apostrophes inside words, map every other byte to
+# a single collapsed space, trim. Stops at `cap` bytes (adversarial-
+# input bound). Returns the normalized length.
+fn ez_normalize(src, len, out, cap): i64 {
+    var o = 0;
+    var prev_space = 1;       # collapse runs + trim leading
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if (o >= cap) { go = 0; continue; }
+        var c = load8(src + i) & 0xFF;
+        var keep = 0;
+        if (c >= 65) { if (c <= 90) { c = c + 32; keep = 1; } }   # A-Z -> a-z
+        if (c >= 97) { if (c <= 122) { keep = 1; } }              # a-z
+        if (c == 39) { keep = 1; }                                # apostrophe
+        if (keep == 1) {
+            store8(out + o, c); o = o + 1; prev_space = 0;
+        } else {
+            if (prev_space == 0) { store8(out + o, 32); o = o + 1; prev_space = 1; }
+        }
+        i = i + 1;
+    }
+    if (o > 0) { if ((load8(out + o - 1) & 0xFF) == 32) { o = o - 1; } }
+    return o;
+}
+
+# === Reflection (whole-word pronoun swap) ===
+#
+# A single left-to-right pass; each token is replaced atomically (no
+# re-reflection, so I<->you can't loop). am->are is one-way (paired with
+# i->you so "I am" -> "you are"); "are" is left untouched to avoid
+# "they am". Whole-word exact match, so "i" never matches "is"/"if".
+fn ez_reflect_word(w, wl, out): i64 {
+    if (ez_word_is(w, wl, "i'm") != 0)      { return ez_puts(out, "you are"); }
+    if (ez_word_is(w, wl, "im") != 0)       { return ez_puts(out, "you are"); }
+    if (ez_word_is(w, wl, "i'd") != 0)      { return ez_puts(out, "you would"); }
+    if (ez_word_is(w, wl, "i've") != 0)     { return ez_puts(out, "you have"); }
+    if (ez_word_is(w, wl, "i'll") != 0)     { return ez_puts(out, "you will"); }
+    if (ez_word_is(w, wl, "i") != 0)        { return ez_puts(out, "you"); }
+    if (ez_word_is(w, wl, "me") != 0)       { return ez_puts(out, "you"); }
+    if (ez_word_is(w, wl, "my") != 0)       { return ez_puts(out, "your"); }
+    if (ez_word_is(w, wl, "mine") != 0)     { return ez_puts(out, "yours"); }
+    if (ez_word_is(w, wl, "myself") != 0)   { return ez_puts(out, "yourself"); }
+    if (ez_word_is(w, wl, "am") != 0)       { return ez_puts(out, "are"); }
+    if (ez_word_is(w, wl, "was") != 0)      { return ez_puts(out, "were"); }
+    if (ez_word_is(w, wl, "were") != 0)     { return ez_puts(out, "was"); }
+    if (ez_word_is(w, wl, "you're") != 0)   { return ez_puts(out, "I am"); }
+    if (ez_word_is(w, wl, "youre") != 0)    { return ez_puts(out, "I am"); }
+    if (ez_word_is(w, wl, "you've") != 0)   { return ez_puts(out, "I have"); }
+    if (ez_word_is(w, wl, "you'll") != 0)   { return ez_puts(out, "I will"); }
+    if (ez_word_is(w, wl, "you'd") != 0)    { return ez_puts(out, "I would"); }
+    if (ez_word_is(w, wl, "your") != 0)     { return ez_puts(out, "my"); }
+    if (ez_word_is(w, wl, "yours") != 0)    { return ez_puts(out, "mine"); }
+    if (ez_word_is(w, wl, "yourself") != 0) { return ez_puts(out, "myself"); }
+    # Bare "you" reflects to the OBJECT form "me" — every splice site that
+    # receives a bare "you" is object position (after a verb/preposition);
+    # subject-position "you are"/"you" route to the canned KW_ARE/KW_YOU
+    # handlers, never here. Subject "you are"/"you were" are caught by the
+    # two-word lookahead in ez_reflect before reaching this fn.
+    if (ez_word_is(w, wl, "you") != 0)      { return ez_puts(out, "me"); }
+    memcpy(out, w, wl);
+    return wl;
+}
+
+# Reflect src[0..len) word-by-word into out (bounded by cap). Returns
+# the reflected length. A two-word lookahead maps the spelled-out
+# subject clauses "you are" -> "I am" and "you were" -> "I was" (which
+# the bare-word table can't, since "are" is deliberately left untouched
+# to avoid "they am"); everything else goes through ez_reflect_word.
+fn ez_reflect(src, len, out, cap): i64 {
+    var o = 0;
+    var first = 1;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if ((load8(src + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(src, i, len);
+        # lookahead: "you are"/"you were" as a unit
+        var repl = 0;
+        var consumed = j;
+        if (ez_word_is(src + i, j - i, "you") != 0) {
+            var a2 = ez_skip_sp(src, j, len);
+            var b2 = ez_word_end(src, a2, len);
+            if (b2 > a2) {
+                if (ez_word_is(src + a2, b2 - a2, "are") != 0)  { repl = "I am";  consumed = b2; }
+                if (ez_word_is(src + a2, b2 - a2, "were") != 0) { repl = "I was"; consumed = b2; }
+            }
+        }
+        if (o + (consumed - i) + 12 > cap) { go = 0; continue; }   # room for expansion
+        if (first == 0) { store8(out + o, 32); o = o + 1; }
+        if (repl != 0) {
+            o = o + ez_puts(out + o, repl);
+            i = consumed;
+        } else {
+            o = o + ez_reflect_word(src + i, j - i, out + o);
+            i = j;
+        }
+        first = 0;
+    }
+    return o;
+}
+
+# === Keyword table (the DOCTOR script's scan layer) ===
+
+# Map a word to its keyword id (KW_NONE if not a keyword).
+fn ez_kw_id(w, wl): i64 {
+    if (ez_word_is(w, wl, "sorry") != 0)     { return KW_SORRY; }
+    if (ez_word_is(w, wl, "apologize") != 0) { return KW_SORRY; }
+    if (ez_word_is(w, wl, "remember") != 0)  { return KW_REMEMBER; }
+    if (ez_word_is(w, wl, "if") != 0)        { return KW_IF; }
+    if (ez_word_is(w, wl, "dream") != 0)     { return KW_DREAM; }
+    if (ez_word_is(w, wl, "dreams") != 0)    { return KW_DREAM; }
+    if (ez_word_is(w, wl, "dreamed") != 0)   { return KW_DREAM; }
+    if (ez_word_is(w, wl, "dreamt") != 0)    { return KW_DREAM; }
+    if (ez_word_is(w, wl, "perhaps") != 0)   { return KW_PERHAPS; }
+    if (ez_word_is(w, wl, "maybe") != 0)     { return KW_PERHAPS; }
+    if (ez_word_is(w, wl, "hello") != 0)     { return KW_HELLO; }
+    if (ez_word_is(w, wl, "hi") != 0)        { return KW_HELLO; }
+    if (ez_word_is(w, wl, "computer") != 0)  { return KW_COMPUTER; }
+    if (ez_word_is(w, wl, "computers") != 0) { return KW_COMPUTER; }
+    if (ez_word_is(w, wl, "machine") != 0)   { return KW_COMPUTER; }
+    if (ez_word_is(w, wl, "machines") != 0)  { return KW_COMPUTER; }
+    if (ez_word_is(w, wl, "name") != 0)      { return KW_NAME; }
+    if (ez_word_is(w, wl, "am") != 0)        { return KW_AM; }
+    if (ez_word_is(w, wl, "are") != 0)       { return KW_ARE; }
+    if (ez_word_is(w, wl, "your") != 0)      { return KW_YOUR; }
+    if (ez_word_is(w, wl, "was") != 0)       { return KW_WAS; }
+    if (ez_word_is(w, wl, "were") != 0)      { return KW_WAS; }
+    if (ez_word_is(w, wl, "i") != 0)         { return KW_I; }
+    if (ez_word_is(w, wl, "i'm") != 0)       { return KW_I; }
+    if (ez_word_is(w, wl, "im") != 0)        { return KW_I; }
+    if (ez_word_is(w, wl, "you") != 0)       { return KW_YOU; }
+    if (ez_word_is(w, wl, "yes") != 0)       { return KW_YES; }
+    if (ez_word_is(w, wl, "no") != 0)        { return KW_NO; }
+    if (ez_word_is(w, wl, "my") != 0)        { return KW_MY; }
+    if (ez_word_is(w, wl, "can") != 0)       { return KW_CAN; }
+    if (ez_word_is(w, wl, "what") != 0)      { return KW_WHAT; }
+    if (ez_word_is(w, wl, "because") != 0)   { return KW_BECAUSE; }
+    if (ez_word_is(w, wl, "why") != 0)       { return KW_WHY; }
+    if (ez_word_is(w, wl, "everyone") != 0)  { return KW_EVERYONE; }
+    if (ez_word_is(w, wl, "everybody") != 0) { return KW_EVERYONE; }
+    if (ez_word_is(w, wl, "nobody") != 0)    { return KW_EVERYONE; }
+    if (ez_word_is(w, wl, "everything") != 0){ return KW_EVERYONE; }
+    if (ez_word_is(w, wl, "always") != 0)    { return KW_ALWAYS; }
+    if (ez_word_is(w, wl, "alike") != 0)     { return KW_LIKE; }
+    if (ez_word_is(w, wl, "like") != 0)      { return KW_LIKE; }
+    if (ez_word_is(w, wl, "same") != 0)      { return KW_LIKE; }
+    if (ez_word_is(w, wl, "mother") != 0)    { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "father") != 0)    { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "mom") != 0)       { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "dad") != 0)       { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "sister") != 0)    { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "brother") != 0)   { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "wife") != 0)      { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "husband") != 0)   { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "children") != 0)  { return KW_FAMILY; }
+    if (ez_word_is(w, wl, "family") != 0)    { return KW_FAMILY; }
+    return KW_NONE;
+}
+
+# Keyword precedence (canonical DOCTOR ranks; higher wins, leftmost on
+# ties). COMPUTER=50, NAME=15, LIKE=10, REMEMBER=5, DREAM=4, IF=3,
+# WAS/MY/EVERYONE/FAMILY=2, ALWAYS=1, the rest 0.
+fn ez_kw_rank(id): i64 {
+    if (id == KW_COMPUTER) { return 50; }
+    if (id == KW_NAME)     { return 15; }
+    if (id == KW_LIKE)     { return 10; }
+    if (id == KW_REMEMBER) { return 5; }
+    if (id == KW_DREAM)    { return 4; }
+    if (id == KW_IF)       { return 3; }
+    if (id == KW_WAS)      { return 2; }
+    if (id == KW_MY)       { return 2; }
+    if (id == KW_EVERYONE) { return 2; }
+    if (id == KW_FAMILY)   { return 2; }
+    if (id == KW_ALWAYS)   { return 1; }
+    return 0;
+}
+
+# Scan normalized buf for the highest-ranked keyword. Writes the keyword
+# word's start to *pos_out and its length to *len_out. Returns the id
+# (KW_NONE if none). Leftmost wins ties (strictly-greater compare).
+fn ez_scan(norm, len, pos_out, len_out): i64 {
+    var best = KW_NONE;
+    var bestrank = 0 - 1;
+    var bestpos = 0;
+    var bestlen = 0;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if ((load8(norm + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(norm, i, len);
+        var wl = j - i;
+        var id = ez_kw_id(norm + i, wl);
+        if (id != KW_NONE) {
+            var r = ez_kw_rank(id);
+            if (r > bestrank) { bestrank = r; best = id; bestpos = i; bestlen = wl; }
+        }
+        i = j;
+    }
+    store64(pos_out, bestpos);
+    store64(len_out, bestlen);
+    return best;
+}
+
+# Per-keyword cycle counter: return current value, then increment.
+fn ez_counter_next(st, kwid): i64 {
+    var ctrs = load64(st + EZ_CTRS);
+    var v = load64(ctrs + kwid * 8);
+    store64(ctrs + kwid * 8, v + 1);
+    return v;
+}
+
+# 1 if any word in norm[start..len) is a family word.
+fn ez_contains_family(norm, start, len): i64 {
+    var i = start;
+    var found = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if (found == 1) { go = 0; continue; }
+        if ((load8(norm + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(norm, i, len);
+        if (ez_kw_id(norm + i, j - i) == KW_FAMILY) { found = 1; }
+        i = j;
+    }
+    return found;
+}
+
+# === Per-keyword reassembly (the DOCTOR script's response layer) ===
+#
+# Each returns the response length written to out. Templates cycle by
+# `idx` (the keyword's persistent counter). Responses that splice the
+# reflected remainder use ez_fill; the rest are canned.
+
+fn ez_i_am(idx, rb, rl, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_fill(out, "How long have you been ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Do you believe it is normal to be ", rb, rl, "?"); }
+    if (m == 2) { return ez_fill(out, "Do you enjoy being ", rb, rl, "?"); }
+    return ez_fill(out, "Do you know anyone else who is ", rb, rl, "?");
+}
+
+fn ez_i_feel(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Tell me more about such feelings."); }
+    if (m == 1) { return ez_fill(out, "Do you often feel ", rb, rl, "?"); }
+    return ez_fill(out, "Do you enjoy feeling ", rb, rl, "?");
+}
+
+fn ez_i_want(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "Why do you want ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "What would it mean to you if you got ", rb, rl, "?"); }
+    return ez_fill(out, "Suppose you got ", rb, rl, " soon?");
+}
+
+fn ez_i_cant(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "How do you know you can't ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Perhaps you could ", rb, rl, " if you tried?"); }
+    return ez_fill(out, "Do you really want to be able to ", rb, rl, "?");
+}
+
+fn ez_i_dont(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "Don't you really ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Why don't you ", rb, rl, "?"); }
+    return ez_canned(out, "Does that trouble you?");
+}
+
+fn ez_i_generic(idx, rb, rl, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_fill(out, "You say ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Why do you say ", rb, rl, "?"); }
+    if (m == 2) { return ez_canned(out, "Can you elaborate on that?"); }
+    return ez_canned(out, "That is quite interesting."); }
+
+# KW_I: inspect the word after "i" (or treat "i'm"/"im" as "i am").
+fn ez_resp_i(st, idx, norm, nlen, kwpos, kwlen, out): i64 {
+    var rb = alloc(EZ_REFL_CAP);
+    var rl = 0;
+    var kw = norm + kwpos;
+    var amlike = 0;
+    if (ez_word_is(kw, kwlen, "i'm") != 0) { amlike = 1; }
+    if (ez_word_is(kw, kwlen, "im") != 0)  { amlike = 1; }
+    var istart = kwpos + kwlen;
+    if (amlike == 1) {
+        rl = ez_reflect(norm + istart, nlen - istart, rb, EZ_REFL_CAP);
+        return ez_i_am(idx, rb, rl, out);
+    }
+    var a = ez_skip_sp(norm, istart, nlen);
+    var b = ez_word_end(norm, a, nlen);
+    var w2l = b - a;
+    rl = ez_reflect(norm + b, nlen - b, rb, EZ_REFL_CAP);   # predicate after w2
+    if (ez_word_is(norm + a, w2l, "am") != 0)     { return ez_i_am(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "feel") != 0)   { return ez_i_feel(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "want") != 0)   { return ez_i_want(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "need") != 0)   { return ez_i_want(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "can't") != 0)  { return ez_i_cant(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "cant") != 0)   { return ez_i_cant(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "cannot") != 0) { return ez_i_cant(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "don't") != 0)  { return ez_i_dont(idx, rb, rl, out); }
+    if (ez_word_is(norm + a, w2l, "dont") != 0)   { return ez_i_dont(idx, rb, rl, out); }
+    # generic: reflect the whole remainder after "i"
+    rl = ez_reflect(norm + istart, nlen - istart, rb, EZ_REFL_CAP);
+    return ez_i_generic(idx, rb, rl, out);
+}
+
+# KW_MY: stash a memory ("your X") then reply (family-aware).
+fn ez_resp_my(st, idx, norm, nlen, kwpos, kwlen, rb, rl, out): i64 {
+    ez_mem_stash(st, rb, rl);
+    if (ez_contains_family(norm, kwpos + kwlen, nlen) != 0) {
+        var f = idx % 3;
+        if (f == 0) { return ez_canned(out, "Tell me more about your family."); }
+        if (f == 1) { return ez_fill(out, "Your ", rb, rl, "?"); }
+        return ez_canned(out, "What else comes to mind when you think of your family?");
+    }
+    var m = idx % 4;
+    if (m == 0) { return ez_fill(out, "Your ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Why do you say your ", rb, rl, "?"); }
+    if (m == 2) { return ez_canned(out, "Does that suggest anything else which belongs to you?"); }
+    return ez_fill(out, "Is it important to you that your ", rb, rl, "?");
+}
+
+fn ez_resp_sorry(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Please don't apologize."); }
+    if (m == 1) { return ez_canned(out, "Apologies are not necessary."); }
+    return ez_canned(out, "What feelings do you have when you apologize?");
+}
+
+fn ez_resp_remember(idx, rb, rl, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_fill(out, "Do you often think of ", rb, rl, "?"); }
+    if (m == 1) { return ez_canned(out, "What else do you remember?"); }
+    if (m == 2) { return ez_fill(out, "Why do you remember ", rb, rl, " just now?"); }
+    return ez_fill(out, "What in the present situation reminds you of ", rb, rl, "?");
+}
+
+fn ez_resp_if(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "Do you think it's likely that ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Do you wish that ", rb, rl, "?"); }
+    return ez_fill(out, "What do you think about ", rb, rl, "?");
+}
+
+fn ez_resp_dream(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "What does that dream suggest to you?"); }
+    if (m == 1) { return ez_canned(out, "Do you dream often?"); }
+    if (m == 2) { return ez_canned(out, "What persons appear in your dreams?"); }
+    return ez_canned(out, "Do you believe that dreaming has something to do with your problem?");
+}
+
+fn ez_resp_perhaps(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "You don't seem quite certain."); }
+    if (m == 1) { return ez_canned(out, "Why the uncertain tone?"); }
+    if (m == 2) { return ez_canned(out, "Can't you be more positive?"); }
+    return ez_canned(out, "You aren't sure?");
+}
+
+fn ez_resp_hello(idx, out): i64 {
+    return ez_canned(out, "How do you do. Please state your problem.");
+}
+
+fn ez_resp_computer(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "Do computers worry you?"); }
+    if (m == 1) { return ez_canned(out, "Why do you mention computers?"); }
+    if (m == 2) { return ez_canned(out, "What do you think machines have to do with your problem?"); }
+    return ez_canned(out, "Don't you think computers can help people?");
+}
+
+fn ez_resp_name(idx, out): i64 {
+    var m = idx % 2;
+    if (m == 0) { return ez_canned(out, "I am not interested in names."); }
+    return ez_canned(out, "I've told you before, I don't care about names -- please go on.");
+}
+
+fn ez_resp_am(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Do you believe you are what you describe?"); }
+    if (m == 1) { return ez_canned(out, "Would you want to be?"); }
+    return ez_canned(out, "Why do you say 'am'?");
+}
+
+fn ez_resp_are(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Why are you interested in whether I am or not?"); }
+    if (m == 1) { return ez_canned(out, "Would you prefer it if I weren't?"); }
+    return ez_canned(out, "Perhaps I am, in your fantasies.");
+}
+
+fn ez_resp_your(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "Why are you concerned over my ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "What about your own ", rb, rl, "?"); }
+    return ez_fill(out, "Are you worried about someone else's ", rb, rl, "?");
+}
+
+fn ez_resp_was(idx, rb, rl, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_fill(out, "What if you were ", rb, rl, "?"); }
+    if (m == 1) { return ez_fill(out, "Were you really ", rb, rl, "?"); }
+    return ez_canned(out, "Why do you tell me that now?");
+}
+
+fn ez_resp_you(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "We were discussing you -- not me."); }
+    if (m == 1) { return ez_canned(out, "Oh, I?"); }
+    if (m == 2) { return ez_canned(out, "You're not really talking about me, are you?"); }
+    return ez_canned(out, "What are your feelings now?");
+}
+
+fn ez_resp_yes(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "You seem quite positive."); }
+    if (m == 1) { return ez_canned(out, "You are sure?"); }
+    return ez_canned(out, "I understand.");
+}
+
+fn ez_resp_no(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Are you saying no just to be negative?"); }
+    if (m == 1) { return ez_canned(out, "You are being a bit negative."); }
+    return ez_canned(out, "Why not?");
+}
+
+fn ez_resp_can(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "You believe I can help you, don't you?"); }
+    if (m == 1) { return ez_canned(out, "Perhaps you'd like to be able to do that yourself?"); }
+    return ez_canned(out, "Whether or not you can do that depends more on you than on me.");
+}
+
+fn ez_resp_what(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "Why do you ask?"); }
+    if (m == 1) { return ez_canned(out, "Does that question interest you?"); }
+    if (m == 2) { return ez_canned(out, "What is it you really want to know?"); }
+    return ez_canned(out, "What answer would please you most?");
+}
+
+fn ez_resp_because(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Is that the real reason?"); }
+    if (m == 1) { return ez_canned(out, "Don't any other reasons come to mind?"); }
+    return ez_canned(out, "What other reasons might there be?");
+}
+
+fn ez_resp_why(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Why do you ask that?"); }
+    if (m == 1) { return ez_canned(out, "Does that question interest you?"); }
+    return ez_canned(out, "What is it you really want to know?");
+}
+
+fn ez_resp_everyone(idx, out): i64 {
+    var m = idx % 4;
+    if (m == 0) { return ez_canned(out, "Really, everyone?"); }
+    if (m == 1) { return ez_canned(out, "Surely not everyone."); }
+    if (m == 2) { return ez_canned(out, "Can you think of anyone in particular?"); }
+    return ez_canned(out, "Who, for example?");
+}
+
+fn ez_resp_always(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Can you think of a specific example?"); }
+    if (m == 1) { return ez_canned(out, "When?"); }
+    return ez_canned(out, "Really, always?");
+}
+
+fn ez_resp_like(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "In what way?"); }
+    if (m == 1) { return ez_canned(out, "What resemblance do you see?"); }
+    return ez_canned(out, "What does that similarity suggest to you?");
+}
+
+fn ez_resp_family(idx, out): i64 {
+    var m = idx % 3;
+    if (m == 0) { return ez_canned(out, "Tell me more about your family."); }
+    if (m == 1) { return ez_canned(out, "Who else in your family comes to mind?"); }
+    return ez_canned(out, "How do you get along with your family?");
+}
+
+# === Memory ring ===
+
+# Stash a reflected "your X" remainder for later resurfacing.
+fn ez_mem_stash(st, rbuf, rlen): i64 {
+    var n = rlen;
+    if (n > EZ_MEM_SLOT) { n = EZ_MEM_SLOT; }
+    if (n <= 0) { return 0; }
+    var mem = load64(st + EZ_MEM);
+    var meml = load64(st + EZ_MEMLEN);
+    var head = load64(st + EZ_MEMHEAD);
+    var cnt = load64(st + EZ_MEMCNT);
+    var slot = 0;
+    if (cnt >= EZ_MEM_SLOTS) {
+        slot = head;                                   # full: overwrite oldest
+        store64(st + EZ_MEMHEAD, (head + 1) % EZ_MEM_SLOTS);
+    } else {
+        slot = head + cnt;
+        if (slot >= EZ_MEM_SLOTS) { slot = slot - EZ_MEM_SLOTS; }
+        store64(st + EZ_MEMCNT, cnt + 1);
+    }
+    memcpy(mem + slot * EZ_MEM_SLOT, rbuf, n);
+    store64(meml + slot * 8, n);
+    return 0;
+}
+
+# NONE turn: resurface the oldest stashed memory if any, else cycle a
+# generic deflection.
+fn ez_resp_none(st, out): i64 {
+    var cnt = load64(st + EZ_MEMCNT);
+    if (cnt > 0) {
+        var mem = load64(st + EZ_MEM);
+        var meml = load64(st + EZ_MEMLEN);
+        var head = load64(st + EZ_MEMHEAD);
+        var sp = mem + head * EZ_MEM_SLOT;
+        var sl = load64(meml + head * 8);
+        store64(st + EZ_MEMHEAD, (head + 1) % EZ_MEM_SLOTS);
+        store64(st + EZ_MEMCNT, cnt - 1);
+        var mi = load64(st + EZ_MEMCTR);
+        store64(st + EZ_MEMCTR, mi + 1);
+        var mm = mi % 4;
+        if (mm == 0) { return ez_fill(out, "Earlier you said your ", sp, sl, "."); }
+        if (mm == 1) { return ez_fill(out, "Does that have anything to do with the fact that your ", sp, sl, "?"); }
+        if (mm == 2) { return ez_fill(out, "Lets discuss further why your ", sp, sl, "."); }
+        return ez_fill(out, "But your ", sp, sl, "?");
+    }
+    var ni = load64(st + EZ_NONECTR);
+    store64(st + EZ_NONECTR, ni + 1);
+    var k = ni % 6;
+    if (k == 0) { return ez_canned(out, "I am not sure I understand you fully."); }
+    if (k == 1) { return ez_canned(out, "Please go on."); }
+    if (k == 2) { return ez_canned(out, "What does that suggest to you?"); }
+    if (k == 3) { return ez_canned(out, "Do you feel strongly about discussing such things?"); }
+    if (k == 4) { return ez_canned(out, "That is interesting. Please continue."); }
+    return ez_canned(out, "Tell me more about that.");
+}
+
+# === Engine entry: respond to one input line ===
+#
+# Writes ELIZA's reply (no "ELIZA:" prefix — the caller frames it) into
+# out (must be >= EZ_RESP_CAP). Returns the reply length. `st` carries
+# the per-keyword cycle counters + memory ring across the conversation.
+fn ez_respond(st, line, len, out): i64 {
+    var norm = alloc(EZ_IN_MAX + 1);
+    var nlen = ez_normalize(line, len, norm, EZ_IN_MAX);
+    if (nlen <= 0) { return ez_resp_none(st, out); }
+    var posp = alloc(8);
+    var lenp = alloc(8);
+    var kwid = ez_scan(norm, nlen, posp, lenp);
+    if (kwid == KW_NONE) { return ez_resp_none(st, out); }
+    var kwpos = load64(posp);
+    var kwlen = load64(lenp);
+    var idx = ez_counter_next(st, kwid);
+    if (kwid == KW_I) { return ez_resp_i(st, idx, norm, nlen, kwpos, kwlen, out); }
+    var rstart = kwpos + kwlen;
+    var rb = alloc(EZ_REFL_CAP);
+    var rl = ez_reflect(norm + rstart, nlen - rstart, rb, EZ_REFL_CAP);
+    if (kwid == KW_MY)       { return ez_resp_my(st, idx, norm, nlen, kwpos, kwlen, rb, rl, out); }
+    if (kwid == KW_SORRY)    { return ez_resp_sorry(idx, out); }
+    if (kwid == KW_REMEMBER) { return ez_resp_remember(idx, rb, rl, out); }
+    if (kwid == KW_IF)       { return ez_resp_if(idx, rb, rl, out); }
+    if (kwid == KW_DREAM)    { return ez_resp_dream(idx, out); }
+    if (kwid == KW_PERHAPS)  { return ez_resp_perhaps(idx, out); }
+    if (kwid == KW_HELLO)    { return ez_resp_hello(idx, out); }
+    if (kwid == KW_COMPUTER) { return ez_resp_computer(idx, out); }
+    if (kwid == KW_NAME)     { return ez_resp_name(idx, out); }
+    if (kwid == KW_AM)       { return ez_resp_am(idx, out); }
+    if (kwid == KW_ARE)      { return ez_resp_are(idx, out); }
+    if (kwid == KW_YOUR)     { return ez_resp_your(idx, rb, rl, out); }
+    if (kwid == KW_WAS)      { return ez_resp_was(idx, rb, rl, out); }
+    if (kwid == KW_YOU)      { return ez_resp_you(idx, out); }
+    if (kwid == KW_YES)      { return ez_resp_yes(idx, out); }
+    if (kwid == KW_NO)       { return ez_resp_no(idx, out); }
+    if (kwid == KW_CAN)      { return ez_resp_can(idx, out); }
+    if (kwid == KW_WHAT)     { return ez_resp_what(idx, out); }
+    if (kwid == KW_BECAUSE)  { return ez_resp_because(idx, out); }
+    if (kwid == KW_WHY)      { return ez_resp_why(idx, out); }
+    if (kwid == KW_EVERYONE) { return ez_resp_everyone(idx, out); }
+    if (kwid == KW_ALWAYS)   { return ez_resp_always(idx, out); }
+    if (kwid == KW_LIKE)     { return ez_resp_like(idx, out); }
+    if (kwid == KW_FAMILY)   { return ez_resp_family(idx, out); }
+    return ez_resp_none(st, out);
+}
+
+# 1 if the first word of line is a goodbye token (a port convention —
+# the 1966 script had no quit word; the operator ended the session).
+fn ez_is_quit(line, len): i64 {
+    var w = alloc(16);
+    var wl = ez_word_lower(line, len, w, 16);
+    if (wl == 3) { if (memeq(w, "bye", 3) == 1) { return 1; } }
+    if (wl == 7) { if (memeq(w, "goodbye", 7) == 1) { return 1; } }
+    if (wl == 4) { if (memeq(w, "quit", 4) == 1) { return 1; } }
+    if (wl == 4) { if (memeq(w, "exit", 4) == 1) { return 1; } }
+    return 0;
+}
+
+# === Door contract (ADR 0009 shape) ===
+
+# Allocate + zero the conversation state + its sub-buffers. seed/mode/
+# max_days are part of the door contract but unused (deterministic,
+# practice-only — a DOCTOR session has no save worth persisting).
+fn ez_new(seed, mode, max_days): i64 {
+    var st = alloc(EZ_SIZE);
+    store64(st + EZ_OVER, 0);
+    var resp = alloc(EZ_RESP_CAP);
+    store64(st + EZ_RESP, resp);
+    store64(st + EZ_RESPLEN, 0);
+    var ctrs = alloc(KW_COUNT * 8);
+    var i = 0;
+    while (i < KW_COUNT) { store64(ctrs + i * 8, 0); i = i + 1; }
+    store64(st + EZ_CTRS, ctrs);
+    store64(st + EZ_NONECTR, 0);
+    var mem = alloc(EZ_MEM_SLOTS * EZ_MEM_SLOT);
+    store64(st + EZ_MEM, mem);
+    var meml = alloc(EZ_MEM_SLOTS * 8);
+    var k = 0;
+    while (k < EZ_MEM_SLOTS) { store64(meml + k * 8, 0); k = k + 1; }
+    store64(st + EZ_MEMLEN, meml);
+    store64(st + EZ_MEMHEAD, 0);
+    store64(st + EZ_MEMCNT, 0);
+    store64(st + EZ_MEMCTR, 0);
+    return st;
+}
+
+# Seed the opening line.
+fn ez_start(st): i64 {
+    var resp = load64(st + EZ_RESP);
+    var n = ez_puts(resp, "How do you do. Please tell me your problem.");
+    store64(st + EZ_RESPLEN, n);
+    return 0;
+}
+
+# Consume one input line; compute the reply into the state's response
+# buffer. Returns 1 if the user said goodbye (door exits), else 0.
+fn ez_feed(st, line, len): i64 {
+    var resp = load64(st + EZ_RESP);
+    if (ez_is_quit(line, len) != 0) {
+        var qn = ez_puts(resp, "Goodbye. It was nice talking to you.");
+        store64(st + EZ_RESPLEN, qn);
+        store64(st + EZ_OVER, 1);
+        return 1;
+    }
+    var n = ez_respond(st, line, len, resp);
+    store64(st + EZ_RESPLEN, n);
+    return 0;
+}
+
+# Render the current frame: "ELIZA: <reply>" + a blank line + prompt.
+fn ez_render(st, buf, cap): i64 {
+    var pos = 0;
+    pos = emit_cstr(buf, pos, "ELIZA: ");
+    var resp = load64(st + EZ_RESP);
+    var rl = load64(st + EZ_RESPLEN);
+    memcpy(buf + pos, resp, rl);
+    pos = pos + rl;
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "(say what's on your mind, or 'bye' to leave) > ");
+    return pos;
+}
+
+# Eliza never "wins/loses" — no score, no leaderboard. Always 0 so the
+# door framework treats a quit as a plain exit (door_save_on_exit no-op).
+fn ez_is_over(st): i64 {
+    return 0;
+}

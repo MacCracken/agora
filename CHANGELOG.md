@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-06-08 (Chat area + Eliza: the synchronous public-assembly surface)
+
+**agora gets a live multi-user chat room and its first inhabitant.** [ADR 0011](docs/adr/0011-chat-area.md) adds the *synchronous* public-assembly surface the BBS was missing — the classic teleconference / CB-simulator — built entirely on the 1.2.0 `flock`'d shared-disk discipline (no new concurrency model, no new dependencies). **Eliza** (Weizenbaum's 1966 DOCTOR) lands as a pure-module chatbot reachable two ways: a `play eliza` door and a private `/eliza` side-channel inside chat. 141 → **155 tests**; 678,776 B → **730,792 B** (clean DCE; on the cyrius 6.1.5 → 6.1.9 toolchain — the bump is the chat + Eliza source plus the toolchain codegen delta).
+
+### Added
+
+- **Chat area** (`src/chat.cyr`, [ADR 0011](docs/adr/0011-chat-area.md)) — a live, multi-user, login-gated teleconference. Per-channel append-only **ring transcript** at `<store>/.chat/<channel>/log` (32 KB cap; whole-line front-trim), mutated through the same `flock`'d lock → read → trim → append → write transaction the Universe established. `chat [channel]` (default `lobby`) joins; `/leave` `/help` `/quit` are the in-room commands; anything else is said to the room. A new `MODE_CHAT` in `handle_client` **live-tails by absolute sequence number** (not byte offset — the front-trim shifts bytes but never a seq, so a reader's position survives rotation), polled on the recv-timeout tick: while in chat the socket recv timeout drops to `CHAT_POLL_SECS` (2 s) and an `-EAGAIN` read flushes new lines instead of disconnecting (only when the input line is empty, so a half-typed line isn't garbled); pure silence is bounded by `CHAT_IDLE_SECS` (15 min). Message text is sanitised to printable ASCII (no tab/CR/LF/ESC), so it can neither break the `<seq>\t<handle>\t<text>` line format nor inject terminal escapes into another viewer. Pure transcript helpers (format / parse-seq / render / sanitise / ring-trim / tail-since) are unit-tested t142–t148; the cross-session interleaving is wire-proven by `11-chat.sh` (two logged-in sessions: scrollback delivery + live-tail tick).
+- **Eliza** (`src/eliza.cyr`) — a faithful pure-module port of Weizenbaum's 1966 ELIZA DOCTOR script: normalize → whole-word pronoun reflection → ranked keyword scan (COMPUTER 50 · NAME 15 · LIKE 10 · REMEMBER 5 · DREAM 4 · IF 3 · WAS/MY/EVERYONE/FAMILY 2 · ALWAYS 1) → cyclic reassembly templates → a memory ring (`my X` stashes "your X", resurfaced on a later no-keyword turn as "Earlier you said your X.") → NONE deflections. Decomposition handles `i am/feel/want/can't/don't X`; object-position `you` reflects to `me` and the subject clauses `you are`/`you were` to `I am`/`I was`. Reachable as a `play eliza` **door** (practice-only — a conversation has no save state) and a private **`/eliza` side-channel** inside chat (toggle on the couch: replies go only to the asker, never to the room transcript; room tailing pauses). The engine's parsing/reflection/scan/memory primitives are written to be reused by **PARRY** (1.3.1). Unit-tested t149–t155; both wire surfaces + the privacy guarantee proven by `12-eliza.sh`.
+
+### Changed
+
+- **Toolchain pin lifted 6.1.5 → 6.1.9** (`cyrius.cyml [package].cyrius`). The crypto/sigil surface and the full suite stay green; no source changes required by the bump.
+
+### Fixed
+
+- Pre-release adversarial review (multi-agent, each finding independently verified) caught and fixed three real defects before the cut: Eliza reflected object-position `you` to the subject form `I` ("hate you" → "hate **I**"), and spelled-out `you are` to `I are`, instead of `me` / `I am`; and the chat live-tail advanced its seq watermark past lines dropped when the per-tick render buffer filled, silently losing them under burst (> ~27 messages in one 2 s tick). Regression-guarded by t155.
+
 ## [1.2.0] — 2026-06-08 (Persistent Universe: shared-world multiplayer for the door games)
 
 **The door games go multiplayer.** [ADR 0010](docs/adr/0010-persistent-universe.md) lands in full: a shared, persistent, contested world per game lives on disk under `<store>/.games/<game>/world/`, mutated through a `flock`'d **lock → read → compute → write** transaction with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives). All three games now have a Universe; finished runs post to cross-game leaderboards. Built on the unblocked cyrius 6.1.5 toolchain — the array-in-loop codegen bug that reverted the first attempt is cleared (t129 probes it on the real code). 121 → **141 tests**; 484,184 B (1.1.0) → **678,776 B** clean DCE.

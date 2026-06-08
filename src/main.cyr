@@ -24,6 +24,7 @@ include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
 include "src/chat.cyr"
+include "src/eliza.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -137,6 +138,14 @@ var g_chat_channel = 0;             # alloc'd in handle_client (CHAT_CHANNEL_MAX
 var g_chat_seen    = 0;
 var g_chat_idle    = 0;
 
+# 1.3.0 (ADR 0011): the private `/eliza` side-channel inside chat. When
+# g_chat_eliza==1 the session is on the couch — non-command lines go to
+# the DOCTOR (g_eliza_state) and the reply is sent ONLY to this user
+# (never chat_say'd to the room); room tailing is paused. g_eliza_state
+# is alloc'd lazily on first /eliza.
+var g_chat_eliza  = 0;
+var g_eliza_state = 0;
+
 enum DoorRuntime {
     DOOR_FRAME_CAP = 8192;        # per-frame render buffer
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
@@ -155,7 +164,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.2.0 — civic-marketplace BBS for AGNOS; door games + Persistent Universe");
+    println("v1.3.0 — civic-marketplace BBS for AGNOS; live chat area + Eliza");
     return 0;
 }
 
@@ -333,7 +342,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door game: smuggler | port | handler  [practice|solo|universe]\r\n");
+        send_str(cfd, "  play <game>     door game: smuggler | port | handler | eliza  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  help            this message\r\n");
@@ -705,7 +714,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza> [practice|solo]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -733,13 +742,18 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(gbuf, "smuggler") != 0) { game = GAME_SMUGGLER; }
         if (streq(gbuf, "port") != 0)     { game = GAME_PORT; }
         if (streq(gbuf, "handler") != 0)  { game = GAME_HANDLER; }
+        if (streq(gbuf, "eliza") != 0)    { game = GAME_ELIZA; }
         if (game == GAME_NONE) {
-            send_str(cfd, "unknown game. try: play smuggler | play port | play handler\r\n");
+            send_str(cfd, "unknown game. try: play smuggler | play port | play handler | play eliza\r\n");
             return MODE_COMMAND;
         }
         var dmode = DOOR_PRACTICE;
         if (streq(mbuf, "solo") != 0)     { dmode = DOOR_SOLO; }
         if (streq(mbuf, "universe") != 0) { dmode = DOOR_UNIVERSE; }
+        # 1.3.0 (ADR 0011): Eliza is a stateless conversation — no save,
+        # no shared world. Force practice so it skips the solo/universe
+        # machinery entirely (ez_load_parse / ez_save_format are no-ops).
+        if (game == GAME_ELIZA) { dmode = DOOR_PRACTICE; }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -813,10 +827,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (game == GAME_SMUGGLER) { g_door_state = sl_new(seed, dmode, SL_DEF_DAYS); }
             if (game == GAME_PORT)     { g_door_state = pa_new(seed, dmode, PA_DEF_DAYS); }
             if (game == GAME_HANDLER)  { g_door_state = th_new(seed, dmode, TH_DEF_DAYS); }
+            if (game == GAME_ELIZA)    { g_door_state = ez_new(seed, dmode, EZ_DEF_DAYS); }
         }
         if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
         if (game == GAME_PORT)     { pa_start(g_door_state); }
         if (game == GAME_HANDLER)  { th_start(g_door_state); }
+        if (game == GAME_ELIZA)    { ez_start(g_door_state); }
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -942,6 +958,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_SMUGGLER) { return "smuggler"; }
     if (game == GAME_PORT)     { return "port"; }
     if (game == GAME_HANDLER)  { return "handler"; }
+    if (game == GAME_ELIZA)    { return "eliza"; }
     return "game";
 }
 
@@ -984,8 +1001,24 @@ fn chat_cmd_dispatch(cfd, line, len): i64 {
         send_str(cfd, "bye\r\n");
         return 2;
     }
+    if (line_has_prefix(line, len, "/eliza") != 0) {
+        # 1.3.0 (ADR 0011): toggle the private DOCTOR side-channel. While
+        # on the couch, your lines go only to Eliza — never to the room.
+        if (g_chat_eliza == 1) {
+            g_chat_eliza = 0;
+            send_str(cfd, "(left the couch -- back in the room)\r\n");
+            return 0;
+        }
+        if (g_eliza_state == 0) { g_eliza_state = ez_new(0, DOOR_PRACTICE, EZ_DEF_DAYS); }
+        ez_start(g_eliza_state);
+        g_chat_eliza = 1;
+        send_str(cfd, "ELIZA: ");
+        send_buf(cfd, load64(g_eliza_state + EZ_RESP), load64(g_eliza_state + EZ_RESPLEN));
+        send_str(cfd, "\r\n(private session with Eliza -- /eliza to return to the room, 'bye' to leave her)\r\n");
+        return 0;
+    }
     if (line_has_prefix(line, len, "/help") != 0) {
-        send_str(cfd, "chat commands:  /leave (back to BBS)   /help   /quit (log off)\r\n");
+        send_str(cfd, "chat commands:  /leave (back to BBS)   /eliza (private chat with the DOCTOR)   /help   /quit\r\n");
         send_str(cfd, "anything else you type is said to the room.\r\n");
         return 0;
     }
@@ -1112,6 +1145,7 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_SMUGGLER) { n = sl_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_PORT)     { n = pa_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_HANDLER)  { n = th_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_ELIZA)    { n = ez_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1124,6 +1158,7 @@ fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_game == GAME_SMUGGLER) { return sl_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_PORT)     { return pa_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_ELIZA)    { return ez_feed(g_door_state, line, line_len); }
     return 1;
 }
 
@@ -1390,7 +1425,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.2.0 — telnet BBS + door games + Universe\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.0 — telnet BBS + door games + chat + Eliza\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1483,6 +1518,8 @@ fn handle_client(cfd): i64 {
     store8(g_chat_channel, 0);
     g_chat_seen = 0;
     g_chat_idle = 0;
+    g_chat_eliza  = 0;
+    g_eliza_state = 0;
 
     var mode    = MODE_COMMAND;
     var last_cr = 0;
@@ -1508,7 +1545,7 @@ fn handle_client(cfd): i64 {
         if (n <= 0) {
             if (mode == MODE_CHAT) {
                 if (n == (0 - EWOULDBLOCK_ERR)) {
-                    if (line_pos == 0) { chat_flush_tail(cfd); }
+                    if (line_pos == 0) { if (g_chat_eliza == 0) { chat_flush_tail(cfd); } }
                     g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
                     if (g_chat_idle >= CHAT_IDLE_SECS) {
                         send_str(cfd, "\r\n(idle — leaving chat)\r\n");
@@ -1688,6 +1725,7 @@ fn handle_client(cfd): i64 {
                                     sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
                                     store8(g_chat_channel, 0);
                                     g_chat_seen = 0;
+                                    g_chat_eliza = 0;
                                     mode = MODE_COMMAND;
                                     send_prompt(cfd, current_board);
                                 }
@@ -1695,17 +1733,35 @@ fn handle_client(cfd): i64 {
                             }
                         }
                         if (handled == 0) {
-                            # Ordinary line → sanitise + say to the room,
-                            # then flush so the speaker sees the canonical
-                            # "<handle> text" line (and any interleaved ones).
-                            if (clen > 0) {
-                                var tbuf = alloc(CHAT_MSG_MAX + 1);
-                                var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
-                                if (tlen > 0) {
-                                    chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
+                            if (g_chat_eliza == 1) {
+                                # On the couch: this line goes only to the
+                                # DOCTOR, never to the room. 'bye' returns
+                                # the user to the channel.
+                                if (clen > 0) {
+                                    var ezc = ez_feed(g_eliza_state, line, clen);
+                                    send_str(cfd, "ELIZA: ");
+                                    send_buf(cfd, load64(g_eliza_state + EZ_RESP), load64(g_eliza_state + EZ_RESPLEN));
+                                    send_str(cfd, "\r\n");
+                                    if (ezc == 1) {
+                                        g_chat_eliza = 0;
+                                        send_str(cfd, "(back in #");
+                                        send_str(cfd, g_chat_channel);
+                                        send_str(cfd, ")\r\n");
+                                    }
                                 }
+                            } else {
+                                # Ordinary line → sanitise + say to the room,
+                                # then flush so the speaker sees the canonical
+                                # "<handle> text" line (and any interleaved ones).
+                                if (clen > 0) {
+                                    var tbuf = alloc(CHAT_MSG_MAX + 1);
+                                    var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
+                                    if (tlen > 0) {
+                                        chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
+                                    }
+                                }
+                                chat_flush_tail(cfd);
                             }
-                            chat_flush_tail(cfd);
                         }
                         i = i + 1; continue;
                     }
@@ -2490,7 +2546,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.2.0");
+    println("agora 1.3.0");
     return 0;
 }
 

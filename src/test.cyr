@@ -15,6 +15,7 @@ include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
 include "src/chat.cyr"
+include "src/eliza.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -3388,6 +3389,117 @@ fn t148_chat_scrollback(): i64 {
     return 0;
 }
 
+# === 1.3.0 Eliza / DOCTOR engine (t149-t154, ADR 0011) ===
+
+# normalize: lowercase, punctuation -> single space, apostrophes kept, trim.
+fn t149_ez_normalize(): i64 {
+    var out = alloc(64);
+    var n = ez_normalize("Hello, World!", 13, out, EZ_IN_MAX);
+    if (n != 11)                       { test_fail("t149_ez_normalize", "len"); return 1; }
+    if (memeq(out, "hello world", 11) == 0) { test_fail("t149_ez_normalize", "body"); return 1; }
+    # apostrophe survives, case folds
+    var n2 = ez_normalize("I'M Fine", 8, out, EZ_IN_MAX);
+    if (memeq(out, "i'm fine", n2) == 0)    { test_fail("t149_ez_normalize", "apostrophe"); return 1; }
+    test_pass("t149_ez_normalize");
+    return 0;
+}
+
+# reflect: whole-word pronoun swap, single pass.
+fn t150_ez_reflect(): i64 {
+    var out = alloc(128);
+    var n = ez_reflect("i am happy", 10, out, 128);
+    if (memeq(out, "you are happy", n) == 0) { test_fail("t150_ez_reflect", "i am"); return 1; }
+    var n2 = ez_reflect("my name", 7, out, 128);
+    if (memeq(out, "your name", n2) == 0)    { test_fail("t150_ez_reflect", "my"); return 1; }
+    var n3 = ez_reflect("i'm fine", 8, out, 128);
+    if (memeq(out, "you are fine", n3) == 0) { test_fail("t150_ez_reflect", "contraction"); return 1; }
+    test_pass("t150_ez_reflect");
+    return 0;
+}
+
+# scan: highest rank wins, leftmost on ties.
+fn t151_ez_scan(): i64 {
+    var pp = alloc(8);
+    var lp = alloc(8);
+    # COMPUTER(50) beats MY(2)
+    var nb = alloc(64);
+    var l1 = ez_normalize("my computer is broken", 21, nb, EZ_IN_MAX);
+    if (ez_scan(nb, l1, pp, lp) != KW_COMPUTER) { test_fail("t151_ez_scan", "computer"); return 1; }
+    # REMEMBER(5) beats I(0) and YOU(0)
+    var l2 = ez_normalize("i remember you", 14, nb, EZ_IN_MAX);
+    if (ez_scan(nb, l2, pp, lp) != KW_REMEMBER) { test_fail("t151_ez_scan", "remember"); return 1; }
+    # plain "i am sad" -> leftmost rank-0 keyword is I
+    var l3 = ez_normalize("i am sad", 8, nb, EZ_IN_MAX);
+    if (ez_scan(nb, l3, pp, lp) != KW_I)        { test_fail("t151_ez_scan", "i leftmost"); return 1; }
+    # no keyword
+    var l4 = ez_normalize("blah blah", 9, nb, EZ_IN_MAX);
+    if (ez_scan(nb, l4, pp, lp) != KW_NONE)     { test_fail("t151_ez_scan", "none"); return 1; }
+    test_pass("t151_ez_scan");
+    return 0;
+}
+
+# respond: decomposition + reassembly through a fresh state.
+fn t152_ez_respond(): i64 {
+    var st = ez_new(0, 0, 0);
+    var out = alloc(EZ_RESP_CAP);
+    # "I am sad" -> i/am decomposition, predicate reflected
+    var n = ez_respond(st, "I am sad", 8, out);
+    if (memeq(out, "How long have you been sad?", n) == 0) { test_fail("t152_ez_respond", "i am sad"); return 1; }
+    # "Sorry" -> canned (counter 0)
+    var n2 = ez_respond(st, "Sorry", 5, out);
+    if (memeq(out, "Please don't apologize.", n2) == 0)    { test_fail("t152_ez_respond", "sorry"); return 1; }
+    # no keyword -> first NONE deflection
+    var n3 = ez_respond(st, "xyzzy plugh", 11, out);
+    if (memeq(out, "I am not sure I understand you fully.", n3) == 0) { test_fail("t152_ez_respond", "none"); return 1; }
+    test_pass("t152_ez_respond");
+    return 0;
+}
+
+# memory: a "my X" stash resurfaces on a later NONE turn.
+fn t153_ez_memory(): i64 {
+    var st = ez_new(0, 0, 0);
+    var out = alloc(EZ_RESP_CAP);
+    # stash: "my dog is sick" -> "Your dog is sick?" + memory "dog is sick"
+    var n = ez_respond(st, "my dog is sick", 14, out);
+    if (memeq(out, "Your dog is sick?", n) == 0) { test_fail("t153_ez_memory", "my reply"); return 1; }
+    # NONE turn surfaces the oldest memory
+    var n2 = ez_respond(st, "hmmmm", 5, out);
+    if (memeq(out, "Earlier you said your dog is sick.", n2) == 0) { test_fail("t153_ez_memory", "resurface"); return 1; }
+    test_pass("t153_ez_memory");
+    return 0;
+}
+
+# object-position "you" reflects to "me"; subject "you are/were" -> "I am/was".
+# (Regression guard for the 1.3.0 review's reflection-grammar findings.)
+fn t155_ez_reflect_you(): i64 {
+    var out = alloc(128);
+    var n = ez_reflect("i hate you", 10, out, 128);
+    if (memeq(out, "you hate me", n) == 0)  { test_fail("t155_ez_reflect_you", "object you"); return 1; }
+    var n2 = ez_reflect("you are sad", 11, out, 128);
+    if (memeq(out, "I am sad", n2) == 0)    { test_fail("t155_ez_reflect_you", "you are"); return 1; }
+    var n3 = ez_reflect("you were here", 13, out, 128);
+    if (memeq(out, "I was here", n3) == 0)  { test_fail("t155_ez_reflect_you", "you were"); return 1; }
+    # end-to-end through ez_respond (fresh state each so idx == 0)
+    var s1 = ez_new(0, 0, 0);
+    var r = ez_respond(s1, "i hate you", 10, out);
+    if (memeq(out, "You say hate me?", r) == 0) { test_fail("t155_ez_reflect_you", "respond object"); return 1; }
+    var s2 = ez_new(0, 0, 0);
+    var r2 = ez_respond(s2, "if you are happy", 16, out);
+    if (memeq(out, "Do you think it's likely that I am happy?", r2) == 0) { test_fail("t155_ez_reflect_you", "respond you-are"); return 1; }
+    test_pass("t155_ez_reflect_you");
+    return 0;
+}
+
+# quit pre-scan recognizes goodbye tokens.
+fn t154_ez_quit(): i64 {
+    if (ez_is_quit("bye", 3) != 1)         { test_fail("t154_ez_quit", "bye"); return 1; }
+    if (ez_is_quit("Goodbye now", 11) != 1){ test_fail("t154_ez_quit", "goodbye"); return 1; }
+    if (ez_is_quit("hello", 5) != 0)       { test_fail("t154_ez_quit", "hello"); return 1; }
+    if (ez_is_quit("i am fine", 9) != 0)   { test_fail("t154_ez_quit", "not quit"); return 1; }
+    test_pass("t154_ez_quit");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -3542,6 +3654,13 @@ fn main(): i64 {
     t146_chat_trim();
     t147_chat_sanitize();
     t148_chat_scrollback();
+    t149_ez_normalize();
+    t150_ez_reflect();
+    t151_ez_scan();
+    t152_ez_respond();
+    t153_ez_memory();
+    t154_ez_quit();
+    t155_ez_reflect_you();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
