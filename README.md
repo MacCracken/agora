@@ -2,7 +2,7 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: **v1.1.0 — 2026-06-07** adds a BBS **door / games** subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three in-session text games — **Smuggler's Ledger** (contraband run), **Port Authority** (space trade + combat), and **The Handler** (espionage deduction) — reachable from any telnet session via `play <game> [practice|solo]`. Built on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
+**Status**: **v1.2.0 — 2026-06-08** lands the **Persistent Universe** ([ADR 0010](docs/adr/0010-persistent-universe.md)): shared-world multiplayer for all three door games over a `flock`'d on-disk world transaction (fork-per-accept-safe). **Port Authority** gets a shared galaxy — depletable port stock that moves the market + exclusive planet ownership + async-PvP garrisons; **Smuggler's Ledger** gets shared district heat; **The Handler** gets shared city alerts; all three feed **cross-game leaderboards** (`scores <game>`). Reach it via `play <game> universe` (login-gated). Built on **v1.1.0** (2026-06-07) — the BBS **door / games** subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three in-session text games (**Smuggler's Ledger**, **Port Authority**, **The Handler**) via `play <game> [practice|solo]`. And on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
 
 ## Etymology
 
@@ -33,7 +33,7 @@ End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting
 ## Architecture
 
 ```
-agora binary (~484 KB static ELF at 1.1.0)
+agora binary (~679 KB static ELF at 1.2.0)
 ├── src/main.cyr            argv dispatch + telnet handle_client + session helpers
 │                           + login flow + CLI keygen/register/whoami
 │                           + fork-per-accept loop (ADR 0007)

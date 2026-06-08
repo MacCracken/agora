@@ -325,6 +325,7 @@ enum PAScreen {
     PSCR_PLANETWD  = 9;
     PSCR_COMBAT    = 10;
     PSCR_OVER      = 11;
+    PSCR_GARRISON  = 12;    # 1.2.0 bite 3: deploy fighters as a sector garrison (Universe)
 }
 
 enum PADock {
@@ -668,6 +669,24 @@ fn pa_render_sector(st, buf, pos): i64 {
             pos = emit_crlf(buf, pos);
         }
     }
+    if (pa_is_universe(st) == 1) {
+        var w = load64(st + PA_WORLD);
+        if (w != 0) {
+            var gf = paw_garrison_fighters(w, sector);
+            if (gf > 0) {
+                var owner = paw_garrison_owner(w, sector);
+                if (owner == load64(st + PA_FP)) { pos = emit_cstr(buf, pos, "Your garrison: "); }
+                else {
+                    pos = emit_sgr(buf, pos, 31);
+                    pos = emit_cstr(buf, pos, "HOSTILE garrison: ");
+                    pos = emit_reset(buf, pos);
+                }
+                pos = emit_int(buf, pos, gf);
+                pos = emit_cstr(buf, pos, " fighters");
+                pos = emit_crlf(buf, pos);
+            }
+        }
+    }
     return pos;
 }
 
@@ -741,6 +760,10 @@ fn pa_render(st, buf, cap): i64 {
         pos = emit_crlf(buf, pos);
         pos = emit_cstr(buf, pos, "[B]uy [S]ell [M]ove [D]ock [P]lanet [N]ext-day [Q]uit");
         pos = emit_crlf(buf, pos);
+        if (pa_is_universe(st) == 1) {
+            pos = emit_cstr(buf, pos, "[G]arrison — deploy fighters to hold this sector");
+            pos = emit_crlf(buf, pos);
+        }
     }
     if (screen == PSCR_BUY) {
         pos = pa_render_sector(st, buf, pos);
@@ -810,6 +833,13 @@ fn pa_render(st, buf, cap): i64 {
         pos = emit_cstr(buf, pos, "Withdraw how many credits? (Enter cancels)");
         pos = emit_crlf(buf, pos);
     }
+    if (screen == PSCR_GARRISON) {
+        pos = emit_cstr(buf, pos, "Fighters aboard: ");
+        pos = emit_int(buf, pos, load64(st + PA_FIGHTERS));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Deploy how many to garrison this sector? (Enter cancels)");
+        pos = emit_crlf(buf, pos);
+    }
     if (screen == PSCR_COMBAT) {
         pos = emit_sgr(buf, pos, 31);
         pos = emit_cstr(buf, pos, "!! RAIDERS !!");
@@ -846,6 +876,11 @@ fn pa_feed_main(st, line, len): i64 {
         return 0;
     }
     if (k == 112) { store64(st + PA_SCREEN, PSCR_PLANET); return 0; } # p
+    if (k == 103) {                                                   # g garrison (Universe only)
+        if (pa_is_universe(st) == 1) { store64(st + PA_SCREEN, PSCR_GARRISON); }
+        else { pa_msg(st, "Garrisons are a Universe feature."); }
+        return 0;
+    }
     if (k == 110) {                                                   # n next day
         pa_end_day(st);
         if (load64(st + PA_OVER) != 0) { store64(st + PA_SCREEN, PSCR_OVER); return 0; }
@@ -929,6 +964,14 @@ fn pa_feed_move(st, line, len): i64 {
         var rc = pa_move(st, dest);
         if (rc == (0 - 2)) { pa_msg(st, "Out of turns - end the day."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
         if (rc != 0)       { pa_msg(st, "Can't warp there."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+        if (pa_is_universe(st) == 1) {
+            # Universe: fight any hostile garrison left in the new sector
+            # (async PvP), not the NPC raider roll.
+            pa_arrival_universe(st);
+            if (load64(st + PA_OVER) == 2) { pa_msg(st, "Your ship is debris. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+            store64(st + PA_SCREEN, PSCR_MAIN);
+            return 0;
+        }
         var amb = pa_roll_ambush(st);
         if (amb == 1) { pa_msg(st, "Raiders drop out of warp!"); return 0; }
         store64(st + PA_SCREEN, PSCR_MAIN);
@@ -1011,6 +1054,18 @@ fn pa_feed_planetwd(st, line, len): i64 {
     return 0;
 }
 
+fn pa_feed_garrison(st, line, len): i64 {
+    var n = door_parse_int(line, len);
+    if (n < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+    var rc = pa_garrison_u(st, n);
+    if (rc == 0)       { pa_msg(st, "Fighters deployed to hold the sector."); }
+    if (rc == (0 - 1)) { pa_msg(st, "A rival garrison holds this sector — clear it first."); }
+    if (rc == (0 - 4)) { pa_msg(st, "Bad count."); }
+    if (rc == (0 - 8)) { pa_msg(st, "You don't have that many fighters aboard."); }
+    store64(st + PA_SCREEN, PSCR_MAIN);
+    return 0;
+}
+
 fn pa_feed_combat(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 102) {
@@ -1049,6 +1104,7 @@ fn pa_feed(st, line, len): i64 {
     if (screen == PSCR_PLANETDEP) { return pa_feed_planetdep(st, line, len); }
     if (screen == PSCR_PLANETWD)  { return pa_feed_planetwd(st, line, len); }
     if (screen == PSCR_COMBAT)    { return pa_feed_combat(st, line, len); }
+    if (screen == PSCR_GARRISON)  { return pa_feed_garrison(st, line, len); }
     return 0;
 }
 
@@ -1074,7 +1130,7 @@ fn pa_feed(st, line, len): i64 {
 # ============================================================
 
 enum PAW {
-    PAW_VERSION      = 1;      # world-snapshot format version (load-bearing across releases)
+    PAW_VERSION      = 2;      # world-snapshot format version. v2 (bite 3) appends per-sector garrisons.
     PAW_STOCK_BASE   = 500;    # baseline stock; quoted price == base price at this level
     PA_UNIVERSE_SEED = 2002;   # the one shared galaxy everyone trades (TradeWars 2002 nod)
 }
@@ -1083,18 +1139,21 @@ enum PAW {
 #   [0]                              version
 #   [1]                              seed (galaxy regenerates from this)
 #   [2 + s*PA_COMM + c]              stock for (sector s, commodity c)
-#   [2 + PA_SECTORS*PA_COMM + s]     planet owner fp for sector s (0 = unclaimed)
+#   [planet_base + s]                planet owner fp for sector s (0 = unclaimed)
+#   [deploy_base + s*2 + 0]          garrison owner fp for sector s (0 = none)
+#   [deploy_base + s*2 + 1]          garrison fighter count for sector s
 enum PAWOff {
     PAW_OFF_VERSION = 0;
     PAW_OFF_SEED    = 1;
     PAW_OFF_STOCK   = 2;     # first stock cell (in i64 units)
 }
 
-# Total stock cells, the planet-owner base offset, and the full word
-# count of the snapshot (all in i64 units).
+# Section base offsets + the full word count of the snapshot (all in i64
+# units). The deploy (garrison) section is 2 cells per sector.
 fn paw_stock_cells(): i64 { return PA_SECTORS * PA_COMM; }
 fn paw_planet_base(): i64 { return PAW_OFF_STOCK + PA_SECTORS * PA_COMM; }
-fn paw_word_count(): i64 { return paw_planet_base() + PA_SECTORS; }
+fn paw_deploy_base(): i64 { return paw_planet_base() + PA_SECTORS; }
+fn paw_word_count(): i64 { return paw_deploy_base() + PA_SECTORS * 2; }
 fn paw_byte_size(): i64  { return paw_word_count() * 8; }
 
 # === Construction ===
@@ -1142,6 +1201,21 @@ fn paw_planet_owner(w, s): i64 {
 
 fn paw_set_planet_owner(w, s, fp): i64 {
     store64(w + (paw_planet_base() + s) * 8, fp);
+    return 0;
+}
+
+# Garrison (deployed-fighter) accessors — the async-PvP layer (bite 3).
+fn paw_garrison_owner(w, s): i64 {
+    return load64(w + (paw_deploy_base() + s * 2) * 8);
+}
+
+fn paw_garrison_fighters(w, s): i64 {
+    return load64(w + (paw_deploy_base() + s * 2 + 1) * 8);
+}
+
+fn paw_set_garrison(w, s, owner, fighters): i64 {
+    store64(w + (paw_deploy_base() + s * 2) * 8, owner);
+    store64(w + (paw_deploy_base() + s * 2 + 1) * 8, fighters);
     return 0;
 }
 
@@ -1212,6 +1286,38 @@ fn paw_claim_planet(w, s, fp): i64 {
     return 0;
 }
 
+# === Async PvP — deployed garrisons (bite 3, ADR 0010 § PA deployments) ===
+
+# Reinforce (or establish) your garrison in sector s with `addf`
+# fighters. 0 ok / -1 sector held by a rival garrison (clear it first by
+# transiting) / -2 anonymous / -4 bad count.
+fn paw_deploy(w, s, fp, addf): i64 {
+    if (fp == 0)   { return 0 - 2; }
+    if (addf <= 0) { return 0 - 4; }
+    var owner = paw_garrison_owner(w, s);
+    if (owner != 0) { if (owner != fp) { return 0 - 1; } }
+    paw_set_garrison(w, s, fp, paw_garrison_fighters(w, s) + addf);
+    return 0;
+}
+
+# Hostile garrison strength facing player fp at sector s — the fighters
+# someone ELSE left there (0 if empty or your own).
+fn paw_hostile_garrison(w, s, fp): i64 {
+    var owner = paw_garrison_owner(w, s);
+    if (owner == 0)  { return 0; }
+    if (owner == fp) { return 0; }
+    return paw_garrison_fighters(w, s);
+}
+
+# Pure clash loss: how many of `active`'s fighters are lost transiting an
+# `other`-strong opposing force, given roll in [0, other]. Bounded to
+# `active`. Symmetric — both ship and garrison resolve with their own
+# roll. Unit-tested (t13x) so async-PvP outcomes are pinned vs the PRNG.
+fn pa_clash_loss(active, other, roll): i64 {
+    var loss = other / 2 + roll;
+    return imin(loss, active);
+}
+
 # === Ship-side Universe glue ===
 #
 # These let the existing pa_feed screen machine stay untouched: pa_buy /
@@ -1256,5 +1362,46 @@ fn pa_sell_u(st, c, qty): i64 {
     store64(st + PA_CREDITS, load64(st + PA_CREDITS) + rc);
     pa_set_cargo(st, c, pa_cargo(st, c) - qty);
     return 0;
+}
+
+# Deploy `n` of your ship's fighters as a garrison in the current sector.
+# 0 ok / -1 sector held by a rival / -2 no identity / -4 bad count /
+# -8 not enough fighters aboard.
+fn pa_garrison_u(st, n): i64 {
+    var w = load64(st + PA_WORLD);
+    if (w == 0) { return 0 - 2; }
+    if (n <= 0) { return 0 - 4; }
+    if (n > load64(st + PA_FIGHTERS)) { return 0 - 8; }
+    var rc = paw_deploy(w, load64(st + PA_SECTOR), load64(st + PA_FP), n);
+    if (rc != 0) { return rc; }
+    store64(st + PA_FIGHTERS, load64(st + PA_FIGHTERS) - n);
+    return 0;
+}
+
+# Universe arrival: fight any hostile garrison the defender left in the
+# ship's current sector (async PvP). Both sides take losses; survivors
+# persist (ship → state, garrison → world). A wiped garrison clears the
+# sector; the ship reaching 0 fighters is destroyed (OVER=2). Returns 1
+# if an encounter happened (message set), else 0. Runs inside the world
+# transaction (PA_WORLD held), so the world write is atomic.
+fn pa_arrival_universe(st): i64 {
+    var w = load64(st + PA_WORLD);
+    if (w == 0) { return 0; }
+    var s  = load64(st + PA_SECTOR);
+    var fp = load64(st + PA_FP);
+    var foe = paw_hostile_garrison(w, s, fp);
+    if (foe <= 0) { return 0; }
+    var rng = st + PA_RNG;
+    var mine = load64(st + PA_FIGHTERS);
+    var my_loss  = pa_clash_loss(mine, foe, rng_range(rng, 0, foe));
+    var foe_loss = pa_clash_loss(foe, mine, rng_range(rng, 0, mine));
+    var new_mine = imax(mine - my_loss, 0);
+    var new_foe  = imax(foe - foe_loss, 0);
+    store64(st + PA_FIGHTERS, new_mine);
+    if (new_foe <= 0) { paw_set_garrison(w, s, 0, 0); }
+    else              { paw_set_garrison(w, s, paw_garrison_owner(w, s), new_foe); }
+    if (new_mine <= 0) { store64(st + PA_OVER, 2); }
+    pa_msg(st, "Hostile garrison! Fighters traded fire as you dropped in.");
+    return 1;
 }
 

@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-06-08 (**1.2.0 bite 2 landed** — Port Authority shared galaxy [`play port universe`; depletable stock + exclusive planet ownership; t128-t135, 135 tests; `09-universe-port.sh`]. ADR 0010 status → Accepted/bite-2; CHANGELOG [Unreleased]; state.md + roadmap.md synced; **Eliza + chat area** penciled as planned 1.3.0 in roadmap. VERSION stays 1.1.1 — 1.2.0 not cut. Prior same day: **1.1.1 released** — Handler field pressure + toolchain unblock 6.0.52 → 6.1.5). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-06-08 (**1.2.0 Persistent Universe CUT** — all 6 ADR 0010 bites: world-txn framework, PA shared galaxy + async-PvP garrisons, Smuggler heat, Handler alerts, cross-game leaderboards [`scores <game>`]. VERSION → 1.2.0; three inline main.cyr literals; CHANGELOG [1.2.0]; ADR 0010 → Accepted/all-bites; state.md + roadmap.md synced; 141 tests; 678,776 B; smokes 08/09/10. Roadmap: **1.3.0 Eliza+chat**, **1.4.0 Descent/MUD link** both planned. Earlier same day: 1.2.0 bite 2, and 1.1.1). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -45,14 +45,14 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 1.0 cut.** Status pointer: "v1.0.0 shipped, iron-validated on archaemenid; all v1.0 criteria met". Planned-architecture box replaced with the actual 4-source-file architecture; examples + benchmarks links added. |
-| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [1.1.1] entered; **[Unreleased] holds 1.2.0 bite 2** (PA shared galaxy) + the Eliza/chat-area roadmap note. [1.1.1] Handler field pressure + toolchain unblock 6.0.52 → 6.1.5; [1.1.0] door games; [1.0.0] release-narrative. |
+| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → **[1.2.0]** entered. [1.2.0] = Persistent Universe (all 6 ADR 0010 bites) + Eliza/Descent roadmap notes; [1.1.1] Handler field pressure + 6.1.5 unblock; [1.1.0] door games; [1.0.0] release-narrative. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 closeout — 5 telnet-parser benchmarks all within ±2 ns of M1-close baseline (every release between M6 and 0.9.2 was off-hot-path). 0.9.2 row added to per-release history. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-06-08 | ✅ Fresh | `1.1.1`. Bumped via release flow. |
+| `VERSION` | 2026-06-08 | ✅ Fresh | `1.2.0`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-06-08 | ✅ Fresh | Toolchain pin **`6.1.5`** (lifted from 6.0.52 on 2026-06-08 — sigil/sha256 SIGILL on ≥6.0.53 resolved upstream; verified on 6.1.4 then aligned to 6.1.5 with the local toolchain; see state.md Version table). Deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
@@ -63,8 +63,8 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.2.0 bite 2 landed** — PA shared galaxy (`play port universe`; 135 tests; 662,608 B). In-flight slot rewritten: bites 1-2 done, bite 3 next, both original blockers retired. Header / Build-artifacts / Tests / In-flight / Source-surface rows synced. (Earlier same day: 1.1.1 — Handler field pressure + 6.1.5 unblock.) |
-| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: 1.1.1 row, **1.2.0 bites 1-2 done**, **new 1.3.0 Chat area + Eliza** (planned). "In progress" rewritten ▶ Active (blockers retired); bite plan marks bites 1-2 ✅. New **Planned** section with the Eliza/chat-area design + open ADR questions. |
+| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.2.0 CUT** — Persistent Universe (all 3 games + leaderboards; 141 tests; 678,776 B). Released / Build-artifacts / Tests / In-flight (now "no active cycle" + next directions) / Recent-shipped / Source-surface rows synced. |
+| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: **1.2.0 ✅**, 1.3.0 Chat+Eliza (planned), **new 1.4.0 Descent/MUD link** (planned). "In progress" → no active cycle. Planned section has Eliza + Descent-link designs with open ADR questions. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -120,6 +120,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `07-play-door.sh` | 2026-06-07 | ✅ Fresh | **New at 1.1.0.** Launches all three door games over telnet in practice mode, asserts each renders (THE HANDLER / CABLE QUEUE / SMUGGLER'S LEDGER / PORT AUTHORITY). |
 | `08-world-concurrency.sh` | 2026-06-07 | ✅ Fresh | **New at 1.2.0 bite 1.** Hammers one `flock`'d world with N concurrent processes × M `world_txn_add`s; asserts the final counter equals N×M (no lost updates). Proves the ADR 0010 transaction framework race-free. |
 | `09-universe-port.sh` | 2026-06-08 | ✅ Fresh | **New at 1.2.0 bite 2.** Two players log in (sigil challenge/response) and `play port universe`: asserts a shared deterministic galaxy, exclusive planet ownership across sessions, world-snapshot persistence, and login-gating. Proves the PA shared galaxy end-to-end over telnet. |
+| `10-leaderboard.sh` | 2026-06-08 | ✅ Fresh | **New at 1.2.0 bite 5.** Logs in, plays Port Authority solo to the close of the quarter, leaves (posting the score), then asserts `scores port` lists the run. Proves the cross-game leaderboard end-to-end. |
 
 ---
 

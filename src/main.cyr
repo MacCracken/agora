@@ -105,16 +105,17 @@ var g_door_game  = 0;
 var g_door_state = 0;
 var g_door_mode  = 0;
 
-# 1.2.0 Universe (ADR 0010 bite 2). Per-session shared-world snapshot
-# buffer for Port Authority Universe play; alloc'd lazily on entry to
-# `play port universe`. The flock'd lock→read→feed→write transaction
+# 1.2.0 Universe (ADR 0010 bites 2-4). Per-session shared-world snapshot
+# buffer, alloc'd lazily on entry to `play <game> universe` (sized to the
+# largest game world). The flock'd lock→read→feed→write transaction
 # around each input line reads into this buffer and writes it back, so
 # concurrent players serialize on the world lock with no lost updates.
-var g_pa_world = 0;
+var g_uni_world = 0;
 
 enum DoorRuntime {
     DOOR_FRAME_CAP = 8192;        # per-frame render buffer
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
+    DOOR_WORLD_CAP = 8192;        # 1.2.0 Universe shared-world snapshot buffer (largest world fits)
 }
 
 # 0.7.0 audit M6 — explicit 30 s deadline on a parked login challenge.
@@ -129,7 +130,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.1.1 — civic-marketplace BBS for AGNOS; door games + Handler field pressure");
+    println("v1.2.0 — civic-marketplace BBS for AGNOS; door games + Persistent Universe");
     return 0;
 }
 
@@ -307,7 +308,8 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door game: smuggler | port | handler  [practice|solo]\r\n");
+        send_str(cfd, "  play <game>     door game: smuggler | port | handler  [practice|solo|universe]\r\n");
+        send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -714,41 +716,45 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(mbuf, "universe") != 0) { dmode = DOOR_UNIVERSE; }
 
         if (dmode == DOOR_UNIVERSE) {
-            # 1.2.0 (ADR 0010 bite 2): only Port Authority has a shared
-            # Universe in this build. Smuggler + Handler Universe layers
-            # are roadmapped (bite 4).
-            if (game != GAME_PORT) {
-                send_str(cfd, "Only 'port' has a shared Universe in this build — try: play port universe\r\n");
-                send_str(cfd, "Smuggler + Handler Universe layers are roadmapped (ADR 0010).\r\n");
-                return MODE_COMMAND;
-            }
+            # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
+            # Universe. Login-gated — a persistent actor needs an identity.
             if ((load8(g_session_fp) & 0xFF) == 0) {
                 send_str(cfd, "Universe play needs an identity — log in first ('login <handle>').\r\n");
                 return MODE_COMMAND;
             }
-            g_door_game = GAME_PORT;
+            g_door_game = game;
             g_door_mode = DOOR_UNIVERSE;
-            if (g_pa_world == 0) { g_pa_world = alloc(paw_byte_size()); }
+            if (g_uni_world == 0) { g_uni_world = alloc(DOOR_WORLD_CAP); }
+            var uslot = door_universe_slot(game);
             var uloaded = 0;
-            if (door_save_exists(g_store_buf, g_session_fp, "portu") == 1) {
+            if (door_save_exists(g_store_buf, g_session_fp, uslot) == 1) {
                 var ulbuf = alloc(DOOR_SAVE_CAP);
-                var uln = door_save_read(g_store_buf, g_session_fp, "portu", ulbuf, DOOR_SAVE_CAP);
+                var uln = door_save_read(g_store_buf, g_session_fp, uslot, ulbuf, DOOR_SAVE_CAP);
                 if (uln > 0) {
-                    g_door_state = pa_load_parse(ulbuf, uln);
+                    if (game == GAME_PORT)     { g_door_state = pa_load_parse(ulbuf, uln); }
+                    if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(ulbuf, uln); }
+                    if (game == GAME_HANDLER)  { g_door_state = th_load_parse(ulbuf, uln); }
                     if (g_door_state != 0) { uloaded = 1; }
                 }
             }
             if (uloaded == 0) {
-                g_door_state = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS);
+                var useed = clock_now_ns();
+                if (game == GAME_PORT)     { g_door_state = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS); }
+                if (game == GAME_SMUGGLER) { g_door_state = sl_new(useed, DOOR_UNIVERSE, SL_DEF_DAYS); }
+                if (game == GAME_HANDLER)  { g_door_state = th_new(useed, DOOR_UNIVERSE, TH_DEF_DAYS); }
             }
-            pa_start(g_door_state);
-            store64(g_door_state + PA_FP, hex16_to_i64(g_session_fp));
+            if (game == GAME_PORT) {
+                pa_start(g_door_state);
+                store64(g_door_state + PA_FP, hex16_to_i64(g_session_fp));
+            }
+            if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
+            if (game == GAME_HANDLER)  { th_start(g_door_state); }
             # Prime the world — mints + persists it on the first ever entry
-            # — so the opening frame already shows live shared prices.
-            var ufd = pa_world_begin();
+            # — so the opening frame already reflects shared state.
+            var ufd = door_world_begin();
             if (ufd >= 0) {
-                store64(g_door_state + PA_WORLD, g_pa_world);
-                pa_world_commit(ufd);
+                door_set_world(game, g_uni_world);
+                door_world_commit(ufd);
             }
             door_send_frame(cfd);
             return MODE_DOOR;
@@ -789,6 +795,41 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         return MODE_DOOR;
     }
 
+    # 1.2.0 bite 5: `scores <game>` — show a game's top-10 leaderboard.
+    if (line_has_prefix(line, len, "scores") != 0) {
+        var scsp = 6;
+        var scsk = 1;
+        while (scsk == 1) {
+            if (scsp >= len) { scsk = 0; }
+            else { if ((load8(line + scsp) & 0xFF) != 32) { scsk = 0; } else { scsp = scsp + 1; } }
+        }
+        var scgs = scsp;
+        var scge = 1;
+        while (scge == 1) {
+            if (scsp >= len) { scge = 0; }
+            else { if ((load8(line + scsp) & 0xFF) == 32) { scge = 0; } else { scsp = scsp + 1; } }
+        }
+        var scgl = scsp - scgs;
+        if (scgl <= 0) {
+            send_str(cfd, "usage: scores <smuggler|port|handler>\r\n");
+            return MODE_COMMAND;
+        }
+        if (scgl > 15) { scgl = 15; }
+        var scgb = alloc(16);
+        memcpy(scgb, line + scgs, scgl);
+        store8(scgb + scgl, 0);
+        var scgame = GAME_NONE;
+        if (streq(scgb, "smuggler") != 0) { scgame = GAME_SMUGGLER; }
+        if (streq(scgb, "port") != 0)     { scgame = GAME_PORT; }
+        if (streq(scgb, "handler") != 0)  { scgame = GAME_HANDLER; }
+        if (scgame == GAME_NONE) {
+            send_str(cfd, "unknown game. try: scores smuggler | scores port | scores handler\r\n");
+            return MODE_COMMAND;
+        }
+        door_render_leaderboard(cfd, scgame);
+        return MODE_COMMAND;
+    }
+
     if (line_has_prefix(line, len, "quit") != 0) {
         send_str(cfd, "bye\r\n");
         store64(quit_out, 1);
@@ -822,63 +863,115 @@ fn door_game_name(game): i64 {
     return "game";
 }
 
-# === 1.2.0 Universe world transaction (ADR 0010 bite 2) ===
+# === 1.2.0 Universe world transaction (ADR 0010 bites 2-4) ===
 #
-# The shared Port Authority galaxy lives under <store>/.games/port/world/
-# (the bite-1 world dir). Per-player ship state stays in the Solo-style
-# save under the dedicated "portu" slot. The galaxy STRUCTURE regenerates
-# deterministically from PA_UNIVERSE_SEED; only the depletable stock +
-# planet ownership are in the snapshot.
+# Each game's shared world lives under <store>/.games/<game>/world/ (the
+# bite-1 world dir). Per-player state stays in a Solo-style save under a
+# dedicated "<game>u" slot. main.cyr owns the flock'd lock→read→feed→
+# write transaction; the pure modules mutate the in-memory snapshot.
+# These helpers dispatch by g_door_game so PA (bite 2-3), Smuggler, and
+# Handler (bite 4) all share one transaction path.
 
-# Open the world lock and load the current snapshot into g_pa_world,
-# minting a fresh world (and persisting it) if none/invalid exists.
-# Returns the held lock fd, or (0 - 1) on failure (caller renders a
-# "world busy" message and stays put). Caller MUST pa_world_commit.
-fn pa_world_begin(): i64 {
-    var fd = world_lock_acquire(g_store_buf, "port");
+# Snapshot byte size for a game's world.
+fn door_world_bytes(game): i64 {
+    if (game == GAME_PORT)     { return paw_byte_size(); }
+    if (game == GAME_SMUGGLER) { return slw_byte_size(); }
+    if (game == GAME_HANDLER)  { return thw_byte_size(); }
+    return 8;
+}
+
+# Validate a freshly-read snapshot for a game (size + version).
+fn door_world_valid(game, buf, len): i64 {
+    if (game == GAME_PORT)     { return paw_valid(buf, len); }
+    if (game == GAME_SMUGGLER) { return slw_valid(buf, len); }
+    if (game == GAME_HANDLER)  { return thw_valid(buf, len); }
+    return 0;
+}
+
+# Mint a fresh world for a game into buf (used when no/invalid snapshot
+# exists yet). PA's galaxy is seeded; Smuggler/Handler start clean.
+fn door_world_fresh_into(game, buf): i64 {
+    var src = 0;
+    if (game == GAME_PORT)     { src = paw_new(PA_UNIVERSE_SEED); }
+    if (game == GAME_SMUGGLER) { src = slw_new(); }
+    if (game == GAME_HANDLER)  { src = thw_new(); }
+    if (src != 0) { memcpy(buf, src, door_world_bytes(game)); }
+    return 0;
+}
+
+# Point the active game state's world field at ptr (so its pure
+# transforms read/write the in-memory snapshot during the transaction).
+fn door_set_world(game, ptr): i64 {
+    if (game == GAME_PORT)     { store64(g_door_state + PA_WORLD, ptr); }
+    if (game == GAME_SMUGGLER) { store64(g_door_state + SL_WORLD, ptr); }
+    if (game == GAME_HANDLER)  { store64(g_door_state + TH_WORLD, ptr); }
+    return 0;
+}
+
+# The per-player Universe save slot for a game ("<game>u" — distinct
+# from the Solo slot so a player can keep both).
+fn door_universe_slot(game): i64 {
+    if (game == GAME_PORT)     { return "portu"; }
+    if (game == GAME_SMUGGLER) { return "smuggleru"; }
+    if (game == GAME_HANDLER)  { return "handleru"; }
+    return "gameu";
+}
+
+# Open the world lock and load the active game's snapshot into
+# g_uni_world, minting + persisting a fresh world if none/invalid.
+# Returns the held lock fd, or (0 - 1). Caller MUST door_world_commit.
+fn door_world_begin(): i64 {
+    var name = door_game_name(g_door_game);
+    var fd = world_lock_acquire(g_store_buf, name);
     if (fd < 0) { return 0 - 1; }
-    var cap = paw_byte_size();
-    var n = world_read(g_store_buf, "port", g_pa_world, cap);
-    if (paw_valid(g_pa_world, n) == 0) {
-        var fresh = paw_new(PA_UNIVERSE_SEED);
-        memcpy(g_pa_world, fresh, cap);
-        world_write(g_store_buf, "port", g_pa_world, cap);
+    var cap = door_world_bytes(g_door_game);
+    var n = world_read(g_store_buf, name, g_uni_world, cap);
+    if (door_world_valid(g_door_game, g_uni_world, n) == 0) {
+        door_world_fresh_into(g_door_game, g_uni_world);
+        world_write(g_store_buf, name, g_uni_world, cap);
     }
     return fd;
 }
 
-# Write g_pa_world back under the held lock and release it.
-fn pa_world_commit(fd): i64 {
-    world_write(g_store_buf, "port", g_pa_world, paw_byte_size());
+# Write g_uni_world back under the held lock and release it.
+fn door_world_commit(fd): i64 {
+    world_write(g_store_buf, door_game_name(g_door_game), g_uni_world, door_world_bytes(g_door_game));
     world_lock_release(fd);
     return 0;
 }
 
-# Feed one line to a Port Authority Universe session inside a world
-# transaction: lock → read snapshot → pa_feed (mutates the snapshot via
-# the paw_* transforms) → write snapshot → unlock. PA_WORLD stays
-# pointing at g_pa_world so the post-feed render shows live prices.
-# Returns pa_feed's exit control (1 = leave the game).
-fn pa_universe_feed(line, len): i64 {
-    var fd = pa_world_begin();
+# Feed one line to a Universe session inside the world transaction:
+# lock → read snapshot → <game>_feed (mutates it via the pure
+# transforms) → write snapshot → unlock. The world field stays set so
+# the post-feed render reflects shared state. Returns the feed's exit
+# control (1 = leave the game).
+fn door_universe_feed(line, len): i64 {
+    var fd = door_world_begin();
     if (fd < 0) {
-        pa_msg(g_door_state, "The galaxy is busy — try again.");
+        if (g_door_game == GAME_PORT)     { pa_msg(g_door_state, "The galaxy is busy — try again."); }
+        if (g_door_game == GAME_SMUGGLER) { sl_msg(g_door_state, "The streets are busy — try again."); }
+        if (g_door_game == GAME_HANDLER)  { th_msg(g_door_state, "The registry is busy — try again."); }
         return 0;
     }
-    store64(g_door_state + PA_WORLD, g_pa_world);
-    var ctrl = pa_feed(g_door_state, line, len);
-    pa_world_commit(fd);
+    door_set_world(g_door_game, g_uni_world);
+    var ctrl = 0;
+    if (g_door_game == GAME_PORT)     { ctrl = pa_feed(g_door_state, line, len); }
+    if (g_door_game == GAME_SMUGGLER) { ctrl = sl_feed(g_door_state, line, len); }
+    if (g_door_game == GAME_HANDLER)  { ctrl = th_feed(g_door_state, line, len); }
+    door_world_commit(fd);
     return ctrl;
 }
 
-# Persist the Universe ship under its own save slot ("portu"), keyed by
-# the player's fp — separate from the Solo "port" save so a player can
-# keep both a solo run and a universe captain.
-fn pa_universe_save(): i64 {
+# Persist the active Universe player's per-player state under its
+# "<game>u" slot, keyed by fp — separate from the Solo save.
+fn door_universe_save(): i64 {
     if ((load8(g_session_fp) & 0xFF) == 0) { return 0; }
     var buf = alloc(DOOR_SAVE_CAP);
-    var n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP);
-    if (n > 0) { door_save_write(g_store_buf, g_session_fp, "portu", buf, n); }
+    var n = 0;
+    if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+    if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+    if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+    if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_universe_slot(g_door_game), buf, n); }
     return 0;
 }
 
@@ -897,11 +990,9 @@ fn door_send_frame(cfd): i64 {
 # Port Authority Universe play wraps the feed in a world transaction so
 # trades/claims hit the shared galaxy under the flock (ADR 0010 bite 2).
 fn door_feed_line(cfd, line, line_len): i64 {
+    if (g_door_mode == DOOR_UNIVERSE) { return door_universe_feed(line, line_len); }
     if (g_door_game == GAME_SMUGGLER) { return sl_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_PORT) {
-        if (g_door_mode == DOOR_UNIVERSE) { return pa_universe_feed(line, line_len); }
-        return pa_feed(g_door_state, line, line_len);
-    }
+    if (g_door_game == GAME_PORT)     { return pa_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
     return 1;
 }
@@ -913,10 +1004,16 @@ fn door_is_over(): i64 {
     return 0;
 }
 
-# Append a Handler campaign result to the shared standings file under
-# <store>/.games/handler/standings, serialized across forked sessions
-# by file_append_locked (ADR 0009 § Multiplayer — first shared-disk use).
-fn door_append_standing(cfd): i64 {
+# === 1.2.0 bite 5 — cross-game leaderboards (generalizes the 1.1.0
+# Handler standings to all three games) ===
+#
+# Each game appends "<handle>\t<score>\t<rank>\n" to a shared, flock'd
+# per-game file <store>/.games/<game>/leaderboard on a finished run
+# (solo OR universe). `scores <game>` reads it back, top-10 by score.
+
+# Build <store>/.games/<game>/leaderboard into out_buf, ensuring dirs.
+fn door_leaderboard_path(game, out_buf): i64 {
+    var name = door_game_name(game);
     var dir1 = alloc(PATH_MAX_BYTES);
     var slen = strlen(g_store_buf);
     memcpy(dir1, g_store_buf, slen);
@@ -929,33 +1026,128 @@ fn door_append_standing(cfd): i64 {
     var d1len = strlen(dir1);
     memcpy(dir2, dir1, d1len);
     store8(dir2 + d1len, 47);
-    memcpy(dir2 + d1len + 1, "handler", 7);
-    store8(dir2 + d1len + 8, 0);
+    var glen = strlen(name);
+    memcpy(dir2 + d1len + 1, name, glen);
+    store8(dir2 + d1len + 1 + glen, 0);
     store_ensure(dir2);
 
-    var path = alloc(PATH_MAX_BYTES);
     var d2len = strlen(dir2);
-    memcpy(path, dir2, d2len);
-    store8(path + d2len, 47);
-    memcpy(path + d2len + 1, "standings", 9);
-    store8(path + d2len + 10, 0);
+    memcpy(out_buf, dir2, d2len);
+    store8(out_buf + d2len, 47);
+    memcpy(out_buf + d2len + 1, "leaderboard", 11);
+    store8(out_buf + d2len + 12, 0);
+    return 0;
+}
 
-    var sbuf = alloc(256);
-    var slen2 = th_format_standing(g_door_state, g_session_handle, sbuf);
-    file_append_locked(path, sbuf, slen2);
+# Format a "<handle>\t<score>\t<rank>\n" line into buf; returns length.
+fn door_format_score(handle, score, rank, buf): i64 {
+    var pos = 0;
+    pos = emit_cstr(buf, pos, handle);
+    store8(buf + pos, 9); pos = pos + 1;
+    pos = emit_int(buf, pos, score);
+    store8(buf + pos, 9); pos = pos + 1;
+    pos = emit_cstr(buf, pos, rank);
+    store8(buf + pos, 10); pos = pos + 1;
+    return pos;
+}
+
+# Append the active player's final score for `game` to its leaderboard.
+fn door_post_score(game): i64 {
+    if ((load8(g_session_handle) & 0xFF) == 0) { return 0; }
+    var score = 0;
+    var rank = "";
+    if (game == GAME_PORT)     { score = pa_final_score(g_door_state); rank = pa_rank(score); }
+    if (game == GAME_SMUGGLER) { score = sl_final_score(g_door_state); rank = sl_rank(score); }
+    if (game == GAME_HANDLER)  { score = th_score(g_door_state);       rank = th_rank(score); }
+    var path = alloc(PATH_MAX_BYTES);
+    door_leaderboard_path(game, path);
+    var line = alloc(256);
+    var n = door_format_score(g_session_handle, score, rank, line);
+    file_append_locked(path, line, n);
+    return 0;
+}
+
+# Send the top-10 (by score) of a game's leaderboard to the client.
+fn door_render_leaderboard(cfd, game): i64 {
+    var path = alloc(PATH_MAX_BYTES);
+    door_leaderboard_path(game, path);
+    var cap = 16384;
+    var buf = alloc(cap);
+    var total = file_read_all(path, buf, cap);
+    send_str(cfd, "== ");
+    send_str(cfd, door_game_name(game));
+    send_str(cfd, " leaderboard ==\r\n");
+    if (total <= 0) { send_str(cfd, "No scores posted yet — finish a run to make the board.\r\n"); return 0; }
+
+    var maxe = 256;
+    var starts = alloc(maxe * 8);
+    var ends   = alloc(maxe * 8);
+    var scores = alloc(maxe * 8);
+    var count = 0;
+    var i = 0;
+    var ls = 0;
+    while (i <= total) {
+        var atend = 0;
+        if (i == total) { atend = 1; }
+        else { if ((load8(buf + i) & 0xFF) == 10) { atend = 1; } }
+        if (atend == 1) {
+            if (i > ls) {
+                if (count < maxe) {
+                    store64(starts + count * 8, ls);
+                    store64(ends + count * 8, i);
+                    store64(scores + count * 8, lb_line_score(buf, ls, i));
+                    count = count + 1;
+                }
+            }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+
+    var shown = count;
+    if (shown > 10) { shown = 10; }
+    var k = 0;
+    while (k < shown) {
+        var best = k;
+        var j = k + 1;
+        while (j < count) {
+            if (load64(scores + j * 8) > load64(scores + best * 8)) { best = j; }
+            j = j + 1;
+        }
+        var ts = load64(starts + k * 8); store64(starts + k * 8, load64(starts + best * 8)); store64(starts + best * 8, ts);
+        var te = load64(ends + k * 8);   store64(ends + k * 8,   load64(ends + best * 8));   store64(ends + best * 8, te);
+        var tc = load64(scores + k * 8); store64(scores + k * 8, load64(scores + best * 8)); store64(scores + best * 8, tc);
+
+        var ln = alloc(320);
+        var p = 0;
+        p = emit_int(ln, p, k + 1);
+        store8(ln + p, 41); p = p + 1;    # )
+        store8(ln + p, 32); p = p + 1;    # space
+        var s2 = load64(starts + k * 8);
+        var e2 = load64(ends + k * 8);
+        var x = s2;
+        while (x < e2) {
+            var ch = load8(buf + x) & 0xFF;
+            if (ch == 9) { ch = 32; }      # tabs -> spaces for display
+            store8(ln + p, ch); p = p + 1;
+            x = x + 1;
+        }
+        store8(ln + p, 13); p = p + 1;
+        store8(ln + p, 10); p = p + 1;
+        send_buf(cfd, ln, p);
+        k = k + 1;
+    }
     return 0;
 }
 
 # On leaving a door: persist a solo checkpoint (logged-in, mid-game),
 # and post a Handler standing on a finished campaign.
 fn door_save_on_exit(cfd): i64 {
-    # 1.2.0 Universe: the shared galaxy is already persisted per action;
-    # here we just checkpoint the player's own ship under the "portu" slot.
+    # 1.2.0 Universe: the shared world is already persisted per action;
+    # checkpoint the player's own state under the "<game>u" slot.
     if (g_door_mode == DOOR_UNIVERSE) {
-        if (g_door_game == GAME_PORT) { pa_universe_save(); }
-        return 0;
-    }
-    if (g_door_mode == DOOR_SOLO) {
+        door_universe_save();
+    } else { if (g_door_mode == DOOR_SOLO) {
         if ((load8(g_session_fp) & 0xFF) != 0) {
             if (door_is_over() == 0) {
                 var buf = alloc(DOOR_SAVE_CAP);
@@ -966,12 +1158,12 @@ fn door_save_on_exit(cfd): i64 {
                 if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
             }
         }
-    }
-    if (g_door_game == GAME_HANDLER) {
-        if (th_is_over(g_door_state) == 1) {
-            if ((load8(g_session_handle) & 0xFF) != 0) {
-                door_append_standing(cfd);
-            }
+    } }
+    # 1.2.0 bite 5: any finished run by a logged-in player posts to the
+    # cross-game leaderboard (solo or universe; all three games).
+    if (door_is_over() == 1) {
+        if ((load8(g_session_handle) & 0xFF) != 0) {
+            door_post_score(g_door_game);
         }
     }
     return 0;
@@ -1068,7 +1260,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.1.1 — telnet BBS + door games\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.2.0 — telnet BBS + door games + Universe\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2105,7 +2297,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.1.1");
+    println("agora 1.2.0");
     return 0;
 }
 

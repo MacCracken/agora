@@ -21,6 +21,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 07 | [`07-play-door.sh`](07-play-door.sh) | 1.1.0 door games: plays Smuggler's Ledger / Port Authority / The Handler over telnet (practice mode) — ADR 0009 | none |
 | 08 | [`08-world-concurrency.sh`](08-world-concurrency.sh) | 1.2.0 world-transaction framework: N processes hammer one shared world, assert no lost updates — ADR 0010 | `/tmp/agora-world-smoke-$$` |
 | 09 | [`09-universe-port.sh`](09-universe-port.sh) | 1.2.0 bite 2 PA shared galaxy: two players `play port universe` — shared map, exclusive planet ownership across sessions, world persists, login-gated — ADR 0010 | `./bbs/`, `./keys/` |
+| 10 | [`10-leaderboard.sh`](10-leaderboard.sh) | 1.2.0 bite 5 cross-game leaderboards: finish a Port Authority run, then `scores port` lists it — ADR 0010 | `./bbs/`, `./keys/` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

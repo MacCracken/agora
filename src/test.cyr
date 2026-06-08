@@ -3109,6 +3109,132 @@ fn t135_pa_universe_actions(): i64 {
     return 0;
 }
 
+# === 1.2.0 bite 3: PA deployed garrisons / async PvP (t136-t138) ===
+
+# Deploy establishes + reinforces an owned garrison; rivals are locked
+# out; hostile detection is owner-relative.
+fn t136_paw_deploy(): i64 {
+    var w = paw_new(1);
+    if (paw_deploy(w, 5, 111, 30) != 0)            { test_fail("t136_paw_deploy", "establish"); return 1; }
+    if (paw_garrison_owner(w, 5) != 111)           { test_fail("t136_paw_deploy", "owner"); return 1; }
+    if (paw_garrison_fighters(w, 5) != 30)         { test_fail("t136_paw_deploy", "fighters"); return 1; }
+    if (paw_deploy(w, 5, 111, 20) != 0)            { test_fail("t136_paw_deploy", "reinforce"); return 1; }
+    if (paw_garrison_fighters(w, 5) != 50)         { test_fail("t136_paw_deploy", "reinforced count"); return 1; }
+    if (paw_deploy(w, 5, 222, 10) != (0 - 1))      { test_fail("t136_paw_deploy", "rival deployed"); return 1; }
+    if (paw_deploy(w, 6, 0, 10) != (0 - 2))        { test_fail("t136_paw_deploy", "anon"); return 1; }
+    if (paw_deploy(w, 6, 222, 0) != (0 - 4))       { test_fail("t136_paw_deploy", "bad count"); return 1; }
+    if (paw_hostile_garrison(w, 5, 222) != 50)     { test_fail("t136_paw_deploy", "rival not hostile"); return 1; }
+    if (paw_hostile_garrison(w, 5, 111) != 0)      { test_fail("t136_paw_deploy", "own seen hostile"); return 1; }
+    if (paw_hostile_garrison(w, 7, 222) != 0)      { test_fail("t136_paw_deploy", "empty hostile"); return 1; }
+    test_pass("t136_paw_deploy");
+    return 0;
+}
+
+# Pure clash loss: other/2 + roll, capped at active strength.
+fn t137_pa_clash_loss(): i64 {
+    if (pa_clash_loss(100, 40, 0) != 20)   { test_fail("t137_pa_clash_loss", "base"); return 1; }
+    if (pa_clash_loss(100, 40, 5) != 25)   { test_fail("t137_pa_clash_loss", "roll"); return 1; }
+    if (pa_clash_loss(10, 40, 0) != 10)    { test_fail("t137_pa_clash_loss", "cap"); return 1; }
+    if (pa_clash_loss(100, 0, 0) != 0)     { test_fail("t137_pa_clash_loss", "no foe"); return 1; }
+    test_pass("t137_pa_clash_loss");
+    return 0;
+}
+
+# Arrival resolution: a wiped garrison clears the sector and the ship
+# survives; arriving at your OWN garrison is no fight; a hopeless
+# arrival destroys the ship.
+fn t138_pa_arrival_universe(): i64 {
+    var w = paw_new(PA_UNIVERSE_SEED);
+    var st = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS);
+    pa_start(st);
+    store64(st + PA_WORLD, w);
+    store64(st + PA_FP, 111);
+
+    # big ship transits a tiny hostile garrison -> garrison wiped, ship lives
+    store64(st + PA_SECTOR, 8);
+    store64(st + PA_FIGHTERS, 1000);
+    paw_set_garrison(w, 8, 222, 1);
+    if (pa_arrival_universe(st) != 1)          { test_fail("t138_pa_arrival_universe", "no encounter"); return 1; }
+    if (paw_garrison_owner(w, 8) != 0)         { test_fail("t138_pa_arrival_universe", "garrison not cleared"); return 1; }
+    if (load64(st + PA_OVER) == 2)             { test_fail("t138_pa_arrival_universe", "ship died vs 1"); return 1; }
+
+    # arriving at your OWN garrison: no fight, untouched
+    store64(st + PA_FP, 222);
+    paw_set_garrison(w, 9, 222, 5);
+    store64(st + PA_SECTOR, 9);
+    if (pa_arrival_universe(st) != 0)          { test_fail("t138_pa_arrival_universe", "own fought"); return 1; }
+    if (paw_garrison_fighters(w, 9) != 5)      { test_fail("t138_pa_arrival_universe", "own touched"); return 1; }
+
+    # hopeless arrival: 1 fighter into a 1000 garrison -> ship destroyed
+    store64(st + PA_FP, 111);
+    store64(st + PA_FIGHTERS, 1);
+    store64(st + PA_SECTOR, 10);
+    paw_set_garrison(w, 10, 222, 1000);
+    pa_arrival_universe(st);
+    if (load64(st + PA_OVER) != 2)             { test_fail("t138_pa_arrival_universe", "ship not destroyed"); return 1; }
+    test_pass("t138_pa_arrival_universe");
+    return 0;
+}
+
+# === 1.2.0 bite 4: Smuggler shared heat + Handler shared alerts (t139-t140) ===
+
+# Smuggler shared district heat: new/valid, clamped add, and the
+# pure heat→cop-chance curve.
+fn t139_slw_heat(): i64 {
+    var w = slw_new();
+    if (slw_valid(w, slw_byte_size()) != 1)      { test_fail("t139_slw_heat", "valid"); return 1; }
+    if (slw_valid(w, slw_byte_size() - 8) != 0)  { test_fail("t139_slw_heat", "bad len"); return 1; }
+    if (slw_heat(w, 3) != 0)                     { test_fail("t139_slw_heat", "init"); return 1; }
+    slw_add_heat(w, 3, 30);
+    if (slw_heat(w, 3) != 30)                    { test_fail("t139_slw_heat", "add"); return 1; }
+    slw_add_heat(w, 3, 999);
+    if (slw_heat(w, 3) != SLW_HEAT_MAX)          { test_fail("t139_slw_heat", "clamp hi"); return 1; }
+    slw_add_heat(w, 3, 0 - 999);
+    if (slw_heat(w, 3) != 0)                     { test_fail("t139_slw_heat", "clamp lo"); return 1; }
+    if (slw_heat(w, 4) != 0)                     { test_fail("t139_slw_heat", "isolation"); return 1; }
+    if (sl_heat_chance(18, 0) != 18)             { test_fail("t139_slw_heat", "chance base"); return 1; }
+    if (sl_heat_chance(18, 60) <= 18)            { test_fail("t139_slw_heat", "chance up"); return 1; }
+    if (sl_heat_chance(18, 100) > 80)            { test_fail("t139_slw_heat", "chance cap"); return 1; }
+    test_pass("t139_slw_heat");
+    return 0;
+}
+
+# Handler shared city alerts: new/valid, clamped add, total, and the
+# pure alert→confidence-drain curve.
+fn t140_thw_alert(): i64 {
+    var w = thw_new();
+    if (thw_valid(w, thw_byte_size()) != 1)      { test_fail("t140_thw_alert", "valid"); return 1; }
+    if (thw_valid(w, thw_byte_size() + 8) != 0)  { test_fail("t140_thw_alert", "bad len"); return 1; }
+    if (thw_total_alert(w) != 0)                 { test_fail("t140_thw_alert", "init total"); return 1; }
+    thw_add_alert(w, 0, 40);
+    thw_add_alert(w, 2, 60);
+    if (thw_alert(w, 0) != 40)                   { test_fail("t140_thw_alert", "alert0"); return 1; }
+    if (thw_total_alert(w) != 100)               { test_fail("t140_thw_alert", "total"); return 1; }
+    thw_add_alert(w, 0, 999);
+    if (thw_alert(w, 0) != THW_ALERT_MAX)        { test_fail("t140_thw_alert", "clamp"); return 1; }
+    if (th_alert_drain(0) != 0)                  { test_fail("t140_thw_alert", "drain0"); return 1; }
+    if (th_alert_drain(100) != 100 / THW_DRAIN_DIV) { test_fail("t140_thw_alert", "drain"); return 1; }
+    test_pass("t140_thw_alert");
+    return 0;
+}
+
+# === 1.2.0 bite 5: leaderboard score parsing (t141) ===
+
+# lb_line_score extracts the integer score field (after the first tab)
+# from a "<handle>\t<score>\t<rank>" line span.
+fn t141_lb_line_score(): i64 {
+    var s = "qix\t1234\tFree Trader";
+    if (lb_line_score(s, 0, strlen(s)) != 1234)   { test_fail("t141_lb_line_score", "basic"); return 1; }
+    var s2 = "pac\t0\tBilge Runner";
+    if (lb_line_score(s2, 0, strlen(s2)) != 0)    { test_fail("t141_lb_line_score", "zero"); return 1; }
+    var s3 = "zax\t98765\tStar Sovereign";
+    if (lb_line_score(s3, 0, strlen(s3)) != 98765){ test_fail("t141_lb_line_score", "big"); return 1; }
+    var s4 = "nohandle-no-tabs";
+    if (lb_line_score(s4, 0, strlen(s4)) != 0)    { test_fail("t141_lb_line_score", "malformed"); return 1; }
+    test_pass("t141_lb_line_score");
+    return 0;
+}
+
 
 fn main(): i64 {
     alloc_init();
@@ -3251,6 +3377,12 @@ fn main(): i64 {
     t133_paw_claim_planet();
     t134_paw_bytes_roundtrip();
     t135_pa_universe_actions();
+    t136_paw_deploy();
+    t137_pa_clash_loss();
+    t138_pa_arrival_universe();
+    t139_slw_heat();
+    t140_thw_alert();
+    t141_lb_line_score();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

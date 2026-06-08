@@ -55,7 +55,8 @@ enum SL {
     SL_PRICES  = 184;   # ptr → SL_GOODS i64 price table for current day
     SL_EVENT   = 192;   # ptr → 2 i64 (event kind, good)
     SL_MSG     = 200;   # ptr → 256-byte transient message buffer
-    SL_SIZE    = 208;
+    SL_WORLD   = 208;   # 1.2.0 Universe (ADR 0010 bite 4): ptr → shared district-heat snapshot (0 = solo)
+    SL_SIZE    = 216;
 }
 
 # === Construction ===
@@ -461,9 +462,24 @@ fn sl_roll_encounter(st): i64 {
     var carry = sl_capacity_used(st);
     var chance = 18;
     if (carry > 50) { chance = 30; }
+    # Universe: shared district heat raises the trouble odds, and working
+    # the district nudges that heat up for the next player.
+    if (sl_is_universe(st) == 1) {
+        var hw = load64(st + SL_WORLD);
+        if (hw != 0) {
+            var hloc = load64(st + SL_LOC);
+            chance = sl_heat_chance(chance, slw_heat(hw, hloc));
+            slw_add_heat(hw, hloc, SLW_HEAT_DEAL);
+        }
+    }
     if (rng_chance(rng, chance) == 0) { return 0; }
     var kind = rng_below(rng, 3);          # 0 cops, 1 mugging, 2 lucky
     if (kind == 0) {
+        # A bust draws police attention to the whole district (shared).
+        if (sl_is_universe(st) == 1) {
+            var bw = load64(st + SL_WORLD);
+            if (bw != 0) { slw_add_heat(bw, load64(st + SL_LOC), SLW_HEAT_BUST); }
+        }
         var toughness = rng_range(rng, 1, 3);
         store64(st + SL_PEND, toughness);
         store64(st + SL_SCREEN, SCR_ENC);
@@ -1055,5 +1071,72 @@ fn sl_feed(st, line, len): i64 {
     if (screen == SCR_BANKWD)   { return sl_feed_bankwd(st, line, len); }
     if (screen == SCR_FIXER)    { return sl_feed_fixer(st, line, len); }
     if (screen == SCR_ENC)      { return sl_feed_enc(st, line, len); }
+    return 0;
+}
+
+# ============================================================
+# 1.2.0 Universe (ADR 0010 bite 4) — Smuggler's Ledger SHARED HEAT.
+#
+# The contested state is per-district POLICE HEAT. Every player's run
+# uses its own price seed (the market is personal), but a bust raises
+# the shared heat in that district for EVERYONE, and dealing nudges it
+# up; high heat raises the cop-encounter odds for whoever arrives next.
+# Heat is the clean, bounded shared mechanic; aggregate price pressure
+# is a deeper follow-on. Pure model + transforms here; main.cyr wraps
+# the per-line flock transaction (shared with PA + Handler).
+# ============================================================
+
+enum SLW {
+    SLW_VERSION   = 1;       # snapshot format version
+    SLW_HEAT_MAX  = 100;     # heat ceiling per district
+    SLW_HEAT_DEAL = 2;       # heat added when a player works a district
+    SLW_HEAT_BUST = 15;      # heat added when cops show (draws more heat for all)
+}
+
+# Flat-i64 snapshot: [0] version, then SL_DISTRICTS heat cells.
+enum SLWOff {
+    SLW_OFF_VERSION = 0;
+    SLW_OFF_HEAT    = 1;
+}
+
+fn slw_word_count(): i64 { return SLW_OFF_HEAT + SL_DISTRICTS; }
+fn slw_byte_size(): i64  { return slw_word_count() * 8; }
+
+fn slw_new(): i64 {
+    var n = slw_word_count();
+    var w = alloc(n * 8);
+    memset(w, 0, n * 8);
+    store64(w + SLW_OFF_VERSION * 8, SLW_VERSION);
+    return w;
+}
+
+fn slw_valid(buf, len): i64 {
+    if (len != slw_byte_size()) { return 0; }
+    if (load64(buf + SLW_OFF_VERSION * 8) != SLW_VERSION) { return 0; }
+    return 1;
+}
+
+fn slw_heat(w, d): i64 {
+    return load64(w + (SLW_OFF_HEAT + d) * 8);
+}
+
+fn slw_set_heat(w, d, v): i64 {
+    store64(w + (SLW_OFF_HEAT + d) * 8, iclamp(v, 0, SLW_HEAT_MAX));
+    return 0;
+}
+
+fn slw_add_heat(w, d, delta): i64 {
+    slw_set_heat(w, d, slw_heat(w, d) + delta);
+    return 0;
+}
+
+# Pure: the cop-encounter chance after shared heat. Heat adds up to ~33
+# points of risk on top of the base, capped at 80%. Unit-tested.
+fn sl_heat_chance(base, heat): i64 {
+    return iclamp(base + heat / 3, base, 80);
+}
+
+fn sl_is_universe(st): i64 {
+    if (load64(st + SL_MODE) == DOOR_UNIVERSE) { return 1; }
     return 0;
 }

@@ -98,7 +98,8 @@ enum TH {
     TH_CURSOR   = 128;   # cable-reader index
     TH_MSG      = 136;
     TH_LASTBURN = 144;   # agents burned on the most recent day rollover
-    TH_SIZE     = 152;
+    TH_WORLD    = 152;   # 1.2.0 Universe (ADR 0010 bite 4): ptr → shared city-alert snapshot (0 = solo)
+    TH_SIZE     = 160;
 }
 
 # === Tables ===
@@ -441,6 +442,14 @@ fn th_accuse(st, agent): i64 {
         return 1;
     }
     store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - 30, 0, 100));
+    # Universe: fingering an innocent rattles every city's alert.
+    if (th_is_universe(st) == 1) {
+        var fw = load64(st + TH_WORLD);
+        if (fw != 0) {
+            var c = 0;
+            while (c < TH_CITIES) { thw_add_alert(fw, c, THW_ALERT_FALSE); c = c + 1; }
+        }
+    }
     if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); }
     return 0;
 }
@@ -491,6 +500,11 @@ fn th_field_tick(st): i64 {
                 store64(a + AG_STATUS, AGS_DEAD);
                 store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - TH_BURN_CONF_HIT, 0, 100));
                 if (load64(a + AG_MOLE) == 1) { store64(st + TH_MOLEIDX, 0 - 1); }
+                # Universe: a burn lights up that city's alert for all sections.
+                if (th_is_universe(st) == 1) {
+                    var aw = load64(st + TH_WORLD);
+                    if (aw != 0) { thw_add_alert(aw, load64(a + AG_CITY), THW_ALERT_BURN); }
+                }
                 burned = burned + 1;
             } else {
                 store64(a + AG_COVER, cover);
@@ -517,6 +531,16 @@ fn th_next_day(st): i64 {
     if (load64(st + TH_AUDIT) >= 80) {
         store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - 5, 0, 100));
         store64(st + TH_AUDIT, iclamp(load64(st + TH_AUDIT) - 20, 0, 100));
+    }
+    # Universe: shared city alerts drain extra confidence (the whole
+    # service is under scrutiny), then cool off a little.
+    if (th_is_universe(st) == 1) {
+        var w = load64(st + TH_WORLD);
+        if (w != 0) {
+            store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - th_alert_drain(thw_total_alert(w)), 0, 100));
+            var c = 0;
+            while (c < TH_CITIES) { thw_add_alert(w, c, 0 - THW_ALERT_DECAY); c = c + 1; }
+        }
     }
     if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); return 0; }
     store64(st + TH_DAY, load64(st + TH_DAY) + 1);
@@ -1062,5 +1086,83 @@ fn th_feed(st, line, len): i64 {
     if (screen == HSCR_MOVECITY) { return th_feed_movecity(st, line, len); }
     if (screen == HSCR_FUNDAMT)  { return th_feed_fundamt(st, line, len); }
     if (screen == HSCR_ACCUSE)   { return th_feed_accuse(st, line, len); }
+    return 0;
+}
+
+# ============================================================
+# 1.2.0 Universe (ADR 0010 bite 4) — The Handler SHARED CITY ALERTS.
+#
+# Rival sections run the same theatre of cities. The contested state is
+# a per-city ALERT level: when any section burns an agent or fingers an
+# innocent, that city's alert climbs for EVERYONE, and high alert drains
+# supervisor confidence faster at each day rollover (the whole service
+# is under scrutiny). Alert decays a little each day. Pure model +
+# transforms here; main.cyr wraps the per-line flock transaction.
+# Intercept pool + anonymous-tip sabotage are deeper follow-ons.
+# ============================================================
+
+enum THW {
+    THW_VERSION    = 1;       # snapshot format version
+    THW_ALERT_MAX  = 100;     # per-city alert ceiling
+    THW_ALERT_BURN = 12;      # alert added when an agent is burned in a city
+    THW_ALERT_FALSE= 8;       # alert added (all cities) on a wrong accusation
+    THW_ALERT_DECAY= 2;       # alert shed per day
+    THW_DRAIN_DIV  = 20;      # extra confidence drained = total_alert / this
+}
+
+# Flat-i64 snapshot: [0] version, then TH_CITIES alert cells.
+enum THWOff {
+    THW_OFF_VERSION = 0;
+    THW_OFF_ALERT   = 1;
+}
+
+fn thw_word_count(): i64 { return THW_OFF_ALERT + TH_CITIES; }
+fn thw_byte_size(): i64  { return thw_word_count() * 8; }
+
+fn thw_new(): i64 {
+    var n = thw_word_count();
+    var w = alloc(n * 8);
+    memset(w, 0, n * 8);
+    store64(w + THW_OFF_VERSION * 8, THW_VERSION);
+    return w;
+}
+
+fn thw_valid(buf, len): i64 {
+    if (len != thw_byte_size()) { return 0; }
+    if (load64(buf + THW_OFF_VERSION * 8) != THW_VERSION) { return 0; }
+    return 1;
+}
+
+fn thw_alert(w, c): i64 {
+    return load64(w + (THW_OFF_ALERT + c) * 8);
+}
+
+fn thw_set_alert(w, c, v): i64 {
+    store64(w + (THW_OFF_ALERT + c) * 8, iclamp(v, 0, THW_ALERT_MAX));
+    return 0;
+}
+
+fn thw_add_alert(w, c, delta): i64 {
+    thw_set_alert(w, c, thw_alert(w, c) + delta);
+    return 0;
+}
+
+fn thw_total_alert(w): i64 {
+    var t = 0;
+    var c = 0;
+    while (c < TH_CITIES) {
+        t = t + thw_alert(w, c);
+        c = c + 1;
+    }
+    return t;
+}
+
+# Pure: extra daily confidence drain from the city-alert total.
+fn th_alert_drain(total_alert): i64 {
+    return total_alert / THW_DRAIN_DIV;
+}
+
+fn th_is_universe(st): i64 {
+    if (load64(st + TH_MODE) == DOOR_UNIVERSE) { return 1; }
     return 0;
 }

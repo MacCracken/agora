@@ -4,22 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — 1.2.0 Persistent Universe, bite 2 (ADR 0010): Port Authority shared galaxy
+## [1.2.0] — 2026-06-08 (Persistent Universe: shared-world multiplayer for the door games)
 
-The canonical Universe slice — a **shared, persistent, contested galaxy** for Port Authority, the previously-reverted bite now re-authored and landed on the unblocked 6.1.x toolchain.
+**The door games go multiplayer.** [ADR 0010](docs/adr/0010-persistent-universe.md) lands in full: a shared, persistent, contested world per game lives on disk under `<store>/.games/<game>/world/`, mutated through a `flock`'d **lock → read → compute → write** transaction with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives). All three games now have a Universe; finished runs post to cross-game leaderboards. Built on the unblocked cyrius 6.1.5 toolchain — the array-in-loop codegen bug that reverted the first attempt is cleared (t129 probes it on the real code). 121 → **141 tests**; 484,184 B (1.1.0) → **678,776 B** clean DCE.
 
-- **Shared depletable market.** Every (sector, commodity) carries a **stock** level in a per-game world snapshot under `<store>/.games/port/world/` (the bite-1 world dir). Buying drains stock and **raises the price the next player sees**; selling refills it and lowers the price (`paw_price` — monotone in stock, clamped to `[base/3, base*2]`). This is the "your trading moves the market" soul of a shared TradeWars galaxy.
-- **Exclusive planet ownership.** A sector can be claimed by exactly one player, keyed by sigil fingerprint; rival captains arriving later are refused ("Another captain already owns this sector").
-- **One deterministic galaxy.** The galaxy *structure* (warps, port flags, base prices) regenerates from a fixed `PA_UNIVERSE_SEED` so every player shares the same map; only the mutable stock + ownership live in the ~2 KB snapshot (a flat-i64 buffer persisted verbatim by `world_read`/`world_write`).
-- **`play port universe`** — login-gated (a persistent captain needs an identity). The per-player ship persists in its own `portu` save slot, separate from the Solo `port` save, so a player can keep both. The existing PA screen machine is untouched: `pa_buy`/`pa_sell`/`pa_establish_planet` detect Universe mode and route through the world.
-- **The world transaction.** `main.cyr` wraps every fed input line in `flock` → read snapshot → `pa_feed` (mutates via the pure `paw_*` transforms) → write snapshot → unlock — so concurrent players serialize on the world lock with **no lost updates**, inheriting the race-proven guarantee from bite 1.
-- 8 new unit tests (t128–t135) — world model, price curve, buy-depletes/sell-gluts, exclusive claim, byte-roundtrip, and the ship-side glue. **t129 is a distinct-write-readback** over the whole stock array that directly probes the array-in-loop codegen bug which reverted the first bite-2 attempt — it passes on cyrius 6.1.5, confirming that blocker is cleared. **127 → 135 tests.** New end-to-end smoke `docs/examples/09-universe-port.sh` proves the shared galaxy, cross-session persistence, exclusive ownership, and login-gating over real telnet sigil logins.
+### Added
 
-`VERSION` stays **1.1.1** — 1.2.0 is not cut until its remaining bites (3 PvP, 4 Smuggler/Handler shared layers, 5 leaderboards, 6 closeout) land. Clean DCE build 654,592 → **662,608 B** (+8,016 B for the shared-world code).
+- **World-transaction framework** (bite 1, `door.cyr`) — per-game world dir + `flock` lock + snapshot read/write + the `world_txn_add` primitive. Race-proven: 16 procs × 500 → exactly 8000, no lost updates (`08-world-concurrency.sh`); t122/t123.
+- **Port Authority shared galaxy** (bite 2) — the canonical Universe slice. Depletable **port stock** that moves the next player's quoted price (`paw_buy`/`paw_sell`/`paw_price`, clamped `[base/3, base*2]`); **exclusive planet ownership** by sigil fp (`paw_claim_planet`). One deterministic galaxy from a fixed `PA_UNIVERSE_SEED`; only the mutable stock + ownership live in the ~3 KB flat-i64 snapshot. `play port universe` is login-gated; the per-player ship persists in a `portu` save. The existing PA screen machine is untouched — `pa_buy`/`pa_sell`/`pa_establish_planet` detect Universe mode and route through the world. t128–t135; `09-universe-port.sh`.
+- **PA deployments + async PvP** (bite 3) — drop ship fighters as a sector **garrison** (`[G]arrison`, `paw_deploy`); transiting a rival's garrison auto-resolves a fighter clash on arrival (`pa_arrival_universe` + the pure `pa_clash_loss`) — you fight the assets the defender left behind, never a live duel. A wiped garrison clears the sector; a hopeless transit destroys the ship. World snapshot v2. t136–t138.
+- **Smuggler shared heat + Handler shared alerts** (bite 4) — all three games now have a Universe. Smuggler: a shared per-district **police heat** (`slw_*`) — a bust raises heat for everyone, dealing nudges it up, and high heat raises the next arrival's cop odds (`sl_heat_chance`). The Handler: shared per-city **alert levels** (`thw_*`) — burning an agent or fingering an innocent lights up the cities for all sections, and high total alert drains supervisor confidence faster at each rollover (`th_alert_drain`), cooling off daily. t139–t140. The per-line world transaction in `main.cyr` is generalized to dispatch by game (`door_world_begin`/`door_world_commit`/`door_universe_feed`/`door_universe_save`).
+- **Cross-game leaderboards** (bite 5) — every game appends `<handle>\t<score>\t<rank>` to a shared, `flock`'d `<store>/.games/<game>/leaderboard` on a finished run (solo or universe), generalizing the 1.1.0 Handler standings. New `scores <game>` telnet command shows the top-10 by score (`lb_line_score` parses the score field; t141). `10-leaderboard.sh`.
+
+### Changed
+
+- The Handler's finished-run result now posts to the unified `leaderboard` file (was a Handler-only `standings` file at 1.1.0); all three games share the same leaderboard shape and the `scores` command.
 
 ### Added — roadmap
 
-- **Eliza + a chat area** penciled as a planned **1.3.0** (release table + a *Planned* design section in [`roadmap.md`](docs/development/roadmap.md)): a live multi-user chat surface (the classic BBS teleconference) with Eliza — a pure-module Rogerian chatbot — as its anchor inhabitant. Builds on the 1.2.0 `flock`'d shared-disk framework; no new deps. Earns a dedicated ADR when the chat surface is cut.
+- **Eliza + a chat area** penciled as planned **1.3.0** (release table + a *Planned* design section in [`roadmap.md`](docs/development/roadmap.md)): a live multi-user chat surface with Eliza, a pure-module Rogerian chatbot, as anchor. Builds on the 1.2.0 shared-disk framework; no new deps.
 
 ## [1.1.1] — 2026-06-08 (The Handler: field pressure; toolchain unblocked 6.0.52 → 6.1.5)
 
