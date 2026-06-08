@@ -200,7 +200,11 @@ enum PA {
     PA_SCREEN   = 152;
     PA_PEND     = 160;
     PA_MSG      = 168;
-    PA_SIZE     = 176;
+    # 1.2.0 Universe (ADR 0010 bite 2), runtime-only:
+    PA_WORLD    = 176;    # ptr → in-memory shared-world snapshot (0 = solo); main.cyr
+                          # locks + reads it in before each fed line and writes it back after
+    PA_FP       = 184;    # this player's identity as an i64 (for planet ownership; 0 = solo/anon)
+    PA_SIZE     = 192;
 }
 
 fn pa_new(seed, mode, max_days): i64 {
@@ -269,6 +273,7 @@ fn pa_net_worth(st): i64 {
 #   that side / -4 bad qty / -5 not enough credits / -6 no holds /
 #   -7 not holding that many.
 fn pa_buy(st, c, qty): i64 {
+    if (pa_is_universe(st) == 1) { return pa_buy_u(st, c, qty); }
     if (c < 0)        { return 0 - 1; }
     if (c >= PA_COMM) { return 0 - 1; }
     if (qty <= 0)     { return 0 - 4; }
@@ -286,6 +291,7 @@ fn pa_buy(st, c, qty): i64 {
 }
 
 fn pa_sell(st, c, qty): i64 {
+    if (pa_is_universe(st) == 1) { return pa_sell_u(st, c, qty); }
     if (c < 0)        { return 0 - 1; }
     if (c >= PA_COMM) { return 0 - 1; }
     if (qty <= 0)     { return 0 - 4; }
@@ -485,8 +491,15 @@ fn pa_buy_shields(st): i64 {
 
 # === Planet (single, credits-only vault for v1) ===
 
+# 0 ok / -1 you already hold a planet / -2 anonymous (no identity) /
+# -3 (Universe) this sector is already owned by another captain.
 fn pa_establish_planet(st): i64 {
     if (load64(st + PA_PLANET) >= 0) { return 0 - 1; }
+    if (pa_is_universe(st) == 1) {
+        var rc = paw_claim_planet(load64(st + PA_WORLD), load64(st + PA_SECTOR), load64(st + PA_FP));
+        if (rc == (0 - 1)) { return 0 - 3; }   # owned by another player
+        if (rc != 0)       { return rc; }       # -2 anonymous
+    }
     store64(st + PA_PLANET, load64(st + PA_SECTOR));
     return 0;
 }
@@ -644,7 +657,7 @@ fn pa_render_sector(st, buf, pos): i64 {
                 pos = emit_cstr(buf, pos, pa_comm_name(c));
                 if (flag == 1) { pos = emit_cstr(buf, pos, " SELLS @ "); }
                 else           { pos = emit_cstr(buf, pos, " BUYS  @ "); }
-                pos = emit_int(buf, pos, pa_port_price(gx, sector, c));
+                pos = emit_int(buf, pos, pa_shown_price(st, gx, sector, c));
                 pos = emit_crlf(buf, pos);
             }
             c = c + 1;
@@ -957,8 +970,10 @@ fn pa_feed_planet(st, line, len): i64 {
     if (k == 0)   { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k == 101) {
         var rc = pa_establish_planet(st);
-        if (rc == 0) { pa_msg(st, "Planet claimed in this sector."); }
-        else         { pa_msg(st, "You already hold a planet."); }
+        if (rc == 0)       { pa_msg(st, "Planet claimed in this sector."); }
+        if (rc == (0 - 1)) { pa_msg(st, "You already hold a planet."); }
+        if (rc == (0 - 2)) { pa_msg(st, "You need an identity to claim a planet."); }
+        if (rc == (0 - 3)) { pa_msg(st, "Another captain already owns this sector."); }
         store64(st + PA_SCREEN, PSCR_MAIN);
         return 0;
     }
@@ -1034,6 +1049,212 @@ fn pa_feed(st, line, len): i64 {
     if (screen == PSCR_PLANETDEP) { return pa_feed_planetdep(st, line, len); }
     if (screen == PSCR_PLANETWD)  { return pa_feed_planetwd(st, line, len); }
     if (screen == PSCR_COMBAT)    { return pa_feed_combat(st, line, len); }
+    return 0;
+}
+
+# ============================================================
+# 1.2.0 Universe (ADR 0010 bite 2) — Port Authority SHARED galaxy.
+#
+# The CONTESTED state that all Universe players touch on disk:
+#   - depletable port STOCK per (sector, commodity): buying drains it
+#     and raises the price the next player sees; selling refills it and
+#     lowers the price. This is the "your buying moves the market" soul
+#     of a shared TradeWars galaxy.
+#   - planet OWNERSHIP per sector: a sector can be claimed by exactly
+#     one player (by sigil fp); others are locked out.
+#
+# Per-player ship state (credits / holds / cargo / fighters) stays in
+# the Solo save (`.users/<fp16>/games/port.sav`). The galaxy STRUCTURE
+# (warps, port flags, base prices) is regenerated deterministically
+# from the world seed — only the mutable bits live in the snapshot.
+#
+# Everything here is a PURE transform on a flat-i64 world buffer; the
+# `flock`'d lock -> read -> compute -> write transaction (door.cyr world
+# helpers + main.cyr) wraps it. No socket / filesystem in this section.
+# ============================================================
+
+enum PAW {
+    PAW_VERSION      = 1;      # world-snapshot format version (load-bearing across releases)
+    PAW_STOCK_BASE   = 500;    # baseline stock; quoted price == base price at this level
+    PA_UNIVERSE_SEED = 2002;   # the one shared galaxy everyone trades (TradeWars 2002 nod)
+}
+
+# Flat-i64 world snapshot layout (the bytes written to disk verbatim):
+#   [0]                              version
+#   [1]                              seed (galaxy regenerates from this)
+#   [2 + s*PA_COMM + c]              stock for (sector s, commodity c)
+#   [2 + PA_SECTORS*PA_COMM + s]     planet owner fp for sector s (0 = unclaimed)
+enum PAWOff {
+    PAW_OFF_VERSION = 0;
+    PAW_OFF_SEED    = 1;
+    PAW_OFF_STOCK   = 2;     # first stock cell (in i64 units)
+}
+
+# Total stock cells, the planet-owner base offset, and the full word
+# count of the snapshot (all in i64 units).
+fn paw_stock_cells(): i64 { return PA_SECTORS * PA_COMM; }
+fn paw_planet_base(): i64 { return PAW_OFF_STOCK + PA_SECTORS * PA_COMM; }
+fn paw_word_count(): i64 { return paw_planet_base() + PA_SECTORS; }
+fn paw_byte_size(): i64  { return paw_word_count() * 8; }
+
+# === Construction ===
+
+# A fresh world: every traded slot starts at baseline stock, every
+# sector unclaimed. Returns the flat buffer (paw_byte_size() bytes).
+fn paw_new(seed): i64 {
+    var n = paw_word_count();
+    var w = alloc(n * 8);
+    memset(w, 0, n * 8);
+    store64(w + PAW_OFF_VERSION * 8, PAW_VERSION);
+    store64(w + PAW_OFF_SEED * 8, seed);
+    var cells = PA_SECTORS * PA_COMM;
+    var i = 0;
+    while (i < cells) {
+        store64(w + (PAW_OFF_STOCK + i) * 8, PAW_STOCK_BASE);
+        i = i + 1;
+    }
+    return w;
+}
+
+# A snapshot is valid if it's exactly our size and the version matches.
+fn paw_valid(buf, len): i64 {
+    if (len != paw_byte_size()) { return 0; }
+    if (load64(buf + PAW_OFF_VERSION * 8) != PAW_VERSION) { return 0; }
+    return 1;
+}
+
+# === Accessors ===
+
+fn paw_seed(w): i64 { return load64(w + PAW_OFF_SEED * 8); }
+
+fn paw_stock(w, s, c): i64 {
+    return load64(w + (PAW_OFF_STOCK + s * PA_COMM + c) * 8);
+}
+
+fn paw_set_stock(w, s, c, v): i64 {
+    store64(w + (PAW_OFF_STOCK + s * PA_COMM + c) * 8, v);
+    return 0;
+}
+
+fn paw_planet_owner(w, s): i64 {
+    return load64(w + (paw_planet_base() + s) * 8);
+}
+
+fn paw_set_planet_owner(w, s, fp): i64 {
+    store64(w + (paw_planet_base() + s) * 8, fp);
+    return 0;
+}
+
+# === Dynamic pricing ===
+#
+# The price the port quotes given its current stock. Monotone-decreasing
+# in stock: at PAW_STOCK_BASE it equals the galaxy base price; depleted
+# below baseline (players bought) it rises; glutted above baseline
+# (players sold) it falls. Clamped to [max(1, base/3), base*2] so a run
+# on a port can't drive the price to zero or to infinity.
+fn paw_price(base, stock): i64 {
+    var p = base * (2 * PAW_STOCK_BASE - stock) / PAW_STOCK_BASE;
+    var lo = base / 3;
+    if (lo < 1) { lo = 1; }
+    return iclamp(p, lo, base * 2);
+}
+
+# Convenience: the live quoted price at a port, from world + galaxy.
+fn paw_quote(w, gx, s, c): i64 {
+    return paw_price(pa_port_price(gx, s, c), paw_stock(w, s, c));
+}
+
+# === Pure world transforms ===
+# Each validates fully against the world + the passed-in player limits,
+# mutates the world ONLY on success, and returns the credit delta
+# (>= 0) so the caller can apply it to the player's save under the same
+# held lock. Negative returns are status codes mirroring solo pa_buy/
+# pa_sell so main.cyr can reuse the same messages:
+#   -1 bad commodity / -2 no port / -3 wrong trade side / -4 bad qty /
+#   -5 not enough credits / -6 not enough holds / -7 stock/cargo short.
+
+# Buy qty of c at sector s. Returns total cost; depletes port stock.
+fn paw_buy(w, gx, s, c, qty, credits, holds_free): i64 {
+    if (c < 0)        { return 0 - 1; }
+    if (c >= PA_COMM) { return 0 - 1; }
+    if (qty <= 0)     { return 0 - 4; }
+    if (pa_has_port(gx, s) == 0)             { return 0 - 2; }
+    if (pa_port_flag(gx, s, c) != PF_SELLS)  { return 0 - 3; }
+    var stock = paw_stock(w, s, c);
+    if (qty > stock)      { return 0 - 7; }
+    if (qty > holds_free) { return 0 - 6; }
+    var cost = paw_price(pa_port_price(gx, s, c), stock) * qty;
+    if (cost > credits)   { return 0 - 5; }
+    paw_set_stock(w, s, c, stock - qty);
+    return cost;
+}
+
+# Sell qty of c at sector s. Returns total proceeds; refills port stock.
+fn paw_sell(w, gx, s, c, qty, cargo_have): i64 {
+    if (c < 0)        { return 0 - 1; }
+    if (c >= PA_COMM) { return 0 - 1; }
+    if (qty <= 0)     { return 0 - 4; }
+    if (pa_has_port(gx, s) == 0)            { return 0 - 2; }
+    if (pa_port_flag(gx, s, c) != PF_BUYS)  { return 0 - 3; }
+    if (qty > cargo_have) { return 0 - 7; }
+    var stock = paw_stock(w, s, c);
+    var proceeds = paw_price(pa_port_price(gx, s, c), stock) * qty;
+    paw_set_stock(w, s, c, stock + qty);
+    return proceeds;
+}
+
+# Claim sector s for owner fp. 0 ok / -1 already owned (by anyone) /
+# -2 invalid owner (anonymous). The vault credits stay player-local.
+fn paw_claim_planet(w, s, fp): i64 {
+    if (fp == 0)                      { return 0 - 2; }
+    if (paw_planet_owner(w, s) != 0)  { return 0 - 1; }
+    paw_set_planet_owner(w, s, fp);
+    return 0;
+}
+
+# === Ship-side Universe glue ===
+#
+# These let the existing pa_feed screen machine stay untouched: pa_buy /
+# pa_sell / pa_establish_planet detect Universe mode and route here,
+# operating on the in-memory world snapshot main.cyr loaded into
+# PA_WORLD under the held world lock. The world MUTATION lives in the
+# pure paw_* transforms; here we just apply the credit/cargo effect to
+# the ship and keep the same status codes the solo path returns.
+
+fn pa_is_universe(st): i64 {
+    if (load64(st + PA_MODE) == DOOR_UNIVERSE) { return 1; }
+    return 0;
+}
+
+# Price shown to the player: the live stock-adjusted quote in Universe,
+# the static galaxy price in solo.
+fn pa_shown_price(st, gx, sector, c): i64 {
+    if (pa_is_universe(st) == 1) {
+        var w = load64(st + PA_WORLD);
+        if (w != 0) { return paw_quote(w, gx, sector, c); }
+    }
+    return pa_port_price(gx, sector, c);
+}
+
+fn pa_buy_u(st, c, qty): i64 {
+    var w = load64(st + PA_WORLD);
+    if (w == 0) { return 0 - 2; }
+    var rc = paw_buy(w, load64(st + PA_GX), load64(st + PA_SECTOR), c, qty,
+                     load64(st + PA_CREDITS), pa_holds_free(st));
+    if (rc < 0) { return rc; }                       # status code, world untouched
+    store64(st + PA_CREDITS, load64(st + PA_CREDITS) - rc);
+    pa_set_cargo(st, c, pa_cargo(st, c) + qty);
+    return 0;
+}
+
+fn pa_sell_u(st, c, qty): i64 {
+    var w = load64(st + PA_WORLD);
+    if (w == 0) { return 0 - 2; }
+    var rc = paw_sell(w, load64(st + PA_GX), load64(st + PA_SECTOR), c, qty,
+                      pa_cargo(st, c));
+    if (rc < 0) { return rc; }
+    store64(st + PA_CREDITS, load64(st + PA_CREDITS) + rc);
+    pa_set_cargo(st, c, pa_cargo(st, c) - qty);
     return 0;
 }
 

@@ -2895,6 +2895,220 @@ fn t127_th_extract_saves_from_burn(): i64 {
     return 0;
 }
 
+# === 1.2.0 Universe: Port Authority shared galaxy (t128-t134, ADR 0010 bite 2) ===
+
+# Fresh world: version + seed set, every traded slot at baseline stock,
+# every sector unclaimed.
+fn t128_paw_new(): i64 {
+    var w = paw_new(98765);
+    if (paw_seed(w) != 98765)                       { test_fail("t128_paw_new", "seed"); return 1; }
+    if (paw_valid(w, paw_byte_size()) != 1)         { test_fail("t128_paw_new", "valid"); return 1; }
+    if (paw_valid(w, paw_byte_size() - 8) != 0)     { test_fail("t128_paw_new", "bad len accepted"); return 1; }
+    if (paw_stock(w, 7, 2) != PAW_STOCK_BASE)       { test_fail("t128_paw_new", "stock"); return 1; }
+    if (paw_planet_owner(w, 7) != 0)                { test_fail("t128_paw_new", "owner"); return 1; }
+    test_pass("t128_paw_new");
+    return 0;
+}
+
+# Distinct write/read-back across the whole stock array in a loop — this
+# directly probes the array-in-loop codegen bug (store64(base+i*8,…)
+# collapsing onto the base index) that reverted the first bite-2 attempt.
+# Each (s,c) gets a unique value; every one must read back exactly.
+fn t129_paw_stock_distinct(): i64 {
+    var w = paw_new(1);
+    var s = 0;
+    while (s < PA_SECTORS) {
+        var c = 0;
+        while (c < PA_COMM) {
+            paw_set_stock(w, s, c, s * 100 + c + 1);
+            c = c + 1;
+        }
+        s = s + 1;
+    }
+    s = 0;
+    while (s < PA_SECTORS) {
+        var c = 0;
+        while (c < PA_COMM) {
+            if (paw_stock(w, s, c) != s * 100 + c + 1) { test_fail("t129_paw_stock_distinct", "collapsed write"); return 1; }
+            c = c + 1;
+        }
+        s = s + 1;
+    }
+    # planet owners must be untouched by the stock writes (no overlap)
+    if (paw_planet_owner(w, 0) != 0)                { test_fail("t129_paw_stock_distinct", "owner clobbered"); return 1; }
+    if (paw_planet_owner(w, PA_SECTORS - 1) != 0)   { test_fail("t129_paw_stock_distinct", "owner clobbered tail"); return 1; }
+    test_pass("t129_paw_stock_distinct");
+    return 0;
+}
+
+# Price curve: base at baseline stock, higher when depleted, lower when
+# glutted, clamped to the band.
+fn t130_paw_price_curve(): i64 {
+    if (paw_price(100, PAW_STOCK_BASE) != 100)            { test_fail("t130_paw_price_curve", "baseline"); return 1; }
+    if (paw_price(100, PAW_STOCK_BASE / 2) <= 100)        { test_fail("t130_paw_price_curve", "depleted not up"); return 1; }
+    if (paw_price(100, PAW_STOCK_BASE + PAW_STOCK_BASE / 2) >= 100) { test_fail("t130_paw_price_curve", "glut not down"); return 1; }
+    if (paw_price(100, 0) != 200)                         { test_fail("t130_paw_price_curve", "empty cap"); return 1; }
+    if (paw_price(100, 2 * PAW_STOCK_BASE) != 33)         { test_fail("t130_paw_price_curve", "full floor"); return 1; }
+    test_pass("t130_paw_price_curve");
+    return 0;
+}
+
+# Find a sector whose port SELLS commodity c (for buy tests) or BUYS it
+# (for sell tests). Returns sector or -1. flag: PF_SELLS / PF_BUYS.
+fn t_paw_find_port(gx, c, want_flag): i64 {
+    var s = 1;
+    var found = 0 - 1;
+    while (s < PA_SECTORS) {
+        if (found < 0) {
+            if (pa_has_port(gx, s) == 1) {
+                if (pa_port_flag(gx, s, c) == want_flag) { found = s; }
+            }
+        }
+        s = s + 1;
+    }
+    return found;
+}
+
+# Buying drains stock and raises the next quoted price; guards reject
+# over-credits / over-holds / over-stock without mutating.
+fn t131_paw_buy_depletes(): i64 {
+    var gx = pa_galaxy_new(4242);
+    var w = paw_new(4242);
+    # locate the first SELLS port across the commodities
+    var c = 0;
+    var s = 0 - 1;
+    var found_c = 0 - 1;
+    while (c < PA_COMM) {
+        if (s < 0) {
+            var cand = t_paw_find_port(gx, c, PF_SELLS);
+            if (cand >= 0) { s = cand; found_c = c; }
+        }
+        c = c + 1;
+    }
+    if (s < 0) { test_pass("t131_paw_buy_depletes"); return 0; }   # no SELLS port at this seed: vacuously ok
+    var price0 = paw_quote(w, gx, s, found_c);
+    var cost = paw_buy(w, gx, s, found_c, 100, 1000000, 1000);
+    if (cost < 0)                                   { test_fail("t131_paw_buy_depletes", "buy failed"); return 1; }
+    if (paw_stock(w, s, found_c) != PAW_STOCK_BASE - 100) { test_fail("t131_paw_buy_depletes", "stock not drained"); return 1; }
+    if (paw_quote(w, gx, s, found_c) < price0)      { test_fail("t131_paw_buy_depletes", "price not up"); return 1; }
+    # guards: no credits, no holds, over stock — none should mutate further
+    var stock_now = paw_stock(w, s, found_c);
+    if (paw_buy(w, gx, s, found_c, 10, 0, 1000) != (0 - 5))   { test_fail("t131_paw_buy_depletes", "credit guard"); return 1; }
+    if (paw_buy(w, gx, s, found_c, 10, 1000000, 0) != (0 - 6)){ test_fail("t131_paw_buy_depletes", "holds guard"); return 1; }
+    if (paw_buy(w, gx, s, found_c, 999999, 1000000, 1000000) != (0 - 7)) { test_fail("t131_paw_buy_depletes", "stock guard"); return 1; }
+    if (paw_stock(w, s, found_c) != stock_now)      { test_fail("t131_paw_buy_depletes", "guard mutated"); return 1; }
+    test_pass("t131_paw_buy_depletes");
+    return 0;
+}
+
+# Selling refills stock and lowers the next quoted price.
+fn t132_paw_sell_gluts(): i64 {
+    var gx = pa_galaxy_new(909);
+    var w = paw_new(909);
+    var c = 0;
+    var s = 0 - 1;
+    var found_c = 0 - 1;
+    while (c < PA_COMM) {
+        if (s < 0) {
+            var cand = t_paw_find_port(gx, c, PF_BUYS);
+            if (cand >= 0) { s = cand; found_c = c; }
+        }
+        c = c + 1;
+    }
+    if (s < 0) { test_pass("t132_paw_sell_gluts"); return 0; }    # no BUYS port at this seed
+    var price0 = paw_quote(w, gx, s, found_c);
+    var proceeds = paw_sell(w, gx, s, found_c, 80, 1000);
+    if (proceeds < 0)                               { test_fail("t132_paw_sell_gluts", "sell failed"); return 1; }
+    if (paw_stock(w, s, found_c) != PAW_STOCK_BASE + 80) { test_fail("t132_paw_sell_gluts", "stock not filled"); return 1; }
+    if (paw_quote(w, gx, s, found_c) > price0)      { test_fail("t132_paw_sell_gluts", "price not down"); return 1; }
+    if (paw_sell(w, gx, s, found_c, 81, 80) != (0 - 7)) { test_fail("t132_paw_sell_gluts", "cargo guard"); return 1; }
+    test_pass("t132_paw_sell_gluts");
+    return 0;
+}
+
+# Planet claim is exclusive: first owner sticks, a second claim by
+# anyone fails, anonymous (fp 0) is refused.
+fn t133_paw_claim_planet(): i64 {
+    var w = paw_new(5);
+    if (paw_claim_planet(w, 12, 0) != (0 - 2))      { test_fail("t133_paw_claim_planet", "anon allowed"); return 1; }
+    if (paw_claim_planet(w, 12, 44444) != 0)        { test_fail("t133_paw_claim_planet", "first claim"); return 1; }
+    if (paw_planet_owner(w, 12) != 44444)           { test_fail("t133_paw_claim_planet", "owner recorded"); return 1; }
+    if (paw_claim_planet(w, 12, 44444) != (0 - 1))  { test_fail("t133_paw_claim_planet", "reclaim self"); return 1; }
+    if (paw_claim_planet(w, 12, 77777) != (0 - 1))  { test_fail("t133_paw_claim_planet", "steal"); return 1; }
+    if (paw_planet_owner(w, 12) != 44444)           { test_fail("t133_paw_claim_planet", "owner changed"); return 1; }
+    test_pass("t133_paw_claim_planet");
+    return 0;
+}
+
+# The world buffer is directly persistable: its raw bytes round-trip
+# through a byte copy (what world_read/world_write do on disk) and the
+# accessors still read true.
+fn t134_paw_bytes_roundtrip(): i64 {
+    var w = paw_new(321);
+    paw_set_stock(w, 3, 1, 137);
+    paw_set_planet_owner(w, 9, 88888);
+    var cap = paw_byte_size();
+    var disk = alloc(cap);
+    memcpy(disk, w, cap);
+    if (paw_valid(disk, cap) != 1)            { test_fail("t134_paw_bytes_roundtrip", "valid"); return 1; }
+    if (paw_seed(disk) != 321)               { test_fail("t134_paw_bytes_roundtrip", "seed"); return 1; }
+    if (paw_stock(disk, 3, 1) != 137)        { test_fail("t134_paw_bytes_roundtrip", "stock"); return 1; }
+    if (paw_planet_owner(disk, 9) != 88888)  { test_fail("t134_paw_bytes_roundtrip", "owner"); return 1; }
+    test_pass("t134_paw_bytes_roundtrip");
+    return 0;
+}
+
+# Ship-side Universe glue: a PA ship in DOOR_UNIVERSE routes pa_buy /
+# pa_sell / pa_establish_planet through the in-memory world — applying
+# the credit/cargo effect to the ship AND mutating shared stock /
+# ownership — while the solo path is untouched.
+fn t135_pa_universe_actions(): i64 {
+    var seed = 4242;
+    var gx = pa_galaxy_new(seed);
+    var w = paw_new(seed);
+    var st = pa_new(seed, DOOR_UNIVERSE, PA_DEF_DAYS);
+    pa_start(st);                       # regenerates PA_GX from seed (== gx structurally)
+    store64(st + PA_WORLD, w);
+    store64(st + PA_FP, 31415);
+    if (pa_is_universe(st) != 1)        { test_fail("t135_pa_universe_actions", "not universe"); return 1; }
+
+    # find a SELLS port and move the ship there
+    var c = 0;
+    var s = 0 - 1;
+    var bc = 0 - 1;
+    while (c < PA_COMM) {
+        if (s < 0) { var cand = t_paw_find_port(load64(st + PA_GX), c, PF_SELLS);
+                     if (cand >= 0) { s = cand; bc = c; } }
+        c = c + 1;
+    }
+    if (s >= 0) {
+        store64(st + PA_SECTOR, s);
+        store64(st + PA_CREDITS, 1000000);
+        var cr0 = load64(st + PA_CREDITS);
+        var stk0 = paw_stock(w, s, bc);
+        if (pa_buy(st, bc, 10) != 0)                  { test_fail("t135_pa_universe_actions", "buy"); return 1; }
+        if (pa_cargo(st, bc) != 10)                   { test_fail("t135_pa_universe_actions", "cargo"); return 1; }
+        if (load64(st + PA_CREDITS) >= cr0)           { test_fail("t135_pa_universe_actions", "credits not spent"); return 1; }
+        if (paw_stock(w, s, bc) != stk0 - 10)         { test_fail("t135_pa_universe_actions", "world stock not drained"); return 1; }
+    }
+
+    # planet claim writes ownership into the shared world
+    store64(st + PA_PLANET, 0 - 1);
+    var psec = load64(st + PA_SECTOR);
+    if (pa_establish_planet(st) != 0)                 { test_fail("t135_pa_universe_actions", "claim"); return 1; }
+    if (paw_planet_owner(w, psec) != 31415)           { test_fail("t135_pa_universe_actions", "world owner"); return 1; }
+    # a rival ship can't re-claim the same sector
+    var rival = pa_new(seed, DOOR_UNIVERSE, PA_DEF_DAYS);
+    pa_start(rival);
+    store64(rival + PA_WORLD, w);
+    store64(rival + PA_FP, 27182);
+    store64(rival + PA_SECTOR, psec);
+    store64(rival + PA_PLANET, 0 - 1);
+    if (pa_establish_planet(rival) != (0 - 3))        { test_fail("t135_pa_universe_actions", "rival claimed"); return 1; }
+    test_pass("t135_pa_universe_actions");
+    return 0;
+}
+
 
 fn main(): i64 {
     alloc_init();
@@ -3029,6 +3243,14 @@ fn main(): i64 {
     t125_th_mole_local_burn();
     t126_th_fund_relieves_stress();
     t127_th_extract_saves_from_burn();
+    t128_paw_new();
+    t129_paw_stock_distinct();
+    t130_paw_price_curve();
+    t131_paw_buy_depletes();
+    t132_paw_sell_gluts();
+    t133_paw_claim_planet();
+    t134_paw_bytes_roundtrip();
+    t135_pa_universe_actions();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

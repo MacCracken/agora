@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 1.2.0 Persistent Universe, bite 2 (ADR 0010): Port Authority shared galaxy
+
+The canonical Universe slice — a **shared, persistent, contested galaxy** for Port Authority, the previously-reverted bite now re-authored and landed on the unblocked 6.1.x toolchain.
+
+- **Shared depletable market.** Every (sector, commodity) carries a **stock** level in a per-game world snapshot under `<store>/.games/port/world/` (the bite-1 world dir). Buying drains stock and **raises the price the next player sees**; selling refills it and lowers the price (`paw_price` — monotone in stock, clamped to `[base/3, base*2]`). This is the "your trading moves the market" soul of a shared TradeWars galaxy.
+- **Exclusive planet ownership.** A sector can be claimed by exactly one player, keyed by sigil fingerprint; rival captains arriving later are refused ("Another captain already owns this sector").
+- **One deterministic galaxy.** The galaxy *structure* (warps, port flags, base prices) regenerates from a fixed `PA_UNIVERSE_SEED` so every player shares the same map; only the mutable stock + ownership live in the ~2 KB snapshot (a flat-i64 buffer persisted verbatim by `world_read`/`world_write`).
+- **`play port universe`** — login-gated (a persistent captain needs an identity). The per-player ship persists in its own `portu` save slot, separate from the Solo `port` save, so a player can keep both. The existing PA screen machine is untouched: `pa_buy`/`pa_sell`/`pa_establish_planet` detect Universe mode and route through the world.
+- **The world transaction.** `main.cyr` wraps every fed input line in `flock` → read snapshot → `pa_feed` (mutates via the pure `paw_*` transforms) → write snapshot → unlock — so concurrent players serialize on the world lock with **no lost updates**, inheriting the race-proven guarantee from bite 1.
+- 8 new unit tests (t128–t135) — world model, price curve, buy-depletes/sell-gluts, exclusive claim, byte-roundtrip, and the ship-side glue. **t129 is a distinct-write-readback** over the whole stock array that directly probes the array-in-loop codegen bug which reverted the first bite-2 attempt — it passes on cyrius 6.1.5, confirming that blocker is cleared. **127 → 135 tests.** New end-to-end smoke `docs/examples/09-universe-port.sh` proves the shared galaxy, cross-session persistence, exclusive ownership, and login-gating over real telnet sigil logins.
+
+`VERSION` stays **1.1.1** — 1.2.0 is not cut until its remaining bites (3 PvP, 4 Smuggler/Handler shared layers, 5 leaderboards, 6 closeout) land. Clean DCE build 654,592 → **662,608 B** (+8,016 B for the shared-world code).
+
+### Added — roadmap
+
+- **Eliza + a chat area** penciled as a planned **1.3.0** (release table + a *Planned* design section in [`roadmap.md`](docs/development/roadmap.md)): a live multi-user chat surface (the classic BBS teleconference) with Eliza — a pure-module Rogerian chatbot — as its anchor inhabitant. Builds on the 1.2.0 `flock`'d shared-disk framework; no new deps. Earns a dedicated ADR when the chat surface is cut.
+
 ## [1.1.1] — 2026-06-08 (The Handler: field pressure; toolchain unblocked 6.0.52 → 6.1.5)
 
 **The Handler grows stakes, and the crypto blocker is gone.** This release deepens The Handler's single-player loop with a **field-pressure** system and lifts the cyrius toolchain cap that had deferred 1.2.0 bite 2+.

@@ -29,22 +29,23 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
 | **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
 | **1.1.1** | The Handler **field pressure** (single-player depth: cover erosion + agent burnout + mole-local leak; Extract/Fund now load-bearing) + **toolchain unblock** cyrius 6.0.52 → 6.1.5 (sigil SIGILL cleared) | ✅ 2026-06-08 |
-| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 bite 1 done; **bite 2+ codegen-unblocked** (sigil SIGILL cleared on 6.1.x) — fresh re-authoring task, see In progress |
+| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 **bites 1-2 done** (world-txn framework + PA shared galaxy, `play port universe`); bites 3-6 remain — see In progress |
+| **1.3.0** | **Chat area + Eliza** — a live multi-user chat surface (the classic BBS teleconference / CB simulator) with **Eliza**, a pure-module Rogerian chatbot, as its anchor inhabitant. Builds on the 1.2.0 `flock`'d shared-disk framework; Eliza is also a `play eliza` door. No new deps. | 📋 planned |
 
 ---
 
 ## In progress
 
-**1.2.0 — Persistent Universe (bite 1 shipped; bite 2+ deferred to a future release).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** (the 0.x line → the 1.0.0 BBS cut → the 1.1.0 door / games subsystem — see *Closed milestones* + [`CHANGELOG.md`](../../CHANGELOG.md)).
+**1.2.0 — Persistent Universe (bites 1-2 shipped; bite 3 next).** Shared-world multiplayer for the three door games. **Everything before 1.2.0 is shipped history** (the 0.x line → the 1.0.0 BBS cut → the 1.1.0 door / games subsystem → 1.1.1 Handler field pressure — see *Closed milestones* + [`CHANGELOG.md`](../../CHANGELOG.md)).
 
-> **⏸ Deferred — blocked on the cyrius toolchain, not on design.** Bite 1 (the world-transaction framework) is done and race-proven. Bites 2+ wait on two toolchain issues: (1) **sigil/crypto SIGILL on cyrius ≥ 6.0.53** — the pin is capped at **6.0.52** ([`state.md`](state.md) Version table); a fix is the gating dependency. (2) An **array-in-loop codegen bug** seen while building the PA shared-galaxy economy (an accessor returned the right value directly but 0 inside a sibling loop; `store64(var + i*8, …)` dropped the index). The bite-2 PA-world code was authored, hit this, and was cleanly reverted — the full design survives in [ADR 0010](../adr/0010-persistent-universe.md). Resume from bite 2 once sigil is fixed upstream, re-verifying the codegen on the then-current toolchain.
+> **▶ Active — both original blockers retired.** The cyrius toolchain issues that had deferred this are cleared on 6.1.5: (1) the **sigil/crypto SIGILL on ≥ 6.0.53** (pin lifted 6.0.52 → 6.1.5; verified by 135/135 + crypto round-trip + telnet login), and (2) the **array-in-loop codegen bug** — bite 2's real shared-galaxy code (not just a synthetic probe) compiles and passes, with t129 a distinct-write-readback over the stock array that specifically exercised it. Bite 1 (world-transaction framework) and bite 2 (PA shared galaxy) are both shipped + smoke-green; bites 3-6 remain.
 
 Design: [ADR 0010](../adr/0010-persistent-universe.md) — a per-game shared world dir under `<store>/.games/<game>/world/`, mutated through a `flock`'d **lock → read → compute → write** "world transaction" with the game logic staying a **pure transform** (the ADR 0009 pure-module rule survives; the I/O lives in `door.cyr` + `main.cyr`). Universe requires login; Practice + Solo (shipped 1.1.0) are unchanged. Async/indirect PvP (act against the state another player left behind), not real-time. Daily-turn budgets keep it fair.
 
-**1.2.0 bite plan** (ADR 0010 § Phasing — bite 1 ✅; **bites 2–6 deferred to a future release**, see the note above):
+**1.2.0 bite plan** (ADR 0010 § Phasing — bites 1-2 ✅; bites 3-6 remain):
 
-1. **World-transaction framework** in `door.cyr` ✅ (2026-06-07) — world dir + `flock` lock + snapshot read/write + `world_txn_add` + diagnostic `worldbench`/`worldread` verbs. Concurrency smoke green: 16 procs × 500 txns → exactly 8000, no lost updates (`08-world-concurrency.sh`); t122/t123 unit (123/123). Snapshot write is in-place `O_TRUNC` under the held lock; temp+rename/event-log crash-hardening deferred (ADR 0010).
-2. **Port Authority shared galaxy** — generated-once world, depletable port stock (your buying moves the next player's price), player-owned planets. The canonical Universe slice.
+1. **World-transaction framework** in `door.cyr` ✅ (2026-06-07) — world dir + `flock` lock + snapshot read/write + `world_txn_add` + diagnostic `worldbench`/`worldread` verbs. Concurrency smoke green: 16 procs × 500 txns → exactly 8000, no lost updates (`08-world-concurrency.sh`); t122/t123 unit. Snapshot write is in-place `O_TRUNC` under the held lock; temp+rename/event-log crash-hardening deferred (ADR 0010).
+2. **Port Authority shared galaxy** ✅ (2026-06-08) — generated-once deterministic galaxy (`PA_UNIVERSE_SEED`), **depletable port stock** that moves the next player's quoted price (`paw_buy`/`paw_sell`/`paw_price`), **exclusive planet ownership** by sigil fp (`paw_claim_planet`); `play port universe` (login-gated) with the per-line `flock`'d world transaction in `main.cyr`; per-player ship in the `portu` save. t128-t135 (135/135; t129 re-cleared the codegen bug on the real code); cross-session shared-world smoke `09-universe-port.sh`. The canonical Universe slice.
 3. **PA deployments + async PvP** — sector-deployed fighters/mines, combat vs left-behind assets, alliances.
 4. **Smuggler's shared economy** (district prices + heat move with all players) + **The Handler shared layer** (per-city alerts, intercept pool, anonymous-tip sabotage).
 5. **Leaderboards** — generalize the 1.1.0 Handler standings file to all three games.
@@ -54,6 +55,23 @@ Design: [ADR 0010](../adr/0010-persistent-universe.md) — a per-game shared wor
 
 - `agora policy set <board> <mode>` + `agora admins {add,rm,list}` CLI verbs (operators currently edit `.policy` / `.admins` files directly).
 - Door directions still unpinned beyond 1.2.0 (Handler world-event track + legacy ranks, PA citadels/mining deep endgame, the 2400-baud teletype effect) live in [`roadmap-future.md`](roadmap-future.md) § Door games.
+
+---
+
+## Planned
+
+### 1.3.0 — Chat area + Eliza
+
+A **chat area** is the public-assembly surface agora hasn't built yet: the classic BBS *teleconference* / CB-simulator where logged-in citizens talk in shared, named channels in (near) real time — distinct from the asynchronous post boards. **Eliza** — a faithful pure-module port of Weizenbaum's 1966 Rogerian psychotherapist chatbot — is its anchor inhabitant: a nostalgic BBS staple, a zero-dependency pure transform, and a low-risk first thing to put *in* the room.
+
+**Design fit (why it slots cleanly into agora):**
+
+- **Eliza is a pure module** (`src/eliza.cyr`), exactly the [ADR 0009](../adr/0009-door-games-subsystem.md) shape the games already use: a deterministic, side-effect-free `(input line) → (reflected response)` transform — keyword-ranked decomposition + reassembly-rule templates + pronoun reflection (I↔you, my↔your). Unit-testable without a socket (canned exchanges → fixed replies), no external deps, no RNG required (or a seeded `door.cyr` PRNG for reply variety, keeping replays reproducible). She's reachable two ways: as a `play eliza` **door** (solo, immediately), and as a **bot participant** in the chat area.
+- **The chat area is a new shared surface** that builds directly on the **1.2.0 `flock`'d shared-disk framework** (the world-transaction pattern, generalized): a per-channel append-only, `flock`'d transcript that connected sessions tail — the same fork-per-accept-safe, on-disk-is-the-only-shared-state discipline ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) the Universe work establishes. So it is **gated behind 1.2.0** for the shared-state machinery, not a from-scratch concurrency build.
+- **Login-gated, like Universe** — a chat presence is a persistent-ish actor, so it needs a sigil identity; anonymous users can still read/post on boards.
+- **No new dependencies** — pattern-matching + flat-file transcripts are agora's existing idioms.
+
+**Open questions for its ADR (when 1.3.0 pulls forward):** live-tail delivery model (poll-on-input vs. a notify mechanism under fork-per-accept), channel lifecycle + scrollback retention, whether Eliza runs as an always-present bot writing into the transcript or a private `/eliza` side-channel, and an Eliza script format (built-in DOCTOR script vs. operator-loadable rule files). Earns a dedicated ADR when the chat surface is cut.
 
 ---
 

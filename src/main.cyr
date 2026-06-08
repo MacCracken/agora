@@ -105,6 +105,13 @@ var g_door_game  = 0;
 var g_door_state = 0;
 var g_door_mode  = 0;
 
+# 1.2.0 Universe (ADR 0010 bite 2). Per-session shared-world snapshot
+# buffer for Port Authority Universe play; alloc'd lazily on entry to
+# `play port universe`. The flock'd lock→read→feed→write transaction
+# around each input line reads into this buffer and writes it back, so
+# concurrent players serialize on the world lock with no lost updates.
+var g_pa_world = 0;
+
 enum DoorRuntime {
     DOOR_FRAME_CAP = 8192;        # per-frame render buffer
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
@@ -707,9 +714,44 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(mbuf, "universe") != 0) { dmode = DOOR_UNIVERSE; }
 
         if (dmode == DOOR_UNIVERSE) {
-            send_str(cfd, "Persistent Universe (shared multiplayer) is on the roadmap — not in this build.\r\n");
-            send_str(cfd, "Play 'practice' (ephemeral) or 'solo' (saved) for now.\r\n");
-            return MODE_COMMAND;
+            # 1.2.0 (ADR 0010 bite 2): only Port Authority has a shared
+            # Universe in this build. Smuggler + Handler Universe layers
+            # are roadmapped (bite 4).
+            if (game != GAME_PORT) {
+                send_str(cfd, "Only 'port' has a shared Universe in this build — try: play port universe\r\n");
+                send_str(cfd, "Smuggler + Handler Universe layers are roadmapped (ADR 0010).\r\n");
+                return MODE_COMMAND;
+            }
+            if ((load8(g_session_fp) & 0xFF) == 0) {
+                send_str(cfd, "Universe play needs an identity — log in first ('login <handle>').\r\n");
+                return MODE_COMMAND;
+            }
+            g_door_game = GAME_PORT;
+            g_door_mode = DOOR_UNIVERSE;
+            if (g_pa_world == 0) { g_pa_world = alloc(paw_byte_size()); }
+            var uloaded = 0;
+            if (door_save_exists(g_store_buf, g_session_fp, "portu") == 1) {
+                var ulbuf = alloc(DOOR_SAVE_CAP);
+                var uln = door_save_read(g_store_buf, g_session_fp, "portu", ulbuf, DOOR_SAVE_CAP);
+                if (uln > 0) {
+                    g_door_state = pa_load_parse(ulbuf, uln);
+                    if (g_door_state != 0) { uloaded = 1; }
+                }
+            }
+            if (uloaded == 0) {
+                g_door_state = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS);
+            }
+            pa_start(g_door_state);
+            store64(g_door_state + PA_FP, hex16_to_i64(g_session_fp));
+            # Prime the world — mints + persists it on the first ever entry
+            # — so the opening frame already shows live shared prices.
+            var ufd = pa_world_begin();
+            if (ufd >= 0) {
+                store64(g_door_state + PA_WORLD, g_pa_world);
+                pa_world_commit(ufd);
+            }
+            door_send_frame(cfd);
+            return MODE_DOOR;
         }
         if (dmode == DOOR_SOLO) {
             if ((load8(g_session_fp) & 0xFF) == 0) {
@@ -780,6 +822,66 @@ fn door_game_name(game): i64 {
     return "game";
 }
 
+# === 1.2.0 Universe world transaction (ADR 0010 bite 2) ===
+#
+# The shared Port Authority galaxy lives under <store>/.games/port/world/
+# (the bite-1 world dir). Per-player ship state stays in the Solo-style
+# save under the dedicated "portu" slot. The galaxy STRUCTURE regenerates
+# deterministically from PA_UNIVERSE_SEED; only the depletable stock +
+# planet ownership are in the snapshot.
+
+# Open the world lock and load the current snapshot into g_pa_world,
+# minting a fresh world (and persisting it) if none/invalid exists.
+# Returns the held lock fd, or (0 - 1) on failure (caller renders a
+# "world busy" message and stays put). Caller MUST pa_world_commit.
+fn pa_world_begin(): i64 {
+    var fd = world_lock_acquire(g_store_buf, "port");
+    if (fd < 0) { return 0 - 1; }
+    var cap = paw_byte_size();
+    var n = world_read(g_store_buf, "port", g_pa_world, cap);
+    if (paw_valid(g_pa_world, n) == 0) {
+        var fresh = paw_new(PA_UNIVERSE_SEED);
+        memcpy(g_pa_world, fresh, cap);
+        world_write(g_store_buf, "port", g_pa_world, cap);
+    }
+    return fd;
+}
+
+# Write g_pa_world back under the held lock and release it.
+fn pa_world_commit(fd): i64 {
+    world_write(g_store_buf, "port", g_pa_world, paw_byte_size());
+    world_lock_release(fd);
+    return 0;
+}
+
+# Feed one line to a Port Authority Universe session inside a world
+# transaction: lock → read snapshot → pa_feed (mutates the snapshot via
+# the paw_* transforms) → write snapshot → unlock. PA_WORLD stays
+# pointing at g_pa_world so the post-feed render shows live prices.
+# Returns pa_feed's exit control (1 = leave the game).
+fn pa_universe_feed(line, len): i64 {
+    var fd = pa_world_begin();
+    if (fd < 0) {
+        pa_msg(g_door_state, "The galaxy is busy — try again.");
+        return 0;
+    }
+    store64(g_door_state + PA_WORLD, g_pa_world);
+    var ctrl = pa_feed(g_door_state, line, len);
+    pa_world_commit(fd);
+    return ctrl;
+}
+
+# Persist the Universe ship under its own save slot ("portu"), keyed by
+# the player's fp — separate from the Solo "port" save so a player can
+# keep both a solo run and a universe captain.
+fn pa_universe_save(): i64 {
+    if ((load8(g_session_fp) & 0xFF) == 0) { return 0; }
+    var buf = alloc(DOOR_SAVE_CAP);
+    var n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP);
+    if (n > 0) { door_save_write(g_store_buf, g_session_fp, "portu", buf, n); }
+    return 0;
+}
+
 # Render the active game's current frame and send it to the client.
 fn door_send_frame(cfd): i64 {
     var buf = alloc(DOOR_FRAME_CAP);
@@ -792,9 +894,14 @@ fn door_send_frame(cfd): i64 {
 }
 
 # Feed one input line to the active game. Returns 1 if the game exited.
+# Port Authority Universe play wraps the feed in a world transaction so
+# trades/claims hit the shared galaxy under the flock (ADR 0010 bite 2).
 fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_game == GAME_SMUGGLER) { return sl_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_PORT)     { return pa_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_PORT) {
+        if (g_door_mode == DOOR_UNIVERSE) { return pa_universe_feed(line, line_len); }
+        return pa_feed(g_door_state, line, line_len);
+    }
     if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
     return 1;
 }
@@ -842,6 +949,12 @@ fn door_append_standing(cfd): i64 {
 # On leaving a door: persist a solo checkpoint (logged-in, mid-game),
 # and post a Handler standing on a finished campaign.
 fn door_save_on_exit(cfd): i64 {
+    # 1.2.0 Universe: the shared galaxy is already persisted per action;
+    # here we just checkpoint the player's own ship under the "portu" slot.
+    if (g_door_mode == DOOR_UNIVERSE) {
+        if (g_door_game == GAME_PORT) { pa_universe_save(); }
+        return 0;
+    }
     if (g_door_mode == DOOR_SOLO) {
         if ((load8(g_session_fp) & 0xFF) != 0) {
             if (door_is_over() == 0) {

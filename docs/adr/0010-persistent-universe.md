@@ -1,7 +1,7 @@
 # 0010 — Persistent Universe (shared-world multiplayer for door games)
 
-> **Status**: Proposed (1.2.0 design sketch) — **bite 1 (world-transaction framework) shipped + concurrency-smoke-green 2026-06-07**
-> **Date**: 2026-06-07
+> **Status**: Accepted (1.2.0 in progress) — **bite 1 (world-transaction framework) shipped + concurrency-smoke-green 2026-06-07; bite 2 (Port Authority shared galaxy — depletable port stock + exclusive planet ownership) shipped 2026-06-08**, the canonical Universe slice, with a cross-session shared-world smoke (`09-universe-port.sh`)
+> **Date**: 2026-06-07 (bite 2: 2026-06-08)
 
 ## Context
 
@@ -39,8 +39,8 @@ The open question 1.2.0 answers: **how does a shared, concurrently-mutated game 
 
 ### Phasing (1.2.0 bites)
 
-1. **World-transaction framework** in `door.cyr` — world dir + `flock` lock + read/write-snapshot + the transaction wrapper + a multi-process concurrency smoke (two clients hammering one world, assert no lost updates / no corruption). Prove the pattern before any game uses it.
-2. **Port Authority shared galaxy** — generated-once world, depletable port stock, planet ownership (the canonical Universe slice).
+1. **World-transaction framework** in `door.cyr` — world dir + `flock` lock + read/write-snapshot + the transaction wrapper + a multi-process concurrency smoke (two clients hammering one world, assert no lost updates / no corruption). Prove the pattern before any game uses it. **✅ shipped 2026-06-07.**
+2. **Port Authority shared galaxy** — generated-once world, depletable port stock, planet ownership (the canonical Universe slice). **✅ shipped 2026-06-08.** Snapshot = a flat-i64 buffer (version + seed + per-(sector,commodity) stock + per-sector planet-owner fp), persisted verbatim by the bite-1 `world_read`/`world_write`. The galaxy *structure* regenerates deterministically from a fixed `PA_UNIVERSE_SEED`; only the contested stock + ownership live in the snapshot. Pure transforms `paw_buy`/`paw_sell` (stock moves the next player's price via `paw_price`) + `paw_claim_planet` (exclusive by sigil fp); the ship-side glue (`pa_buy_u`/`pa_sell_u`, `pa_is_universe`) routes the existing PA screen machine through the world while the per-player ship stays in a `portu` Solo-style save. `main.cyr` wraps every fed line in lock→read→`pa_feed`→write→unlock. Unit-tested t128–t135 (incl. t129, the distinct-write-readback that re-cleared the reverted-attempt codegen bug on cyrius 6.1.5); cross-session shared-world + login-gating + exclusive ownership proven by `docs/examples/09-universe-port.sh`.
 3. **PA deployments + async PvP** — fighters/mines, combat against left-behind assets, alliances.
 4. **Smuggler's shared economy** + **Handler shared alert / intercepts / sabotage**.
 5. **Leaderboards** generalized from the Handler standings file to all three games.
