@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-08 (The Handler: field pressure; toolchain unblocked 6.0.52 → 6.1.5)
+
+**The Handler grows stakes, and the crypto blocker is gone.** This release deepens The Handler's single-player loop with a **field-pressure** system and lifts the cyrius toolchain cap that had deferred 1.2.0 bite 2+.
+
+### Added
+
+- **The Handler — field pressure** (`src/handler.cyr`). Three mechanics that were modeled in the save format since 1.1.0 (`AG_STRESS`, `AG_COVER`, the `AGS_DEAD` status) are now live gameplay, so the `THDG1` save format is **unchanged and forward/backward compatible**:
+  - **Cover erosion + burnout.** Each day, active agents gain stress (field fatigue) and lose cover. When an agent's cover hits 0 they are **BURNED** (`AGS_DEAD`) — removed from play — and supervisor confidence takes an 8-point hit. A full network collapse can now end a campaign in recall.
+  - **The mole gets people killed.** An unflagged mole compromises the honest agents **sharing its city** (the leak is local): +6 cover wear per day on co-located colleagues. The mole's danger is no longer only the slow confidence bleed — dithering burns your network. If you never catch it, the mole can self-burn (threat ends, but uncaught: no accusation surge).
+  - **Extraction and funding gain teeth.** **Extract** now genuinely *saves* an agent from an impending burn (extracted agents are out of the field and still score half-trust); **Authorize funds** now relieves stress (morale) alongside lifting trust — a second purpose for the budget.
+  - **Roster telemetry.** The roster shows each agent's **cover** and a **HOT** marker at high stress, so burns are foreseeable and the Extract/Fund decision is informed. Dead agents render `[BURNED]`.
+- 4 new unit tests (t124–t127): pure cover-wear math (`th_cover_loss`), mole-co-located burn vs. distant survival + confidence hit, funding stress-relief, and extraction-saves-from-burn-and-still-scores. **123 → 127 tests.**
+
+### Changed
+
+- **Toolchain pin lifted `6.0.52` → `6.1.5`** (`cyrius.cyml [package].cyrius`). The cap at 6.0.52 existed because cyrius **≥ 6.0.53 SIGILL'd the sigil/sha256 crypto path** (fingerprint onward) — the gating dependency for 1.2.0 Persistent Universe bite 2+. **That blocker is resolved on 6.1.x**: the full crypto surface is green — 127/127 unit tests, runtime `keygen`→`register`→`whoami` fingerprint round-trip, and the end-to-end telnet Ed25519 challenge/response login (`welcome, qix` → bound `whoami`) all pass. Concurrency + door smokes re-verified (`08-world-concurrency` no lost updates; all three door games over telnet; board-policy across open/known/admin). Binary grew with the toolchain codegen: clean DCE build **484,184 B (6.0.52) → 654,592 B (6.1.5)** (+170,136 B / +35.2%) — a codegen change across the toolchain span, not an agora source change.
+
+### Notes
+
+- 1.2.0 bite 2+ (Persistent Universe / PA shared galaxy) is now **codegen-unblocked** — the sigil SIGILL is cleared. Resuming it is a fresh re-authoring of the reverted PA-world code per [ADR 0010](docs/adr/0010-persistent-universe.md), with a re-check of the context-dependent array-in-loop codegen on 6.1.x (a faithful minimal probe does not reproduce it).
+
 ## [1.1.0] — 2026-06-07 (door games: Smuggler's Ledger, Port Authority, The Handler)
 
 **agora grows a door.** The classic BBS tradition of in-session text games arrives as a first-class subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three games reachable from any telnet session via `play <game> [practice|solo]`. Each game is a **pure state machine** (renders into a buffer, consumes one input line at a time) — `main.cyr` owns all socket I/O and persistence — so the entire economy / combat / deduction core is unit-tested without binding a port. 80 → **121 tests**; binary 378,456 → **484,184 B** (+105,728 B for the three games + framework). End-to-end telnet smoke drives all three games launch → play → exit.

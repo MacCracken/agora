@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-06-07 (**1.1.0 — door / games subsystem**; ADR 0009 filed; CHANGELOG [1.1.0] + VERSION + three inline main.cyr literals + state.md + roadmap.md + roadmap-future.md + README all synced; `07-play-door.sh` added). Prior: **1.0.0 cut** 2026-05-23 (iron-validated on archaemenid). | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-06-08 (**1.1.1 released** — The Handler field pressure [cover/burnout/mole-local; t124-t127, 127 tests] + toolchain unblock cyrius 6.0.52 → 6.1.5 [sigil SIGILL cleared, crypto verified on 6.1.4 + 6.1.5]. VERSION → 1.1.1; three inline main.cyr literals; CHANGELOG [1.1.1]; state.md + cyrius.cyml + this file synced). Prior: 2026-06-07 (**1.1.0 — door / games subsystem**; ADR 0009 filed). Prior: **1.0.0 cut** 2026-05-23 (iron-validated on archaemenid). | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -45,15 +45,15 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 1.0 cut.** Status pointer: "v1.0.0 shipped, iron-validated on archaemenid; all v1.0 criteria met". Planned-architecture box replaced with the actual 4-source-file architecture; examples + benchmarks links added. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [1.0.0] all entered. [1.0.0] is the release-narrative entry — 18-tag arc summary + v1.0 criteria checkbox + post-1.0 followups. |
+| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → [1.1.1] all entered. [1.0.0] is the release-narrative entry; [1.1.0] door games; **[1.1.1] Handler field pressure + toolchain unblock 6.0.52 → 6.1.5**. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 closeout — 5 telnet-parser benchmarks all within ±2 ns of M1-close baseline (every release between M6 and 0.9.2 was off-hot-path). 0.9.2 row added to per-release history. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-05-23 | ✅ Fresh | `1.0.0`. Bumped via release flow. |
-| `cyrius.cyml` | 2026-05-23 | ✅ Fresh | Toolchain pin `6.0.1`; deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
+| `VERSION` | 2026-06-08 | ✅ Fresh | `1.1.1`. Bumped via release flow. |
+| `cyrius.cyml` | 2026-06-08 | ✅ Fresh | Toolchain pin **`6.1.5`** (lifted from 6.0.52 on 2026-06-08 — sigil/sha256 SIGILL on ≥6.0.53 resolved upstream; verified on 6.1.4 then aligned to 6.1.5 with the local toolchain; see state.md Version table). Deps list grew to 20 stdlib modules at 0.6.0 (added sigil, freelist, bigint, ct for M6 sigil consumption). |
 
 ---
 
@@ -63,7 +63,7 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** 1.0.0 shipped, iron-validated on archaemenid. 80 tests; 378,456 B. Boot guide updated: in-flight slot is now "post-1.0 work — no active cycle". Archived 1.0.0 + 0.9.2 + 0.9.1 + 0.8.0 + 0.7.0 + M6 in-flight notes kept for next-session reference. Verification-hosts table marks archaemenid as validated. |
+| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.1.1 shipped** — Handler field pressure (127 tests) + toolchain pin lifted 6.0.52 → 6.1.5 (sigil SIGILL cleared; bite 2+ now codegen-unblocked). Binary 484,184 → 654,592 B on 6.1.5. Released / Toolchain / Build-artifacts / Tests / In-flight / Recent-shipped / Source-surface / Gate-state rows all synced. |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | Refreshed at 1.0 cut: 1.0.0 row marked ✅; "In progress" section rewritten as **no active cycle**; v1.0 criteria section rewritten with per-criterion ✅ status + verbatim verification outputs. |
 | `roadmap-future.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23 (M1 fourth-bite closeout)** — six unpinned v2.x sovereignty pillars (identity / content-addr / threat-level / topics / self-dist / offline). Pattern adopted from `cyrius/docs/development/roadmap-future.md`. Items pull forward on consumer pressure, not by calendar. |
 

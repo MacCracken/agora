@@ -97,7 +97,8 @@ enum TH {
     TH_PEND     = 120;
     TH_CURSOR   = 128;   # cable-reader index
     TH_MSG      = 136;
-    TH_SIZE     = 144;
+    TH_LASTBURN = 144;   # agents burned on the most recent day rollover
+    TH_SIZE     = 152;
 }
 
 # === Tables ===
@@ -315,6 +316,24 @@ enum THCost {
     TH_EXTRACT_COST = 800;
 }
 
+# === Field pressure (1.1.1) ===
+# Active agents fatigue and lose cover each day. The mole compromises
+# non-mole agents that share its city (the leak is local), so its
+# presence doesn't merely erode confidence — it gets your people
+# killed. Cover at 0 = BURNED (AGS_DEAD). This is what makes Extract a
+# real decision and Funding (stress relief) matter beyond trust.
+enum THWear {
+    TH_STRESS_LO     = 2;     # daily field-fatigue stress gain (min)
+    TH_STRESS_HI     = 6;     # daily field-fatigue stress gain (max)
+    TH_WEAR_LO       = 1;     # baseline cover wear (min)
+    TH_WEAR_HI       = 4;     # baseline cover wear (max)
+    TH_STRESS_HOT    = 60;    # stress at/above this accelerates burn
+    TH_HOT_WEAR      = 3;     # extra cover wear when stressed
+    TH_MOLE_LOCAL    = 6;     # extra cover wear when co-located with the mole
+    TH_BURN_CONF_HIT = 8;     # confidence lost when an agent is burned
+    TH_FUND_RELIEF   = 50;    # credits per 1 point of stress relief on funding
+}
+
 enum THSave {
     TH_SAVE_CAP = 32768;
 }
@@ -402,6 +421,7 @@ fn th_authorize_funds(st, agent, amount): i64 {
     store64(st + TH_BUDGET, load64(st + TH_BUDGET) - amount);
     store64(st + TH_POINTS, load64(st + TH_POINTS) - 1);
     store64(a + AG_TRUST, iclamp(load64(a + AG_TRUST) + amount / 100, 0, 100));
+    store64(a + AG_STRESS, iclamp(load64(a + AG_STRESS) - amount / TH_FUND_RELIEF, 0, 100));
     if (amount > load64(a + AG_PAY) * 3) {
         store64(st + TH_AUDIT, iclamp(load64(st + TH_AUDIT) + 15, 0, 100));
     }
@@ -425,12 +445,70 @@ fn th_accuse(st, agent): i64 {
     return 0;
 }
 
+# === Field pressure ===
+#
+# Pure cover-wear math: baseline wear, plus a penalty when the agent is
+# stressed, plus a penalty when the agent is co-located with the mole.
+# Unit-tested directly (t124) so the burn curve is pinned independent
+# of the PRNG.
+fn th_cover_loss(stress, mole_local, base): i64 {
+    var loss = base;
+    if (stress >= TH_STRESS_HOT) { loss = loss + TH_HOT_WEAR; }
+    if (mole_local == 1)         { loss = loss + TH_MOLE_LOCAL; }
+    return loss;
+}
+
+# 1 if agent i is an honest agent sharing a city with an UNFLAGGED mole
+# (the mole leaks its co-located colleagues to the other side). The
+# mole itself, and everyone once the mole is caught, returns 0.
+fn th_mole_local(st, i): i64 {
+    var mole = load64(st + TH_MOLEIDX);
+    if (mole < 0)  { return 0; }
+    if (i == mole) { return 0; }
+    if (load64(th_agent(st, i) + AG_CITY) == load64(th_agent(st, mole) + AG_CITY)) { return 1; }
+    return 0;
+}
+
+# Advance one day of field pressure on every ACTIVE agent: gain stress,
+# lose cover, and burn (AGS_DEAD) any agent whose cover hits 0. Burning
+# an agent costs supervisor confidence; if the burned agent WAS the
+# mole, the threat ends uncaught (moleidx cleared, no accusation
+# surge). Records the burn count in TH_LASTBURN for the feed. Uses the
+# live PRNG; returns agents burned.
+fn th_field_tick(st): i64 {
+    var rng = st + TH_RNG;
+    var burned = 0;
+    var i = 0;
+    while (i < TH_AGENTS) {
+        var a = th_agent(st, i);
+        if (load64(a + AG_STATUS) == AGS_ACTIVE) {
+            store64(a + AG_STRESS, iclamp(load64(a + AG_STRESS) + rng_range(rng, TH_STRESS_LO, TH_STRESS_HI), 0, 100));
+            var base = rng_range(rng, TH_WEAR_LO, TH_WEAR_HI);
+            var loss = th_cover_loss(load64(a + AG_STRESS), th_mole_local(st, i), base);
+            var cover = load64(a + AG_COVER) - loss;
+            if (cover <= 0) {
+                store64(a + AG_COVER, 0);
+                store64(a + AG_STATUS, AGS_DEAD);
+                store64(st + TH_CONF, iclamp(load64(st + TH_CONF) - TH_BURN_CONF_HIT, 0, 100));
+                if (load64(a + AG_MOLE) == 1) { store64(st + TH_MOLEIDX, 0 - 1); }
+                burned = burned + 1;
+            } else {
+                store64(a + AG_COVER, cover);
+            }
+        }
+        i = i + 1;
+    }
+    store64(st + TH_LASTBURN, burned);
+    return burned;
+}
+
 # === Day rollover ===
 #
 # An unflagged mole slowly erodes supervisor confidence; high audit
 # risk triggers scrutiny that also costs confidence. Confidence at 0 =
-# recalled (loss). Past the quarter = finished. Otherwise refill
-# dispatch points and file the next day's traffic.
+# recalled (loss). Past the quarter = finished. Otherwise field
+# pressure ticks (cover wear + burns), dispatch points refill, and the
+# next day's traffic files.
 fn th_next_day(st): i64 {
     if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); return 0; }
     if (load64(st + TH_MOLEIDX) >= 0) {
@@ -444,6 +522,8 @@ fn th_next_day(st): i64 {
     store64(st + TH_DAY, load64(st + TH_DAY) + 1);
     store64(st + TH_POINTS, TH_DISPATCH_PTS);
     if (load64(st + TH_DAY) > load64(st + TH_MAXDAYS)) { store64(st + TH_OVER, 1); return 0; }
+    th_field_tick(st);
+    if (load64(st + TH_CONF) <= 0) { store64(st + TH_OVER, 2); return 0; }
     th_gen_day(st);
     return 0;
 }
@@ -646,9 +726,14 @@ fn th_render_roster(st, buf, pos): i64 {
         pos = emit_cstr(buf, pos, th_city_name(load64(a + AG_CITY)));
         pos = emit_cstr(buf, pos, "  trust ");
         pos = emit_int(buf, pos, load64(a + AG_TRUST));
+        pos = emit_cstr(buf, pos, "  cov ");
+        pos = emit_int(buf, pos, load64(a + AG_COVER));
         var status = load64(a + AG_STATUS);
+        if (status == AGS_ACTIVE) {
+            if (load64(a + AG_STRESS) >= TH_STRESS_HOT) { pos = emit_cstr(buf, pos, " HOT"); }
+        }
         if (status == AGS_EXTRACTED) { pos = emit_cstr(buf, pos, " [OUT]"); }
-        if (status == AGS_DEAD)      { pos = emit_cstr(buf, pos, " [DEAD]"); }
+        if (status == AGS_DEAD)      { pos = emit_cstr(buf, pos, " [BURNED]"); }
         if (status == AGS_FLAGGED)   { pos = emit_cstr(buf, pos, " [FLAGGED]"); }
         pos = emit_crlf(buf, pos);
         i = i + 1;
@@ -837,7 +922,11 @@ fn th_feed_main(st, line, len): i64 {
     if (k == 101) {                                                   # e end day
         th_next_day(st);
         if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
-        th_msg(st, "A new day. Overnight traffic filed.");
+        if (load64(st + TH_LASTBURN) > 0) {
+            th_msg(st, "An agent was BURNED overnight. Cover failed. Check the roster.");
+        } else {
+            th_msg(st, "A new day. Overnight traffic filed.");
+        }
         return 0;
     }
     th_msg(st, "Unknown command.");

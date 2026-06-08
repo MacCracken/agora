@@ -28,7 +28,8 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 | **0.9.2** | Perf re-run + final 1.0 closeout sweep (G) — CLAUDE.md "Closeout Pass" §1-11 | ✅ 2026-05-23 |
 | **1.0.0** | Iron-validated on archaemenid LAN — criterion #3 telnet round-trip + criterion #4 8-user fanout both green | ✅ 2026-05-23 |
 | **1.1.0** | Door / games subsystem — Smuggler's Ledger + Port Authority + The Handler (ADR 0009); `play` verb + MODE_DOOR | ✅ 2026-06-07 |
-| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 bite 1 done; **bite 2+ deferred to a future release** (sigil/cyrius toolchain — see In progress) |
+| **1.1.1** | The Handler **field pressure** (single-player depth: cover erosion + agent burnout + mole-local leak; Extract/Fund now load-bearing) + **toolchain unblock** cyrius 6.0.52 → 6.1.5 (sigil SIGILL cleared) | ✅ 2026-06-08 |
+| **1.2.0** | **Persistent Universe** — shared-world multiplayer for the door games (ADR 0010): flock'd world transactions, PA shared galaxy + PvP, shared economy, Handler intercepts/sabotage, leaderboards | 🚧 bite 1 done; **bite 2+ codegen-unblocked** (sigil SIGILL cleared on 6.1.x) — fresh re-authoring task, see In progress |
 
 ---
 

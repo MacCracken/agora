@@ -2821,6 +2821,80 @@ fn t123_world_txn_roundtrip(): i64 {
     return 0;
 }
 
+# === 1.1.1 The Handler field pressure (t124-t127) ===
+
+# Pure cover-wear math: baseline, stressed, mole-co-located, and the
+# stressed+local worst case. Pins the burn curve independent of rng.
+fn t124_th_cover_loss(): i64 {
+    if (th_cover_loss(0, 0, 2) != 2)                                          { test_fail("t124_th_cover_loss", "base"); return 1; }
+    if (th_cover_loss(TH_STRESS_HOT, 0, 2) != 2 + TH_HOT_WEAR)               { test_fail("t124_th_cover_loss", "hot");  return 1; }
+    if (th_cover_loss(0, 1, 2) != 2 + TH_MOLE_LOCAL)                         { test_fail("t124_th_cover_loss", "local"); return 1; }
+    if (th_cover_loss(TH_STRESS_HOT, 1, 2) != 2 + TH_HOT_WEAR + TH_MOLE_LOCAL){ test_fail("t124_th_cover_loss", "both"); return 1; }
+    test_pass("t124_th_cover_loss");
+    return 0;
+}
+
+# An honest agent sharing the mole's city burns; a distant honest agent
+# survives. Confidence drops on the burn. mole_local fires only while
+# the mole is unflagged.
+fn t125_th_mole_local_burn(): i64 {
+    var st = th_new(555, DOOR_SOLO, TH_DEF_DAYS);
+    var i = 0;
+    while (i < TH_AGENTS) { store64(th_agent(st, i) + AG_MOLE, 0); store64(th_agent(st, i) + AG_STATUS, AGS_ACTIVE); i = i + 1; }
+    # agent 0 = mole in city 1; agent 1 honest co-located; agent 2 honest distant
+    store64(th_agent(st, 0) + AG_MOLE, 1);
+    store64(st + TH_MOLEIDX, 0);
+    store64(th_agent(st, 0) + AG_CITY, 1);
+    store64(th_agent(st, 1) + AG_CITY, 1);
+    store64(th_agent(st, 2) + AG_CITY, 3);
+    if (th_mole_local(st, 1) != 1) { test_fail("t125_th_mole_local_burn", "local not 1"); return 1; }
+    if (th_mole_local(st, 2) != 0) { test_fail("t125_th_mole_local_burn", "distant not 0"); return 1; }
+    if (th_mole_local(st, 0) != 0) { test_fail("t125_th_mole_local_burn", "mole self local"); return 1; }
+    # low cover on the co-located agent, high on the distant one
+    store64(th_agent(st, 1) + AG_COVER, 6);
+    store64(th_agent(st, 2) + AG_COVER, 95);
+    var conf0 = load64(st + TH_CONF);
+    th_field_tick(st);
+    if (load64(th_agent(st, 1) + AG_STATUS) != AGS_DEAD)   { test_fail("t125_th_mole_local_burn", "colocated survived"); return 1; }
+    if (load64(th_agent(st, 2) + AG_STATUS) != AGS_ACTIVE) { test_fail("t125_th_mole_local_burn", "distant burned");     return 1; }
+    if (load64(st + TH_LASTBURN) < 1)                      { test_fail("t125_th_mole_local_burn", "lastburn");           return 1; }
+    if (load64(st + TH_CONF) >= conf0)                     { test_fail("t125_th_mole_local_burn", "conf not hit");       return 1; }
+    test_pass("t125_th_mole_local_burn");
+    return 0;
+}
+
+# Funding an agent relieves stress (morale), not just trust.
+fn t126_th_fund_relieves_stress(): i64 {
+    var st = th_new(606, DOOR_SOLO, TH_DEF_DAYS);
+    store64(th_agent(st, 2) + AG_STATUS, AGS_ACTIVE);
+    store64(th_agent(st, 2) + AG_STRESS, 90);
+    store64(st + TH_BUDGET, 9000);
+    store64(st + TH_POINTS, 4);
+    if (th_authorize_funds(st, 2, 1000) != 0)            { test_fail("t126_th_fund_relieves_stress", "fund rc"); return 1; }
+    if (load64(th_agent(st, 2) + AG_STRESS) >= 90)       { test_fail("t126_th_fund_relieves_stress", "stress");  return 1; }
+    test_pass("t126_th_fund_relieves_stress");
+    return 0;
+}
+
+# Extraction pulls an agent out of the field, so field pressure can no
+# longer burn them — and an extracted agent still scores (half trust).
+fn t127_th_extract_saves_from_burn(): i64 {
+    var st = th_new(707, DOOR_SOLO, TH_DEF_DAYS);
+    store64(st + TH_MOLEIDX, 0 - 1);
+    var i = 0;
+    while (i < TH_AGENTS) { store64(th_agent(st, i) + AG_MOLE, 0); store64(th_agent(st, i) + AG_STATUS, AGS_ACTIVE); store64(th_agent(st, i) + AG_COVER, 2); i = i + 1; }
+    store64(th_agent(st, 0) + AG_TRUST, 80);
+    store64(st + TH_BUDGET, 9000);
+    store64(st + TH_POINTS, 4);
+    if (th_order_extract(st, 0) != 0)                    { test_fail("t127_th_extract_saves_from_burn", "extract rc"); return 1; }
+    th_field_tick(st);
+    th_field_tick(st);
+    if (load64(th_agent(st, 0) + AG_STATUS) != AGS_EXTRACTED) { test_fail("t127_th_extract_saves_from_burn", "not safe"); return 1; }
+    if (th_score(st) <= 0)                               { test_fail("t127_th_extract_saves_from_burn", "no score"); return 1; }
+    test_pass("t127_th_extract_saves_from_burn");
+    return 0;
+}
+
 
 fn main(): i64 {
     alloc_init();
@@ -2951,6 +3025,10 @@ fn main(): i64 {
     t119_th_nextday_score();
     t120_th_save_load();
     t121_th_feed_render();
+    t124_th_cover_loss();
+    t125_th_mole_local_burn();
+    t126_th_fund_relieves_stress();
+    t127_th_extract_saves_from_burn();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
