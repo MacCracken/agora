@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — agora
 
-> **Last refresh**: 2026-06-08 (**1.3.0 Chat area + Eliza CUT** — all 3 ADR 0011 bites: the chat surface [`src/chat.cyr`, `MODE_CHAT`, seq-number live-tail], Eliza [`src/eliza.cyr`, `play eliza` door + private `/eliza` side-channel], closeout. VERSION → 1.3.0; three inline main.cyr literals; CHANGELOG [1.3.0]; **new ADR 0011**; toolchain pin 6.1.5 → 6.1.9; state.md + roadmap.md + roadmap-future.md synced; 155 tests; 730,792 B; **new smokes 11**[chat]**/12**[eliza]. Pre-cut multi-agent adversarial review fixed 3 defects. Roadmap: **1.3.1 PARRY**, **1.4.0 Descent link**, **QUEST** [LORD homage door] all queued. Earlier same day: **1.2.0 Persistent Universe** [ADR 0010]). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-06-08 (**1.3.1 PARRY CUT** — Colby's 1972 paranoid chatbot as Eliza's foil [`src/parry.cyr`, affect engine + Mafia/bookie delusion story]; `play parry` + private `/parry` [chat couch generalized to `g_chat_bot`]. VERSION → 1.3.1; three inline main.cyr literals; CHANGELOG [1.3.1]; state.md + roadmap.md synced; 160 tests; 752,240 B; **new smoke 13-parry.sh**. Pre-cut review verified the affect model faithful + fixed one rotation defect. Next: **1.3.2 QUEST**, **1.3.3 Jabberwacky**. Earlier same day: **1.3.0 Chat area + Eliza CUT** — all 3 ADR 0011 bites: the chat surface [`src/chat.cyr`, `MODE_CHAT`, seq-number live-tail], Eliza [`src/eliza.cyr`, `play eliza` door + private `/eliza` side-channel], closeout. VERSION → 1.3.0; three inline main.cyr literals; CHANGELOG [1.3.0]; **new ADR 0011**; toolchain pin 6.1.5 → 6.1.9; state.md + roadmap.md + roadmap-future.md synced; 155 tests; 730,792 B; **new smokes 11**[chat]**/12**[eliza]. Pre-cut multi-agent adversarial review fixed 3 defects. Roadmap: **1.3.1 PARRY**, **1.4.0 Descent link**, **QUEST** [LORD homage door] all queued. Earlier same day: **1.2.0 Persistent Universe** [ADR 0010]). Prior: 2026-06-07 (**1.1.0 — door / games**; ADR 0009). | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`agora`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION). Per-stdlib-dep docs live in their own repos and are not audited here.
 >
 > **Convention adopted from cyrius** (2026-05-23): pattern from `cyrius/docs/doc-health.md`, scaled down for agora's early-stage tree (~12 markdown files vs. cyrius's ~105). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), the doc-health ledger is technically earned past ~30 docs — agora scaffolds it early to set the convention from day one and keep drift visible while the surface is small.
@@ -45,14 +45,14 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-23 | ✅ Fresh | **Rewritten at 1.0 cut.** Status pointer: "v1.0.0 shipped, iron-validated on archaemenid; all v1.0 criteria met". Planned-architecture box replaced with the actual 4-source-file architecture; examples + benchmarks links added. |
-| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → **[1.3.0]** entered. [1.3.0] = Chat area + Eliza (ADR 0011) + toolchain 6.1.5→6.1.9 + the review-fix Fixed section; [1.2.0] Persistent Universe (ADR 0010); [1.1.1] Handler field pressure; [1.1.0] door games; [1.0.0] release-narrative. |
+| `CHANGELOG.md` | 2026-06-08 | ✅ Fresh | **Source of truth per CLAUDE.md.** [0.1.0] → **[1.3.1]** entered. [1.3.1] = PARRY (affect-engine chatbot) + couch generalization + review-fix; [1.3.0] Chat area + Eliza (ADR 0011) + toolchain 6.1.5→6.1.9; [1.2.0] Persistent Universe (ADR 0010); [1.1.x] door games; [1.0.0] release-narrative. |
 | `BENCHMARKS.md` (root) | 2026-05-23 | ✅ Fresh | Refreshed at 0.9.2 closeout — 5 telnet-parser benchmarks all within ±2 ns of M1-close baseline (every release between M6 and 0.9.2 was off-hot-path). 0.9.2 row added to per-release history. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Durable rules. Volatile state delegated to `docs/development/state.md`. Per `example_claude.md` template. |
 | `CONTRIBUTING.md` | 2026-05-23 | ✅ Fresh | Initial scaffold. Refresh when contributor workflow stabilizes post-M1. |
 | `SECURITY.md` | 2026-05-23 | ✅ Fresh | Initial scaffold (reporting policy + scope). Audit findings go in `docs/audit/`. |
 | `CODE_OF_CONDUCT.md` | 2026-05-23 | ✅ Fresh | Standard first-party scaffold. |
 | `LICENSE` | 2026-05-23 | ✅ Fresh | GPL-3.0-only. |
-| `VERSION` | 2026-06-08 | ✅ Fresh | `1.3.0`. Bumped via release flow. |
+| `VERSION` | 2026-06-08 | ✅ Fresh | `1.3.1`. Bumped via release flow. |
 | `cyrius.cyml` | 2026-06-08 | ✅ Fresh | Toolchain pin **`6.1.9`** (realigned 6.1.5 → 6.1.9 at the 1.3.0 cut; earlier lifted from the 6.0.52 sigil-SIGILL cap; see state.md Version table). Deps list = 20 stdlib modules (no new deps at 1.3.0 — chat + Eliza are pure). |
 
 ---
@@ -63,8 +63,8 @@ Numbers exact post-0.9.1; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.3.0 CUT** — Chat area + Eliza (155 tests; 730,792 B; pin 6.1.9). Refresh line / Released / Toolchain / Build-artifacts / Tests / In-flight (3-bite summary + 1.3.1/1.4.0/QUEST next directions) / Recent-shipped / Source-surface (+chat.cyr, +eliza.cyr) rows synced. |
-| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: **1.3.0 ✅**, **new 1.3.1 PARRY** (planned), 1.4.0 Descent link (planned). "In progress" → no active cycle (1.3.0 shipped). Planned section + the PARRY note (descriptor-refactor first step). |
+| `state.md` | 2026-06-08 | ✅ Fresh | **Rotates every release.** **1.3.1 CUT** — PARRY (160 tests; 752,240 B). Refresh line / Released / Build-artifacts / Tests / In-flight (PARRY summary + 1.3.2 QUEST / 1.3.3 Jabberwacky next) / Recent-shipped / Source-surface (+parry.cyr) rows synced. |
+| `roadmap.md` | 2026-06-08 | ✅ Fresh | Release table: **1.3.1 ✅ PARRY**, **new 1.3.2 QUEST** + **1.3.3 Jabberwacky** (planned), 1.4.0 Descent link. "In progress" → 1.3.2 QUEST next. |
 | `roadmap-future.md` | 2026-06-08 | ✅ Fresh | **Touched at 1.3.0** — added § **Chatbot personalities** (ALICE / Racter / MegaHAL / Jabberwacky beyond Eliza+PARRY) and the **QUEST** LORD-homage door spec under § Door games (full 12-level Great-Work arc + Emerald-Tablet spine). Plus the original six unpinned v2.x sovereignty pillars. |
 
 Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-model.md` (when M6 auth is in scope), `performance.md` (when M1 close adds bench numbers worth narrating), `issues/` (one file per deferred bug).
@@ -126,6 +126,7 @@ Added when earned: `process-notes.md` (per-repo workflow specifics), `threat-mod
 | `10-leaderboard.sh` | 2026-06-08 | ✅ Fresh | **New at 1.2.0 bite 5.** Logs in, plays Port Authority solo to the close of the quarter, leaves (posting the score), then asserts `scores port` lists the run. Proves the cross-game leaderboard end-to-end. |
 | `11-chat.sh` | 2026-06-08 | ✅ Fresh | **New at 1.3.0 bite 1.** Two logged-in sessions (sigil challenge/response) join `#lobby`: asserts session B sees A's line in **scrollback** (cross-session delivery via the `flock`'d transcript) AND A sees B's line via the **live-tail poll tick**. Proves the ADR 0011 chat interleaving over the wire. |
 | `12-eliza.sh` | 2026-06-08 | ✅ Fresh | **New at 1.3.0 bite 2.** Drives both Eliza surfaces: the `play eliza` door (no login) decomposes "I am sad" → "How long have you been sad?"; the private `/eliza` side-channel answers in-chat AND the private line is asserted **absent** from the room transcript (privacy guarantee). |
+| `13-parry.sh` | 2026-06-08 | ✅ Fresh | **New at 1.3.1.** Drives both PARRY surfaces: the `play parry` door answers a neutral line calmly, then a Mafia "flare" launches the delusion story (affect-gated); the private `/parry` side-channel answers in-chat AND off the room transcript. |
 
 ---
 

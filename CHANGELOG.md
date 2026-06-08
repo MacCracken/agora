@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-06-08 (PARRY: the paranoid foil to Eliza)
+
+**Eliza gets a sparring partner.** PARRY (Kenneth Colby, 1972) joins as agora's second chatbot — and where Eliza is stateless input→template reflection, PARRY is **affect-driven**: it carries internal **fear / anger / mistrust** that decays toward a wary baseline, spikes when provoked, and *gates* which response it gives. Touch one of its delusion "flare" topics (the Mafia, his bookie, the gambling debt, being watched, the police) and it stops answering and starts telling its paranoid story. Reachable the same two ways as Eliza: a `play parry` door and a private `/parry` chat side-channel. No new dependencies. 155 → **160 tests**; 730,792 B → **752,240 B**.
+
+### Added
+
+- **PARRY** (`src/parry.cyr`) — Colby's 1972 paranoid chatbot as a pure module. It **reuses the ELIZA text primitives** (`ez_normalize` / `ez_word_is` / `ez_skip_sp` / `ez_word_end` / `ez_puts` / `ez_canned` / `ez_fill` / `ez_is_quit`) and adds the machinery ELIZA lacks: an **affect-state struct** (fear/anger/mistrust, sticky nonzero mistrust), a per-turn **input classifier** (benevolent / neutral / malevolent, with insult / threat / probe / mock / control sub-signals and HOT/WARM delusion "flare" topics), **decay-then-delta** affect dynamics, **mood-gated dispatch** (calm / wary / fearful / hostile), and an **8-beat delusion story** (debt → bookie → mob connection → threat → surveillance → seeking help → crooked cops → confinement) with a latch + a steer-back that resists topic changes without losing its place. Reachable as a `play parry` **door** (practice-only) and a private **`/parry`** chat side-channel. Unit-tested t156–t160; both wire surfaces proven by `13-parry.sh`.
+- **Chat couch generalized** — the private chatbot side-channel was generalized from a single `g_chat_eliza` flag to a `g_chat_bot` id (0 none / 1 Eliza / 2 Parry) with `chat_bot_state` / `chat_bot_feed` / `chat_bot_name` helpers and a `/parry` command, so `/eliza` and `/parry` coexist on one couch (both bots keep their response buffer at the same struct offset, so the couch reads either uniformly). The privacy guarantee (couch input never reaches the room transcript) is preserved for both.
+
+### Fixed
+
+- Pre-release adversarial review (multi-agent, each finding verified; the affect model itself was checked and confirmed faithful) caught one real rotation defect: PARRY's probe-deflect gate advanced its `SLOT_PROBE` cycle counter twice per turn and tested a different value than it used to select the phrasing. Now a single counter tick gates and selects.
+
 ## [1.3.0] — 2026-06-08 (Chat area + Eliza: the synchronous public-assembly surface)
 
 **agora gets a live multi-user chat room and its first inhabitant.** [ADR 0011](docs/adr/0011-chat-area.md) adds the *synchronous* public-assembly surface the BBS was missing — the classic teleconference / CB-simulator — built entirely on the 1.2.0 `flock`'d shared-disk discipline (no new concurrency model, no new dependencies). **Eliza** (Weizenbaum's 1966 DOCTOR) lands as a pure-module chatbot reachable two ways: a `play eliza` door and a private `/eliza` side-channel inside chat. 141 → **155 tests**; 678,776 B → **730,792 B** (clean DCE; on the cyrius 6.1.5 → 6.1.9 toolchain — the bump is the chat + Eliza source plus the toolchain codegen delta).

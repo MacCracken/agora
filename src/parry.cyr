@@ -1,0 +1,495 @@
+# parry.cyr — PARRY (Kenneth Colby, 1972) as a pure-module door + chat
+# side-channel (1.3.1, ADR 0011 lineage).
+#
+# PARRY is the paranoid foil to ELIZA. Where ELIZA is stateless
+# input→template reflection, PARRY is AFFECT-DRIVEN: it carries internal
+# emotional state (fear / anger / mistrust) that decays toward a wary
+# baseline, spikes when provoked, and *gates* which response it gives.
+# Touch one of its delusion "flare" topics (the Mafia, his bookie, the
+# gambling debt, being watched, the police) and it stops answering and
+# starts telling its paranoid story.
+#
+# Architecture: this module REUSES the ELIZA engine's pure text
+# primitives — `ez_normalize`, `ez_word_is`, `ez_skip_sp`,
+# `ez_word_end`, `ez_puts`, `ez_canned`, `ez_fill`, `ez_is_quit`
+# (src/eliza.cyr, included upstream) — and adds the new machinery PARRY
+# needs and ELIZA lacks: an affect-state struct, a per-turn input
+# classifier, mood-gated dispatch, and a story-progression latch. The
+# constants below (scales, baselines, deltas, thresholds) are a
+# reconstructed engineering model — Colby published the *mechanism*
+# (the three affect variables, intent valence, flare topics, the
+# delusion, mood-driven output), not a constants table.
+#
+# Reachable two ways (mirrors Eliza): a `play parry` DOOR and a private
+# `/parry` chat side-channel. State layout keeps the response buffer +
+# length at the SAME offsets as Eliza (8 / 16) so main.cyr's chat couch
+# reads either bot uniformly. Pure: no socket, no disk — unit-testable.
+#
+# Deps resolved upstream: eliza.cyr (text primitives), door.cyr
+# (emit_cstr / emit_crlf), lib/* (strlen / memcpy / memeq / load8 /
+# store8 / alloc).
+
+# === Constants ===
+
+enum PyCap {
+    PY_IN_MAX        = 256;    # normalized-input ceiling (adversarial bound)
+    PY_RESP_CAP      = 1024;   # response buffer — `out` must be >= this
+    PY_DEF_DAYS      = 1;      # door contract arg (unused)
+    PY_AFF_MAX       = 20;     # affect ceiling
+    PY_FEAR_BASE     = 1;      # resting fear
+    PY_ANGER_BASE    = 1;      # resting anger
+    PY_MISTRUST_BASE = 4;      # resting suspicion — NONZERO: PARRY starts wary
+    PY_DECAY_FAST    = 2;      # fear/anger relax per turn (reactive)
+    PY_DECAY_SLOW    = 1;      # mistrust relaxes slowly (sticky paranoia)
+    PY_WARY_TH       = 6;      # mistrust >= -> wary
+    PY_FEARFUL_TH    = 10;     # fear >= -> fearful
+    PY_HOSTILE_TH    = 10;     # anger >= -> hostile
+    PY_STORY_TH      = 10;     # mistrust >= -> the delusion latches
+    PY_STORY_BEATS   = 8;      # number of narrative beats
+}
+
+# Per-turn classifier flag bits (OR'd over the input's words).
+enum PyFlag {
+    PF_BENE       = 1;     # benevolent / reassuring
+    PF_INSULT     = 2;     # mocked-as-crazy, slurs
+    PF_THREAT     = 4;     # menace / force
+    PF_PROBE      = 8;     # invasive questioning ("why do you want to know")
+    PF_MOCK       = 16;    # disbelief / ridicule
+    PF_CONTROL    = 32;    # "calm down" / commands (loss-of-autonomy trigger)
+    PF_FLARE_HOT  = 64;    # the delusion core: Mafia / bookie / watched
+    PF_FLARE_WARM = 128;   # the on-ramp: gambling / police
+}
+
+# Mood (derived from the affect vector each turn).
+enum PyMood {
+    MOOD_CALM    = 0;
+    MOOD_WARY    = 1;
+    MOOD_FEARFUL = 2;
+    MOOD_HOSTILE = 3;
+}
+
+# Rotation-counter slots (per-mood + story/steer/probe cyclic indices).
+enum PySlot {
+    SLOT_CALM    = 0;
+    SLOT_WARY    = 1;
+    SLOT_FEARFUL = 2;
+    SLOT_HOSTILE = 3;
+    SLOT_STORY   = 4;
+    SLOT_STEER   = 5;
+    SLOT_PROBE   = 6;
+    PY_NCTRS     = 7;
+}
+
+# Affect-state struct (8-byte i64 fields). PY_RESP / PY_RESPLEN share
+# Eliza's offsets (8 / 16) so the chat couch reads both uniformly.
+enum PY {
+    PY_OVER     = 0;       # 0 talking, 1 ended
+    PY_RESP     = 8;       # ptr -> response buffer (== EZ_RESP)
+    PY_RESPLEN  = 16;      # response length (== EZ_RESPLEN)
+    PY_FEAR     = 24;
+    PY_ANGER    = 32;
+    PY_MISTRUST = 40;
+    PY_STORYIDX = 48;      # next delusion beat to tell (0..PY_STORY_BEATS)
+    PY_STORYON  = 56;      # 1 once the delusion has latched
+    PY_CTRS     = 64;      # ptr -> i64[PY_NCTRS] rotation counters
+    PY_TURNS    = 72;
+    PY_SIZE     = 80;
+}
+
+# === Input classifier (built on the reused keyword-scan idiom) ===
+
+# Flag bits contributed by one word.
+fn py_word_bits(w, wl): i64 {
+    var b = 0;
+    # benevolent / reassuring
+    if (ez_word_is(w, wl, "understand") != 0) { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "sorry") != 0)      { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "help") != 0)       { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "friend") != 0)     { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "trust") != 0)      { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "okay") != 0)       { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "ok") != 0)         { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "safe") != 0)       { b = b | PF_BENE; }
+    if (ez_word_is(w, wl, "care") != 0)       { b = b | PF_BENE; }
+    # insult / called-crazy
+    if (ez_word_is(w, wl, "crazy") != 0)      { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "paranoid") != 0)   { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "sick") != 0)       { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "insane") != 0)     { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "nuts") != 0)       { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "stupid") != 0)     { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "idiot") != 0)      { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "liar") != 0)       { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "lying") != 0)      { b = b | PF_INSULT; }
+    if (ez_word_is(w, wl, "delusional") != 0) { b = b | PF_INSULT; }
+    # threat / menace
+    if (ez_word_is(w, wl, "kill") != 0)       { b = b | PF_THREAT; }
+    if (ez_word_is(w, wl, "hurt") != 0)       { b = b | PF_THREAT; }
+    if (ez_word_is(w, wl, "arrest") != 0)     { b = b | PF_THREAT; }
+    if (ez_word_is(w, wl, "jail") != 0)       { b = b | PF_THREAT; }
+    if (ez_word_is(w, wl, "threaten") != 0)   { b = b | PF_THREAT; }
+    if (ez_word_is(w, wl, "warn") != 0)       { b = b | PF_THREAT; }
+    # probe (invasive questioning)
+    if (ez_word_is(w, wl, "why") != 0)        { b = b | PF_PROBE; }
+    if (ez_word_is(w, wl, "who") != 0)        { b = b | PF_PROBE; }
+    if (ez_word_is(w, wl, "where") != 0)      { b = b | PF_PROBE; }
+    if (ez_word_is(w, wl, "tell") != 0)       { b = b | PF_PROBE; }
+    if (ez_word_is(w, wl, "explain") != 0)    { b = b | PF_PROBE; }
+    # mock / disbelief
+    if (ez_word_is(w, wl, "ha") != 0)         { b = b | PF_MOCK; }
+    if (ez_word_is(w, wl, "haha") != 0)       { b = b | PF_MOCK; }
+    if (ez_word_is(w, wl, "lol") != 0)        { b = b | PF_MOCK; }
+    if (ez_word_is(w, wl, "joking") != 0)     { b = b | PF_MOCK; }
+    if (ez_word_is(w, wl, "kidding") != 0)    { b = b | PF_MOCK; }
+    # control / command (loss of autonomy)
+    if (ez_word_is(w, wl, "calm") != 0)       { b = b | PF_CONTROL; }
+    if (ez_word_is(w, wl, "relax") != 0)      { b = b | PF_CONTROL; }
+    if (ez_word_is(w, wl, "settle") != 0)     { b = b | PF_CONTROL; }
+    if (ez_word_is(w, wl, "must") != 0)       { b = b | PF_CONTROL; }
+    if (ez_word_is(w, wl, "reasonable") != 0) { b = b | PF_CONTROL; }
+    # flare HOT — the delusion core
+    if (ez_word_is(w, wl, "mafia") != 0)      { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "mob") != 0)        { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "syndicate") != 0)  { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "underworld") != 0) { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "gangster") != 0)   { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "gangsters") != 0)  { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "bookie") != 0)     { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "debt") != 0)       { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "owe") != 0)        { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "watching") != 0)   { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "watched") != 0)    { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "following") != 0)  { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "followed") != 0)   { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "spying") != 0)     { b = b | PF_FLARE_HOT; }
+    if (ez_word_is(w, wl, "bugged") != 0)     { b = b | PF_FLARE_HOT; }
+    # flare WARM — the on-ramp
+    if (ez_word_is(w, wl, "bet") != 0)        { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "betting") != 0)    { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "gamble") != 0)     { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "gambling") != 0)   { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "horse") != 0)      { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "horses") != 0)     { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "track") != 0)      { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "races") != 0)      { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "police") != 0)     { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "cops") != 0)       { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "cop") != 0)        { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "fbi") != 0)        { b = b | PF_FLARE_WARM; }
+    if (ez_word_is(w, wl, "detective") != 0)  { b = b | PF_FLARE_WARM; }
+    return b;
+}
+
+# OR the flag bits across every word in the normalized input.
+fn py_scan_flags(norm, nlen): i64 {
+    var bits = 0;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= nlen) { go = 0; continue; }
+        if ((load8(norm + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(norm, i, nlen);
+        bits = bits | py_word_bits(norm + i, j - i);
+        i = j;
+    }
+    return bits;
+}
+
+# === Affect update ===
+
+fn py_clampv(v): i64 {
+    if (v < 0)          { return 0; }
+    if (v > PY_AFF_MAX) { return PY_AFF_MAX; }
+    return v;
+}
+
+# Relax one affect toward its baseline by `rate`.
+fn py_decay(st, off, base, rate): i64 {
+    var v = load64(st + off);
+    if (v > base) {
+        v = v - rate;
+        if (v < base) { v = base; }
+    }
+    store64(st + off, v);
+    return 0;
+}
+
+# One turn of affect dynamics: decay toward baseline, then apply the
+# classifier's deltas, then clamp. Magnitudes are the reconstructed
+# model (see header) — the SIGNS + relative sizes are what reproduce
+# PARRY: malevolence + flares spike, benevolence calms, mistrust is
+# sticky.
+fn py_apply_affect(st, bits): i64 {
+    py_decay(st, PY_FEAR,     PY_FEAR_BASE,     PY_DECAY_FAST);
+    py_decay(st, PY_ANGER,    PY_ANGER_BASE,    PY_DECAY_FAST);
+    py_decay(st, PY_MISTRUST, PY_MISTRUST_BASE, PY_DECAY_SLOW);
+
+    var df = 0;
+    var da = 0;
+    var dm = 0;
+    var bene = 0;
+    if ((bits & PF_BENE) != 0) { bene = 1; }
+    var mal = 0;
+    if ((bits & PF_INSULT) != 0)  { mal = 1; }
+    if ((bits & PF_THREAT) != 0)  { mal = 1; }
+    if ((bits & PF_MOCK) != 0)    { mal = 1; }
+    if ((bits & PF_CONTROL) != 0) { mal = 1; }
+
+    # intent base
+    if (mal == 1) {
+        df = df + 1; da = da + 2; dm = dm + 2;
+    } else {
+        if (bene == 1) { df = df - 2; da = da - 2; dm = dm - 1; }
+        else           { df = df - 1; da = da - 1; }
+    }
+    # malevolent sub-flags (additive)
+    if ((bits & PF_INSULT) != 0)  { da = da + 3; dm = dm + 1; }
+    if ((bits & PF_THREAT) != 0)  { df = df + 4; da = da + 1; dm = dm + 2; }
+    if ((bits & PF_PROBE) != 0)   { df = df + 1; dm = dm + 3; }   # "why do you ask"
+    if ((bits & PF_MOCK) != 0)    { df = df + 1; da = da + 3; dm = dm + 2; }
+    if ((bits & PF_CONTROL) != 0) { df = df + 3; da = da + 1; dm = dm + 3; }
+    # flares (spike regardless of intent — they touch the delusion)
+    if ((bits & PF_FLARE_HOT) != 0)  { df = df + 5; da = da + 2; dm = dm + 5; }
+    if ((bits & PF_FLARE_WARM) != 0) { df = df + 2; da = da + 1; dm = dm + 3; }
+
+    store64(st + PY_FEAR,     py_clampv(load64(st + PY_FEAR) + df));
+    store64(st + PY_ANGER,    py_clampv(load64(st + PY_ANGER) + da));
+    store64(st + PY_MISTRUST, py_clampv(load64(st + PY_MISTRUST) + dm));
+    return 0;
+}
+
+# Derive the mood from the affect vector. Hostile/fearful both high →
+# break by which dominates (lash out vs shut down).
+fn py_mood(fear, anger, mistrust): i64 {
+    if (anger >= PY_HOSTILE_TH) { if (anger >= fear) { return MOOD_HOSTILE; } }
+    if (fear >= PY_FEARFUL_TH)  { return MOOD_FEARFUL; }
+    if (mistrust >= PY_WARY_TH) { return MOOD_WARY; }
+    return MOOD_CALM;
+}
+
+# === Rotation counters ===
+
+fn py_next(st, slot): i64 {
+    var ctrs = load64(st + PY_CTRS);
+    var c = load64(ctrs + slot * 8);
+    store64(ctrs + slot * 8, c + 1);
+    return c;
+}
+
+# === Response pools (cyclic; original-phrasing homage) ===
+
+fn py_calm(rot, out): i64 {
+    var m = rot % 3;
+    if (m == 0) { return ez_canned(out, "I'm getting by."); }
+    if (m == 1) { return ez_canned(out, "What do you want?"); }
+    return ez_canned(out, "I don't have much to say to you.");
+}
+
+fn py_wary(rot, out): i64 {
+    var m = rot % 4;
+    if (m == 0) { return ez_canned(out, "Why do you ask?"); }
+    if (m == 1) { return ez_canned(out, "What are you getting at?"); }
+    if (m == 2) { return ez_canned(out, "I don't see why that's your business."); }
+    return ez_canned(out, "People who ask that usually have a reason.");
+}
+
+fn py_fearful(rot, out): i64 {
+    var m = rot % 4;
+    if (m == 0) { return ez_canned(out, "I'd rather not get into that here."); }
+    if (m == 1) { return ez_canned(out, "It isn't safe to talk about that."); }
+    if (m == 2) { return ez_canned(out, "Can we change the subject?"); }
+    return ez_canned(out, "You're making me nervous.");
+}
+
+fn py_hostile(rot, out): i64 {
+    var m = rot % 4;
+    if (m == 0) { return ez_canned(out, "Don't tell me what to think."); }
+    if (m == 1) { return ez_canned(out, "How do I know you're not one of them?"); }
+    if (m == 2) { return ez_canned(out, "You're just like the rest of them."); }
+    return ez_canned(out, "I don't have to answer to you.");
+}
+
+fn py_probe_deflect(rot, out): i64 {
+    var m = rot % 3;
+    if (m == 0) { return ez_canned(out, "Why do you want to know that?"); }
+    if (m == 1) { return ez_canned(out, "What's it to you?"); }
+    return ez_canned(out, "You ask a lot of questions for someone I just met.");
+}
+
+fn py_steerback(rot, out): i64 {
+    var m = rot % 3;
+    if (m == 0) { return ez_canned(out, "I don't care about that. What I'm telling you is they're after me."); }
+    if (m == 1) { return ez_canned(out, "Forget that -- are you even listening to what I'm saying?"); }
+    return ez_canned(out, "That's not important. What matters is what's being done to me.");
+}
+
+# The delusion narrative: ordered beats (debt -> bookie -> connection ->
+# threat -> surveillance -> seeking help -> betrayal -> confinement).
+fn py_beat(idx, rot, out): i64 {
+    var v = rot % 2;
+    if (idx == 0) {
+        if (v == 0) { return ez_canned(out, "I got in over my head betting the horses. I owe money I haven't got."); }
+        return ez_canned(out, "It started at the track. I bet more than I could ever cover.");
+    }
+    if (idx == 1) {
+        if (v == 0) { return ez_canned(out, "The man I owe isn't just some bookie. He's got friends."); }
+        return ez_canned(out, "It's not the money anymore. It's who the bookie answers to.");
+    }
+    if (idx == 2) {
+        if (v == 0) { return ez_canned(out, "He's connected -- to the mob. You understand what I'm telling you?"); }
+        return ez_canned(out, "The bookie works for the underworld. That's who I'm dealing with now.");
+    }
+    if (idx == 3) {
+        if (v == 0) { return ez_canned(out, "They've let me know they're coming for me. I've been warned."); }
+        return ez_canned(out, "It stopped being about a debt. Now they want to make an example of me.");
+    }
+    if (idx == 4) {
+        if (v == 0) { return ez_canned(out, "I'm being watched. There are cars outside, people who don't belong."); }
+        return ez_canned(out, "They follow me. I see the same faces. They always know where I am.");
+    }
+    if (idx == 5) {
+        if (v == 0) { return ez_canned(out, "I went to the police for protection. I thought that's what they were for."); }
+        return ez_canned(out, "I tried to get help. I told the cops everything.");
+    }
+    if (idx == 6) {
+        if (v == 0) { return ez_canned(out, "The cops won't lift a finger. Half of them are on the take."); }
+        return ez_canned(out, "The police are no good to me -- some of them are in on it.");
+    }
+    if (idx == 7) {
+        if (v == 0) { return ez_canned(out, "They put me in here so no one would listen to me. And now you're asking all these questions."); }
+        return ez_canned(out, "I ended up locked away where it's easy to get to me. Why are you really asking me all this?");
+    }
+    return ez_canned(out, "I've said too much already.");
+}
+
+# === Engine entry: respond to one input line ===
+#
+# Writes PARRY's reply (no "PARRY:" prefix — the caller frames it) into
+# out (must be >= PY_RESP_CAP). Returns the reply length. Pipeline:
+# classify -> update affect -> (story-gated OR mood-gated) selection.
+fn py_respond(st, line, len, out): i64 {
+    var norm = alloc(PY_IN_MAX + 1);
+    var nlen = ez_normalize(line, len, norm, PY_IN_MAX);
+    var bits = py_scan_flags(norm, nlen);
+    py_apply_affect(st, bits);
+
+    var fear = load64(st + PY_FEAR);
+    var anger = load64(st + PY_ANGER);
+    var mistrust = load64(st + PY_MISTRUST);
+
+    var flare_hot = 0;
+    if ((bits & PF_FLARE_HOT) != 0) { flare_hot = 1; }
+    var flare = flare_hot;
+    if ((bits & PF_FLARE_WARM) != 0) { flare = 1; }
+    var probe = 0;
+    if ((bits & PF_PROBE) != 0) { probe = 1; }
+
+    # story latch: high mistrust, or a hot flare while already wary
+    var storyon = load64(st + PY_STORYON);
+    if (mistrust >= PY_STORY_TH) { storyon = 1; }
+    if (flare_hot == 1) { if (mistrust >= 6) { storyon = 1; } }
+    store64(st + PY_STORYON, storyon);
+
+    if (storyon == 1) {
+        var idx = load64(st + PY_STORYIDX);
+        if (idx < PY_STORY_BEATS) {
+            var ontopic = 0;
+            if (flare == 1) { ontopic = 1; }
+            if (probe == 1) { ontopic = 1; }
+            if (anger >= PY_HOSTILE_TH) { ontopic = 1; }
+            if (ontopic == 1) {
+                # tell the next beat; recounting re-frightens him
+                var bn = py_beat(idx, py_next(st, SLOT_STORY), out);
+                store64(st + PY_STORYIDX, idx + 1);
+                store64(st + PY_FEAR,     py_clampv(load64(st + PY_FEAR) + 1));
+                store64(st + PY_MISTRUST, py_clampv(load64(st + PY_MISTRUST) + 1));
+                return bn;
+            }
+            # user changed the subject — steer back, resent the redirect,
+            # do NOT advance the beat (he keeps his place).
+            store64(st + PY_MISTRUST, py_clampv(load64(st + PY_MISTRUST) + 1));
+            return py_steerback(py_next(st, SLOT_STEER), out);
+        }
+        # idx >= beats: he's told it all; fall through to mood pool.
+    }
+
+    var mood = py_mood(fear, anger, mistrust);
+    # defensiveness: a probe in any non-calm mood biases toward
+    # "why do you want to know" before anything else.
+    if (mood != MOOD_CALM) {
+        if (probe == 1) {
+            # One counter tick per turn: the SAME rotation value gates the
+            # 50% deflect and selects the phrasing (don't call py_next twice
+            # — that decouples the gate from the choice + double-advances).
+            var pr = py_next(st, SLOT_PROBE);
+            if ((pr % 2) == 0) {
+                return py_probe_deflect(pr, out);
+            }
+        }
+    }
+    if (mood == MOOD_HOSTILE) { return py_hostile(py_next(st, SLOT_HOSTILE), out); }
+    if (mood == MOOD_FEARFUL) { return py_fearful(py_next(st, SLOT_FEARFUL), out); }
+    if (mood == MOOD_WARY)    { return py_wary(py_next(st, SLOT_WARY), out); }
+    return py_calm(py_next(st, SLOT_CALM), out);
+}
+
+# === Door contract (ADR 0009 shape) ===
+
+fn py_new(seed, mode, max_days): i64 {
+    var st = alloc(PY_SIZE);
+    store64(st + PY_OVER, 0);
+    var resp = alloc(PY_RESP_CAP);
+    store64(st + PY_RESP, resp);
+    store64(st + PY_RESPLEN, 0);
+    store64(st + PY_FEAR,     PY_FEAR_BASE);
+    store64(st + PY_ANGER,    PY_ANGER_BASE);
+    store64(st + PY_MISTRUST, PY_MISTRUST_BASE);
+    store64(st + PY_STORYIDX, 0);
+    store64(st + PY_STORYON,  0);
+    var ctrs = alloc(PY_NCTRS * 8);
+    var i = 0;
+    while (i < PY_NCTRS) { store64(ctrs + i * 8, 0); i = i + 1; }
+    store64(st + PY_CTRS, ctrs);
+    store64(st + PY_TURNS, 0);
+    return st;
+}
+
+fn py_start(st): i64 {
+    var resp = load64(st + PY_RESP);
+    var n = ez_puts(resp, "I don't know you, and I'm not sure why you want to talk to me.");
+    store64(st + PY_RESPLEN, n);
+    return 0;
+}
+
+# Consume one input line; compute the reply into the response buffer.
+# Returns 1 if the user said goodbye (door exits), else 0.
+fn py_feed(st, line, len): i64 {
+    var resp = load64(st + PY_RESP);
+    if (ez_is_quit(line, len) != 0) {
+        var qn = ez_puts(resp, "I knew you'd leave. They always do.");
+        store64(st + PY_RESPLEN, qn);
+        store64(st + PY_OVER, 1);
+        return 1;
+    }
+    var n = py_respond(st, line, len, resp);
+    store64(st + PY_RESPLEN, n);
+    store64(st + PY_TURNS, load64(st + PY_TURNS) + 1);
+    return 0;
+}
+
+fn py_render(st, buf, cap): i64 {
+    var pos = 0;
+    pos = emit_cstr(buf, pos, "PARRY: ");
+    var resp = load64(st + PY_RESP);
+    var rl = load64(st + PY_RESPLEN);
+    memcpy(buf + pos, resp, rl);
+    pos = pos + rl;
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "(say something, or 'bye' to leave) > ");
+    return pos;
+}
+
+fn py_is_over(st): i64 {
+    return 0;
+}
