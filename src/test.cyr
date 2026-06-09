@@ -4354,6 +4354,35 @@ fn t194_ol_field(): i64 {
     return 0;
 }
 
+# t196 — the season ladder: a win climbs a tier (purse scales), and winning
+# the final meet takes the crown and ends the campaign. Made deterministic
+# by handing only your team (lane 0) any form, so you always win.
+fn t196_ol_ladder(): i64 {
+    var st = ol_new(5, DOOR_PRACTICE);
+    store64(st + OL_FIELDN, 4);
+    var f = load64(st + OL_FIELD);
+    store64(f + 0, 10); store64(f + 8, 0); store64(f + 16, 0); store64(f + 24, 0);
+    var money0 = load64(st + OL_MONEY);
+    ol_run_race(st);
+    if (load64(st + OL_PLACE) != 1)              { test_fail("t196_ol_ladder", "won"); return 1; }
+    if (load64(st + OL_TIER) != 1)               { test_fail("t196_ol_ladder", "advance"); return 1; }
+    if (load64(st + OL_PURSE) != OL_PURSE_WIN)   { test_fail("t196_ol_ladder", "purse t0"); return 1; }
+    if (load64(st + OL_MONEY) != money0 + OL_PURSE_WIN) { test_fail("t196_ol_ladder", "paid"); return 1; }
+    if (ol_is_over(st) != 0)                     { test_fail("t196_ol_ladder", "not over yet"); return 1; }
+    # at the final meet, a win takes the crown and ends it
+    var st2 = ol_new(5, DOOR_PRACTICE);
+    store64(st2 + OL_TIER, OL_MAX_TIER - 1);
+    store64(st2 + OL_FIELDN, 4);
+    var f2 = load64(st2 + OL_FIELD);
+    store64(f2 + 0, 10); store64(f2 + 8, 0); store64(f2 + 16, 0); store64(f2 + 24, 0);
+    ol_run_race(st2);
+    if (ol_is_over(st2) != 1)                    { test_fail("t196_ol_ladder", "crown over"); return 1; }
+    if (load64(st2 + OL_CROWNS) != 1)            { test_fail("t196_ol_ladder", "crown count"); return 1; }
+    if (load64(st2 + OL_PURSE) != OL_PURSE_WIN * OL_MAX_TIER) { test_fail("t196_ol_ladder", "purse top"); return 1; }
+    test_pass("t196_ol_ladder");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4563,6 +4592,7 @@ fn main(): i64 {
     t193_ol_odds_and_new();
     t194_ol_field();
     t195_wager_payout();
+    t196_ol_ladder();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

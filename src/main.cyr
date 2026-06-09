@@ -1338,6 +1338,7 @@ fn door_post_score(game): i64 {
     if (game == GAME_SMUGGLER) { score = sl_final_score(g_door_state); rank = sl_rank(score); }
     if (game == GAME_HANDLER)  { score = th_score(g_door_state);       rank = th_rank(score); }
     if (game == GAME_QUEST)    { score = qu_final_score(g_door_state);  rank = qu_rank(score); }
+    if (game == GAME_OLYMPIAD) { score = ol_final_score(g_door_state);  rank = ol_rank(score); }
     var path = alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var line = alloc(256);

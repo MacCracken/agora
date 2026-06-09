@@ -128,6 +128,7 @@ enum OLEcon {
     OL_PURSE_2ND   = 40;
     OL_PURSE_3RD   = 20;
     OL_BET_MIN     = 5;      # minimum wager at the book
+    OL_MAX_TIER    = 12;     # meets on the ladder; winning the last takes the crown
 }
 
 # === Competitor accessors + form ===
@@ -381,6 +382,24 @@ fn ol_faction_name(f): i64 {
     return "White";
 }
 
+# The ladder of meets (tier 0..OL_MAX_TIER-1), climbing in prestige from a
+# provincial dirt track to the great Panhellenic sites and the Circus
+# Maximus. Winning the last takes the tethrippon crown.
+fn ol_meet_name(t): i64 {
+    if (t == 0)  { return "the Veii dirt circuit"; }
+    if (t == 1)  { return "the Ostia strand"; }
+    if (t == 2)  { return "the Capua oval"; }
+    if (t == 3)  { return "the Tarentum hippodrome"; }
+    if (t == 4)  { return "the Syracuse course"; }
+    if (t == 5)  { return "the Isthmian games at Corinth"; }
+    if (t == 6)  { return "the Nemean ring"; }
+    if (t == 7)  { return "the Pythian course at Delphi"; }
+    if (t == 8)  { return "the Antioch hippodrome"; }
+    if (t == 9)  { return "the Lageion of Alexandria"; }
+    if (t == 10) { return "the hippodrome at Olympia"; }
+    return "the Circus Maximus";
+}
+
 # A team's name by table index (your founding team is 0; rivals draw
 # from the rest in bite 2).
 fn ol_team_name(id): i64 {
@@ -501,10 +520,11 @@ fn ol_run_race(st): i64 {
         }
     }
     store64(st + OL_PLACE, place);
+    var tier = load64(st + OL_TIER);
     var purse = 0;
-    if (place == 1) { purse = OL_PURSE_WIN; }
-    if (place == 2) { purse = OL_PURSE_2ND; }
-    if (place == 3) { purse = OL_PURSE_3RD; }
+    if (place == 1) { purse = OL_PURSE_WIN * (tier + 1); }   # purses grow up the ladder
+    if (place == 2) { purse = OL_PURSE_2ND * (tier + 1); }
+    if (place == 3) { purse = OL_PURSE_3RD * (tier + 1); }
     store64(st + OL_PURSE, purse);
     store64(st + OL_MONEY, load64(st + OL_MONEY) + purse);
     # the race tires your real stable team
@@ -534,7 +554,20 @@ fn ol_run_race(st): i64 {
         store64(st + OL_BETDELTA, bdelta);
     }
     ol_clear_bet(st);
-    store64(st + OL_SCREEN, OSCR_RESULT);
+    # advancement: a win climbs the ladder; winning the final meet (the
+    # Circus Maximus) takes the tethrippon crown and ends the campaign.
+    var crowned = 0;
+    if (place == 1) {
+        if (tier + 1 >= OL_MAX_TIER) {
+            store64(st + OL_CROWNS, load64(st + OL_CROWNS) + 1);
+            store64(st + OL_OVER, 1);
+            crowned = 1;
+        } else {
+            store64(st + OL_TIER, tier + 1);
+        }
+    }
+    if (crowned == 1) { store64(st + OL_SCREEN, OSCR_OVER); }
+    else              { store64(st + OL_SCREEN, OSCR_RESULT); }
     return 0;
 }
 
@@ -613,10 +646,25 @@ fn ol_render(st, buf, cap): i64 {
     pos = emit_crlf(buf, pos);
 
     if (screen == OSCR_OVER) {
-        pos = emit_cstr(buf, pos, "-- THE GAMES CLOSE --");
-        pos = emit_crlf(buf, pos);
+        if (load64(st + OL_CROWNS) > 0) {
+            pos = emit_sgr(buf, pos, 33);
+            pos = emit_cstr(buf, pos, "-- THE TETHRIPPON CROWN --");
+            pos = emit_reset(buf, pos);
+            pos = emit_crlf(buf, pos);
+            pos = emit_cstr(buf, pos, "You take the Circus Maximus, and the olive crown with it.");
+            pos = emit_crlf(buf, pos);
+            pos = emit_cstr(buf, pos, "From a Veii dirt track to the greatest course in the world --");
+            pos = emit_crlf(buf, pos);
+            pos = emit_cstr(buf, pos, "your faction's name is sung across the empire.");
+            pos = emit_crlf(buf, pos);
+        } else {
+            pos = emit_cstr(buf, pos, "-- THE GAMES CLOSE --");
+            pos = emit_crlf(buf, pos);
+        }
         pos = emit_cstr(buf, pos, "Crowns: ");
         pos = emit_int(buf, pos, load64(st + OL_CROWNS));
+        pos = emit_cstr(buf, pos, "   Denarii: ");
+        pos = emit_int(buf, pos, load64(st + OL_MONEY));
         pos = emit_crlf(buf, pos);
         pos = emit_cstr(buf, pos, "Standing: ");
         pos = emit_cstr(buf, pos, ol_rank(ol_final_score(st)));
@@ -630,6 +678,9 @@ fn ol_render(st, buf, cap): i64 {
         pos = emit_sgr(buf, pos, 36);
         pos = emit_cstr(buf, pos, "-- THE HIPPODROME: the field assembles --");
         pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "at ");
+        pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
         pos = emit_crlf(buf, pos);
         var rn = load64(st + OL_FIELDN);
         var fc = load64(st + OL_FCOMP);
@@ -724,11 +775,27 @@ fn ol_render(st, buf, cap): i64 {
             }
             pos = emit_crlf(buf, pos);
         }
+        if (load64(st + OL_PLACE) == 1) {
+            pos = emit_sgr(buf, pos, 33);
+            pos = emit_cstr(buf, pos, "You win the meet! On to ");
+            pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
+            pos = emit_cstr(buf, pos, ".");
+            pos = emit_reset(buf, pos);
+            pos = emit_crlf(buf, pos);
+        }
         pos = emit_cstr(buf, pos, "[Enter] back to the stable");
         pos = emit_crlf(buf, pos);
         return pos;
     }
 
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Next meet: ");
+    pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
+    pos = emit_cstr(buf, pos, " (");
+    pos = emit_int(buf, pos, load64(st + OL_TIER) + 1);
+    pos = emit_cstr(buf, pos, " of ");
+    pos = emit_int(buf, pos, OL_MAX_TIER);
+    pos = emit_cstr(buf, pos, ")");
     pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "Your stable:");
     pos = emit_crlf(buf, pos);
