@@ -4659,6 +4659,94 @@ fn t204_ash_growth_turn(): i64 {
     return 0;
 }
 
+# t205: diplomacy verbs — a proposal records a pending offer, the reciprocal
+# proposal seals the alliance (symmetric), breaking is unilateral, invalid
+# pairs are rejected, and the pact table caps.
+fn t205_ash_diplomacy(): i64 {
+    var w = ashw_new(ASH_WORLD_SEED);
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "fresh"); return 1; }
+    # invalid: self + zero fp
+    if (ash_pact_propose(w, 100, 100) != ASH_DIP_INVALID) { test_fail("t205_ash_diplomacy", "self"); return 1; }
+    if (ash_pact_propose(w, 0, 200) != ASH_DIP_INVALID)   { test_fail("t205_ash_diplomacy", "zero"); return 1; }
+    # propose -> pending; re-propose same dir -> still pending; not yet allied
+    if (ash_pact_propose(w, 100, 200) != ASH_DIP_PROPOSED) { test_fail("t205_ash_diplomacy", "propose"); return 1; }
+    if (ash_pact_propose(w, 100, 200) != ASH_DIP_PENDING)  { test_fail("t205_ash_diplomacy", "re-propose"); return 1; }
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "not yet"); return 1; }
+    # reciprocal proposal seals it; symmetric
+    if (ash_pact_propose(w, 200, 100) != ASH_DIP_ALLIED) { test_fail("t205_ash_diplomacy", "seal"); return 1; }
+    if (ash_allied(w, 100, 200) != 1)             { test_fail("t205_ash_diplomacy", "allied"); return 1; }
+    if (ash_allied(w, 200, 100) != 1)             { test_fail("t205_ash_diplomacy", "symmetric"); return 1; }
+    # proposing when already allied is a no-op
+    if (ash_pact_propose(w, 100, 200) != ASH_DIP_PENDING) { test_fail("t205_ash_diplomacy", "already"); return 1; }
+    # break is unilateral + frees the slot
+    if (ash_pact_break(w, 200, 100) != 1)         { test_fail("t205_ash_diplomacy", "break"); return 1; }
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "broken"); return 1; }
+    if (ash_pact_break(w, 100, 200) != 0)         { test_fail("t205_ash_diplomacy", "break gone"); return 1; }
+    # the freed slot is reusable — re-ally
+    if (ash_pact_propose(w, 100, 200) != ASH_DIP_PROPOSED) { test_fail("t205_ash_diplomacy", "re-offer"); return 1; }
+    # fill the table to capacity, then the next distinct pair is refused
+    var i = 0;
+    while (i < ASH_MAXPACT - 1) {
+        if (ash_pact_propose(w, 1000 + i, 9000 + i) != ASH_DIP_PROPOSED) { test_fail("t205_ash_diplomacy", "fill"); return 1; }
+        i = i + 1;
+    }
+    if (ash_pact_propose(w, 7777, 8888) != ASH_DIP_FULL) { test_fail("t205_ash_diplomacy", "full"); return 1; }
+    test_pass("t205_ash_diplomacy");
+    return 0;
+}
+
+# t206: cooperative combat — an ally's march reinforces (the holder keeps the
+# province), allied attackers merge into one bloc and the largest takes a won
+# province, and breaking the pact flips a reinforcement back into an attack
+# (betrayal, with no special code path).
+fn t206_ash_alliance_combat(): i64 {
+    # --- allied reinforcement: A's big march into ally D's land helps D hold ---
+    var w = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w, 0, 100); ashw_set_army(w, 0, 25);
+    ashw_set_owner(w, 1, 300); ashw_set_army(w, 1, 5);
+    ash_pact_propose(w, 100, 300); ash_pact_propose(w, 300, 100);   # A & D allied
+    ashw_order_push(w, 100, 0, 1, 20);
+    ash_resolve_combat(w);
+    if (ashw_owner(w, 1) != 300)                  { test_fail("t206_ash_alliance_combat", "ally holds"); return 1; }
+    if (ashw_army(w, 1) != 25)                    { test_fail("t206_ash_alliance_combat", "ally reinforced"); return 1; }
+    if (ashw_army(w, 0) != 5)                     { test_fail("t206_ash_alliance_combat", "src drained"); return 1; }
+
+    # --- betrayal: same setup, NO alliance -> the march is an attack ---
+    var wb = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(wb, 0, 100); ashw_set_army(wb, 0, 25);
+    ashw_set_owner(wb, 1, 300); ashw_set_army(wb, 1, 5);
+    ashw_order_push(wb, 100, 0, 1, 20);
+    ash_resolve_combat(wb);
+    if (ashw_owner(wb, 1) != 100)                 { test_fail("t206_ash_alliance_combat", "betrayal seizes"); return 1; }
+
+    # --- allied attackers combine: A(12)+B(12) allied vs enemy E(18) at prov1 ---
+    var w2 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w2, 1, 900); ashw_set_army(w2, 1, 18);
+    ashw_set_owner(w2, 0, 100); ashw_set_army(w2, 0, 12);
+    ashw_set_owner(w2, 2, 200); ashw_set_army(w2, 2, 12);
+    ash_pact_propose(w2, 100, 200); ash_pact_propose(w2, 200, 100);  # A & B allied
+    ashw_order_push(w2, 100, 0, 1, 12);
+    ashw_order_push(w2, 200, 2, 1, 12);
+    var d1 = ash_province_defense(w2, 1);
+    ash_resolve_combat(w2);
+    # coalition power 24 beats E (18 + terrain); leader = lower-fp tie = A(100)
+    if (ashw_owner(w2, 1) != 100)                 { test_fail("t206_ash_alliance_combat", "coalition wins"); return 1; }
+    if (ashw_army(w2, 1) != 24 - 18 - d1)         { test_fail("t206_ash_alliance_combat", "coalition surv"); return 1; }
+
+    # --- same attack WITHOUT the alliance: E holds (two separate 12s lose) ---
+    var w3 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w3, 1, 900); ashw_set_army(w3, 1, 18);
+    ashw_set_owner(w3, 0, 100); ashw_set_army(w3, 0, 12);
+    ashw_set_owner(w3, 2, 200); ashw_set_army(w3, 2, 12);
+    ashw_order_push(w3, 100, 0, 1, 12);
+    ashw_order_push(w3, 200, 2, 1, 12);
+    ash_resolve_combat(w3);
+    if (ashw_owner(w3, 1) != 900)                 { test_fail("t206_ash_alliance_combat", "uncoordinated holds"); return 1; }
+    if (ashw_army(w3, 1) != 18 - 12)              { test_fail("t206_ash_alliance_combat", "defender attrition"); return 1; }
+    test_pass("t206_ash_alliance_combat");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4879,6 +4967,8 @@ fn main(): i64 {
     t202_ash_combat();
     t203_ash_resolve_rules();
     t204_ash_growth_turn();
+    t205_ash_diplomacy();
+    t206_ash_alliance_combat();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

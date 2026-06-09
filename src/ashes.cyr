@@ -45,13 +45,19 @@
 # snapshot, the fixed structure does not — exactly as PA regenerates galaxy
 # structure from its seed). Pure accessors + the lazy turn-window helper.
 #
-# Bite 2 (this revision, snapshot v2): queued MARCH orders + the pure
-# batch-resolution combat transform (departures capped per source, then
-# order-independent per-destination contests, then growth). The hard pure
-# function ADR 0014 flagged — fully unit-testable without a socket.
+# Bite 2 (snapshot v2): queued MARCH orders + the pure batch-resolution combat
+# transform (departures capped per source, then order-independent
+# per-destination contests, then growth). The hard pure function ADR 0014
+# flagged — fully unit-testable without a socket.
 #
-# Still ahead: alliances bite 3; the door UI + async-PvP notice bite 4;
-# multi-process concurrency smoke + scores + closeout bite 5.
+# Bite 3 (this revision, snapshot v3): alliances / diplomacy. A pact edge-list
+# (propose / reciprocate-to-ally / break) folded into the resolver — a
+# defender's allies reinforce instead of attacking, and allied attackers merge
+# into coalitions (union-find) that fight as one bloc. Betrayal needs no code:
+# breaking a pact re-evaluates a march as an attack at the next resolution.
+#
+# Still ahead: the door UI + async-PvP notice bite 4; multi-process
+# concurrency smoke + scores + closeout bite 5.
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr — rng_seed/rng_below (seeded terrain), save_put/get_i64,
@@ -69,6 +75,27 @@ enum ASH {
     ASH_ORDCELLS    = 4;             # per-order snapshot cells (owner fp, src, dst, qty)
     ASH_ARMY_CAP    = 99;            # garrison ceiling (growth never exceeds this)
     ASH_GROWTH      = 2;             # armies an owned province raises per resolved turn
+    ASH_MAXPACT     = 32;            # alliance/offer edges the snapshot holds
+    ASH_PACTCELLS   = 3;             # per-pact snapshot cells (lo fp, hi fp, status)
+}
+
+# Pact status. A pact is a single edge between two players, stored once with
+# the lower fp as `lo`. An offer is directional (who proposed); a reciprocal
+# proposal upgrades it to ALLIED. NONE marks an empty slot.
+enum ASHPact {
+    ASH_PACT_NONE     = 0;
+    ASH_PACT_OFFER_LO = 1;   # lo proposed to hi, pending hi's reciprocation
+    ASH_PACT_OFFER_HI = 2;   # hi proposed to lo, pending lo's reciprocation
+    ASH_PACT_ALLIED   = 3;
+}
+
+# Diplomacy result codes (returned by ash_pact_propose).
+enum ASHDip {
+    ASH_DIP_INVALID  = 0;   # self / zero fp
+    ASH_DIP_PROPOSED = 1;   # a new offer was recorded (pending)
+    ASH_DIP_ALLIED   = 2;   # the offer met a reciprocal — now allied
+    ASH_DIP_PENDING  = 3;   # already offered (same direction) or already allied
+    ASH_DIP_FULL     = 4;   # the pact table is full
 }
 
 # Terrain kinds — derived from the world seed, never stored. They modify
@@ -93,6 +120,9 @@ enum ASHTerr {
 #   [orders_base + 1 + i*ASH_ORDCELLS + 1]  order i src province
 #   [orders_base + 1 + i*ASH_ORDCELLS + 2]  order i dst province
 #   [orders_base + 1 + i*ASH_ORDCELLS + 3]  order i army qty
+#   [pacts_base + p*ASH_PACTCELLS + 0]       pact p lo fp
+#   [pacts_base + p*ASH_PACTCELLS + 1]       pact p hi fp
+#   [pacts_base + p*ASH_PACTCELLS + 2]       pact p status (ASHPact)
 enum ASHWOff {
     ASHW_OFF_VERSION = 0;
     ASHW_OFF_SEED    = 1;
@@ -102,14 +132,15 @@ enum ASHWOff {
 }
 
 # Snapshot format version. v1 (bite 1): map only. v2 (bite 2): appends the
-# queued-orders section; bite 3 bumps to v3 for alliances — exactly the
-# append-and-bump discipline PA used (PAW_VERSION 1 -> 2 added garrisons).
-enum ASHWVer { ASHW_VERSION = 2; }
+# queued-orders section. v3 (bite 3): appends the alliance/offer pact table —
+# the append-and-bump discipline PA used (PAW_VERSION 1 -> 2 added garrisons).
+enum ASHWVer { ASHW_VERSION = 3; }
 
 # Section base offsets + sizing (all in i64 words). The orders section
-# (norders + ASH_MAXORD order records) is appended after the map.
+# (norders + ASH_MAXORD records) follows the map; the pact table follows that.
 fn ashw_orders_base(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
-fn ashw_word_count(): i64  { return ashw_orders_base() + 1 + ASH_MAXORD * ASH_ORDCELLS; }
+fn ashw_pacts_base(): i64  { return ashw_orders_base() + 1 + ASH_MAXORD * ASH_ORDCELLS; }
+fn ashw_word_count(): i64  { return ashw_pacts_base() + ASH_MAXPACT * ASH_PACTCELLS; }
 fn ashw_byte_size(): i64   { return ashw_word_count() * 8; }
 
 # === Terrain (derived from seed, not stored) ===
@@ -312,6 +343,177 @@ fn ashw_order_push(w, owner, src, dst, qty): i64 {
 
 fn ashw_orders_clear(w): i64 { ashw_set_norders(w, 0); return 0; }
 
+# === Alliances / diplomacy (snapshot v3) ===
+#
+# A pact is one undirected edge between two players, stored once with the lower
+# fp as `lo`. Proposing is the only verb to ally: a first proposal records a
+# directional OFFER; the other player proposing back upgrades it to ALLIED.
+# Breaking is unilateral and immediate. Diplomacy mutates the graph the instant
+# it's issued (not queued), so the batch resolver reads the alliance state as
+# it stands at the window boundary. BETRAYAL needs no special code: break the
+# pact, and a march into the (former) ally's province is re-evaluated as an
+# ATTACK at resolution instead of a reinforcement — the treachery falls out of
+# re-checking allied status when the window resolves.
+
+fn ashw_pact_cell(p, f): i64 { return (ashw_pacts_base() + p * ASH_PACTCELLS + f); }
+fn ashw_pact_lo(w, p): i64     { return load64(w + ashw_pact_cell(p, 0) * 8); }
+fn ashw_pact_hi(w, p): i64     { return load64(w + ashw_pact_cell(p, 1) * 8); }
+fn ashw_pact_status(w, p): i64 { return load64(w + ashw_pact_cell(p, 2) * 8); }
+
+# Find the pact slot for the unordered pair {a,b}, or (0-1) if none exists.
+fn ash_pact_find(w, a, b): i64 {
+    var lo = imin(a, b);
+    var hi = imax(a, b);
+    var p = 0;
+    var hit = 0 - 1;
+    while (p < ASH_MAXPACT) {
+        if (ashw_pact_status(w, p) != ASH_PACT_NONE) {
+            if (ashw_pact_lo(w, p) == lo) {
+                if (ashw_pact_hi(w, p) == hi) { hit = p; }
+            }
+        }
+        p = p + 1;
+    }
+    return hit;
+}
+
+# The pact status between two players (ASH_PACT_NONE if none / invalid pair).
+fn ash_pact_status_of(w, a, b): i64 {
+    if (a == b) { return ASH_PACT_NONE; }
+    var p = ash_pact_find(w, a, b);
+    if (p < 0) { return ASH_PACT_NONE; }
+    return ashw_pact_status(w, p);
+}
+
+# Are two distinct real players currently allied?
+fn ash_allied(w, a, b): i64 {
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    if (a == b) { return 0; }
+    if (ash_pact_status_of(w, a, b) == ASH_PACT_ALLIED) { return 1; }
+    return 0;
+}
+
+# Propose (or accept) an alliance from `from` to `to`. A reciprocal proposal
+# upgrades a pending offer to ALLIED. Returns an ASHDip code.
+fn ash_pact_propose(w, from, to): i64 {
+    if (from == 0) { return ASH_DIP_INVALID; }
+    if (to == 0)   { return ASH_DIP_INVALID; }
+    if (from == to) { return ASH_DIP_INVALID; }
+    var lo = imin(from, to);
+    var from_is_lo = 0;
+    if (from == lo) { from_is_lo = 1; }
+    var p = ash_pact_find(w, from, to);
+    if (p < 0) {
+        # find a free slot
+        var f = 0;
+        var slot = 0 - 1;
+        while (f < ASH_MAXPACT) {
+            if (ashw_pact_status(w, f) == ASH_PACT_NONE) {
+                if (slot < 0) { slot = f; }
+            }
+            f = f + 1;
+        }
+        if (slot < 0) { return ASH_DIP_FULL; }
+        store64(w + ashw_pact_cell(slot, 0) * 8, imin(from, to));
+        store64(w + ashw_pact_cell(slot, 1) * 8, imax(from, to));
+        var st0 = ASH_PACT_OFFER_HI;
+        if (from_is_lo == 1) { st0 = ASH_PACT_OFFER_LO; }
+        store64(w + ashw_pact_cell(slot, 2) * 8, st0);
+        return ASH_DIP_PROPOSED;
+    }
+    var st = ashw_pact_status(w, p);
+    if (st == ASH_PACT_ALLIED) { return ASH_DIP_PENDING; }
+    # a pending offer exists — reciprocate (opposite direction) => allied
+    if (from_is_lo == 1) {
+        if (st == ASH_PACT_OFFER_HI) {
+            store64(w + ashw_pact_cell(p, 2) * 8, ASH_PACT_ALLIED);
+            return ASH_DIP_ALLIED;
+        }
+        return ASH_DIP_PENDING;
+    }
+    if (st == ASH_PACT_OFFER_LO) {
+        store64(w + ashw_pact_cell(p, 2) * 8, ASH_PACT_ALLIED);
+        return ASH_DIP_ALLIED;
+    }
+    return ASH_DIP_PENDING;
+}
+
+# Break a pact (alliance or pending offer) unilaterally. Returns 1 if one
+# existed, else 0. Frees the slot.
+fn ash_pact_break(w, a, b): i64 {
+    var p = ash_pact_find(w, a, b);
+    if (p < 0) { return 0; }
+    store64(w + ashw_pact_cell(p, 0) * 8, 0);
+    store64(w + ashw_pact_cell(p, 1) * 8, 0);
+    store64(w + ashw_pact_cell(p, 2) * 8, ASH_PACT_NONE);
+    return 1;
+}
+
+# === Attacker coalitions (allied forces fight as one) ===
+#
+# Union-find root of element i in `parent`.
+fn ash_uf_find(parent, i): i64 {
+    var x = i;
+    while (load64(parent + x * 8) != x) {
+        x = load64(parent + x * 8);
+    }
+    return x;
+}
+
+# Merge the `natt` distinct attacking owners into coalitions: any two that are
+# allied join (transitively, via union-find). Each coalition contends as ONE
+# force — combined army, led (and so owned, if it wins) by its largest member
+# (ties to the lower fp). Writes co_fp[] / co_army[]; returns the coalition
+# count. Pure (alliance state read from w).
+fn ash_coalitions(w, att_fp, att_army, natt, co_fp, co_army): i64 {
+    var parent = alloc(natt * 8);
+    var i = 0;
+    while (i < natt) { store64(parent + i * 8, i); i = i + 1; }
+    i = 0;
+    while (i < natt) {
+        var j = i + 1;
+        while (j < natt) {
+            if (ash_allied(w, load64(att_fp + i * 8), load64(att_fp + j * 8)) == 1) {
+                var ri = ash_uf_find(parent, i);
+                var rj = ash_uf_find(parent, j);
+                if (ri != rj) { store64(parent + rj * 8, ri); }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var ncoal = 0;
+    var r = 0;
+    while (r < natt) {
+        if (ash_uf_find(parent, r) == r) {
+            var sum = 0;
+            var lead_fp = 0;
+            var lead_army = 0 - 1;
+            var m = 0;
+            while (m < natt) {
+                if (ash_uf_find(parent, m) == r) {
+                    var a = load64(att_army + m * 8);
+                    var f = load64(att_fp + m * 8);
+                    sum = sum + a;
+                    var better = 0;
+                    if (a > lead_army) { better = 1; }
+                    if (a == lead_army) {
+                        if (f < lead_fp) { better = 1; }
+                    }
+                    if (better == 1) { lead_army = a; lead_fp = f; }
+                }
+                m = m + 1;
+            }
+            store64(co_fp + ncoal * 8, lead_fp);
+            store64(co_army + ncoal * 8, sum);
+            ncoal = ncoal + 1;
+        }
+        r = r + 1;
+    }
+    return ncoal;
+}
+
 # === The batch-resolution combat transform (ADR 0014 — the hard pure fn) ===
 #
 # Resolved simultaneously from the WINDOW-START snapshot, so the outcome does
@@ -323,9 +525,11 @@ fn ashw_orders_clear(w): i64 { ashw_set_norders(w, 0); return 0; }
 #      (a player who over-commits one province loses the surplus orders). The
 #      defender army that STAYS is the start garrison minus what marched out.
 #   2. ARRIVAL / COMBAT — per destination, gather all incoming forces (from the
-#      start snapshot) grouped by owner. Same-owner-as-defender forces
-#      reinforce; every other owner is an attacker. The contest depends only on
-#      the multiset of forces at that province — never on iteration order.
+#      start snapshot) grouped by owner. Forces owned by the defender OR an ALLY
+#      of the defender reinforce it; every other owner is an attacker. Allied
+#      attackers merge into coalitions (ash_coalitions). The contest depends
+#      only on the multiset of {defender, coalitions} at that province — never
+#      on iteration order.
 #   3. CLEAR — the queue empties; the window is resolved.
 #
 # A province conquered this window does not let its new garrison march this
@@ -474,6 +678,8 @@ fn ash_resolve_combat(w): i64 {
     # ARRIVAL / COMBAT — per destination, gather forces and contest
     var att_fp  = alloc(n * 8);
     var att_arm = alloc(n * 8);
+    var co_fp   = alloc(n * 8);
+    var co_arm  = alloc(n * 8);
     var out = alloc(16);
     t = 0;
     while (t < n) {
@@ -485,8 +691,16 @@ fn ash_resolve_combat(w): i64 {
             if (load64(a_dst + k * 8) == t) {
                 var ofp = load64(a_fp + k * 8);
                 var oar = load64(a_army + k * 8);
-                if (ofp == def_fp) {
-                    def_army = def_army + oar;       # reinforce the holder
+                # the holder and its allies reinforce; everyone else attacks
+                var reinforce = 0;
+                if (ofp == def_fp) { reinforce = 1; }
+                if (reinforce == 0) {
+                    if (def_fp != 0) {
+                        if (ash_allied(w, ofp, def_fp) == 1) { reinforce = 1; }
+                    }
+                }
+                if (reinforce == 1) {
+                    def_army = def_army + oar;
                 } else {
                     var idx = ash_arr_find(att_fp, natt, ofp);
                     if (idx < 0) {
@@ -501,7 +715,9 @@ fn ash_resolve_combat(w): i64 {
             k = k + 1;
         }
         if (natt > 0) {
-            ash_contest(def_fp, def_army, ash_province_defense(w, t), att_fp, att_arm, natt, out);
+            # allied attackers fight as one bloc; the largest leads (and owns)
+            var ncoal = ash_coalitions(w, att_fp, att_arm, natt, co_fp, co_arm);
+            ash_contest(def_fp, def_army, ash_province_defense(w, t), co_fp, co_arm, ncoal, out);
             ashw_set_owner(w, t, load64(out));
             ashw_set_army(w, t, load64(out + 8));
         } else {
