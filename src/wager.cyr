@@ -1,0 +1,235 @@
+# wager.cyr — shared casino / wagering primitive (1.3.4, ADR 0013).
+#
+# A casino is a MECHANIC, not a door. Strip the skin off roulette,
+# craps, blackjack, or a fighter bout and the loop is identical:
+#
+#       bet  →  draw  →  resolve  →  settle
+#
+# Only the payout table and the entropy mapping differ between games.
+# So agora builds the loop ONCE, here, and every game calls it —
+# exactly the "one shared abstraction under many games" pattern the
+# door PRNG (door.cyr) and the world-transaction framework already use.
+# 1.3.5 embeds this module across the existing doors (cantina table in
+# Port Authority, back-alley dice in Smuggler, tavern cards in QUEST);
+# 1.3.6's training-sim is its flagship (bet on your own fighter).
+#
+# === The fairness split (ADR 0013, the core decision) ===
+#
+# door.cyr's xorshift64 is DELIBERATELY seedable + replayable: a Solo
+# save stores its seed and a test pins an exact stream. That is the
+# right RNG for a single-player economy sim where there is no adversary.
+#
+# A casino inverts that. Here there IS an adversary — the player betting
+# against the house — and a seeded, reconstructable draw is a predictable
+# draw, so the house edge becomes fiction. The wager draw must therefore
+# pull from the kernel CSPRNG (sys_getrandom): fresh per draw, never
+# seeded, never stored, never replayed. This module does NOT call rng_*;
+# the games' determinism is untouched.
+#
+# === The pure / impure seam (testability) ===
+#
+# The ONLY non-deterministic point is the entropy read. Everything else
+# — validation, payout lookup, the weight→outcome mapping, settlement,
+# the house-edge haircut — is a pure integer transform, fully unit-
+# tested. The draw is split so tests inject a known value:
+#
+#   wager_uniform_csprng(n)  — impure: [0,n) from the kernel CSPRNG, or
+#                              (0-1) on a bad read (refuse the bet).
+#   wager_pick(tbl, r)       — PURE: map a uniform r in [0,total_weight)
+#                              to an outcome index. The injected seam —
+#                              tests pass a fixed r for a known outcome.
+#   wager_draw_csprng(tbl)   — production: uniform → pick (or 0-1).
+#   wager_resolve(...)       — PURE: signed gold delta given the outcome.
+#   wager_settle(...)        — PURE: clamp-and-apply (no negative path).
+#
+# Mirrors ADR 0009's pure-render / wired-I/O split and ADR 0010's
+# pure-transform / wired-lock split: the impure edge is one seam.
+#
+# Deps resolved upstream in the main.cyr / test.cyr include chain:
+#   door.cyr            — imin/imax (integer helpers); included earlier
+#   lib/syscalls.cyr    — sys_getrandom (kernel CSPRNG; flags=0 blocking)
+#   lib/alloc.cyr       — alloc (long-lived table backing arrays)
+
+# === Constants ===
+
+enum WagerCap {
+    WAGER_EDGE_DENOM = 10000;   # edge is basis points: 250 bps = 2.50%
+    WAGER_MAX_OUT    = 64;      # sane ceiling on outcomes per table
+}
+
+# Validation result codes. WAGER_OK == 0; every reject is nonzero so a
+# caller can `if (wager_validate(...) != WAGER_OK)` and surface the code.
+enum WagerErr {
+    WAGER_OK       = 0;
+    WAGER_E_STAKE0 = 1;   # stake <= 0
+    WAGER_E_FUNDS  = 2;   # stake > balance (no betting gold you lack)
+    WAGER_E_MIN    = 3;   # stake below the table minimum
+    WAGER_E_MAX    = 4;   # stake above the table maximum
+    WAGER_E_CHOICE = 5;   # chosen outcome outside [0, nout)
+    WAGER_E_DRAW   = 6;   # CSPRNG read failed — never settle on a bad draw
+}
+
+# === Payout table (pure data) ===
+#
+# A table is the whole description of a game's betting surface: stake
+# bounds, the house edge, and per-outcome (weight, payout multiplier).
+# All fields i64, 8-byte slots — the codebase struct convention.
+#
+#   WT_MIN/WT_MAX  — stake bounds. MAX <= 0 means "no upper bound".
+#   WT_EDGEBPS     — house edge in BASIS POINTS, applied as a haircut on
+#                    gross winnings (see wager_resolve). This is the one
+#                    visible margin knob (ADR: "a named field, not a
+#                    magic constant"); it is ON TOP of any structural
+#                    edge implied by weight-vs-multiplier mismatch.
+#   WT_NOUT        — number of outcomes N (1..WAGER_MAX_OUT).
+#   WT_WEIGHTS     — ptr to N i64 relative draw weights (need not sum to
+#                    any particular total; the draw normalizes).
+#   WT_MULTS       — ptr to N i64 GROSS profit multipliers: a winning bet
+#                    of `stake` on outcome k returns +stake*mult[k] profit
+#                    (the stake itself is retained), before the edge cut.
+enum WagerTbl {
+    WT_MIN     = 0;
+    WT_MAX     = 8;
+    WT_EDGEBPS = 16;
+    WT_NOUT    = 24;
+    WT_WEIGHTS = 32;
+    WT_MULTS   = 40;
+    WT_SIZE    = 48;
+}
+
+# Initialize a caller-allocated table (WT_SIZE bytes). weights_ptr and
+# mults_ptr are caller-owned arrays of `nout` i64 each, borrowed by
+# reference (not copied) — they must outlive the table. Returns 0 on
+# success, (0-1) if nout is out of range. min/max/edge are stored as-is;
+# a negative or absurd edge is the caller's bug, not validated here (the
+# tables are first-party, built by the integration code, not user input).
+fn wager_table_init(tbl, min, max, edge_bps, nout, weights_ptr, mults_ptr): i64 {
+    if (nout < 1)             { return 0 - 1; }
+    if (nout > WAGER_MAX_OUT) { return 0 - 1; }
+    store64(tbl + WT_MIN,     min);
+    store64(tbl + WT_MAX,     max);
+    store64(tbl + WT_EDGEBPS, edge_bps);
+    store64(tbl + WT_NOUT,    nout);
+    store64(tbl + WT_WEIGHTS, weights_ptr);
+    store64(tbl + WT_MULTS,   mults_ptr);
+    return 0;
+}
+
+# Sum of the table's draw weights (the draw's denominator). Returns 0
+# for a degenerate table (all-zero or no weights) — wager_pick treats a
+# zero total as outcome 0, and wager_draw_csprng refuses (n<=1 → fixed).
+fn wager_weight_total(tbl): i64 {
+    var n = load64(tbl + WT_NOUT);
+    var w = load64(tbl + WT_WEIGHTS);
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        total = total + load64(w + i * 8);
+        i = i + 1;
+    }
+    return total;
+}
+
+# === Bet validation (pure) ===
+#
+# Reject a bet BEFORE any randomness or settlement runs. Pure transform
+# (table, balance, stake, choice) → WAGER_OK | reason. Guarantees, on OK:
+# 0 < stake <= balance, stake within [min,max], choice in [0,nout). The
+# `stake <= balance` gate is what makes the no-negative-balance invariant
+# structural rather than hoped-for (settlement also clamps as defense).
+fn wager_validate(tbl, balance, stake, choice): i64 {
+    if (stake <= 0)      { return WAGER_E_STAKE0; }
+    if (stake > balance) { return WAGER_E_FUNDS; }
+    var mn = load64(tbl + WT_MIN);
+    if (stake < mn)      { return WAGER_E_MIN; }
+    var mx = load64(tbl + WT_MAX);
+    if (mx > 0) {
+        if (stake > mx)  { return WAGER_E_MAX; }
+    }
+    if (choice < 0)      { return WAGER_E_CHOICE; }
+    var n = load64(tbl + WT_NOUT);
+    if (choice >= n)     { return WAGER_E_CHOICE; }
+    return WAGER_OK;
+}
+
+# === The draw ===
+#
+# wager_pick is the PURE mapping from a uniform value to an outcome:
+# walk the weights, accumulating, until r < running-sum. `r` MUST be in
+# [0, wager_weight_total(tbl)) — the caller (or the CSPRNG) guarantees
+# that. A zero-total table maps to outcome 0. The last outcome catches
+# any residual (defensive: r out of range still returns a legal index).
+fn wager_pick(tbl, r): i64 {
+    var n = load64(tbl + WT_NOUT);
+    var w = load64(tbl + WT_WEIGHTS);
+    var acc = 0;
+    var i = 0;
+    var pick = n - 1;            # default: the last legal outcome
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= n) { scanning = 0; continue; }
+        acc = acc + load64(w + i * 8);
+        if (r < acc) { pick = i; scanning = 0; continue; }
+        i = i + 1;
+    }
+    return pick;
+}
+
+# Uniform value in [0, n) from the kernel CSPRNG (sys_getrandom, flags=0
+# blocking — the safe default; the pool is initialized long before any
+# BBS login). Returns (0-1) on a short/failed read so the caller refuses
+# the bet and NEVER settles on a bad draw (ADR 0013 § Consequences). The
+# sign-fold + i64-min guard mirror door.cyr's rng_below; residual modulo
+# bias is negligible for the small ranges a wager table uses. This is the
+# module's one non-deterministic, non-unit-testable function.
+fn wager_uniform_csprng(n): i64 {
+    if (n <= 1) { return 0; }
+    var buf[8];
+    var got = sys_getrandom(&buf, 8, 0);
+    if (got != 8) { return 0 - 1; }      # refuse: bad entropy read
+    var x = load64(&buf);
+    if (x < 0) { x = 0 - x; }
+    if (x < 0) { x = 0; }                # i64-min: (0 - min) stays min
+    return x % n;
+}
+
+# Production draw: uniform over the weight total, mapped to an outcome.
+# Returns the resolved outcome index, or (0-1) if the CSPRNG read failed
+# (caller maps that to WAGER_E_DRAW and refuses the bet — no settlement).
+fn wager_draw_csprng(tbl): i64 {
+    var total = wager_weight_total(tbl);
+    if (total <= 1) { return wager_pick(tbl, 0); }   # degenerate → outcome 0/last
+    var r = wager_uniform_csprng(total);
+    if (r < 0) { return 0 - 1; }
+    return wager_pick(tbl, r);
+}
+
+# === Resolve + settle (pure) ===
+#
+# wager_resolve: the signed gold delta for staking `stake` on `choice`
+# when the draw resolved to `outcome`. PURE — the caller supplies the
+# outcome (CSPRNG in production, a fixed value in tests). On a win the
+# gross profit stake*mult[choice] is haircut by the table's edge (basis
+# points) and floored; the stake is retained, so the delta is +profit.
+# On a loss the delta is -stake. Edge math is integer: a fractional
+# basis-point cut floors in the house's favor, the conventional rounding.
+fn wager_resolve(tbl, stake, choice, outcome): i64 {
+    if (outcome != choice) { return 0 - stake; }
+    var mult  = load64(load64(tbl + WT_MULTS) + choice * 8);
+    var gross = stake * mult;
+    var edge  = load64(tbl + WT_EDGEBPS);
+    var kept  = WAGER_EDGE_DENOM - edge;
+    if (kept < 0) { kept = 0; }                  # an absurd edge can't pay negative
+    var profit = (gross * kept) / WAGER_EDGE_DENOM;
+    return profit;
+}
+
+# Apply a signed delta to a balance, clamped at zero. Validation already
+# guarantees a losing -stake cannot exceed the balance, so this clamp is
+# structural defense-in-depth: there is NO path that drives a player's
+# gold below zero through a wager (ADR 0013 § Decision).
+fn wager_settle(balance, delta): i64 {
+    var next = balance + delta;
+    if (next < 0) { next = 0; }
+    return next;
+}

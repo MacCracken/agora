@@ -19,6 +19,7 @@ include "src/eliza.cyr"
 include "src/parry.cyr"
 include "src/quest.cyr"
 include "src/jabberwacky.cyr"
+include "src/wager.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -3946,6 +3947,131 @@ fn t178_jw_load_malformed(): i64 {
     return 0;
 }
 
+# === 1.3.4 Wager (shared casino primitive, ADR 0013) ===
+#
+# The pure majority — validation, the weight→outcome mapping, the
+# edge-haircut resolve, the clamp-and-apply settle — is unit-tested for
+# exact values. The one impure point (wager_draw_csprng) is tested only
+# for DISTRIBUTION (range + termination + coverage), never an exact
+# value: that is the property the casino requires and the games reject.
+
+# A small 3-outcome table backing two arrays the test owns; weights
+# [1,2,3] (total 6), gross multipliers [5,2,1]. Reused across tests.
+fn wt_fixture(edge_bps): i64 {
+    var w = alloc(3 * 8);
+    store64(w + 0, 1); store64(w + 8, 2); store64(w + 16, 3);
+    var m = alloc(3 * 8);
+    store64(m + 0, 5); store64(m + 8, 2); store64(m + 16, 1);
+    var tbl = alloc(WT_SIZE);
+    wager_table_init(tbl, 2, 100, edge_bps, 3, w, m);
+    return tbl;
+}
+
+# t179 — validation accepts a good bet and returns the right reason for
+# each reject (stake0 / funds / min / max / choice low + high).
+fn t179_wager_validate(): i64 {
+    var tbl = wt_fixture(0);
+    if (wager_validate(tbl, 50, 10, 1) != WAGER_OK)       { test_fail("t179_wager_validate", "ok"); return 1; }
+    if (wager_validate(tbl, 50, 0, 1) != WAGER_E_STAKE0)  { test_fail("t179_wager_validate", "stake0"); return 1; }
+    if (wager_validate(tbl, 50, (0 - 5), 1) != WAGER_E_STAKE0) { test_fail("t179_wager_validate", "neg"); return 1; }
+    if (wager_validate(tbl, 5, 10, 1) != WAGER_E_FUNDS)   { test_fail("t179_wager_validate", "funds"); return 1; }
+    if (wager_validate(tbl, 50, 1, 1) != WAGER_E_MIN)     { test_fail("t179_wager_validate", "min"); return 1; }
+    if (wager_validate(tbl, 500, 200, 1) != WAGER_E_MAX)  { test_fail("t179_wager_validate", "max"); return 1; }
+    if (wager_validate(tbl, 50, 10, (0 - 1)) != WAGER_E_CHOICE) { test_fail("t179_wager_validate", "choice<0"); return 1; }
+    if (wager_validate(tbl, 50, 10, 3) != WAGER_E_CHOICE) { test_fail("t179_wager_validate", "choice>=n"); return 1; }
+    # MAX <= 0 means "no upper bound": a huge stake passes the max gate
+    var w = alloc(8); store64(w, 1);
+    var m = alloc(8); store64(m, 1);
+    var nb = alloc(WT_SIZE);
+    wager_table_init(nb, 1, 0, 0, 1, w, m);
+    if (wager_validate(nb, 1000000, 999999, 0) != WAGER_OK) { test_fail("t179_wager_validate", "nomax"); return 1; }
+    test_pass("t179_wager_validate");
+    return 0;
+}
+
+# t180 — wager_pick maps a uniform r to the right outcome across every
+# weight boundary; total reports the denominator; zero-total → outcome 0.
+fn t180_wager_pick(): i64 {
+    var tbl = wt_fixture(0);                       # weights [1,2,3], total 6
+    if (wager_weight_total(tbl) != 6)  { test_fail("t180_wager_pick", "total"); return 1; }
+    if (wager_pick(tbl, 0) != 0)       { test_fail("t180_wager_pick", "r0->0"); return 1; }   # [0,1) -> 0
+    if (wager_pick(tbl, 1) != 1)       { test_fail("t180_wager_pick", "r1->1"); return 1; }   # [1,3) -> 1
+    if (wager_pick(tbl, 2) != 1)       { test_fail("t180_wager_pick", "r2->1"); return 1; }
+    if (wager_pick(tbl, 3) != 2)       { test_fail("t180_wager_pick", "r3->2"); return 1; }   # [3,6) -> 2
+    if (wager_pick(tbl, 5) != 2)       { test_fail("t180_wager_pick", "r5->2"); return 1; }
+    # zero-total table: every weight 0 -> falls through to last index (0)
+    var zw = alloc(8); store64(zw, 0);
+    var zm = alloc(8); store64(zm, 1);
+    var zt = alloc(WT_SIZE);
+    wager_table_init(zt, 1, 0, 0, 1, zw, zm);
+    if (wager_weight_total(zt) != 0)   { test_fail("t180_wager_pick", "ztotal"); return 1; }
+    if (wager_pick(zt, 0) != 0)        { test_fail("t180_wager_pick", "zpick"); return 1; }
+    test_pass("t180_wager_pick");
+    return 0;
+}
+
+# t181 — resolve: a loss is -stake; a win pays +stake*mult; the edge is a
+# floored haircut on the gross win; an absurd (>100%) edge cannot pay
+# negative.
+fn t181_wager_resolve(): i64 {
+    var tbl = wt_fixture(0);                       # mults [5,2,1], edge 0
+    # bet 10 on outcome 0, draw 0 -> win +10*5 = +50
+    if (wager_resolve(tbl, 10, 0, 0) != 50)        { test_fail("t181_wager_resolve", "win"); return 1; }
+    # bet 10 on outcome 0, draw 1 -> lose -10
+    if (wager_resolve(tbl, 10, 0, 1) != (0 - 10))  { test_fail("t181_wager_resolve", "loss"); return 1; }
+    # bet 7 on outcome 1, draw 1 -> +7*2 = +14
+    if (wager_resolve(tbl, 7, 1, 1) != 14)         { test_fail("t181_wager_resolve", "win2"); return 1; }
+    # edge 250 bps (2.5%): win 10 on outcome 0 -> floor(50 * 9750/10000) = floor(48.75) = 48
+    var et = wt_fixture(250);
+    if (wager_resolve(et, 10, 0, 0) != 48)         { test_fail("t181_wager_resolve", "edge"); return 1; }
+    # edge floors in the house favor even when it loses a fraction
+    var ht = wt_fixture(1);                         # 0.01%: floor(50*9999/10000)=floor(49.995)=49
+    if (wager_resolve(ht, 10, 0, 0) != 49)         { test_fail("t181_wager_resolve", "edgefloor"); return 1; }
+    # absurd edge > 100% clamps kept to 0 -> a "win" pays 0, never negative
+    var at = wt_fixture(20000);
+    if (wager_resolve(at, 10, 0, 0) != 0)          { test_fail("t181_wager_resolve", "absurd"); return 1; }
+    test_pass("t181_wager_resolve");
+    return 0;
+}
+
+# t182 — settle applies a signed delta and clamps at zero; there is no
+# path to a negative balance through a wager.
+fn t182_wager_settle(): i64 {
+    if (wager_settle(100, 50) != 150)       { test_fail("t182_wager_settle", "win"); return 1; }
+    if (wager_settle(100, (0 - 30)) != 70)  { test_fail("t182_wager_settle", "loss"); return 1; }
+    if (wager_settle(100, (0 - 100)) != 0)  { test_fail("t182_wager_settle", "zero"); return 1; }
+    # defense-in-depth: an over-large loss clamps rather than going negative
+    if (wager_settle(100, (0 - 250)) != 0)  { test_fail("t182_wager_settle", "clamp"); return 1; }
+    test_pass("t182_wager_settle");
+    return 0;
+}
+
+# t183 — the ONE impure path. wager_draw_csprng pulls real kernel
+# entropy, so we cannot assert an exact outcome; instead we assert
+# DISTRIBUTION: every draw lands in [0, nout), the call terminates, and
+# over many draws each outcome is hit at least once (coverage, not
+# uniformity-to-a-tolerance — that would be flaky). A negative return
+# would mean a CSPRNG read failure, which we treat as a hard test fail
+# (the draw must be reliable on a healthy kernel).
+fn t183_wager_draw_csprng(): i64 {
+    var tbl = wt_fixture(0);                        # 3 outcomes, weights [1,2,3]
+    var hit = alloc(3 * 8);
+    store64(hit + 0, 0); store64(hit + 8, 0); store64(hit + 16, 0);
+    var i = 0;
+    while (i < 3000) {
+        var o = wager_draw_csprng(tbl);
+        if (o < 0)  { test_fail("t183_wager_draw_csprng", "csprng read failed"); return 1; }
+        if (o >= 3) { test_fail("t183_wager_draw_csprng", "out of range"); return 1; }
+        store64(hit + o * 8, load64(hit + o * 8) + 1);
+        i = i + 1;
+    }
+    if (load64(hit + 0) < 1)  { test_fail("t183_wager_draw_csprng", "outcome 0 never hit"); return 1; }
+    if (load64(hit + 8) < 1)  { test_fail("t183_wager_draw_csprng", "outcome 1 never hit"); return 1; }
+    if (load64(hit + 16) < 1) { test_fail("t183_wager_draw_csprng", "outcome 2 never hit"); return 1; }
+    test_pass("t183_wager_draw_csprng");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4132,6 +4258,13 @@ fn main(): i64 {
     t176_jw_load_sanitize();
     t177_jw_couch_reentry();
     t178_jw_load_malformed();
+
+    # === 1.3.4 Wager (shared casino primitive) ===
+    t179_wager_validate();
+    t180_wager_pick();
+    t181_wager_resolve();
+    t182_wager_settle();
+    t183_wager_draw_csprng();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

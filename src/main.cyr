@@ -28,6 +28,7 @@ include "src/eliza.cyr"
 include "src/parry.cyr"
 include "src/quest.cyr"
 include "src/jabberwacky.cyr"
+include "src/wager.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
