@@ -61,6 +61,7 @@ enum DoorGame {
     GAME_ELIZA    = 4;   # 1.3.0 (ADR 0011): the DOCTOR chatbot as a door
     GAME_PARRY    = 5;   # 1.3.1: PARRY, the paranoid chatbot
     GAME_QUEST    = 6;   # 1.3.2: QUEST, the LORD-homage RPG
+    GAME_JABBER   = 7;   # 1.3.3: Jabberwacky, the corpus-learning chatbot
 }
 
 # === Integer helpers ===

@@ -18,6 +18,7 @@ include "src/chat.cyr"
 include "src/eliza.cyr"
 include "src/parry.cyr"
 include "src/quest.cyr"
+include "src/jabberwacky.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -3697,6 +3698,254 @@ fn t166_qu_feed(): i64 {
     return 0;
 }
 
+# === 1.3.3 Jabberwacky (corpus-learning chatbot) — t167-t178 ===
+
+# Sanitiser: drop control bytes (TAB/ESC), keep printable, trim trailing
+# space. The TAB/ESC drop is the record-delimiter + escape-injection
+# guard for the learned corpus.
+fn t167_jw_sanitize(): i64 {
+    var out = alloc(64);
+    var inb = alloc(16);
+    store8(inb + 0, 104);   # h
+    store8(inb + 1, 105);   # i
+    store8(inb + 2, 9);     # TAB  -> dropped
+    store8(inb + 3, 116);   # t
+    store8(inb + 4, 111);   # o
+    store8(inb + 5, 27);    # ESC  -> dropped
+    store8(inb + 6, 32);    # space (trailing -> trimmed)
+    store8(inb + 7, 32);    # space (trailing -> trimmed)
+    var n = jw_sanitize(inb, 8, out, 64);
+    if (n != 4)                       { test_fail("t167_jw_sanitize", "len"); return 1; }
+    if (memeq(out, "hito", 4) == 0)   { test_fail("t167_jw_sanitize", "body"); return 1; }
+    test_pass("t167_jw_sanitize");
+    return 0;
+}
+
+# Whole-word membership: present, absent, and a substring is NOT a match.
+fn t168_jw_word_in(): i64 {
+    var b = alloc(64);
+    var bl = ez_normalize("dog and fish", 12, b, JW_IN_MAX);
+    if (jw_word_in("dog", 3, b, bl) != 1)  { test_fail("t168_jw_word_in", "present"); return 1; }
+    if (jw_word_in("cat", 3, b, bl) != 0)  { test_fail("t168_jw_word_in", "absent"); return 1; }
+    if (jw_word_in("fis", 3, b, bl) != 0)  { test_fail("t168_jw_word_in", "substring"); return 1; }
+    test_pass("t168_jw_word_in");
+    return 0;
+}
+
+# Word-overlap score: content matches, stop-words skipped, 1-char
+# skipped, no-overlap = 0, and a REPEATED query word counts once.
+fn t169_jw_overlap(): i64 {
+    var b = alloc(64);
+    var bl = ez_normalize("dog and fish", 12, b, JW_IN_MAX);   # "and" is a stop-word
+    var a = alloc(64);
+    var al = ez_normalize("cat dog fish", 12, a, JW_IN_MAX);
+    if (jw_overlap(a, al, b, bl) != 2) { test_fail("t169_jw_overlap", "two"); return 1; }
+    var c = alloc(64);
+    var cl = ez_normalize("the dog", 7, c, JW_IN_MAX);          # "the" skipped
+    if (jw_overlap(c, cl, b, bl) != 1) { test_fail("t169_jw_overlap", "stopskip"); return 1; }
+    var d = alloc(64);
+    var dl = ez_normalize("a dog", 5, d, JW_IN_MAX);            # "a" skipped (1-char)
+    if (jw_overlap(d, dl, b, bl) != 1) { test_fail("t169_jw_overlap", "shortskip"); return 1; }
+    var e = alloc(64);
+    var el = ez_normalize("bird worm", 9, e, JW_IN_MAX);
+    if (jw_overlap(e, el, b, bl) != 0) { test_fail("t169_jw_overlap", "none"); return 1; }
+    var f = alloc(64);
+    var fl = ez_normalize("dog dog cat", 11, f, JW_IN_MAX);     # distinct: "dog" once
+    if (jw_overlap(f, fl, b, bl) != 1) { test_fail("t169_jw_overlap", "distinct"); return 1; }
+    test_pass("t169_jw_overlap");
+    return 0;
+}
+
+# Best-match over the seed corpus: a seed hit resolves to the right
+# response, no-overlap returns (0-1), and ties go to the LATEST pair.
+fn t170_jw_best_match(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    var q = alloc(64);
+    var ql = ez_normalize("what is your name", 17, q, JW_IN_MAX);
+    var idx = jw_best_match(st, q, ql);
+    if (idx < 0) { test_fail("t170_jw_best_match", "name hit"); return 1; }
+    var rl = load64(load64(st + JW_RTXTL) + idx * 8);
+    if (memeq(load64(st + JW_RTXT) + idx * JW_SLOT, "Jabberwacky. Easy for you to say.", rl) == 0) {
+        test_fail("t170_jw_best_match", "name resp"); return 1; }
+    var q2 = alloc(64);
+    var ql2 = ez_normalize("zzz qqq", 7, q2, JW_IN_MAX);
+    if (jw_best_match(st, q2, ql2) != (0 - 1)) { test_fail("t170_jw_best_match", "no match"); return 1; }
+    # latest pair wins a score tie
+    jw_add_pair(st, "tiebreak word", 13, "FIRST", 5);
+    jw_add_pair(st, "tiebreak word", 13, "SECOND", 6);
+    var q3 = alloc(64);
+    var ql3 = ez_normalize("tiebreak word", 13, q3, JW_IN_MAX);
+    var idx3 = jw_best_match(st, q3, ql3);
+    var rl3 = load64(load64(st + JW_RTXTL) + idx3 * 8);
+    if (memeq(load64(st + JW_RTXT) + idx3 * JW_SLOT, "SECOND", rl3) == 0) {
+        test_fail("t170_jw_best_match", "latest wins"); return 1; }
+    test_pass("t170_jw_best_match");
+    return 0;
+}
+
+# Seed response (fresh state) + the generic fallback when nothing matches.
+fn t171_jw_seed_response(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    var out = alloc(JW_RESP_CAP);
+    var exp = "Jabberwacky. Easy for you to say.";
+    var n = jw_respond(st, "what is your name", 17, out);
+    if (n != strlen(exp))            { test_fail("t171_jw_seed_response", "len"); return 1; }
+    if (memeq(out, exp, n) == 0)     { test_fail("t171_jw_seed_response", "body"); return 1; }
+    var st2 = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    var n2 = jw_respond(st2, "xyzzy plugh", 11, out);   # turn 0 -> first fallback
+    if (memeq(out, "Go on.", n2) == 0) { test_fail("t171_jw_seed_response", "fallback"); return 1; }
+    test_pass("t171_jw_seed_response");
+    return 0;
+}
+
+# THE core mechanic: teach (prev line -> this line), then replay it.
+fn t172_jw_learn_replay(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    var out = alloc(JW_RESP_CAP);
+    var exp = "the password is rosebud";
+    jw_respond(st, "what is the password", 20, out);     # turn 0
+    jw_respond(st, "the password is rosebud", 23, out);  # turn 1: learns the pair
+    var n = jw_respond(st, "what is the password", 20, out);  # turn 2: replays
+    if (n != strlen(exp))         { test_fail("t172_jw_learn_replay", "len"); return 1; }
+    if (memeq(out, exp, n) == 0)  { test_fail("t172_jw_learn_replay", "replay"); return 1; }
+    test_pass("t172_jw_learn_replay");
+    return 0;
+}
+
+# Persistence round-trip: a learned pair survives save_format -> load_parse.
+fn t173_jw_save_load(): i64 {
+    var st = jw_new(0, DOOR_SOLO, JW_DEF_DAYS);
+    var out = alloc(JW_RESP_CAP);
+    jw_respond(st, "secret code phrase", 18, out);
+    jw_respond(st, "the code is hunter two", 22, out);   # learns (secret code phrase -> ...)
+    var sbuf = alloc(4096);
+    var sn = jw_save_format(st, sbuf, 4096);
+    if (memeq(sbuf, "JBRW1\n", 6) == 0) { test_fail("t173_jw_save_load", "header"); return 1; }
+    var st2 = jw_load_parse(sbuf, sn);
+    if (st2 == 0) { test_fail("t173_jw_save_load", "load null"); return 1; }
+    var exp = "the code is hunter two";
+    var n2 = jw_respond(st2, "secret code phrase", 18, out);
+    if (n2 != strlen(exp))         { test_fail("t173_jw_save_load", "rt len"); return 1; }
+    if (memeq(out, exp, n2) == 0)  { test_fail("t173_jw_save_load", "rt replay"); return 1; }
+    if (jw_load_parse("NOPE", 4) != 0) { test_fail("t173_jw_save_load", "bad header"); return 1; }
+    test_pass("t173_jw_save_load");
+    return 0;
+}
+
+# Ring cap: learned pairs evict oldest at JW_MAXPAIRS; seeds never evict.
+fn t174_jw_evict_cap(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= 50) { go = 0; continue; }
+        jw_add_pair(st, "znp word here", 13, "junk", 4);
+        i = i + 1;
+    }
+    if (load64(st + JW_COUNT) != JW_MAXPAIRS) { test_fail("t174_jw_evict_cap", "cap"); return 1; }
+    var out = alloc(JW_RESP_CAP);
+    var n = jw_respond(st, "what is your name", 17, out);
+    if (memeq(out, "Jabberwacky. Easy for you to say.", n) == 0) {
+        test_fail("t174_jw_evict_cap", "seed survived"); return 1; }
+    test_pass("t174_jw_evict_cap");
+    return 0;
+}
+
+# Door contract: opening frame is prefixed, 'bye' exits, is_over stays 0
+# (so the corpus saves on exit), a normal line continues.
+fn t175_jw_door(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    jw_start(st);
+    var buf = alloc(8192);
+    var fn2 = jw_render(st, buf, 8192);
+    if (fn2 <= 0)                          { test_fail("t175_jw_door", "frame len"); return 1; }
+    if (memeq(buf, "JABBERWACKY: ", 13) == 0) { test_fail("t175_jw_door", "frame prefix"); return 1; }
+    if (jw_feed(st, "bye", 3) != 1)        { test_fail("t175_jw_door", "bye exits"); return 1; }
+    if (jw_is_over(st) != 0)               { test_fail("t175_jw_door", "is_over stays 0"); return 1; }
+    if (jw_feed(st, "hello there", 11) != 0) { test_fail("t175_jw_door", "feed continues"); return 1; }
+    test_pass("t175_jw_door");
+    return 0;
+}
+
+# Adversarial .sav deserialization: a stored response carrying ESC / a
+# C1 byte / TAB is re-sanitised on load so nothing un-printable can
+# replay into a terminal. (Builds the save by hand to bypass the writer.)
+fn t176_jw_load_sanitize(): i64 {
+    var sb = alloc(64);
+    var p = 0;
+    memcpy(sb + p, "JBRW1\n", 6); p = p + 6;
+    memcpy(sb + p, "1\n", 2); p = p + 2;
+    memcpy(sb + p, "hello", 5); p = p + 5;
+    store8(sb + p, 9);   p = p + 1;   # TAB delimiter
+    store8(sb + p, 27);  p = p + 1;   # ESC      -> dropped
+    store8(sb + p, 91);  p = p + 1;   # [
+    store8(sb + p, 51);  p = p + 1;   # 3
+    store8(sb + p, 49);  p = p + 1;   # 1
+    store8(sb + p, 109); p = p + 1;   # m
+    store8(sb + p, 112); p = p + 1;   # p
+    store8(sb + p, 119); p = p + 1;   # w
+    store8(sb + p, 110); p = p + 1;   # n
+    store8(sb + p, 100); p = p + 1;   # d
+    store8(sb + p, 155); p = p + 1;   # 0x9B C1  -> dropped
+    store8(sb + p, 10);  p = p + 1;   # LF end record
+    var st = jw_load_parse(sb, p);
+    if (st == 0) { test_fail("t176_jw_load_sanitize", "load null"); return 1; }
+    var out = alloc(JW_RESP_CAP);
+    var n = jw_respond(st, "hello", 5, out);
+    var i = 0;
+    var bad = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= n) { go = 0; continue; }
+        var c = load8(out + i) & 0xFF;
+        if (c < 32)  { bad = 1; }
+        if (c > 126) { bad = 1; }
+        i = i + 1;
+    }
+    if (bad != 0)                       { test_fail("t176_jw_load_sanitize", "control survived"); return 1; }
+    if (memeq(out, "[31mpwnd", 8) == 0) { test_fail("t176_jw_load_sanitize", "body"); return 1; }
+    test_pass("t176_jw_load_sanitize");
+    return 0;
+}
+
+# Couch re-entry: jw_start resets the conversation cursor so a stale
+# pending stimulus from a prior session cannot bridge into the next.
+fn t177_jw_couch_reentry(): i64 {
+    var st = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS);
+    jw_start(st);
+    var out = alloc(JW_RESP_CAP);
+    jw_respond(st, "what is the password", 20, out);    # sets JW_PREV
+    if (load64(st + JW_PREVL) == 0) { test_fail("t177_jw_couch_reentry", "prev unset"); return 1; }
+    jw_start(st);                                        # re-entry resets the cursor
+    if (load64(st + JW_PREVL) != 0) { test_fail("t177_jw_couch_reentry", "prev not reset"); return 1; }
+    var before = load64(st + JW_COUNT);
+    jw_respond(st, "apples are red", 14, out);           # prev empty -> no bridge learned
+    if (load64(st + JW_COUNT) != before) { test_fail("t177_jw_couch_reentry", "spurious bridge"); return 1; }
+    test_pass("t177_jw_couch_reentry");
+    return 0;
+}
+
+# Malformed save: a mid-stream tab-less record is skipped, not bled into
+# the next, so the following good pair still loads.
+fn t178_jw_load_malformed(): i64 {
+    var sb = alloc(64);
+    var p = 0;
+    memcpy(sb + p, "JBRW1\n", 6); p = p + 6;
+    memcpy(sb + p, "2\n", 2); p = p + 2;
+    memcpy(sb + p, "notabhere\n", 10); p = p + 10;       # tab-less record
+    memcpy(sb + p, "goodstim", 8); p = p + 8;
+    store8(sb + p, 9); p = p + 1;                         # TAB
+    memcpy(sb + p, "goodresp", 8); p = p + 8;
+    store8(sb + p, 10); p = p + 1;                        # LF
+    var st = jw_load_parse(sb, p);
+    if (st == 0) { test_fail("t178_jw_load_malformed", "load null"); return 1; }
+    var out = alloc(JW_RESP_CAP);
+    var n = jw_respond(st, "goodstim", 8, out);
+    if (memeq(out, "goodresp", n) == 0) { test_fail("t178_jw_load_malformed", "good pair lost"); return 1; }
+    test_pass("t178_jw_load_malformed");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -3869,6 +4118,20 @@ fn main(): i64 {
     t164_qu_save();
     t165_qu_score();
     t166_qu_feed();
+
+    # === 1.3.3 Jabberwacky (corpus-learning chatbot) ===
+    t167_jw_sanitize();
+    t168_jw_word_in();
+    t169_jw_overlap();
+    t170_jw_best_match();
+    t171_jw_seed_response();
+    t172_jw_learn_replay();
+    t173_jw_save_load();
+    t174_jw_evict_cap();
+    t175_jw_door();
+    t176_jw_load_sanitize();
+    t177_jw_couch_reentry();
+    t178_jw_load_malformed();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

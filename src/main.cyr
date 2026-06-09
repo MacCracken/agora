@@ -27,6 +27,7 @@ include "src/chat.cyr"
 include "src/eliza.cyr"
 include "src/parry.cyr"
 include "src/quest.cyr"
+include "src/jabberwacky.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -142,15 +143,17 @@ var g_chat_idle    = 0;
 
 # 1.3.0/1.3.1 (ADR 0011): the private chatbot side-channel inside chat.
 # g_chat_bot selects the active bot on the couch: 0 = none (talking to
-# the room), 1 = Eliza, 2 = Parry. While non-zero, non-command lines go
-# to that bot and the reply is sent ONLY to this user (never chat_say'd
-# to the room); room tailing is paused. The per-bot states are alloc'd
-# lazily on first /eliza / /parry and keep their response buffer at the
-# same struct offset (EZ_RESP/EZ_RESPLEN == PY_RESP/PY_RESPLEN) so the
-# couch reads either uniformly.
-var g_chat_bot    = 0;
-var g_eliza_state = 0;
-var g_parry_state = 0;
+# the room), 1 = Eliza, 2 = Parry, 3 = Jabberwacky (1.3.3). While
+# non-zero, non-command lines go to that bot and the reply is sent ONLY
+# to this user (never chat_say'd to the room); room tailing is paused.
+# The per-bot states are alloc'd lazily on first /eliza / /parry /
+# /jabberwacky and keep their response buffer at the same struct offset
+# (EZ_RESP/EZ_RESPLEN == PY_RESP/PY_RESPLEN == JW_RESP/JW_RESPLEN) so the
+# couch reads any of them uniformly.
+var g_chat_bot     = 0;
+var g_eliza_state  = 0;
+var g_parry_state  = 0;
+var g_jabber_state = 0;
 
 enum DoorRuntime {
     DOOR_FRAME_CAP = 8192;        # per-frame render buffer
@@ -170,7 +173,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.3.2 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST (LORD homage)");
+    println("v1.3.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky");
     return 0;
 }
 
@@ -348,7 +351,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest  [practice|solo|universe]\r\n");
+        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  help            this message\r\n");
@@ -720,7 +723,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky> [practice|solo]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -751,8 +754,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(gbuf, "eliza") != 0)    { game = GAME_ELIZA; }
         if (streq(gbuf, "parry") != 0)    { game = GAME_PARRY; }
         if (streq(gbuf, "quest") != 0)    { game = GAME_QUEST; }
+        if (streq(gbuf, "jabberwacky") != 0) { game = GAME_JABBER; }
         if (game == GAME_NONE) {
-            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest\r\n");
+            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest | jabberwacky\r\n");
             return MODE_COMMAND;
         }
         var dmode = DOOR_PRACTICE;
@@ -769,6 +773,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # quest universe` falls into the unwired DOOR_UNIVERSE branch,
         # leaves g_door_state NULL, and qu_render(0) segfaults the worker.
         if (game == GAME_QUEST) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
+        # 1.3.3 (ADR 0015): Jabberwacky is a real solo/practice door (its
+        # learned corpus is the per-user save) but has no Universe — coerce
+        # a `universe` request to solo so it never hits the unwired branch.
+        if (game == GAME_JABBER) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -835,6 +843,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (game == GAME_PORT)     { g_door_state = pa_load_parse(lbuf, ln); }
                     if (game == GAME_HANDLER)  { g_door_state = th_load_parse(lbuf, ln); }
                     if (game == GAME_QUEST)    { g_door_state = qu_load_parse(lbuf, ln); }
+                    if (game == GAME_JABBER)   { g_door_state = jw_load_parse(lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
             }
@@ -846,6 +855,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (game == GAME_ELIZA)    { g_door_state = ez_new(seed, dmode, EZ_DEF_DAYS); }
             if (game == GAME_PARRY)    { g_door_state = py_new(seed, dmode, PY_DEF_DAYS); }
             if (game == GAME_QUEST)    { g_door_state = qu_new(seed, dmode, 0); }
+            if (game == GAME_JABBER)   { g_door_state = jw_new(seed, dmode, JW_DEF_DAYS); }
         }
         if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
         if (game == GAME_PORT)     { pa_start(g_door_state); }
@@ -853,6 +863,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (game == GAME_ELIZA)    { ez_start(g_door_state); }
         if (game == GAME_PARRY)    { py_start(g_door_state); }
         if (game == GAME_QUEST)    { qu_start(g_door_state); }
+        if (game == GAME_JABBER)   { jw_start(g_door_state); }
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -982,6 +993,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_ELIZA)    { return "eliza"; }
     if (game == GAME_PARRY)    { return "parry"; }
     if (game == GAME_QUEST)    { return "quest"; }
+    if (game == GAME_JABBER)   { return "jabberwacky"; }
     return "game";
 }
 
@@ -1055,8 +1067,25 @@ fn chat_cmd_dispatch(cfd, line, len): i64 {
         send_str(cfd, "\r\n(private session with Parry -- /parry to return to the room, 'bye' to leave him)\r\n");
         return 0;
     }
+    if (line_has_prefix(line, len, "/jabberwacky") != 0) {
+        # 1.3.3 (ADR 0015): toggle the private Jabberwacky side-channel.
+        # Ephemeral, seed-only (the persistent learned layer lives on the
+        # `play jabberwacky solo` door, not the couch).
+        if (g_chat_bot == 3) {
+            g_chat_bot = 0;
+            send_str(cfd, "(left the couch -- back in the room)\r\n");
+            return 0;
+        }
+        if (g_jabber_state == 0) { g_jabber_state = jw_new(0, DOOR_PRACTICE, JW_DEF_DAYS); }
+        jw_start(g_jabber_state);
+        g_chat_bot = 3;
+        send_str(cfd, "JABBERWACKY: ");
+        send_buf(cfd, load64(g_jabber_state + JW_RESP), load64(g_jabber_state + JW_RESPLEN));
+        send_str(cfd, "\r\n(private session with Jabberwacky -- /jabberwacky to return to the room, 'bye' to leave)\r\n");
+        return 0;
+    }
     if (line_has_prefix(line, len, "/help") != 0) {
-        send_str(cfd, "chat commands:  /leave (back to BBS)   /eliza (the DOCTOR)   /parry (the paranoiac)   /help   /quit\r\n");
+        send_str(cfd, "chat commands:  /leave (back to BBS)   /eliza (the DOCTOR)   /parry (the paranoiac)   /jabberwacky (the mimic)   /help   /quit\r\n");
         send_str(cfd, "anything else you type is said to the room.\r\n");
         return 0;
     }
@@ -1073,18 +1102,21 @@ fn chat_cmd_dispatch(cfd, line, len): i64 {
 fn chat_bot_state(): i64 {
     if (g_chat_bot == 1) { return g_eliza_state; }
     if (g_chat_bot == 2) { return g_parry_state; }
+    if (g_chat_bot == 3) { return g_jabber_state; }
     return 0;
 }
 
 fn chat_bot_feed(line, len): i64 {
     if (g_chat_bot == 1) { return ez_feed(g_eliza_state, line, len); }
     if (g_chat_bot == 2) { return py_feed(g_parry_state, line, len); }
+    if (g_chat_bot == 3) { return jw_feed(g_jabber_state, line, len); }
     return 1;
 }
 
 fn chat_bot_name(): i64 {
     if (g_chat_bot == 1) { return "ELIZA: "; }
     if (g_chat_bot == 2) { return "PARRY: "; }
+    if (g_chat_bot == 3) { return "JABBERWACKY: "; }
     return "BOT: ";
 }
 
@@ -1210,6 +1242,7 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_ELIZA)    { n = ez_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_PARRY)    { n = py_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_QUEST)    { n = qu_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_JABBER)   { n = jw_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1225,6 +1258,7 @@ fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_game == GAME_ELIZA)    { return ez_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_PARRY)    { return py_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_QUEST)    { return qu_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_JABBER)   { return jw_feed(g_door_state, line, line_len); }
     return 1;
 }
 
@@ -1233,6 +1267,7 @@ fn door_is_over(): i64 {
     if (g_door_game == GAME_PORT)     { return pa_is_over(g_door_state); }
     if (g_door_game == GAME_HANDLER)  { return th_is_over(g_door_state); }
     if (g_door_game == GAME_QUEST)    { return qu_is_over(g_door_state); }
+    if (g_door_game == GAME_JABBER)   { return jw_is_over(g_door_state); }
     return 0;
 }
 
@@ -1389,6 +1424,7 @@ fn door_save_on_exit(cfd): i64 {
                 if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_QUEST)    { n = qu_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_JABBER)   { n = jw_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
             }
         }
@@ -1494,7 +1530,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.3.2 — telnet BBS + door games + chat + Eliza/PARRY + QUEST\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.3 — telnet BBS + door games + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1587,9 +1623,10 @@ fn handle_client(cfd): i64 {
     store8(g_chat_channel, 0);
     g_chat_seen = 0;
     g_chat_idle = 0;
-    g_chat_bot    = 0;
-    g_eliza_state = 0;
-    g_parry_state = 0;
+    g_chat_bot     = 0;
+    g_eliza_state  = 0;
+    g_parry_state  = 0;
+    g_jabber_state = 0;
 
     var mode    = MODE_COMMAND;
     var last_cr = 0;
@@ -2617,7 +2654,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.3.2");
+    println("agora 1.3.3");
     return 0;
 }
 

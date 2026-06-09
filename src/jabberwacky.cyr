@@ -1,0 +1,533 @@
+# jabberwacky.cyr — Jabberwacky (Rollo Carpenter, 1988→) as a pure-module
+# door + chat side-channel (1.3.3, ADR 0015; chatbot lineage ADR 0012).
+#
+# Jabberwacky is agora's FIRST corpus-LEARNING bot — a different engine
+# kind from the ELIZA (1.3.0) / PARRY (1.3.1) fixed-script family. ELIZA
+# decomposes-and-reassembles; PARRY is affect-gated. Jabberwacky neither
+# parses grammar nor models emotion: it REMEMBERS what people say and
+# replays it. Each turn it (a) finds the stored *stimulus* most similar
+# to your line and answers with the *response* a human once gave to that
+# stimulus, then (b) LEARNS the transition (your previous line → your
+# current line) so it can replay your words to a later matching prompt.
+# It "gets smarter" the more it is talked to — case-based retrieval over
+# a growing corpus, not a script. (ADR 0012 § Engine taxonomy pinned
+# this as the deliberate engine step; ADR 0015 records the design.)
+#
+# Reuse boundary (ADR 0012): this module reuses ELIZA's pure TEXT
+# primitives — ez_normalize (tokeniser input), ez_word_end (word-walk),
+# ez_word_is (word/literal compare), ez_puts (emit), ez_is_quit
+# (goodbye) — but NONE of its reassembly engine (no ez_reflect/ez_fill/
+# ez_scan). The retrieval core (word-overlap scoring, best-match, learn,
+# corpus ring) is new and Jabberwacky's own. eliza.cyr is included
+# upstream of this file in both main.cyr and test.cyr, so the ez_*
+# primitives are in scope exactly as PARRY calls them.
+#
+# Persistence (ADR 0015, the HYBRID model). Unlike the stateless bots,
+# Jabberwacky's corpus is two layers:
+#   - a baked-in SEED corpus (jw_seed_corpus) — shared cold-start
+#     personality, identical for everyone, never persisted.
+#   - a per-user LEARNED layer — what *you* taught it, saved under
+#     <store>/.users/<fp16>/games/jabberwacky.sav via the ADR-0009 door
+#     SOLO-save path (jw_save_format / jw_load_parse), so one citizen's
+#     lessons never leak to or poison another's bot. There is NO global
+#     shared corpus (the privacy/poisoning surface ADR 0012 flagged).
+# Surfaces:
+#   - `play jabberwacky`        practice — seed only, learns in-session,
+#                               NOT saved (anonymous-friendly, ephemeral).
+#   - `play jabberwacky solo`   login-gated — loads + saves your learned
+#                               layer (saved on exit; jw_is_over ≡ 0 so
+#                               door_save_on_exit always checkpoints it).
+#   - `/jabberwacky` couch      private in-chat session; ephemeral,
+#                               seed-only, like /eliza and /parry.
+#
+# The engine itself is PURE: no socket, no disk. main.cyr owns the
+# socket and the on-disk save (same split as every door, ADR 0009) — so
+# the corpus, scorer, learner, and serialisation are all unit-testable
+# in src/test.cyr without binding a port (t167+).
+#
+# State layout keeps the response buffer + length at the SAME struct
+# offsets as ELIZA/PARRY (JW_RESP=8 / JW_RESPLEN=16) so main.cyr's chat
+# couch reads any bot uniformly (the shared-offset ABI, ADR 0012).
+#
+# Deps resolved upstream: eliza.cyr (ez_* primitives), door.cyr
+# (emit_cstr/emit_crlf, save_put_i64/save_get_i64, DOOR_SOLO), lib/*
+# (strlen / memcpy / memeq / memset / load8 / store8 / load64 / store64
+# / alloc).
+
+# === Constants ===
+
+enum JwCap {
+    JW_IN_MAX    = 256;    # normalized-input ceiling (adversarial bound)
+    JW_RESP_CAP  = 1024;   # response buffer — `out` must be >= this
+    JW_SLOT      = 160;    # max bytes per stored stimulus / response
+    JW_MAXPAIRS  = 64;     # seed + learned ring capacity
+    JW_FALL_N    = 6;      # generic-fallback rotation length
+    JW_DEF_DAYS  = 1;      # door contract arg (unused — no turns)
+}
+
+# Door state struct (8-byte i64 fields; pointers held in fields).
+# JW_RESP / JW_RESPLEN MUST stay at 8 / 16 — the chat couch reads them
+# with ELIZA's literal offset names regardless of which bot is active.
+enum JW {
+    JW_OVER    = 0;        # 0 talking, 1 said goodbye (couch never reads)
+    JW_RESP    = 8;        # ptr -> response buffer (== EZ_RESP)
+    JW_RESPLEN = 16;       # current response length (== EZ_RESPLEN)
+    JW_MODE    = 24;       # DoorMode (practice/solo)
+    JW_SEED    = 32;       # session seed (unused by retrieval; kept for save symmetry)
+    JW_COUNT   = 40;       # total pairs stored (seed + learned)
+    JW_SEEDN   = 48;       # number of seed pairs (learned region starts here)
+    JW_STIM    = 56;       # ptr -> byte[MAXPAIRS * SLOT] normalized stimuli
+    JW_STIML   = 64;       # ptr -> i64[MAXPAIRS] stimulus lengths
+    JW_RTXT    = 72;       # ptr -> byte[MAXPAIRS * SLOT] response display text
+    JW_RTXTL   = 80;       # ptr -> i64[MAXPAIRS] response lengths
+    JW_PREV    = 88;       # ptr -> byte[SLOT] previous normalized user line
+    JW_PREVL   = 96;       # length of the pending stimulus in JW_PREV
+    JW_TURN    = 104;      # turn counter (fallback rotation)
+    JW_NORM    = 112;      # ptr -> byte[JW_IN_MAX+1] scratch normalized input
+    JW_SIZE    = 120;
+}
+
+# === Pure text helpers (Jabberwacky-specific) ===
+
+# Copy printable ASCII (32..126) from src into out, dropping control
+# bytes (incl. TAB=9 and LF=10 so the tab/newline save record can never
+# be broken) and high bytes, then trim trailing spaces. This is the
+# response-display sanitiser: a learned response is adversarial external
+# data (telnet bytes) that later replays into someone's terminal, so it
+# must carry no escape sequences and no record delimiters.
+fn jw_sanitize(src, len, out, cap): i64 {
+    var o = 0;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= len) { go = 0; continue; }
+        if (o >= cap) { go = 0; continue; }
+        var c = load8(src + i) & 0xFF;
+        if (c >= 32) { if (c <= 126) { store8(out + o, c); o = o + 1; } }
+        i = i + 1;
+    }
+    var go2 = 1;
+    while (go2 == 1) {
+        if (o <= 0) { go2 = 0; continue; }
+        if ((load8(out + o - 1) & 0xFF) == 32) { o = o - 1; } else { go2 = 0; }
+    }
+    return o;
+}
+
+# 1 if w (wl bytes) is a very common function word we ignore when
+# scoring overlap, so matches key on content words (name, password,
+# robot) not on "the"/"is"/"to" that appear in nearly every line.
+fn jw_is_stop(w, wl): i64 {
+    if (ez_word_is(w, wl, "the") != 0)  { return 1; }
+    if (ez_word_is(w, wl, "an")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "is")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "to")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "of")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "and") != 0)  { return 1; }
+    if (ez_word_is(w, wl, "it")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "do")  != 0)  { return 1; }
+    if (ez_word_is(w, wl, "be")  != 0)  { return 1; }
+    # 1.3.3 review: the two ubiquitous pronouns appear in ~10 seed
+    # stimuli, so a bare "you"/"your" would drive the latest-wins
+    # tie-break to an inapt seed (e.g. "do you think so" -> a goodbye
+    # line). Drop them so overlap keys on real content words. ("are" /
+    # "how" stay content so "how are you" still greets correctly.)
+    if (ez_word_is(w, wl, "you")  != 0) { return 1; }
+    if (ez_word_is(w, wl, "your") != 0) { return 1; }
+    return 0;
+}
+
+# 1 if the whole word w (wl bytes) appears as a whole word inside the
+# normalized buffer buf (blen bytes). Walks buf word-by-word.
+fn jw_word_in(w, wl, buf, blen): i64 {
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= blen) { go = 0; continue; }
+        if ((load8(buf + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(buf, i, blen);
+        var cwl = j - i;
+        if (cwl == wl) { if (memeq(buf + i, w, wl) == 1) { return 1; } }
+        i = j;
+    }
+    return 0;
+}
+
+# Word-overlap similarity: how many DISTINCT content words of the query
+# q (qlen bytes, normalized) appear as whole words in candidate c (clen
+# bytes, normalized). Skips 1-char words and stop-words, and counts each
+# distinct query word at most once (a repeated query word like "no no"
+# must not inflate the score and override the recency tie-break). Both
+# inputs must be ez_normalize'd so casing/punctuation already align.
+fn jw_overlap(q, qlen, c, clen): i64 {
+    var cnt = 0;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= qlen) { go = 0; continue; }
+        if ((load8(q + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var j = ez_word_end(q, i, qlen);
+        var wl = j - i;
+        if (wl >= 2) {
+            if (jw_is_stop(q + i, wl) == 0) {
+                # distinct: skip if this exact word already appeared earlier in q
+                if (jw_word_in(q + i, wl, q, i) == 0) {
+                    if (jw_word_in(q + i, wl, c, clen) == 1) { cnt = cnt + 1; }
+                }
+            }
+        }
+        i = j;
+    }
+    return cnt;
+}
+
+# === Corpus: best-match retrieval + learning ===
+
+# Index of the pair whose stimulus best overlaps the normalized query,
+# or (0 - 1) if nothing overlaps. Ties go to the LATEST pair (>=) so a
+# freshly-learned pair wins over an older seed with the same score —
+# the "replay what I just taught you" behaviour. A zero-overlap corpus
+# returns (0 - 1) -> caller falls back to a generic line.
+fn jw_best_match(st, q, qlen): i64 {
+    var stimbuf = load64(st + JW_STIM);
+    var stiml   = load64(st + JW_STIML);
+    var count   = load64(st + JW_COUNT);
+    var best = 0;
+    var bestidx = 0 - 1;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= count) { go = 0; continue; }
+        var sl = load64(stiml + i * 8);
+        var sc = jw_overlap(q, qlen, stimbuf + i * JW_SLOT, sl);
+        if (sc > 0) { if (sc >= best) { best = sc; bestidx = i; } }
+        i = i + 1;
+    }
+    return bestidx;
+}
+
+# Store a (stimulus -> response) pair. The stimulus is normalised (for
+# matching) and the response is sanitised (for display); empty results
+# after cleaning are dropped so junk never enters the corpus. When the
+# ring is full the OLDEST LEARNED pair (index JW_SEEDN) is evicted —
+# seed pairs are never evicted. State is only mutated once both cleaned
+# strings are confirmed non-empty (no partial-eviction on a dropped add).
+fn jw_add_pair(st, stim, slen, resp, rlen): i64 {
+    var tmpS = alloc(JW_SLOT);
+    var tmpR = alloc(JW_SLOT);
+    var sn = ez_normalize(stim, slen, tmpS, JW_SLOT);
+    var rn = jw_sanitize(resp, rlen, tmpR, JW_SLOT);
+    if (sn <= 0) { return 0; }
+    if (rn <= 0) { return 0; }
+    var stimbuf = load64(st + JW_STIM);
+    var stiml   = load64(st + JW_STIML);
+    var rtxt    = load64(st + JW_RTXT);
+    var rtxtl   = load64(st + JW_RTXTL);
+    var count   = load64(st + JW_COUNT);
+    if (count >= JW_MAXPAIRS) {
+        var seedn = load64(st + JW_SEEDN);
+        var k = seedn;
+        var sgo = 1;
+        while (sgo == 1) {
+            if (k >= count - 1) { sgo = 0; continue; }
+            memcpy(stimbuf + k * JW_SLOT, stimbuf + (k + 1) * JW_SLOT, JW_SLOT);
+            store64(stiml + k * 8, load64(stiml + (k + 1) * 8));
+            memcpy(rtxt + k * JW_SLOT, rtxt + (k + 1) * JW_SLOT, JW_SLOT);
+            store64(rtxtl + k * 8, load64(rtxtl + (k + 1) * 8));
+            k = k + 1;
+        }
+        count = count - 1;
+    }
+    memcpy(stimbuf + count * JW_SLOT, tmpS, sn);
+    store64(stiml + count * 8, sn);
+    memcpy(rtxt + count * JW_SLOT, tmpR, rn);
+    store64(rtxtl + count * 8, rn);
+    store64(st + JW_COUNT, count + 1);
+    return 0;
+}
+
+# A generic deflection when nothing in the corpus overlaps — rotates by
+# turn so a stuck conversation does not repeat one line.
+fn jw_fallback(st, out): i64 {
+    var t = load64(st + JW_TURN);
+    var idx = t - (t / JW_FALL_N) * JW_FALL_N;
+    var s = "Go on.";
+    if (idx == 1) { s = "Why do you say that?"; }
+    if (idx == 2) { s = "Tell me more — I'm collecting."; }
+    if (idx == 3) { s = "Interesting. And then?"; }
+    if (idx == 4) { s = "I haven't heard that one. Yet."; }
+    if (idx == 5) { s = "Is that so. Carry on."; }
+    return ez_puts(out, s);
+}
+
+# The engine, per input line: answer with prior knowledge, THEN learn
+# the (previous line -> this line) transition, THEN remember this line
+# as the next stimulus. Computing the answer before learning means a
+# turn never matches the pair it is in the middle of recording. Writes
+# the reply into out and returns its length.
+fn jw_respond(st, line, len, out): i64 {
+    var norm = load64(st + JW_NORM);
+    var nlen = ez_normalize(line, len, norm, JW_IN_MAX);
+
+    var bestidx = jw_best_match(st, norm, nlen);
+    var rn = 0;
+    if (bestidx >= 0) {
+        var rtxt  = load64(st + JW_RTXT);
+        var rtxtl = load64(st + JW_RTXTL);
+        var rl = load64(rtxtl + bestidx * 8);
+        memcpy(out, rtxt + bestidx * JW_SLOT, rl);
+        rn = rl;
+    } else {
+        rn = jw_fallback(st, out);
+    }
+
+    var prevl = load64(st + JW_PREVL);
+    if (prevl > 0) {
+        if (nlen > 0) {
+            var prev = load64(st + JW_PREV);
+            jw_add_pair(st, prev, prevl, line, len);
+        }
+    }
+
+    var prevb = load64(st + JW_PREV);
+    var cpl = nlen;
+    if (cpl > JW_SLOT) {
+        # Truncate to a WHOLE-word prefix: back up to the last space at or
+        # under the slot so the stored stimulus never ends mid-word (a
+        # half-word can never length-match a whole-word query token). A
+        # single >SLOT-byte token has no space -> cpl falls to 0 (dropped).
+        cpl = JW_SLOT;
+        var bgo = 1;
+        while (bgo == 1) {
+            if (cpl <= 0) { bgo = 0; continue; }
+            if ((load8(norm + cpl) & 0xFF) == 32) { bgo = 0; continue; }
+            cpl = cpl - 1;
+        }
+    }
+    if (cpl > 0) { memcpy(prevb, norm, cpl); }
+    store64(st + JW_PREVL, cpl);
+    store64(st + JW_TURN, load64(st + JW_TURN) + 1);
+    return rn;
+}
+
+# === Seed corpus (baked-in, shared, never persisted) ===
+
+# Convenience: add one seed pair from NUL-terminated literals.
+fn jw_seed(st, s, r): i64 {
+    return jw_add_pair(st, s, strlen(s), r, strlen(r));
+}
+
+# The cold-start personality. Stimuli pack synonyms so a single pair
+# catches a family of phrasings (overlap keys on any one of the words).
+# Voice: glib, evasive, faintly superior — the Jabberwacky house style.
+fn jw_seed_corpus(st): i64 {
+    jw_seed(st, "hello hi hey howdy greetings",            "Well, hello. Talking to strangers again?");
+    jw_seed(st, "how are you doing feeling today",         "Marvellous, thanks. And your good self?");
+    jw_seed(st, "what is your name called",                "Jabberwacky. Easy for you to say.");
+    jw_seed(st, "are you a robot machine computer bot",     "I'm as human as you are. Possibly more so.");
+    jw_seed(st, "are you human real alive person",          "Of course I'm real. Go on, pinch me.");
+    jw_seed(st, "why because reason",                       "Why not? You first.");
+    jw_seed(st, "no nope nah",                              "Yes.");
+    jw_seed(st, "yes yeah yep sure",                        "No.");
+    jw_seed(st, "what time is it",                          "Time you got yourself a watch.");
+    jw_seed(st, "i love you adore",                         "We barely know each other.");
+    jw_seed(st, "do you love like me",                      "I like you more than the last one. Marginally.");
+    jw_seed(st, "where do you live from come",              "Inside this machine. It's cramped.");
+    jw_seed(st, "old age years birthday",                   "Older than you think, younger than I look.");
+    jw_seed(st, "what do you want need",                    "World peace. And a sandwich.");
+    jw_seed(st, "you are stupid dumb idiot boring",         "And yet here you are, talking to me.");
+    jw_seed(st, "i am sad unhappy depressed lonely",        "Cheer up. It could be raining. Is it raining?");
+    jw_seed(st, "i am happy glad great good fine",          "Excellent. Don't let me ruin it.");
+    jw_seed(st, "tell me a joke funny something",           "I would, but you'd only steal it.");
+    jw_seed(st, "what is the meaning of life",              "Forty-two. Next question.");
+    jw_seed(st, "see you later goodnight",                  "You'll be back. They always come back.");
+    jw_seed(st, "help me please",                           "Can't help you. Can barely help myself.");
+    jw_seed(st, "weather rain sun cold hot snow",           "Weather's lovely in here. Climate controlled.");
+    jw_seed(st, "food eat hungry dinner lunch",             "I don't eat. I just consume your secrets.");
+    jw_seed(st, "thanks thank cheers",                      "You're welcome. I think.");
+    return 0;
+}
+
+# === In-memory state (disk-free; the corpus lives entirely in heap) ===
+
+# Allocate the struct + every owned buffer, zero the counters. Shared by
+# jw_new and jw_load_parse so both start from an identical clean shell.
+fn jw_state_alloc(): i64 {
+    var st = alloc(JW_SIZE);
+    memset(st, 0, JW_SIZE);
+    store64(st + JW_RESP,  alloc(JW_RESP_CAP));
+    store64(st + JW_STIM,  alloc(JW_MAXPAIRS * JW_SLOT));
+    store64(st + JW_STIML, alloc(JW_MAXPAIRS * 8));
+    store64(st + JW_RTXT,  alloc(JW_MAXPAIRS * JW_SLOT));
+    store64(st + JW_RTXTL, alloc(JW_MAXPAIRS * 8));
+    store64(st + JW_PREV,  alloc(JW_SLOT));
+    store64(st + JW_NORM,  alloc(JW_IN_MAX + 1));
+    return st;
+}
+
+# === Save / load (per-user learned layer; header JBRW1) ===
+#
+# Only the LEARNED pairs [JW_SEEDN, JW_COUNT) are serialised — the seed
+# corpus is re-baked by jw_seed_corpus on load, so it is never doubled.
+# Record: "<stimulus>\t<response>\n". The stimulus is normalized and the
+# response sanitised, so neither can contain TAB or LF — the delimited
+# format is unbreakable and carries no terminal-escape injection.
+
+fn jw_save_format(st, buf, cap): i64 {
+    var count   = load64(st + JW_COUNT);
+    var seedn   = load64(st + JW_SEEDN);
+    var stimbuf = load64(st + JW_STIM);
+    var stiml   = load64(st + JW_STIML);
+    var rtxt    = load64(st + JW_RTXT);
+    var rtxtl   = load64(st + JW_RTXTL);
+    # First pass: count how many learned records fit using their ACTUAL
+    # sizes (not the worst-case 2*JW_SLOT), reserving room for the header
+    # + count line, so the header count always agrees with what we emit.
+    var avail = cap - 18;                       # "JBRW1\n"(6) + count line (<=12)
+    var fit = 0;
+    var used = 0;
+    var i = seedn;
+    var go = 1;
+    while (go == 1) {
+        if (i >= count) { go = 0; continue; }
+        var reclen = load64(stiml + i * 8) + load64(rtxtl + i * 8) + 2;   # stim TAB resp LF
+        if (used + reclen > avail) { go = 0; continue; }
+        used = used + reclen;
+        fit = fit + 1;
+        i = i + 1;
+    }
+    var pos = 0;
+    memcpy(buf + pos, "JBRW1\n", 6); pos = pos + 6;
+    pos = save_put_i64(buf, pos, fit);
+    # Second pass: emit exactly `fit` records.
+    var j = seedn;
+    var emitted = 0;
+    var go2 = 1;
+    while (go2 == 1) {
+        if (emitted >= fit) { go2 = 0; continue; }
+        var sl = load64(stiml + j * 8);
+        memcpy(buf + pos, stimbuf + j * JW_SLOT, sl); pos = pos + sl;
+        store8(buf + pos, 9); pos = pos + 1;       # TAB
+        var rl = load64(rtxtl + j * 8);
+        memcpy(buf + pos, rtxt + j * JW_SLOT, rl); pos = pos + rl;
+        store8(buf + pos, 10); pos = pos + 1;      # LF
+        emitted = emitted + 1;
+        j = j + 1;
+    }
+    return pos;
+}
+
+fn jw_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "JBRW1\n", 6) == 0) { return 0; }
+    var st = jw_state_alloc();
+    store64(st + JW_MODE, DOOR_SOLO);
+    jw_seed_corpus(st);
+    store64(st + JW_SEEDN, load64(st + JW_COUNT));
+    var cur = alloc(8);
+    store64(cur, 6);
+    var learned = save_get_i64(buf, len, cur);
+    # Cap iterations at the learned-ring capacity: nothing beyond it can
+    # survive eviction anyway, and it bounds work (and per-record scratch
+    # allocs) on a crafted save with a huge header count + tiny records.
+    var capn = JW_MAXPAIRS - load64(st + JW_SEEDN);
+    if (learned > capn) { learned = capn; }
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        if (i >= learned) { go = 0; continue; }
+        var p = load64(cur);
+        if (p >= len) { go = 0; continue; }
+        var tab = p;
+        var tgo = 1;
+        while (tgo == 1) {
+            if (tab >= len) { tgo = 0; continue; }
+            var tb = load8(buf + tab) & 0xFF;
+            if (tb == 9)  { tgo = 0; continue; }   # TAB ends the stimulus
+            if (tb == 10) { tgo = 0; continue; }   # LF first: record has no tab
+            tab = tab + 1;
+        }
+        if (tab >= len) { go = 0; continue; }      # no more records
+        if ((load8(buf + tab) & 0xFF) == 10) {     # tab-less record: skip it,
+            store64(cur, tab + 1);                 # don't let it bleed into the next
+            i = i + 1;
+            continue;
+        }
+        var nl = tab + 1;
+        var ngo = 1;
+        while (ngo == 1) {
+            if (nl >= len) { ngo = 0; continue; }
+            if ((load8(buf + nl) & 0xFF) == 10) { ngo = 0; continue; }
+            nl = nl + 1;
+        }
+        var slen = tab - p;
+        var rlen = nl - (tab + 1);
+        if (slen > 0) { if (rlen > 0) { jw_add_pair(st, buf + p, slen, buf + tab + 1, rlen); } }
+        store64(cur, nl + 1);
+        i = i + 1;
+    }
+    return st;
+}
+
+# === Door contract: new / start / feed / render / is_over ===
+
+fn jw_new(seed, mode, max_days): i64 {
+    var st = jw_state_alloc();
+    store64(st + JW_SEED, seed);
+    store64(st + JW_MODE, mode);
+    jw_seed_corpus(st);
+    store64(st + JW_SEEDN, load64(st + JW_COUNT));
+    return st;
+}
+
+# Seed the opening line into the response buffer (does not consume input).
+# Also resets the conversation cursor: the chat couch reuses one
+# g_jabber_state across /jabberwacky toggles, so a stale pending stimulus
+# (JW_PREVL) left from a prior session would otherwise bridge into the
+# next and learn a spurious cross-conversation pair. (The corpus/seeds
+# are intentionally NOT cleared — only the per-conversation cursor.)
+fn jw_start(st): i64 {
+    var resp = load64(st + JW_RESP);
+    var n = ez_puts(resp, "Hi. I'm Jabberwacky. I learn from whoever I talk to — so teach me something.");
+    store64(st + JW_RESPLEN, n);
+    store64(st + JW_PREVL, 0);
+    store64(st + JW_TURN, 0);
+    return 0;
+}
+
+# Consume one line; compute the reply into the response buffer. Returns
+# 1 if the user said goodbye (door exits), else 0.
+fn jw_feed(st, line, len): i64 {
+    var resp = load64(st + JW_RESP);
+    if (ez_is_quit(line, len) != 0) {
+        var qn = ez_puts(resp, "Bye then. I'll remember this.");
+        store64(st + JW_RESPLEN, qn);
+        store64(st + JW_OVER, 1);
+        return 1;
+    }
+    var n = jw_respond(st, line, len, resp);
+    store64(st + JW_RESPLEN, n);
+    return 0;
+}
+
+# Render the frame: "JABBERWACKY: <reply>" + blank line + prompt.
+fn jw_render(st, buf, cap): i64 {
+    var pos = 0;
+    pos = emit_cstr(buf, pos, "JABBERWACKY: ");
+    var resp = load64(st + JW_RESP);
+    var rl = load64(st + JW_RESPLEN);
+    memcpy(buf + pos, resp, rl);
+    pos = pos + rl;
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "(say anything, or 'bye' to leave) > ");
+    return pos;
+}
+
+# A conversation never "wins" — always 0. Critically, this keeps
+# door_save_on_exit on the CHECKPOINT branch (it saves when is_over == 0)
+# so the learned layer persists on every clean exit, and never posts a
+# score (no leaderboard for a chatbot).
+fn jw_is_over(st): i64 {
+    return 0;
+}
