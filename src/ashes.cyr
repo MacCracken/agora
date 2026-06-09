@@ -50,14 +50,21 @@
 # per-destination contests, then growth). The hard pure function ADR 0014
 # flagged — fully unit-testable without a socket.
 #
-# Bite 3 (this revision, snapshot v3): alliances / diplomacy. A pact edge-list
-# (propose / reciprocate-to-ally / break) folded into the resolver — a
-# defender's allies reinforce instead of attacking, and allied attackers merge
-# into coalitions (union-find) that fight as one bloc. Betrayal needs no code:
-# breaking a pact re-evaluates a march as an attack at the next resolution.
+# Bite 3 (snapshot v3): alliances / diplomacy. A pact edge-list (propose /
+# reciprocate-to-ally / break) folded into the resolver — a defender's allies
+# reinforce instead of attacking, and allied attackers merge into coalitions
+# (union-find) that fight as one bloc. Betrayal needs no code: breaking a pact
+# re-evaluates a march as an attack at the next resolution.
 #
-# Still ahead: the door UI + async-PvP notice bite 4; multi-process
-# concurrency smoke + scores + closeout bite 5.
+# Bite 4 (this revision): the door layer — Ashes reachable over telnet via
+# `play ashes` (login-gated, forced universe in main.cyr). Per-player session
+# struct (AE_*), the map/orders/pacts frame (ash_render), the command parser
+# (march / ally / break), founding (ash_spawn) + the async next-login notice
+# (ash_on_entry), and the lazy resolve-on-entry hook (ash_world_tick) main.cyr
+# runs inside the flock'd world transaction. Wire smoke: 18-ashes.sh.
+#
+# Still ahead: multi-process concurrency smoke + `scores ashes` + closeout
+# (VERSION / CHANGELOG / state / docs) bite 5.
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr — rng_seed/rng_below (seeded terrain), save_put/get_i64,
@@ -77,6 +84,7 @@ enum ASH {
     ASH_GROWTH      = 2;             # armies an owned province raises per resolved turn
     ASH_MAXPACT     = 32;            # alliance/offer edges the snapshot holds
     ASH_PACTCELLS   = 3;             # per-pact snapshot cells (lo fp, hi fp, status)
+    ASH_SPAWN_ARMY  = 10;            # garrison a newly-founded empire starts with
 }
 
 # Pact status. A pact is a single edge between two players, stored once with
@@ -763,4 +771,464 @@ fn ash_resolve_turn(w): i64 {
     ash_resolve_growth(w);
     ashw_set_turn(w, ashw_turn(w) + 1);
     return 0;
+}
+
+# Lazy resolve-on-entry: a caller holding the world lock runs this on every
+# world-open. ashw_window_tick says how many turn windows are overdue; resolve
+# that many (queued orders resolve in the first, later catch-up turns are
+# growth-only since the queue is cleared). Capped so a wildly-future clock
+# can't spin — growth saturates after a few turns anyway. Returns due count.
+fn ash_world_tick(w, now): i64 {
+    var due = ashw_window_tick(w, now);
+    var capd = due;
+    if (capd > 64) { capd = 64; }
+    var i = 0;
+    while (i < capd) {
+        ash_resolve_turn(w);
+        i = i + 1;
+    }
+    return due;
+}
+
+# === The door layer: per-player session state + the door contract ===
+#
+# Bite 4 (this revision): Ashes becomes reachable over telnet. The shared map
+# is the only durable state (ownership keyed by sigil fp), so a player's
+# per-session struct is tiny — a pointer to the in-memory world snapshot (set
+# by main.cyr inside the flock'd transaction, exactly as PA sets PA_WORLD),
+# their fp, a message line, and the last-seen turn for the async-PvP notice.
+# Login-gated (a persistent territory is a persistent actor). The pure modules
+# above stay socket-free; main.cyr owns the socket + the world transaction.
+
+enum AE {
+    AE_FP       = 0;    # this player's fp (hex16_to_i64), set on entry
+    AE_WORLD    = 8;    # ptr -> in-memory world snapshot (set under the lock)
+    AE_MODE     = 16;   # DoorMode (always DOOR_UNIVERSE in practice)
+    AE_SCREEN   = 24;   # current screen (ASCR_*)
+    AE_MSG      = 32;   # ptr -> 256-byte transient message buffer
+    AE_SEENTURN = 40;   # world turn this player last observed (async notice)
+    AE_SEENHELD = 48;   # holdings this player last observed
+    AE_BYTES    = 64;   # struct size
+}
+
+enum ASHScr { ASCR_MAP = 0; }
+
+fn ash_msg(st, s): i64 {
+    var m = load64(st + AE_MSG);
+    if (m == 0) { return 0; }
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+fn ash_msg_clear(st): i64 {
+    var m = load64(st + AE_MSG);
+    if (m != 0) { store8(m, 0); }
+    return 0;
+}
+
+fn ash_new(seed, mode): i64 {
+    var st = alloc(AE_BYTES);
+    memset(st, 0, AE_BYTES);
+    store64(st + AE_MODE, mode);
+    store64(st + AE_MSG, alloc(256));
+    ash_msg_clear(st);
+    store64(st + AE_SCREEN, ASCR_MAP);
+    return st;
+}
+
+fn ash_start(st): i64 {
+    store64(st + AE_SCREEN, ASCR_MAP);
+    ash_msg_clear(st);
+    return 0;
+}
+
+# Found a player's empire: if they hold nothing (a new arrival, or one wiped
+# off the map), seize a free neutral province for them — probed from an
+# fp-biased start so distinct players tend to spawn apart, falling through to
+# the first free one. Returns the founded province, or (0-1) if the map is
+# full (no neutral province left to take). Must run under the world lock.
+fn ash_spawn(w, fp): i64 {
+    if (fp == 0) { return 0 - 1; }
+    if (ashw_holdings(w, fp) > 0) { return 0 - 1; }
+    var base = (fp & 0xFFFF) % ASH_TERR;
+    var i = 0;
+    var chosen = 0 - 1;
+    while (i < ASH_TERR) {
+        var t = (base + i) % ASH_TERR;
+        if (chosen < 0) {
+            if (ashw_owner(w, t) == 0) { chosen = t; }
+        }
+        i = i + 1;
+    }
+    if (chosen < 0) { return 0 - 1; }
+    ashw_set_owner(w, chosen, fp);
+    if (ashw_army(w, chosen) < ASH_SPAWN_ARMY) { ashw_set_army(w, chosen, ASH_SPAWN_ARMY); }
+    return chosen;
+}
+
+# Entry hook (run under the world lock after the lazy turn tick): found the
+# player if needed, otherwise surface the async "what happened" notice. Sets
+# the opening message + the seen-watermark.
+fn ash_on_entry(st): i64 {
+    var w = load64(st + AE_WORLD);
+    if (w == 0) { return 0; }
+    var me = load64(st + AE_FP);
+    var sp = ash_spawn(w, me);
+    if (sp >= 0) {
+        var m = load64(st + AE_MSG);
+        var p = 0;
+        p = emit_cstr(m, p, "you have founded your empire in ");
+        p = emit_cstr(m, p, ash_terr_name(sp));
+        p = emit_cstr(m, p, " — march out and conquer the ashes.");
+        store8(m + p, 0);
+        store64(st + AE_SEENTURN, ashw_turn(w));
+        store64(st + AE_SEENHELD, ashw_holdings(w, me));
+        return 0;
+    }
+    ash_arrival_notice(st);
+    return 0;
+}
+
+# The async-PvP "what happened while you were gone" notice — the next-login
+# notice shape QUEST/PA prototyped. Run on entry AFTER the lazy turn tick (so
+# the world reflects resolved turns). If turns elapsed since this player last
+# looked, summarise; then update the watermark.
+fn ash_arrival_notice(st): i64 {
+    var w = load64(st + AE_WORLD);
+    if (w == 0) { return 0; }
+    var me = load64(st + AE_FP);
+    var curturn = ashw_turn(w);
+    var held = ashw_holdings(w, me);
+    var seen = load64(st + AE_SEENTURN);
+    if (curturn > seen) {
+        if (seen > 0) {
+            var m = load64(st + AE_MSG);
+            var p = 0;
+            p = emit_cstr(m, p, "while you were away, ");
+            p = emit_int(m, p, curturn - seen);
+            p = emit_cstr(m, p, " turn(s) resolved — you now hold ");
+            p = emit_int(m, p, held);
+            p = emit_cstr(m, p, " province(s).");
+            store8(m + p, 0);
+        }
+    }
+    store64(st + AE_SEENTURN, curturn);
+    store64(st + AE_SEENHELD, held);
+    return 0;
+}
+
+# === Rendering ===
+
+fn ash_emit_owner(buf, pos, w, t, me): i64 {
+    var o = ashw_owner(w, t);
+    if (o == 0)  { return emit_cstr(buf, pos, "open      "); }
+    if (o == me) { return emit_cstr(buf, pos, "YOU       "); }
+    pos = emit_cstr(buf, pos, "rival#");
+    pos = emit_int(buf, pos, o & 0xFFFF);
+    return pos;
+}
+
+fn ash_emit_my_orders(buf, pos, w, me): i64 {
+    var no = ashw_norders(w);
+    var any = 0;
+    var i = 0;
+    while (i < no) {
+        if (ashw_ord_owner(w, i) == me) {
+            if (any == 0) { pos = emit_cstr(buf, pos, "  your pending orders (resolve at the turn boundary):\r\n"); any = 1; }
+            pos = emit_cstr(buf, pos, "    march ");
+            pos = emit_int(buf, pos, ashw_ord_qty(w, i));
+            pos = emit_cstr(buf, pos, " from ");
+            pos = emit_cstr(buf, pos, ash_terr_name(ashw_ord_src(w, i)));
+            pos = emit_cstr(buf, pos, " to ");
+            pos = emit_cstr(buf, pos, ash_terr_name(ashw_ord_dst(w, i)));
+            pos = emit_crlf(buf, pos);
+        }
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn ash_emit_my_pacts(buf, pos, w, me): i64 {
+    var p = 0;
+    var any = 0;
+    while (p < ASH_MAXPACT) {
+        var stt = ashw_pact_status(w, p);
+        if (stt != ASH_PACT_NONE) {
+            var lo = ashw_pact_lo(w, p);
+            var hi = ashw_pact_hi(w, p);
+            var other = 0;
+            var mine = 0;
+            if (lo == me) { mine = 1; other = hi; }
+            if (hi == me) { mine = 1; other = lo; }
+            if (mine == 1) {
+                if (any == 0) { pos = emit_cstr(buf, pos, "  your pacts:\r\n"); any = 1; }
+                pos = emit_cstr(buf, pos, "    rival#");
+                pos = emit_int(buf, pos, other & 0xFFFF);
+                pos = emit_cstr(buf, pos, " — ");
+                if (stt == ASH_PACT_ALLIED) { pos = emit_cstr(buf, pos, "ALLIED"); }
+                else { pos = emit_cstr(buf, pos, "offer pending"); }
+                pos = emit_crlf(buf, pos);
+            }
+        }
+        p = p + 1;
+    }
+    return pos;
+}
+
+fn ash_render(st, buf, cap): i64 {
+    var w = load64(st + AE_WORLD);
+    var me = load64(st + AE_FP);
+    var pos = 0;
+    pos = emit_cstr(buf, pos, "\r\n== ASHES OF EMPIRE ==   turn ");
+    if (w != 0) { pos = emit_int(buf, pos, ashw_turn(w)); }
+    pos = emit_cstr(buf, pos, "   you hold ");
+    var held = 0;
+    if (w != 0) { held = ashw_holdings(w, me); }
+    pos = emit_int(buf, pos, held);
+    pos = emit_cstr(buf, pos, "/");
+    pos = emit_int(buf, pos, ASH_TERR);
+    pos = emit_crlf(buf, pos);
+    var msg = load64(st + AE_MSG);
+    if (msg != 0) {
+        if ((load8(msg) & 0xFF) != 0) {
+            pos = emit_cstr(buf, pos, "  ");
+            pos = emit_cstr(buf, pos, msg);
+            pos = emit_crlf(buf, pos);
+        }
+    }
+    if (w != 0) {
+        pos = emit_cstr(buf, pos, "  the twelve provinces (a ring — march only to a neighbour):\r\n");
+        var t = 0;
+        while (t < ASH_TERR) {
+            pos = emit_cstr(buf, pos, "   ");
+            if (t < 10) { pos = emit_cstr(buf, pos, " "); }
+            pos = emit_int(buf, pos, t);
+            pos = emit_cstr(buf, pos, ") ");
+            pos = emit_cstr(buf, pos, ash_terr_name(t));
+            pos = emit_cstr(buf, pos, " [");
+            pos = emit_cstr(buf, pos, ash_terrain_name(ash_terrain(ashw_seed(w), t)));
+            pos = emit_cstr(buf, pos, "]  ");
+            pos = ash_emit_owner(buf, pos, w, t, me);
+            pos = emit_cstr(buf, pos, "  army ");
+            pos = emit_int(buf, pos, ashw_army(w, t));
+            pos = emit_crlf(buf, pos);
+            t = t + 1;
+        }
+        pos = ash_emit_my_orders(buf, pos, w, me);
+        pos = ash_emit_my_pacts(buf, pos, w, me);
+    }
+    pos = emit_cstr(buf, pos, "  commands: march <src> <dst> <n> | ally <prov> | break <prov> | map | help | quit\r\n");
+    return pos;
+}
+
+# === Command parsing ===
+
+# Does the line begin with the whole word `wd` (followed by a space or EOL)?
+fn ash_cmd_is(line, len, wd): i64 {
+    var wl = strlen(wd);
+    if (len < wl) { return 0; }
+    var i = 0;
+    while (i < wl) {
+        if ((load8(line + i) & 0xFF) != (load8(wd + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    if (len == wl) { return 1; }
+    if ((load8(line + wl) & 0xFF) == 32) { return 1; }
+    return 0;
+}
+
+# Index just past the first whitespace-delimited token (the command word).
+fn ash_after_word(line, len): i64 {
+    var p = 0;
+    var sk = 1;
+    while (sk == 1) {
+        if (p >= len) { sk = 0; }
+        else { if ((load8(line + p) & 0xFF) == 32) { p = p + 1; } else { sk = 0; } }
+    }
+    var go = 1;
+    while (go == 1) {
+        if (p >= len) { go = 0; }
+        else { if ((load8(line + p) & 0xFF) == 32) { go = 0; } else { p = p + 1; } }
+    }
+    return p;
+}
+
+# Parse up to maxn non-negative ints from `start`; write them into out[];
+# return how many were parsed (stops at the first non-numeric token).
+fn ash_scan_ints(line, len, start, out, maxn): i64 {
+    var p = start;
+    var cnt = 0;
+    var go = 1;
+    while (go == 1) {
+        var sk = 1;
+        while (sk == 1) {
+            if (p >= len) { sk = 0; }
+            else { if ((load8(line + p) & 0xFF) == 32) { p = p + 1; } else { sk = 0; } }
+        }
+        if (p >= len) { go = 0; }
+        else {
+            var c = load8(line + p) & 0xFF;
+            var isdig = 0;
+            if (c >= 48) { if (c <= 57) { isdig = 1; } }
+            if (isdig == 0) { go = 0; }
+            else {
+                var v = 0;
+                var dg = 1;
+                while (dg == 1) {
+                    if (p >= len) { dg = 0; }
+                    else {
+                        var d = load8(line + p) & 0xFF;
+                        var dd = 0;
+                        if (d >= 48) { if (d <= 57) { dd = 1; } }
+                        if (dd == 0) { dg = 0; }
+                        else { v = v * 10 + (d - 48); p = p + 1; }
+                    }
+                }
+                store64(out + cnt * 8, v);
+                cnt = cnt + 1;
+                if (cnt >= maxn) { go = 0; }
+            }
+        }
+    }
+    return cnt;
+}
+
+# === The door contract (feed / is_over / score) ===
+#
+# ash_feed mutates the SHARED world (via the AE_WORLD pointer main.cyr set
+# under the flock); the orders/pacts it writes are seen by every player.
+# Returns 1 to leave the door, 0 to stay.
+fn ash_feed(st, line, len): i64 {
+    if (ash_cmd_is(line, len, "quit") == 1) { return 1; }
+    if (ash_cmd_is(line, len, "bye") == 1)  { return 1; }
+    if (ash_cmd_is(line, len, "exit") == 1) { return 1; }
+    if (ash_cmd_is(line, len, "q") == 1)    { return 1; }
+    if (ash_cmd_is(line, len, "help") == 1) {
+        ash_msg(st, "march <src> <dst> <n>: send armies (you must hold src; it must neighbour dst). ally/break <prov>: diplomacy with that province's holder. quit: leave.");
+        return 0;
+    }
+    if (ash_cmd_is(line, len, "map") == 1)  { ash_msg_clear(st); return 0; }
+    if (ash_cmd_is(line, len, "look") == 1) { ash_msg_clear(st); return 0; }
+
+    var w = load64(st + AE_WORLD);
+    var me = load64(st + AE_FP);
+    if (w == 0) { ash_msg(st, "the world is unavailable — try again."); return 0; }
+
+    var is_march = 0;
+    if (ash_cmd_is(line, len, "march") == 1) { is_march = 1; }
+    if (ash_cmd_is(line, len, "m") == 1)     { is_march = 1; }
+    if (is_march == 1) {
+        var after = ash_after_word(line, len);
+        var nums = alloc(24);
+        var cnt = ash_scan_ints(line, len, after, nums, 3);
+        if (cnt < 3) { ash_msg(st, "usage: march <src> <dst> <count>"); return 0; }
+        var src = load64(nums);
+        var dst = load64(nums + 8);
+        var qty = load64(nums + 16);
+        if (src >= ASH_TERR) { ash_msg(st, "no such source province."); return 0; }
+        if (dst >= ASH_TERR) { ash_msg(st, "no such target province."); return 0; }
+        if (ashw_owner(w, src) != me) { ash_msg(st, "you don't hold that province."); return 0; }
+        if (ash_adjacent(src, dst) != 1) { ash_msg(st, "you can only march to a neighbouring province."); return 0; }
+        if (qty <= 0) { ash_msg(st, "march at least 1 army."); return 0; }
+        if (ashw_order_push(w, me, src, dst, qty) == 1) {
+            var m = load64(st + AE_MSG);
+            var mp = 0;
+            mp = emit_cstr(m, mp, "ordered ");
+            mp = emit_int(m, mp, qty);
+            mp = emit_cstr(m, mp, " from ");
+            mp = emit_cstr(m, mp, ash_terr_name(src));
+            mp = emit_cstr(m, mp, " to ");
+            mp = emit_cstr(m, mp, ash_terr_name(dst));
+            mp = emit_cstr(m, mp, ".");
+            store8(m + mp, 0);
+        } else {
+            ash_msg(st, "the turn's order queue is full.");
+        }
+        return 0;
+    }
+
+    if (ash_cmd_is(line, len, "ally") == 1) {
+        var after = ash_after_word(line, len);
+        var nums = alloc(8);
+        var cnt = ash_scan_ints(line, len, after, nums, 1);
+        if (cnt < 1) { ash_msg(st, "usage: ally <a province your target holds>"); return 0; }
+        var prov = load64(nums);
+        if (prov >= ASH_TERR) { ash_msg(st, "no such province."); return 0; }
+        var owner = ashw_owner(w, prov);
+        if (owner == 0)  { ash_msg(st, "no one holds that province."); return 0; }
+        if (owner == me) { ash_msg(st, "that province is your own."); return 0; }
+        var r = ash_pact_propose(w, me, owner);
+        if (r == ASH_DIP_ALLIED) { ash_msg(st, "alliance sealed — your armies now fight as one."); }
+        else { if (r == ASH_DIP_PROPOSED) { ash_msg(st, "alliance proposed — pending their reply."); }
+        else { if (r == ASH_DIP_PENDING)  { ash_msg(st, "already proposed or allied."); }
+        else { ash_msg(st, "no room for another pact."); } } }
+        return 0;
+    }
+
+    if (ash_cmd_is(line, len, "break") == 1) {
+        var after = ash_after_word(line, len);
+        var nums = alloc(8);
+        var cnt = ash_scan_ints(line, len, after, nums, 1);
+        if (cnt < 1) { ash_msg(st, "usage: break <a province the ally holds>"); return 0; }
+        var prov = load64(nums);
+        if (prov >= ASH_TERR) { ash_msg(st, "no such province."); return 0; }
+        var owner = ashw_owner(w, prov);
+        if (owner == 0) { ash_msg(st, "no one holds that province."); return 0; }
+        if (ash_pact_break(w, me, owner) == 1) { ash_msg(st, "pact broken — they are no longer your ally."); }
+        else { ash_msg(st, "you had no pact with them."); }
+        return 0;
+    }
+
+    ash_msg(st, "unknown command — try: march / ally / break / map / help / quit");
+    return 0;
+}
+
+# Domination ends a run: holding every province wins. Otherwise open-ended
+# (you leave by quitting). Used to gate the leaderboard post (bite 5).
+fn ash_is_over(st): i64 {
+    var w = load64(st + AE_WORLD);
+    if (w == 0) { return 0; }
+    if (ashw_holdings(w, load64(st + AE_FP)) >= ASH_TERR) { return 1; }
+    return 0;
+}
+
+fn ash_final_score(st): i64 {
+    var w = load64(st + AE_WORLD);
+    if (w == 0) { return 0; }
+    return ashw_holdings(w, load64(st + AE_FP)) * 100;
+}
+
+fn ash_rank(score): i64 {
+    if (score >= 1200) { return "Imperator"; }
+    if (score >= 600)  { return "Consul"; }
+    if (score >= 300)  { return "Legatus"; }
+    if (score >= 100)  { return "Tribune"; }
+    return "Pretender";
+}
+
+# === Per-player checkpoint (the async-notice watermark) ===
+#
+# The shared map IS the player's durable state, so the per-player save is tiny
+# — just the last-seen turn/holdings so the "while you were away" notice spans
+# sessions. Header "ASHES" (door.cyr positional i64 save).
+fn ash_save_format(st, buf, cap): i64 {
+    memcpy(buf, "ASHES\n", 6);
+    var pos = 6;
+    pos = save_put_i64(buf, pos, load64(st + AE_SEENTURN));
+    pos = save_put_i64(buf, pos, load64(st + AE_SEENHELD));
+    return pos;
+}
+
+fn ash_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "ASHES\n", 6) == 0) { return 0; }
+    var st = ash_new(0, DOOR_UNIVERSE);
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + AE_SEENTURN, save_get_i64(buf, len, cur));
+    store64(st + AE_SEENHELD, save_get_i64(buf, len, cur));
+    return st;
 }

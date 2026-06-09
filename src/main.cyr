@@ -354,7 +354,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad  [practice|solo|universe]\r\n");
+        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  help            this message\r\n");
@@ -726,7 +726,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad|ashes> [practice|solo]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -759,8 +759,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(gbuf, "quest") != 0)    { game = GAME_QUEST; }
         if (streq(gbuf, "jabberwacky") != 0) { game = GAME_JABBER; }
         if (streq(gbuf, "olympiad") != 0) { game = GAME_OLYMPIAD; }
+        if (streq(gbuf, "ashes") != 0)    { game = GAME_ASHES; }
         if (game == GAME_NONE) {
-            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad\r\n");
+            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes\r\n");
             return MODE_COMMAND;
         }
         var dmode = DOOR_PRACTICE;
@@ -785,6 +786,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # stable persists across sessions) but has no Universe — coerce a
         # `universe` request to solo so it never hits the unwired branch.
         if (game == GAME_OLYMPIAD) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
+        # 1.3.7 (ADR 0014): Ashes of Empire is inherently a shared world — the
+        # map IS the game. There is no solo/practice; force universe so every
+        # session runs the flock'd world transaction.
+        if (game == GAME_ASHES) { dmode = DOOR_UNIVERSE; }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -805,6 +810,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (game == GAME_PORT)     { g_door_state = pa_load_parse(ulbuf, uln); }
                     if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(ulbuf, uln); }
                     if (game == GAME_HANDLER)  { g_door_state = th_load_parse(ulbuf, uln); }
+                    if (game == GAME_ASHES)    { g_door_state = ash_load_parse(ulbuf, uln); }
                     if (g_door_state != 0) { uloaded = 1; }
                 }
             }
@@ -813,6 +819,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 if (game == GAME_PORT)     { g_door_state = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS); }
                 if (game == GAME_SMUGGLER) { g_door_state = sl_new(useed, DOOR_UNIVERSE, SL_DEF_DAYS); }
                 if (game == GAME_HANDLER)  { g_door_state = th_new(useed, DOOR_UNIVERSE, TH_DEF_DAYS); }
+                if (game == GAME_ASHES)    { g_door_state = ash_new(useed, DOOR_UNIVERSE); }
             }
             if (game == GAME_PORT) {
                 pa_start(g_door_state);
@@ -820,11 +827,18 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
             if (game == GAME_HANDLER)  { th_start(g_door_state); }
+            if (game == GAME_ASHES) {
+                ash_start(g_door_state);
+                store64(g_door_state + AE_FP, hex16_to_i64(g_session_fp));
+            }
             # Prime the world — mints + persists it on the first ever entry
-            # — so the opening frame already reflects shared state.
+            # — so the opening frame already reflects shared state. For Ashes,
+            # door_world_begin also runs the lazy turn resolution; surface the
+            # async "what happened while you were gone" notice after it ticks.
             var ufd = door_world_begin();
             if (ufd >= 0) {
                 door_set_world(game, g_uni_world);
+                if (game == GAME_ASHES) { ash_on_entry(g_door_state); }
                 door_world_commit(ufd);
             }
             door_send_frame(cfd);
@@ -1006,6 +1020,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_QUEST)    { return "quest"; }
     if (game == GAME_JABBER)   { return "jabberwacky"; }
     if (game == GAME_OLYMPIAD) { return "olympiad"; }
+    if (game == GAME_ASHES)    { return "ashes"; }
     return "game";
 }
 
@@ -1146,6 +1161,7 @@ fn door_world_bytes(game): i64 {
     if (game == GAME_PORT)     { return paw_byte_size(); }
     if (game == GAME_SMUGGLER) { return slw_byte_size(); }
     if (game == GAME_HANDLER)  { return thw_byte_size(); }
+    if (game == GAME_ASHES)    { return ashw_byte_size(); }
     return 8;
 }
 
@@ -1154,6 +1170,7 @@ fn door_world_valid(game, buf, len): i64 {
     if (game == GAME_PORT)     { return paw_valid(buf, len); }
     if (game == GAME_SMUGGLER) { return slw_valid(buf, len); }
     if (game == GAME_HANDLER)  { return thw_valid(buf, len); }
+    if (game == GAME_ASHES)    { return ashw_valid(buf, len); }
     return 0;
 }
 
@@ -1164,6 +1181,7 @@ fn door_world_fresh_into(game, buf): i64 {
     if (game == GAME_PORT)     { src = paw_new(PA_UNIVERSE_SEED); }
     if (game == GAME_SMUGGLER) { src = slw_new(); }
     if (game == GAME_HANDLER)  { src = thw_new(); }
+    if (game == GAME_ASHES)    { src = ashw_new(ASH_WORLD_SEED); }
     if (src != 0) { memcpy(buf, src, door_world_bytes(game)); }
     return 0;
 }
@@ -1174,6 +1192,7 @@ fn door_set_world(game, ptr): i64 {
     if (game == GAME_PORT)     { store64(g_door_state + PA_WORLD, ptr); }
     if (game == GAME_SMUGGLER) { store64(g_door_state + SL_WORLD, ptr); }
     if (game == GAME_HANDLER)  { store64(g_door_state + TH_WORLD, ptr); }
+    if (game == GAME_ASHES)    { store64(g_door_state + AE_WORLD, ptr); }
     return 0;
 }
 
@@ -1183,6 +1202,7 @@ fn door_universe_slot(game): i64 {
     if (game == GAME_PORT)     { return "portu"; }
     if (game == GAME_SMUGGLER) { return "smuggleru"; }
     if (game == GAME_HANDLER)  { return "handleru"; }
+    if (game == GAME_ASHES)    { return "ashesu"; }
     return "gameu";
 }
 
@@ -1198,6 +1218,12 @@ fn door_world_begin(): i64 {
     if (door_world_valid(g_door_game, g_uni_world, n) == 0) {
         door_world_fresh_into(g_door_game, g_uni_world);
         world_write(g_store_buf, name, g_uni_world, cap);
+    }
+    # 1.3.7 (ADR 0014): Ashes resolves overdue turn windows lazily on every
+    # world-open — the entering caller (already holding the lock) runs the
+    # batch resolution. The commit that follows persists the resolved world.
+    if (g_door_game == GAME_ASHES) {
+        ash_world_tick(g_uni_world, clock_epoch_ns() / ASH_NS_PER_TURN);
     }
     return fd;
 }
@@ -1220,6 +1246,7 @@ fn door_universe_feed(line, len): i64 {
         if (g_door_game == GAME_PORT)     { pa_msg(g_door_state, "The galaxy is busy — try again."); }
         if (g_door_game == GAME_SMUGGLER) { sl_msg(g_door_state, "The streets are busy — try again."); }
         if (g_door_game == GAME_HANDLER)  { th_msg(g_door_state, "The registry is busy — try again."); }
+        if (g_door_game == GAME_ASHES)    { ash_msg(g_door_state, "the realm is busy — try again."); }
         return 0;
     }
     door_set_world(g_door_game, g_uni_world);
@@ -1227,6 +1254,7 @@ fn door_universe_feed(line, len): i64 {
     if (g_door_game == GAME_PORT)     { ctrl = pa_feed(g_door_state, line, len); }
     if (g_door_game == GAME_SMUGGLER) { ctrl = sl_feed(g_door_state, line, len); }
     if (g_door_game == GAME_HANDLER)  { ctrl = th_feed(g_door_state, line, len); }
+    if (g_door_game == GAME_ASHES)    { ctrl = ash_feed(g_door_state, line, len); }
     door_world_commit(fd);
     return ctrl;
 }
@@ -1240,6 +1268,7 @@ fn door_universe_save(): i64 {
     if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
     if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
     if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+    if (g_door_game == GAME_ASHES)    { n = ash_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
     if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_universe_slot(g_door_game), buf, n); }
     return 0;
 }
@@ -1256,6 +1285,7 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_QUEST)    { n = qu_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_JABBER)   { n = jw_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_OLYMPIAD) { n = ol_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_ASHES)    { n = ash_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1283,6 +1313,7 @@ fn door_is_over(): i64 {
     if (g_door_game == GAME_QUEST)    { return qu_is_over(g_door_state); }
     if (g_door_game == GAME_JABBER)   { return jw_is_over(g_door_state); }
     if (g_door_game == GAME_OLYMPIAD) { return ol_is_over(g_door_state); }
+    if (g_door_game == GAME_ASHES)    { return ash_is_over(g_door_state); }
     return 0;
 }
 
@@ -1343,6 +1374,7 @@ fn door_post_score(game): i64 {
     if (game == GAME_HANDLER)  { score = th_score(g_door_state);       rank = th_rank(score); }
     if (game == GAME_QUEST)    { score = qu_final_score(g_door_state);  rank = qu_rank(score); }
     if (game == GAME_OLYMPIAD) { score = ol_final_score(g_door_state);  rank = ol_rank(score); }
+    if (game == GAME_ASHES)    { score = ash_final_score(g_door_state); rank = ash_rank(score); }
     var path = alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var line = alloc(256);
