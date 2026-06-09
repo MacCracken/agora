@@ -69,7 +69,11 @@ enum OL {
     OL_FIELDN   = 144;   # entrants in the current field
     OL_PLACE    = 152;   # your finishing place in the last race (1-based; 0 none)
     OL_PURSE    = 160;   # your purse from the last race
-    OL_SIZE     = 168;
+    OL_BETLANE  = 168;   # lane you've wagered on this race (1-based; 0 = no bet)
+    OL_BETSTAKE = 176;   # your stake on that lane
+    OL_BETDELTA = 184;   # the resolved bet's signed gold delta (last race)
+    OL_BETHAD   = 192;   # 1 if a wager was resolved in the last race
+    OL_SIZE     = 200;
 }
 
 # A competitor: a fixed i64 block. Stats are event-flavoured (a chariot
@@ -123,6 +127,7 @@ enum OLEcon {
     OL_PURSE_WIN   = 100;    # 1st-place purse (tier-scaled later)
     OL_PURSE_2ND   = 40;
     OL_PURSE_3RD   = 20;
+    OL_BET_MIN     = 5;      # minimum wager at the book
 }
 
 # === Competitor accessors + form ===
@@ -355,6 +360,10 @@ fn ol_new(seed, mode): i64 {
     store64(st + OL_FIELDN, 0);
     store64(st + OL_PLACE, 0);
     store64(st + OL_PURSE, 0);
+    store64(st + OL_BETLANE, 0);
+    store64(st + OL_BETSTAKE, 0);
+    store64(st + OL_BETDELTA, 0);
+    store64(st + OL_BETHAD, 0);
     # the founding team: a Blue-faction chariot, modest across the board
     store64(st + OL_NCOMP, 1);
     ol_make_competitor(st, 0, EV_CHARIOT,
@@ -445,6 +454,28 @@ fn ol_build_chariot_field(st): i64 {
     return n;
 }
 
+fn ol_clear_bet(st): i64 {
+    store64(st + OL_BETLANE, 0);
+    store64(st + OL_BETSTAKE, 0);
+    return 0;
+}
+
+# Lay a wager of `stake` denarii on `lane` (1-based) to WIN. Validated like
+# a casino bet, reusing the wager.cyr reject codes so the messaging matches
+# the rest of the book. Returns WAGER_OK or a WAGER_E_* code. The stake is
+# held (not debited) until the race settles it.
+fn ol_place_bet(st, lane, stake): i64 {
+    var n = load64(st + OL_FIELDN);
+    if (lane < 1)                       { return WAGER_E_CHOICE; }
+    if (lane > n)                       { return WAGER_E_CHOICE; }
+    if (stake <= 0)                     { return WAGER_E_STAKE0; }
+    if (stake < OL_BET_MIN)             { return WAGER_E_MIN; }
+    if (stake > load64(st + OL_MONEY))  { return WAGER_E_FUNDS; }
+    store64(st + OL_BETLANE, lane);
+    store64(st + OL_BETSTAKE, stake);
+    return WAGER_OK;
+}
+
 # Run the assembled race: compete() resolves the finishing order off the
 # kernel CSPRNG, your placing pays a purse, and the race tires your real
 # team (so you can't spam races without resting — the "train or not"
@@ -481,6 +512,28 @@ fn ol_run_race(st): i64 {
     var cond = load64(mine + CMP_COND) - OL_RACE_COND;
     if (cond < 0) { cond = 0; }
     store64(mine + CMP_COND, cond);
+    # settle the wager (a WIN bet: the book pays if your lane wins outright;
+    # the profit comes from wager_payout off the entrant's form-odds, with
+    # the house vig; a loss debits the stake). Independent of the purse.
+    var betlane = load64(st + OL_BETLANE);
+    if (betlane == 0) {
+        store64(st + OL_BETHAD, 0);
+    } else {
+        store64(st + OL_BETHAD, 1);
+        var bi = betlane - 1;
+        var stake = load64(st + OL_BETSTAKE);
+        var bdelta = 0;
+        if (load64(order + 0 * 8) == bi) {
+            var bw = load64(forms + bi * 8);
+            var total = ol_field_total(forms, n, 0);
+            bdelta = wager_payout(stake, total - bw, bw, OL_VIG_BPS);
+        } else {
+            bdelta = 0 - stake;
+        }
+        store64(st + OL_MONEY, wager_settle(load64(st + OL_MONEY), bdelta));
+        store64(st + OL_BETDELTA, bdelta);
+    }
+    ol_clear_bet(st);
     store64(st + OL_SCREEN, OSCR_RESULT);
     return 0;
 }
@@ -600,6 +653,20 @@ fn ol_render(st, buf, cap): i64 {
             i = i + 1;
         }
         pos = emit_crlf(buf, pos);
+        var bl = load64(st + OL_BETLANE);
+        if (bl == 0) {
+            pos = emit_cstr(buf, pos, "No wager. Type '<lane> <stake>' to bet (min ");
+            pos = emit_int(buf, pos, OL_BET_MIN);
+            pos = emit_cstr(buf, pos, ").");
+        } else {
+            pos = emit_sgr(buf, pos, 33);
+            pos = emit_cstr(buf, pos, "Your wager: ");
+            pos = emit_int(buf, pos, load64(st + OL_BETSTAKE));
+            pos = emit_cstr(buf, pos, " on Lane ");
+            pos = emit_int(buf, pos, bl);
+            pos = emit_reset(buf, pos);
+        }
+        pos = emit_crlf(buf, pos);
         pos = emit_cstr(buf, pos, "[Enter] loose the gates   [x] scratch");
         pos = emit_crlf(buf, pos);
         pos = ol_render_msg(st, buf, pos);
@@ -640,6 +707,23 @@ fn ol_render(st, buf, cap): i64 {
             pos = emit_cstr(buf, pos, " -- out of the money.");
         }
         pos = emit_crlf(buf, pos);
+        if (load64(st + OL_BETHAD) == 1) {
+            var bd = load64(st + OL_BETDELTA);
+            if (bd > 0) {
+                pos = emit_cstr(buf, pos, "Your wager pays +");
+                pos = emit_int(buf, pos, bd);
+                pos = emit_cstr(buf, pos, " denarii.");
+            } else {
+                if (bd == 0) {
+                    pos = emit_cstr(buf, pos, "Your lane won, but the odds were too short to profit.");
+                } else {
+                    pos = emit_cstr(buf, pos, "Your wager loses ");
+                    pos = emit_int(buf, pos, 0 - bd);
+                    pos = emit_cstr(buf, pos, " denarii.");
+                }
+            }
+            pos = emit_crlf(buf, pos);
+        }
         pos = emit_cstr(buf, pos, "[Enter] back to the stable");
         pos = emit_crlf(buf, pos);
         return pos;
@@ -709,10 +793,27 @@ fn ol_feed(st, line, len): i64 {
     var screen = load64(st + OL_SCREEN);
     if (screen == OSCR_OVER) { return 1; }
     var k = door_key(line, len);
-    # The Hippodrome: Enter looses the gates, x scratches back to the hub.
+    # The Hippodrome: type "<lane> <stake>" to wager, Enter looses the
+    # gates (settling any wager), x scratches back to the hub.
     if (screen == OSCR_RACE) {
-        if (k == 120) { store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
-        return ol_run_race(st);
+        if (k == 120) { ol_clear_bet(st); store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
+        if (k == 0)   { return ol_run_race(st); }                          # blank Enter — race
+        var sp = alloc(8);
+        var lane = door_parse_2int(line, len, sp);
+        var stake = load64(sp);
+        if (lane < 0)  { ol_msg(st, "Wager '<lane> <stake>', Enter to race, x to scratch."); return 0; }
+        if (stake < 0) { ol_msg(st, "Name a stake: '<lane> <stake>'."); return 0; }
+        var rc = ol_place_bet(st, lane, stake);
+        if (rc != WAGER_OK) { ol_msg(st, wager_reason(rc)); return 0; }
+        var m = load64(st + OL_MSG);
+        var mp = 0;
+        mp = emit_cstr(m, mp, "Wager laid: ");
+        mp = emit_int(m, mp, stake);
+        mp = emit_cstr(m, mp, " on Lane ");
+        mp = emit_int(m, mp, lane);
+        mp = emit_cstr(m, mp, ". Enter looses the gates.");
+        store8(m + mp, 0);
+        return 0;
     }
     # The finish: any key returns to the stable.
     if (screen == OSCR_RESULT) {
@@ -725,6 +826,7 @@ fn ol_feed(st, line, len): i64 {
     if (k == 51)  { return ol_do_train(st, CMP_HANDLE,  "Handling"); } # 3
     if (k == 52)  { return ol_do_train(st, CMP_NERVE,   "Nerve"); }    # 4
     if (k == 101) {                                                # e — enter the next race
+        ol_clear_bet(st);
         ol_build_chariot_field(st);
         store64(st + OL_SCREEN, OSCR_RACE);
         return 0;

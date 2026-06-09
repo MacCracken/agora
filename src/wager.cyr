@@ -281,3 +281,31 @@ fn wager_settle(balance, delta): i64 {
     }
     return next;
 }
+
+# === Fractional (pari-mutuel) payout — the racetrack companion to the
+# table-based wager_resolve (ADR 0016) ===
+#
+# The casino's payout tables carry small integer multipliers. A racetrack
+# book is continuous: a strong favourite pays a FRACTION of the stake as
+# profit (4-to-5 on, say), which an integer multiplier floors to a broken
+# 0x. So the Olympiad book expresses odds as a profit fraction num:den
+# (3:2 → num=3,den=2; a 5:1 longshot → 5:1; a 4-to-5 favourite → 4:5) and
+# settles a WINNING bet through this helper.
+#
+# Returns the profit for staking `stake` at odds num:den, with edge_bps
+# shaved off in the house's favour and floored (the conventional rounding).
+# Pure. Defensive: den<=0 / num<=0 / a wrapped multiply all yield 0 (a
+# safe no-pay). The edge haircut is staged divide-before-multiply so the
+# intermediate never forms gross*10000, exactly as wager_resolve does.
+fn wager_payout(stake, num, den, edge_bps): i64 {
+    if (stake <= 0) { return 0; }
+    if (den <= 0)   { return 0; }
+    if (num <= 0)   { return 0; }
+    var gross = stake * num;
+    if (gross / num != stake) { return 0; }              # overflow guard
+    gross = gross / den;                                 # fair profit, floored
+    var kept = WAGER_EDGE_DENOM - edge_bps;
+    if (kept < 0) { kept = 0; }
+    if (kept > WAGER_EDGE_DENOM) { kept = WAGER_EDGE_DENOM; }
+    return (gross / WAGER_EDGE_DENOM) * kept + ((gross % WAGER_EDGE_DENOM) * kept) / WAGER_EDGE_DENOM;
+}

@@ -4307,6 +4307,20 @@ fn t193_ol_odds_and_new(): i64 {
     return 0;
 }
 
+# t195 — wager_payout: the fractional (pari-mutuel) profit helper. Odds as
+# num:den profit, edge shaved in the house's favour, floored; defensive 0s.
+fn t195_wager_payout(): i64 {
+    if (wager_payout(100, 3, 1, 0) != 300)    { test_fail("t195_wager_payout", "3:1"); return 1; }
+    if (wager_payout(100, 1, 1, 0) != 100)    { test_fail("t195_wager_payout", "evens"); return 1; }
+    if (wager_payout(100, 4, 5, 0) != 80)     { test_fail("t195_wager_payout", "favourite"); return 1; }   # pays < 1x
+    if (wager_payout(100, 2, 1, 500) != 190)  { test_fail("t195_wager_payout", "edge"); return 1; }         # 200 fair, 5% vig
+    if (wager_payout(0, 3, 1, 0) != 0)        { test_fail("t195_wager_payout", "stake0"); return 1; }
+    if (wager_payout(100, 3, 0, 0) != 0)      { test_fail("t195_wager_payout", "den0"); return 1; }
+    if (wager_payout(100, 0, 1, 0) != 0)      { test_fail("t195_wager_payout", "num0"); return 1; }
+    test_pass("t195_wager_payout");
+    return 0;
+}
+
 # t194 — chariot field construction: lane 0 is a copy of your team, the
 # field is the right size, every entrant has positive form, and rivals are
 # non-Blue factions with in-range stats (seeded generation).
@@ -4548,6 +4562,7 @@ fn main(): i64 {
     t192_ol_compete();
     t193_ol_odds_and_new();
     t194_ol_field();
+    t195_wager_payout();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
