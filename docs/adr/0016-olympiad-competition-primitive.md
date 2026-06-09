@@ -1,6 +1,6 @@
 # 0016 — The Olympiad: a competition primitive (one engine, many event skins) on a games-owner frame
 
-> **Status**: Accepted — being built at **1.3.6** (`src/olympiad.cyr`, the frame + the `compete()` primitive + the chariot-race event). Later events (gladiators, athletics, boat crews) are thin descriptors on the same primitive.
+> **Status**: Accepted — shipped at **1.3.6** (`src/olympiad.cyr`: the owner/stable frame + the `compete()` primitive + the chariot-race event + the book + the 12-meet ladder to the tethrippon crown + solo save + `scores olympiad`). Later events (gladiators, athletics, boat crews) are thin descriptors on the same primitive. The pari-mutuel book required the `wager_payout` fractional helper added to `wager.cyr` (a favourite pays < 1× profit, inexpressible as an integer multiplier). Built across five bites; unit-tested t189–t197; smoke `docs/examples/17-olympiad.sh`.
 > **Date**: 2026-06-09
 
 ## Context

@@ -596,6 +596,85 @@ fn ol_emit_odds(buf, pos, ox100): i64 {
     return pos;
 }
 
+# === Persistence (solo save, bite 5) ===
+#
+# Positional i64 save (door.cyr save_put/get_i64), header "OLYM1". Persists
+# the owner + the whole stable; the OL_RNG cell is saved so the season's
+# rival fields stay deterministic across a reload (the ADR-0016 replayable
+# field). Runtime-only fields (screen / cursor / msg / race scratch / bet)
+# are rebuilt on load, never serialized.
+
+fn ol_save_format(st, buf, cap): i64 {
+    memcpy(buf, "OLYM1\n", 6);
+    var pos = 6;
+    pos = save_put_i64(buf, pos, load64(st + OL_SEED));
+    pos = save_put_i64(buf, pos, load64(st + OL_RNG));
+    pos = save_put_i64(buf, pos, load64(st + OL_MODE));
+    pos = save_put_i64(buf, pos, load64(st + OL_OVER));
+    pos = save_put_i64(buf, pos, load64(st + OL_DAY));
+    pos = save_put_i64(buf, pos, load64(st + OL_ACTIONS));
+    pos = save_put_i64(buf, pos, load64(st + OL_MONEY));
+    pos = save_put_i64(buf, pos, load64(st + OL_TIER));
+    pos = save_put_i64(buf, pos, load64(st + OL_CROWNS));
+    pos = save_put_i64(buf, pos, load64(st + OL_LASTDAY));
+    var n = load64(st + OL_NCOMP);
+    pos = save_put_i64(buf, pos, n);
+    var i = 0;
+    while (i < n) {
+        var c = ol_comp(st, i);
+        pos = save_put_i64(buf, pos, load64(c + CMP_TYPE));
+        pos = save_put_i64(buf, pos, load64(c + CMP_SPEED));
+        pos = save_put_i64(buf, pos, load64(c + CMP_STAMINA));
+        pos = save_put_i64(buf, pos, load64(c + CMP_HANDLE));
+        pos = save_put_i64(buf, pos, load64(c + CMP_NERVE));
+        pos = save_put_i64(buf, pos, load64(c + CMP_COND));
+        pos = save_put_i64(buf, pos, load64(c + CMP_FACTION));
+        pos = save_put_i64(buf, pos, load64(c + CMP_NAMEID));
+        i = i + 1;
+    }
+    return pos;
+}
+
+# Parse a saved owner. Builds a fresh state (so the runtime scratch is
+# allocated) then overwrites the persisted fields. Returns the state, or 0
+# on a bad header. The competitor count is clamped to the stable ceiling.
+fn ol_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "OLYM1\n", 6) == 0) { return 0; }
+    var st = ol_new(0, DOOR_SOLO);
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + OL_SEED,    save_get_i64(buf, len, cur));
+    store64(st + OL_RNG,     save_get_i64(buf, len, cur));
+    store64(st + OL_MODE,    save_get_i64(buf, len, cur));
+    store64(st + OL_OVER,    save_get_i64(buf, len, cur));
+    store64(st + OL_DAY,     save_get_i64(buf, len, cur));
+    store64(st + OL_ACTIONS, save_get_i64(buf, len, cur));
+    store64(st + OL_MONEY,   save_get_i64(buf, len, cur));
+    store64(st + OL_TIER,    save_get_i64(buf, len, cur));
+    store64(st + OL_CROWNS,  save_get_i64(buf, len, cur));
+    store64(st + OL_LASTDAY, save_get_i64(buf, len, cur));
+    var n = save_get_i64(buf, len, cur);
+    if (n < 1) { n = 1; }
+    if (n > OL_STABLE_MAX) { n = OL_STABLE_MAX; }
+    store64(st + OL_NCOMP, n);
+    var i = 0;
+    while (i < n) {
+        var c = ol_comp(st, i);
+        store64(c + CMP_TYPE,    save_get_i64(buf, len, cur));
+        store64(c + CMP_SPEED,   save_get_i64(buf, len, cur));
+        store64(c + CMP_STAMINA, save_get_i64(buf, len, cur));
+        store64(c + CMP_HANDLE,  save_get_i64(buf, len, cur));
+        store64(c + CMP_NERVE,   save_get_i64(buf, len, cur));
+        store64(c + CMP_COND,    save_get_i64(buf, len, cur));
+        store64(c + CMP_FACTION, save_get_i64(buf, len, cur));
+        store64(c + CMP_NAMEID,  save_get_i64(buf, len, cur));
+        i = i + 1;
+    }
+    store64(st + OL_SCREEN, OSCR_STABLE);
+    return st;
+}
+
 # === Door contract ===
 
 fn ol_is_over(st): i64 {

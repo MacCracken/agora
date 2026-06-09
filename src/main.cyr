@@ -175,7 +175,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.3.5 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino");
+    println("v1.3.6 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad");
     return 0;
 }
 
@@ -780,10 +780,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # learned corpus is the per-user save) but has no Universe — coerce
         # a `universe` request to solo so it never hits the unwired branch.
         if (game == GAME_JABBER) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
-        # 1.3.6 (ADR 0016): Olympiad bite 1 ships the owner/stable hub +
-        # the competition primitive. Persistence (the stable save) + the
-        # race + wager UI land in later bites, so force practice for now.
-        if (game == GAME_OLYMPIAD) { dmode = DOOR_PRACTICE; }
+        # 1.3.6 (ADR 0016): Olympiad is a real solo/practice campaign (the
+        # stable persists across sessions) but has no Universe — coerce a
+        # `universe` request to solo so it never hits the unwired branch.
+        if (game == GAME_OLYMPIAD) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -851,6 +851,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (game == GAME_HANDLER)  { g_door_state = th_load_parse(lbuf, ln); }
                     if (game == GAME_QUEST)    { g_door_state = qu_load_parse(lbuf, ln); }
                     if (game == GAME_JABBER)   { g_door_state = jw_load_parse(lbuf, ln); }
+                    if (game == GAME_OLYMPIAD) { g_door_state = ol_load_parse(lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
             }
@@ -892,7 +893,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var scgl = scsp - scgs;
         if (scgl <= 0) {
-            send_str(cfd, "usage: scores <smuggler|port|handler|quest>\r\n");
+            send_str(cfd, "usage: scores <smuggler|port|handler|quest|olympiad>\r\n");
             return MODE_COMMAND;
         }
         if (scgl > 15) { scgl = 15; }
@@ -904,8 +905,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(scgb, "port") != 0)     { scgame = GAME_PORT; }
         if (streq(scgb, "handler") != 0)  { scgame = GAME_HANDLER; }
         if (streq(scgb, "quest") != 0)    { scgame = GAME_QUEST; }
+        if (streq(scgb, "olympiad") != 0) { scgame = GAME_OLYMPIAD; }
         if (scgame == GAME_NONE) {
-            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest\r\n");
+            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest | olympiad\r\n");
             return MODE_COMMAND;
         }
         door_render_leaderboard(cfd, scgame);
@@ -1002,6 +1004,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_PARRY)    { return "parry"; }
     if (game == GAME_QUEST)    { return "quest"; }
     if (game == GAME_JABBER)   { return "jabberwacky"; }
+    if (game == GAME_OLYMPIAD) { return "olympiad"; }
     return "game";
 }
 
@@ -1437,6 +1440,7 @@ fn door_save_on_exit(cfd): i64 {
                 if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_QUEST)    { n = qu_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_JABBER)   { n = jw_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_OLYMPIAD) { n = ol_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
             }
         }
@@ -1542,7 +1546,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.3.5 — telnet BBS + door games (casino tables) + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.6 — telnet BBS + door games (casino + Olympiad) + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2666,7 +2670,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.3.5");
+    println("agora 1.3.6");
     return 0;
 }
 

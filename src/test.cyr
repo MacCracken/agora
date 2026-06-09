@@ -4383,6 +4383,35 @@ fn t196_ol_ladder(): i64 {
     return 0;
 }
 
+# t197 — the solo save round-trips the owner + stable, and a bad header is
+# rejected. (Runtime-only fields aren't serialized; the stable is.)
+fn t197_ol_saveload(): i64 {
+    var st = ol_new(42, DOOR_SOLO);
+    store64(st + OL_TIER, 5);
+    store64(st + OL_MONEY, 777);
+    store64(st + OL_CROWNS, 1);
+    store64(st + OL_DAY, 9);
+    var c = ol_comp(st, 0);
+    store64(c + CMP_SPEED, 18);
+    store64(c + CMP_COND, 63);
+    var buf = alloc(4096);
+    var n = ol_save_format(st, buf, 4096);
+    var st2 = ol_load_parse(buf, n);
+    if (st2 == 0)                          { test_fail("t197_ol_saveload", "null"); return 1; }
+    if (load64(st2 + OL_SEED) != 42)       { test_fail("t197_ol_saveload", "seed"); return 1; }
+    if (load64(st2 + OL_TIER) != 5)        { test_fail("t197_ol_saveload", "tier"); return 1; }
+    if (load64(st2 + OL_MONEY) != 777)     { test_fail("t197_ol_saveload", "money"); return 1; }
+    if (load64(st2 + OL_CROWNS) != 1)      { test_fail("t197_ol_saveload", "crowns"); return 1; }
+    if (load64(st2 + OL_DAY) != 9)         { test_fail("t197_ol_saveload", "day"); return 1; }
+    if (load64(st2 + OL_NCOMP) != 1)       { test_fail("t197_ol_saveload", "ncomp"); return 1; }
+    var c2 = ol_comp(st2, 0);
+    if (load64(c2 + CMP_SPEED) != 18)      { test_fail("t197_ol_saveload", "stat"); return 1; }
+    if (load64(c2 + CMP_COND) != 63)       { test_fail("t197_ol_saveload", "cond"); return 1; }
+    if (ol_load_parse("NOPE1\n", 6) != 0)  { test_fail("t197_ol_saveload", "bad header"); return 1; }
+    test_pass("t197_ol_saveload");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4593,6 +4622,7 @@ fn main(): i64 {
     t194_ol_field();
     t195_wager_payout();
     t196_ol_ladder();
+    t197_ol_saveload();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
