@@ -4307,6 +4307,39 @@ fn t193_ol_odds_and_new(): i64 {
     return 0;
 }
 
+# t194 — chariot field construction: lane 0 is a copy of your team, the
+# field is the right size, every entrant has positive form, and rivals are
+# non-Blue factions with in-range stats (seeded generation).
+fn t194_ol_field(): i64 {
+    var st = ol_new(777, DOOR_PRACTICE);
+    var mine = ol_comp(st, 0);
+    store64(mine + CMP_SPEED, 15);                 # distinctive, to spot the lane-0 copy
+    var n = ol_build_chariot_field(st);
+    if (n != OL_RACE_FIELD)                  { test_fail("t194_ol_field", "size"); return 1; }
+    if (load64(st + OL_FIELDN) != OL_RACE_FIELD) { test_fail("t194_ol_field", "fieldn"); return 1; }
+    var fc = load64(st + OL_FCOMP);
+    if (load64(fc + CMP_SPEED) != 15)        { test_fail("t194_ol_field", "lane0 copy"); return 1; }
+    var forms = load64(st + OL_FIELD);
+    var i = 0;
+    while (i < n) {
+        if (load64(forms + i * 8) <= 0)      { test_fail("t194_ol_field", "form>0"); return 1; }
+        i = i + 1;
+    }
+    var j = 1;
+    while (j < n) {
+        var c = fc + j * CMP_SIZE;
+        var fac = load64(c + CMP_FACTION);
+        if (fac < 1) { test_fail("t194_ol_field", "faction lo"); return 1; }   # not Blue (yours)
+        if (fac > 3) { test_fail("t194_ol_field", "faction hi"); return 1; }
+        var sp = load64(c + CMP_SPEED);
+        if (sp < 1)           { test_fail("t194_ol_field", "stat lo"); return 1; }
+        if (sp > OL_STAT_CAP) { test_fail("t194_ol_field", "stat hi"); return 1; }
+        j = j + 1;
+    }
+    test_pass("t194_ol_field");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4514,6 +4547,7 @@ fn main(): i64 {
     t191_ol_train_rest();
     t192_ol_compete();
     t193_ol_odds_and_new();
+    t194_ol_field();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

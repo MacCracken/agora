@@ -65,7 +65,11 @@ enum OL {
     OL_MSG      = 112;   # ptr -> 256-byte message buffer
     OL_FIELD    = 120;   # ptr -> scratch forms[] for the current event
     OL_ORDER    = 128;   # ptr -> scratch finishing-order[] for the last race
-    OL_SIZE     = 136;
+    OL_FCOMP    = 136;   # ptr -> the current race's field (CMP blocks; lane 0 = you)
+    OL_FIELDN   = 144;   # entrants in the current field
+    OL_PLACE    = 152;   # your finishing place in the last race (1-based; 0 none)
+    OL_PURSE    = 160;   # your purse from the last race
+    OL_SIZE     = 168;
 }
 
 # A competitor: a fixed i64 block. Stats are event-flavoured (a chariot
@@ -99,6 +103,8 @@ enum OLFaction {
 enum OLScreen {
     OSCR_STABLE = 0;     # the owner's hub: roster + day/money/actions
     OSCR_OVER   = 1;     # game over (crowned or ruined)
+    OSCR_RACE   = 2;     # the Hippodrome: the field + odds, loose the gates
+    OSCR_RESULT = 3;     # the finish order + your placing + purse
 }
 
 enum OLEcon {
@@ -112,6 +118,11 @@ enum OLEcon {
     OL_REST_COND   = 30;     # condition restored per rest
     OL_VIG_BPS     = 500;    # the book's house edge (5%), used by the wager UI (bite 3)
     OL_START_MONEY = 200;    # starting denarii
+    OL_RACE_FIELD  = 4;      # entrants per race (you + 3 rivals; tier-scaled later)
+    OL_RACE_COND   = 20;     # condition a hard race costs your team
+    OL_PURSE_WIN   = 100;    # 1st-place purse (tier-scaled later)
+    OL_PURSE_2ND   = 40;
+    OL_PURSE_3RD   = 20;
 }
 
 # === Competitor accessors + form ===
@@ -340,6 +351,10 @@ fn ol_new(seed, mode): i64 {
     store8(load64(st + OL_MSG), 0);
     store64(st + OL_FIELD, alloc(OL_FIELD_MAX * 8));
     store64(st + OL_ORDER, alloc(OL_FIELD_MAX * 8));
+    store64(st + OL_FCOMP, alloc(OL_FIELD_MAX * CMP_SIZE));
+    store64(st + OL_FIELDN, 0);
+    store64(st + OL_PLACE, 0);
+    store64(st + OL_PURSE, 0);
     # the founding team: a Blue-faction chariot, modest across the board
     store64(st + OL_NCOMP, 1);
     ol_make_competitor(st, 0, EV_CHARIOT,
@@ -370,8 +385,132 @@ fn ol_team_name(id): i64 {
     return "the Wreck-makers";
 }
 
-# === Door contract (minimal at bite 1; the stable hub + the race land
-# in bites 2-3) ===
+# === The chariot race event (bite 2) ===
+#
+# An EVENT is a field-builder + a form function + render flavour over the
+# event-agnostic compete() primitive. This is the first; gladiators /
+# athletics / boat crews are added the same way (ADR 0016).
+
+# Ordinal string for a 1-based place (1st/2nd/3rd/Nth). Returns just the
+# suffix-less small set agora needs; places past 8 are rare (field cap 8).
+fn ol_ordinal(p): i64 {
+    if (p == 1) { return "1st"; }
+    if (p == 2) { return "2nd"; }
+    if (p == 3) { return "3rd"; }
+    if (p == 4) { return "4th"; }
+    if (p == 5) { return "5th"; }
+    if (p == 6) { return "6th"; }
+    if (p == 7) { return "7th"; }
+    return "8th";
+}
+
+# Generate a rival chariot into competitor block `c` from the SEEDED PRNG
+# (replayable — a save replays the same field). Strength scales with the
+# season tier; stats vary ±3 around the tier baseline, clamped in range.
+fn ol_gen_rival(st, c, tier, idx): i64 {
+    var rp = st + OL_RNG;
+    var base = OL_STAT_START + tier * 2;
+    store64(c + CMP_TYPE,    EV_CHARIOT);
+    store64(c + CMP_SPEED,   iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
+    store64(c + CMP_STAMINA, iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
+    store64(c + CMP_HANDLE,  iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
+    store64(c + CMP_NERVE,   iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
+    store64(c + CMP_COND,    rng_range(rp, 75, 100));
+    store64(c + CMP_FACTION, (idx % 3) + 1);   # Green / Red / White (Blue is yours)
+    store64(c + CMP_NAMEID,  idx);             # 1.. into the team-name table
+    return 0;
+}
+
+# Assemble the field for the next race: lane 0 = a copy of your selected
+# team (so the race reads its current condition), lanes 1.. = generated
+# rivals. Computes each entrant's form into the forms[] scratch. Returns
+# the field size.
+fn ol_build_chariot_field(st): i64 {
+    var n = OL_RACE_FIELD;
+    var tier = load64(st + OL_TIER);
+    var fc = load64(st + OL_FCOMP);
+    var forms = load64(st + OL_FIELD);
+    memcpy(fc, ol_comp(st, load64(st + OL_SEL)), CMP_SIZE);   # lane 0 = you
+    var i = 1;
+    while (i < n) {
+        ol_gen_rival(st, fc + i * CMP_SIZE, tier, i);
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < n) {
+        store64(forms + j * 8, ol_chariot_form(fc + j * CMP_SIZE));
+        j = j + 1;
+    }
+    store64(st + OL_FIELDN, n);
+    return n;
+}
+
+# Run the assembled race: compete() resolves the finishing order off the
+# kernel CSPRNG, your placing pays a purse, and the race tires your real
+# team (so you can't spam races without resting — the "train or not"
+# tension). Transitions to OSCR_RESULT, or back to the hub on a fault.
+fn ol_run_race(st): i64 {
+    var n = load64(st + OL_FIELDN);
+    var forms = load64(st + OL_FIELD);
+    var order = load64(st + OL_ORDER);
+    if (ol_compete_order(forms, n, order) != 0) {
+        ol_msg(st, "The gates jam (entropy fault) -- the race is void, no stakes lost.");
+        store64(st + OL_SCREEN, OSCR_STABLE);
+        return 0;
+    }
+    # your place = where lane 0 lands in the finishing order
+    var place = 0;
+    var p = 0;
+    var found = 0;
+    while (found == 0) {
+        if (p >= n) { found = 1; }
+        else {
+            if (load64(order + p * 8) == 0) { place = p + 1; found = 1; }
+            else { p = p + 1; }
+        }
+    }
+    store64(st + OL_PLACE, place);
+    var purse = 0;
+    if (place == 1) { purse = OL_PURSE_WIN; }
+    if (place == 2) { purse = OL_PURSE_2ND; }
+    if (place == 3) { purse = OL_PURSE_3RD; }
+    store64(st + OL_PURSE, purse);
+    store64(st + OL_MONEY, load64(st + OL_MONEY) + purse);
+    # the race tires your real stable team
+    var mine = ol_comp(st, load64(st + OL_SEL));
+    var cond = load64(mine + CMP_COND) - OL_RACE_COND;
+    if (cond < 0) { cond = 0; }
+    store64(mine + CMP_COND, cond);
+    store64(st + OL_SCREEN, OSCR_RESULT);
+    return 0;
+}
+
+# A 10-cell form bar (# filled / . empty), form scaled ~/10.
+fn ol_emit_bar(buf, pos, form): i64 {
+    var fill = form / 10;
+    if (fill > 10) { fill = 10; }
+    if (fill < 0)  { fill = 0; }
+    var i = 0;
+    while (i < 10) {
+        if (i < fill) { store8(buf + pos, 35); }   # '#'
+        else          { store8(buf + pos, 46); }   # '.'
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+# Render fair odds as "N.Mx" profit (so 150 -> 1.5x, 300 -> 3.0x, an
+# 85 favourite -> 0.8x). Takes the ×100 odds.
+fn ol_emit_odds(buf, pos, ox100): i64 {
+    pos = emit_int(buf, pos, ox100 / 100);
+    store8(buf + pos, 46); pos = pos + 1;            # '.'
+    pos = emit_int(buf, pos, (ox100 % 100) / 10);
+    store8(buf + pos, 120); pos = pos + 1;           # 'x'
+    return pos;
+}
+
+# === Door contract ===
 
 fn ol_is_over(st): i64 {
     if (load64(st + OL_OVER) != 0) { return 1; }
@@ -390,8 +529,21 @@ fn ol_rank(score): i64 {
     return "Backmarker";
 }
 
-# Render the owner's hub: day / money / actions + the stable roster. The
-# race + wager screens are added in bites 2-3.
+# The green "> message" line, shared by every screen that wants it.
+fn ol_render_msg(st, buf, pos): i64 {
+    var msg = load64(st + OL_MSG);
+    if ((load8(msg) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, msg);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+# Render the owner's hub: day / money / actions + the stable roster, plus
+# the Hippodrome race + result screens (bite 2).
 fn ol_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + OL_SCREEN);
@@ -417,6 +569,78 @@ fn ol_render(st, buf, cap): i64 {
         pos = emit_cstr(buf, pos, ol_rank(ol_final_score(st)));
         pos = emit_crlf(buf, pos);
         pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        return pos;
+    }
+
+    if (screen == OSCR_RACE) {
+        pos = emit_sgr(buf, pos, 36);
+        pos = emit_cstr(buf, pos, "-- THE HIPPODROME: the field assembles --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        var rn = load64(st + OL_FIELDN);
+        var fc = load64(st + OL_FCOMP);
+        var forms = load64(st + OL_FIELD);
+        var i = 0;
+        while (i < rn) {
+            var c = fc + i * CMP_SIZE;
+            pos = emit_cstr(buf, pos, " Lane ");
+            pos = emit_int(buf, pos, i + 1);
+            pos = emit_cstr(buf, pos, "  ");
+            pos = emit_cstr(buf, pos, ol_faction_name(load64(c + CMP_FACTION)));
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_cstr(buf, pos, ol_team_name(load64(c + CMP_NAMEID)));
+            if (i == 0) { pos = emit_cstr(buf, pos, " (you)"); }
+            pos = emit_crlf(buf, pos);
+            pos = emit_cstr(buf, pos, "   ");
+            pos = ol_emit_bar(buf, pos, load64(forms + i * 8));
+            pos = emit_cstr(buf, pos, "  pays ");
+            pos = ol_emit_odds(buf, pos, ol_fair_odds_x100(forms, rn, i));
+            pos = emit_crlf(buf, pos);
+            i = i + 1;
+        }
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[Enter] loose the gates   [x] scratch");
+        pos = emit_crlf(buf, pos);
+        pos = ol_render_msg(st, buf, pos);
+        return pos;
+    }
+
+    if (screen == OSCR_RESULT) {
+        pos = emit_sgr(buf, pos, 36);
+        pos = emit_cstr(buf, pos, "-- THE FINISH --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        var rn2 = load64(st + OL_FIELDN);
+        var fc2 = load64(st + OL_FCOMP);
+        var order = load64(st + OL_ORDER);
+        var p = 0;
+        while (p < rn2) {
+            var e = load64(order + p * 8);
+            var c2 = fc2 + e * CMP_SIZE;
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_cstr(buf, pos, ol_ordinal(p + 1));
+            pos = emit_cstr(buf, pos, "  ");
+            pos = emit_cstr(buf, pos, ol_faction_name(load64(c2 + CMP_FACTION)));
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_cstr(buf, pos, ol_team_name(load64(c2 + CMP_NAMEID)));
+            if (e == 0) { pos = emit_cstr(buf, pos, " (you)"); }
+            pos = emit_crlf(buf, pos);
+            p = p + 1;
+        }
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "You finished ");
+        pos = emit_cstr(buf, pos, ol_ordinal(load64(st + OL_PLACE)));
+        var purse = load64(st + OL_PURSE);
+        if (purse > 0) {
+            pos = emit_cstr(buf, pos, " -- purse ");
+            pos = emit_int(buf, pos, purse);
+            pos = emit_cstr(buf, pos, " denarii.");
+        } else {
+            pos = emit_cstr(buf, pos, " -- out of the money.");
+        }
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "[Enter] back to the stable");
         pos = emit_crlf(buf, pos);
         return pos;
     }
@@ -448,17 +672,9 @@ fn ol_render(st, buf, cap): i64 {
         i = i + 1;
     }
     pos = emit_crlf(buf, pos);
-    pos = emit_cstr(buf, pos, "[1-4] train Spd/Sta/Hnd/Nrv  [R]est  [N]ext-day  [Q]uit");
+    pos = emit_cstr(buf, pos, "[1-4] train Spd/Sta/Hnd/Nrv  [R]est  [E]nter race  [N]ext-day  [Q]uit");
     pos = emit_crlf(buf, pos);
-
-    var msg = load64(st + OL_MSG);
-    if ((load8(msg) & 0xFF) != 0) {
-        pos = emit_sgr(buf, pos, 32);
-        pos = emit_cstr(buf, pos, "> ");
-        pos = emit_cstr(buf, pos, msg);
-        pos = emit_reset(buf, pos);
-        pos = emit_crlf(buf, pos);
-    }
+    pos = ol_render_msg(st, buf, pos);
     return pos;
 }
 
@@ -493,11 +709,26 @@ fn ol_feed(st, line, len): i64 {
     var screen = load64(st + OL_SCREEN);
     if (screen == OSCR_OVER) { return 1; }
     var k = door_key(line, len);
+    # The Hippodrome: Enter looses the gates, x scratches back to the hub.
+    if (screen == OSCR_RACE) {
+        if (k == 120) { store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
+        return ol_run_race(st);
+    }
+    # The finish: any key returns to the stable.
+    if (screen == OSCR_RESULT) {
+        store64(st + OL_SCREEN, OSCR_STABLE);
+        return 0;
+    }
     if (k == 113) { return 1; }                                    # q
     if (k == 49)  { return ol_do_train(st, CMP_SPEED,   "Speed"); }    # 1
     if (k == 50)  { return ol_do_train(st, CMP_STAMINA, "Stamina"); }  # 2
     if (k == 51)  { return ol_do_train(st, CMP_HANDLE,  "Handling"); } # 3
     if (k == 52)  { return ol_do_train(st, CMP_NERVE,   "Nerve"); }    # 4
+    if (k == 101) {                                                # e — enter the next race
+        ol_build_chariot_field(st);
+        store64(st + OL_SCREEN, OSCR_RACE);
+        return 0;
+    }
     if (k == 114) {                                                # r — rest
         if (ol_spend_action(st) == 0) { ol_msg(st, "No actions left. [N]ext-day."); return 0; }
         ol_rest(ol_comp(st, load64(st + OL_SEL)));
