@@ -20,6 +20,7 @@ include "src/eliza.cyr"
 include "src/parry.cyr"
 include "src/quest.cyr"
 include "src/jabberwacky.cyr"
+include "src/olympiad.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -4187,6 +4188,125 @@ fn t188_qu_cards_table(): i64 {
     return 0;
 }
 
+# === 1.3.6 Olympiad (the competition primitive + owner economy) ===
+
+# t189 — chariot form: sum of stats scaled by condition, floored at 1 for
+# a live team, 0 for an empty slot.
+fn t189_ol_chariot_form(): i64 {
+    var c = alloc(CMP_SIZE);
+    store64(c + CMP_SPEED, 8); store64(c + CMP_STAMINA, 8);
+    store64(c + CMP_HANDLE, 8); store64(c + CMP_NERVE, 8);
+    store64(c + CMP_COND, 100);
+    if (ol_chariot_form(c) != 32)        { test_fail("t189_ol_chariot_form", "full"); return 1; }
+    store64(c + CMP_COND, 50);
+    if (ol_chariot_form(c) != 16)        { test_fail("t189_ol_chariot_form", "half"); return 1; }
+    store64(c + CMP_COND, 0);            # spent but alive → floored to 1
+    if (ol_chariot_form(c) != 1)         { test_fail("t189_ol_chariot_form", "spent"); return 1; }
+    store64(c + CMP_SPEED, 0); store64(c + CMP_STAMINA, 0);
+    store64(c + CMP_HANDLE, 0); store64(c + CMP_NERVE, 0);
+    store64(c + CMP_COND, 100);
+    if (ol_chariot_form(c) != 0)         { test_fail("t189_ol_chariot_form", "empty"); return 1; }
+    test_pass("t189_ol_chariot_form");
+    return 0;
+}
+
+# t190 — ol_pick_weighted: the pure weight→entrant seam, with the taken
+# mask for sequential draws, across every boundary.
+fn t190_ol_pick_weighted(): i64 {
+    var f = alloc(3 * 8); store64(f, 1); store64(f + 8, 2); store64(f + 16, 3);  # total 6
+    if (ol_field_total(f, 3, 0) != 6)        { test_fail("t190_ol_pick_weighted", "total"); return 1; }
+    if (ol_pick_weighted(f, 3, 0, 0) != 0)   { test_fail("t190_ol_pick_weighted", "r0"); return 1; }
+    if (ol_pick_weighted(f, 3, 0, 1) != 1)   { test_fail("t190_ol_pick_weighted", "r1"); return 1; }
+    if (ol_pick_weighted(f, 3, 0, 3) != 2)   { test_fail("t190_ol_pick_weighted", "r3"); return 1; }
+    if (ol_pick_weighted(f, 3, 0, 5) != 2)   { test_fail("t190_ol_pick_weighted", "r5"); return 1; }
+    # residual r >= total → last entrant
+    if (ol_pick_weighted(f, 3, 0, 99) != 2)  { test_fail("t190_ol_pick_weighted", "residual"); return 1; }
+    # taken mask: entrant 0 removed → remaining forms 2,3 (total 5)
+    var tk = alloc(3); store8(tk, 1); store8(tk + 1, 0); store8(tk + 2, 0);
+    if (ol_field_total(f, 3, tk) != 5)       { test_fail("t190_ol_pick_weighted", "tktotal"); return 1; }
+    if (ol_pick_weighted(f, 3, tk, 0) != 1)  { test_fail("t190_ol_pick_weighted", "tk r0"); return 1; }
+    if (ol_pick_weighted(f, 3, tk, 2) != 2)  { test_fail("t190_ol_pick_weighted", "tk r2"); return 1; }
+    test_pass("t190_ol_pick_weighted");
+    return 0;
+}
+
+# t191 — train/rest economy: gains, diminishing returns past 2/3 cap, the
+# hard cap, condition cost, and rest restoring + clamping.
+fn t191_ol_train_rest(): i64 {
+    var c = alloc(CMP_SIZE);
+    store64(c + CMP_SPEED, 8); store64(c + CMP_COND, 100);
+    if (ol_train(c, CMP_SPEED) != 2)         { test_fail("t191_ol_train_rest", "gain"); return 1; }
+    if (load64(c + CMP_SPEED) != 10)         { test_fail("t191_ol_train_rest", "raised"); return 1; }
+    if (load64(c + CMP_COND) != 88)          { test_fail("t191_ol_train_rest", "fatigue"); return 1; }
+    store64(c + CMP_SPEED, 20);              # past 2/3 of cap (16) → diminished gain 1
+    if (ol_train(c, CMP_SPEED) != 1)         { test_fail("t191_ol_train_rest", "diminish"); return 1; }
+    store64(c + CMP_SPEED, OL_STAT_CAP);     # capped → no gain
+    if (ol_train(c, CMP_SPEED) != 0)         { test_fail("t191_ol_train_rest", "capped"); return 1; }
+    store64(c + CMP_COND, 40);               # rest restores +30
+    ol_rest(c);
+    if (load64(c + CMP_COND) != 70)          { test_fail("t191_ol_train_rest", "rest"); return 1; }
+    store64(c + CMP_COND, 90);               # rest clamps at 100
+    ol_rest(c);
+    if (load64(c + CMP_COND) != 100)         { test_fail("t191_ol_train_rest", "restclamp"); return 1; }
+    test_pass("t191_ol_train_rest");
+    return 0;
+}
+
+# t192 — the compete() draw (the one impure point). Can't pin a CSPRNG
+# outcome, so assert DISTRIBUTION + structure: winners stay in range, a
+# heavy favourite wins most, and the finishing order is a valid permutation.
+fn t192_ol_compete(): i64 {
+    var f = alloc(3 * 8); store64(f, 10); store64(f + 8, 1); store64(f + 16, 1);  # 0 is the heavy favourite
+    var winfav = 0;
+    var i = 0;
+    while (i < 600) {
+        var w = ol_compete_winner(f, 3);
+        if (w < 0)  { test_fail("t192_ol_compete", "csprng fault"); return 1; }
+        if (w >= 3) { test_fail("t192_ol_compete", "range"); return 1; }
+        if (w == 0) { winfav = winfav + 1; }
+        i = i + 1;
+    }
+    # favourite (~10/12) should clear a simple majority over 600 draws
+    if (winfav < 300) { test_fail("t192_ol_compete", "favourite underperformed"); return 1; }
+    # finishing order is a permutation of {0,1,2}
+    var order = alloc(3 * 8);
+    if (ol_compete_order(f, 3, order) != 0) { test_fail("t192_ol_compete", "order fault"); return 1; }
+    var seen = alloc(3); store8(seen, 0); store8(seen + 1, 0); store8(seen + 2, 0);
+    var p = 0;
+    while (p < 3) {
+        var e = load64(order + p * 8);
+        if (e < 0)  { test_fail("t192_ol_compete", "order range lo"); return 1; }
+        if (e >= 3) { test_fail("t192_ol_compete", "order range hi"); return 1; }
+        if ((load8(seen + e) & 0xFF) != 0) { test_fail("t192_ol_compete", "order dup"); return 1; }
+        store8(seen + e, 1);
+        p = p + 1;
+    }
+    test_pass("t192_ol_compete");
+    return 0;
+}
+
+# t193 — fair odds ×100 straight from the forms (the same weights that
+# resolve the race price the book), plus the founding-owner construction.
+fn t193_ol_odds_and_new(): i64 {
+    var f = alloc(3 * 8); store64(f, 1); store64(f + 8, 1); store64(f + 16, 2);  # total 4
+    # entrant 0: (4-1)*100/1 = 300 (3:1); entrant 2: (4-2)*100/2 = 100 (evens)
+    if (ol_fair_odds_x100(f, 3, 0) != 300)   { test_fail("t193_ol_odds_and_new", "longshot"); return 1; }
+    if (ol_fair_odds_x100(f, 3, 2) != 100)   { test_fail("t193_ol_odds_and_new", "evens"); return 1; }
+    var z = alloc(8); store64(z, 0);                                              # can't-win
+    if (ol_fair_odds_x100(z, 1, 0) != 0)     { test_fail("t193_ol_odds_and_new", "cantwin"); return 1; }
+    # founding owner: one Blue chariot, starting purse + ration
+    var st = ol_new(123, DOOR_PRACTICE);
+    if (load64(st + OL_NCOMP) != 1)          { test_fail("t193_ol_odds_and_new", "ncomp"); return 1; }
+    if (load64(st + OL_MONEY) != OL_START_MONEY) { test_fail("t193_ol_odds_and_new", "money"); return 1; }
+    if (load64(st + OL_ACTIONS) != OL_DAY_ACTIONS) { test_fail("t193_ol_odds_and_new", "actions"); return 1; }
+    var c0 = ol_comp(st, 0);
+    if (load64(c0 + CMP_TYPE) != EV_CHARIOT) { test_fail("t193_ol_odds_and_new", "type"); return 1; }
+    if (load64(c0 + CMP_SPEED) != OL_STAT_START) { test_fail("t193_ol_odds_and_new", "stat"); return 1; }
+    if (ol_is_over(st) != 0)                 { test_fail("t193_ol_odds_and_new", "over"); return 1; }
+    test_pass("t193_ol_odds_and_new");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4387,6 +4507,13 @@ fn main(): i64 {
     t186_pa_dabo_table();
     t187_sl_dice_table();
     t188_qu_cards_table();
+
+    # === 1.3.6 Olympiad (competition primitive + owner economy) ===
+    t189_ol_chariot_form();
+    t190_ol_pick_weighted();
+    t191_ol_train_rest();
+    t192_ol_compete();
+    t193_ol_odds_and_new();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

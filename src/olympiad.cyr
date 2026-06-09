@@ -1,0 +1,514 @@
+# olympiad.cyr — the Olympiad: a Greco-Roman games-owner sim (1.3.6, ADR 0016).
+#
+# You are not the athlete — you are the OWNER (a dominus / lanista /
+# circus-faction boss) who fields a STABLE of competitors across the
+# Games and bets on every contest. Rome paying its debt to Greece:
+# the Greek athletic Games and the Roman circus + arena under one roof.
+#
+# === The competition primitive (ADR 0016, the heart) ===
+#
+# Every event a games-owner stages is the SAME shape:
+#
+#     a field of competitors weighted by FORM
+#       -> one draw picks the winner (and order)
+#       -> the same weights book the bets
+#
+# A chariot race, a gladiatorial bout, a foot race, a regatta — they
+# differ only in their field-builder and their flavour. So `compete()`
+# is one engine; an EVENT is a thin descriptor (a field-builder + a form
+# function + render text). Chariot racing ships first (1.3.6); gladiators
+# / athletics / boat crews are added the same way 1.3.5 added three
+# casino tables to one wager module. This is agora's signature pattern a
+# third time: door PRNG -> wager -> COMPETITION.
+#
+# === The fairness split (extends ADR 0013) ===
+#
+# The rival FIELD is generated from the seeded door.cyr PRNG (replayable
+# — a save replays the same season's opponents). The race WINNER is the
+# kernel CSPRNG (`wager_uniform_csprng`, non-replayable) — the one thing
+# money rides on is the one thing a player cannot predict or replay.
+# Training shifts your WEIGHT; it never makes the result reconstructable.
+# The pure weight->index map (`ol_pick_weighted`, the injected test seam)
+# is split from the CSPRNG read, exactly as wager.cyr splits wager_pick.
+#
+# === Bite 1 scope (this file, the foundation) ===
+#
+# Owner/stable state + the `compete()` primitive + the daily-turn economy
+# (train / rest) + chariot form + fair-odds + the door-contract skeleton.
+# The chariot EVENT (field generation, the race screen) is bite 2; the
+# owner loop + the wager UI + the season ladder are bite 3.
+#
+# Deps resolved upstream in the main.cyr / test.cyr include chain:
+#   door.cyr   — emit_*, door_key/door_parse_int, save_put/get_i64, imin/imax
+#   wager.cyr  — wager_uniform_csprng (the kernel-CSPRNG draw), WAGER_* (bite 3)
+
+# === Constants ===
+
+# Owner / stable state block. Runtime-only fields (screen/sel/msg/scratch)
+# are NOT serialized — a save restores the owner + stable, not mid-UI state.
+enum OL {
+    OL_SEED     = 0;     # field-generation seed (replayable rivals)
+    OL_RNG      = 8;     # live seeded PRNG cell (rival field gen)
+    OL_MODE     = 16;    # DOOR_PRACTICE / DOOR_SOLO
+    OL_OVER     = 24;    # 0 play / 1 crowned (won) / 2 ruined (bankrupt)
+    OL_DAY      = 32;    # current day
+    OL_ACTIONS  = 40;    # training actions left today
+    OL_MONEY    = 48;    # denarii on hand
+    OL_TIER     = 56;    # season-ladder position (which meet)
+    OL_CROWNS   = 64;    # championship crowns won (win-condition counter)
+    OL_LASTDAY  = 72;    # epoch-day of last ration refill (wall-clock reset)
+    OL_NCOMP    = 80;    # competitors in the stable
+    OL_STABLE   = 88;    # ptr -> array of OL_NCOMP competitor blocks
+    # runtime-only (not serialized):
+    OL_SCREEN   = 96;
+    OL_SEL      = 104;   # selected competitor index (UI cursor)
+    OL_MSG      = 112;   # ptr -> 256-byte message buffer
+    OL_FIELD    = 120;   # ptr -> scratch forms[] for the current event
+    OL_ORDER    = 128;   # ptr -> scratch finishing-order[] for the last race
+    OL_SIZE     = 136;
+}
+
+# A competitor: a fixed i64 block. Stats are event-flavoured (a chariot
+# team's are Speed/Stamina/Handling/Nerve); the primitive only ever reads
+# the FORM the event computes from them, so other event types reuse the
+# same slots with their own meaning.
+enum CMP {
+    CMP_TYPE    = 0;     # event type (EV_CHARIOT ...)
+    CMP_SPEED   = 8;     # stat 0
+    CMP_STAMINA = 16;    # stat 1
+    CMP_HANDLE  = 24;    # stat 2
+    CMP_NERVE   = 32;    # stat 3
+    CMP_COND    = 40;    # condition / freshness, 0..100
+    CMP_FACTION = 48;    # circus faction id (0..3)
+    CMP_NAMEID  = 56;    # index into the team-name table
+    CMP_SIZE    = 64;
+}
+
+enum OLEvent {
+    EV_CHARIOT  = 0;     # 1.3.6: the circus chariot race
+}
+
+# The four Roman circus factions.
+enum OLFaction {
+    FAC_BLUE  = 0;
+    FAC_GREEN = 1;
+    FAC_RED   = 2;
+    FAC_WHITE = 3;
+}
+
+enum OLScreen {
+    OSCR_STABLE = 0;     # the owner's hub: roster + day/money/actions
+    OSCR_OVER   = 1;     # game over (crowned or ruined)
+}
+
+enum OLEcon {
+    OL_DAY_ACTIONS = 3;      # training actions granted per day
+    OL_STABLE_MAX  = 8;      # roster ceiling
+    OL_FIELD_MAX   = 8;      # entrants in a race field
+    OL_STAT_CAP    = 25;     # per-stat ceiling
+    OL_STAT_START  = 8;      # a fresh competitor's starting stat
+    OL_TRAIN_GAIN  = 2;      # stat points per training session (pre-diminish)
+    OL_TRAIN_COND  = 12;     # condition spent per hard training session
+    OL_REST_COND   = 30;     # condition restored per rest
+    OL_VIG_BPS     = 500;    # the book's house edge (5%), used by the wager UI (bite 3)
+    OL_START_MONEY = 200;    # starting denarii
+}
+
+# === Competitor accessors + form ===
+
+# Address of the i-th competitor block in the stable.
+fn ol_comp(st, i): i64 {
+    return load64(st + OL_STABLE) + i * CMP_SIZE;
+}
+
+# Write a fresh competitor into stable slot `i`.
+fn ol_make_competitor(st, i, type, s0, s1, s2, s3, cond, faction, nameid): i64 {
+    var c = ol_comp(st, i);
+    store64(c + CMP_TYPE,    type);
+    store64(c + CMP_SPEED,   s0);
+    store64(c + CMP_STAMINA, s1);
+    store64(c + CMP_HANDLE,  s2);
+    store64(c + CMP_NERVE,   s3);
+    store64(c + CMP_COND,    cond);
+    store64(c + CMP_FACTION, faction);
+    store64(c + CMP_NAMEID,  nameid);
+    return 0;
+}
+
+# A chariot team's FORM: the sum of its four stats scaled by condition.
+# This is the weight the competition draw uses and the number the book
+# prices odds from — training raises it, fatigue lowers it. Floored at 1
+# for any live team so it always has a (slim) chance. Pure.
+fn ol_chariot_form(c): i64 {
+    var raw = load64(c + CMP_SPEED) + load64(c + CMP_STAMINA)
+            + load64(c + CMP_HANDLE) + load64(c + CMP_NERVE);
+    if (raw <= 0) { return 0; }
+    var cond = load64(c + CMP_COND);
+    if (cond < 0)   { cond = 0; }
+    if (cond > 100) { cond = 100; }
+    var form = (raw * cond) / 100;
+    if (form < 1) { form = 1; }   # a live team is never a literal 0
+    return form;
+}
+
+# === The compete() primitive (event-agnostic) ===
+
+# Sum of the still-in forms (taken[i]!=0 excludes entrant i). taken may be
+# 0 (null) to sum the whole field. Pure.
+fn ol_field_total(forms, n, taken): i64 {
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var skip = 0;
+        if (taken != 0) {
+            if ((load8(taken + i) & 0xFF) != 0) { skip = 1; }
+        }
+        if (skip == 0) { total = total + load64(forms + i * 8); }
+        i = i + 1;
+    }
+    return total;
+}
+
+# PURE weight->entrant map (the injected test seam — wager.cyr's wager_pick
+# shape, plus a `taken` mask for sequential draws). Walks the still-in
+# entrants accumulating form until r < running-sum. `r` MUST be in
+# [0, ol_field_total(forms,n,taken)); the caller (CSPRNG) guarantees it.
+# A degenerate/residual r returns the last still-in entrant. taken may be 0.
+fn ol_pick_weighted(forms, n, taken, r): i64 {
+    var acc = 0;
+    var i = 0;
+    var pick = 0 - 1;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= n) { scanning = 0; continue; }
+        var skip = 0;
+        if (taken != 0) {
+            if ((load8(taken + i) & 0xFF) != 0) { skip = 1; }
+        }
+        if (skip == 0) {
+            acc = acc + load64(forms + i * 8);
+            if (r < acc) { pick = i; scanning = 0; }
+        }
+        if (scanning == 1) { i = i + 1; }
+    }
+    if (pick >= 0) { return pick; }
+    # residual: the last still-in entrant
+    var j = n - 1;
+    var res = 0 - 1;
+    var sc2 = 1;
+    while (sc2 == 1) {
+        if (j < 0) { sc2 = 0; continue; }
+        var t = 0;
+        if (taken != 0) {
+            if ((load8(taken + j) & 0xFF) != 0) { t = 1; }
+        }
+        if (t == 0) { res = j; sc2 = 0; continue; }
+        j = j - 1;
+    }
+    return res;
+}
+
+# Resolve a single WINNER over a field of n entrants weighted by form[].
+# One kernel-CSPRNG draw (non-replayable). Returns the 0-based winner
+# index, or (0-1) on a CSPRNG fault (caller refuses to settle the card).
+fn ol_compete_winner(forms, n): i64 {
+    var total = ol_field_total(forms, n, 0);
+    if (total <= 0) { return 0; }
+    var r = wager_uniform_csprng(total);
+    if (r < 0) { return 0 - 1; }
+    return ol_pick_weighted(forms, n, 0, r);
+}
+
+# Resolve a full finishing ORDER (for place/show + standings): a SEQUENTIAL
+# weighted draw — pick a winner ∝ form from the kernel CSPRNG, remove,
+# repeat. Writes 0-based entrant indices into out_order[0..n) (1st first).
+# Returns 0, or (0-1) on a CSPRNG fault. Uses a working `taken` mask.
+fn ol_compete_order(forms, n, out_order): i64 {
+    var taken = alloc(n);
+    var z = 0;
+    while (z < n) { store8(taken + z, 0); z = z + 1; }
+    var place = 0;
+    var fault = 0;
+    while (place < n) {
+        var total = ol_field_total(forms, n, taken);
+        var chosen = 0;
+        if (total <= 0) {
+            chosen = ol_pick_weighted(forms, n, taken, 0);   # remaining all-zero: index order
+        } else {
+            var r = wager_uniform_csprng(total);
+            if (r < 0) { fault = 1; place = n; }
+            else       { chosen = ol_pick_weighted(forms, n, taken, r); }
+        }
+        if (place < n) {
+            store64(out_order + place * 8, chosen);
+            store8(taken + chosen, 1);
+            place = place + 1;
+        }
+    }
+    if (fault == 1) { return 0 - 1; }
+    return 0;
+}
+
+# Fair profit-odds for entrant `idx`, scaled ×100 (so 3:2 → 150, evens →
+# 100, a 5:1 longshot → 500). Straight from the forms — the same weights
+# that resolve the race price the book (ADR 0016). The house vig is layered
+# on at settlement by the wager UI (bite 3), not here. Pure. 0 = can't win.
+fn ol_fair_odds_x100(forms, n, idx): i64 {
+    var w = load64(forms + idx * 8);
+    if (w <= 0) { return 0; }
+    var total = ol_field_total(forms, n, 0);
+    return ((total - w) * 100) / w;
+}
+
+# === The daily-turn economy (train / rest) ===
+
+# Train one stat of competitor `c`. Raises it toward OL_STAT_CAP (gains
+# halve past two-thirds of the cap — diminishing returns) at a condition
+# cost (fatigue). Returns the actual stat gain (0 if already capped, so
+# the caller can message "already at their peak"). Pure stat math.
+fn ol_train(c, stat_off): i64 {
+    var cur = load64(c + stat_off);
+    if (cur >= OL_STAT_CAP) { return 0; }
+    var gain = OL_TRAIN_GAIN;
+    if (cur >= (OL_STAT_CAP * 2) / 3) { gain = 1; }   # diminishing returns
+    var next = cur + gain;
+    if (next > OL_STAT_CAP) { next = OL_STAT_CAP; }
+    store64(c + stat_off, next);
+    var cond = load64(c + CMP_COND) - OL_TRAIN_COND;
+    if (cond < 0) { cond = 0; }
+    store64(c + CMP_COND, cond);
+    return next - cur;
+}
+
+# Rest competitor `c`: restore condition toward 100. Pure.
+fn ol_rest(c): i64 {
+    var cond = load64(c + CMP_COND) + OL_REST_COND;
+    if (cond > 100) { cond = 100; }
+    store64(c + CMP_COND, cond);
+    return 0;
+}
+
+# Spend one of the day's training actions. Returns 1 if an action was
+# available (and consumes it), 0 if the day is already spent.
+fn ol_spend_action(st): i64 {
+    var a = load64(st + OL_ACTIONS);
+    if (a <= 0) { return 0; }
+    store64(st + OL_ACTIONS, a - 1);
+    return 1;
+}
+
+# Advance to the next day: refill the action ration, bump the day counter.
+# (Wall-clock gating of the refill — QUEST's "see you tomorrow" hook — is
+# wired in the loop bite; this is the pure refill.)
+fn ol_day_advance(st): i64 {
+    store64(st + OL_DAY, load64(st + OL_DAY) + 1);
+    store64(st + OL_ACTIONS, OL_DAY_ACTIONS);
+    return 0;
+}
+
+# === Owner construction ===
+
+fn ol_msg(st, s): i64 {
+    var m = load64(st + OL_MSG);
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+# Build a new owner with a founding chariot team. Practice = ephemeral
+# coin; Solo = a persistent stable (save lands in bite 3/4).
+fn ol_new(seed, mode): i64 {
+    var st = alloc(OL_SIZE);
+    memset(st, 0, OL_SIZE);
+    store64(st + OL_SEED, seed);
+    rng_seed(st + OL_RNG, seed);
+    store64(st + OL_MODE, mode);
+    store64(st + OL_OVER, 0);
+    store64(st + OL_DAY, 1);
+    store64(st + OL_ACTIONS, OL_DAY_ACTIONS);
+    store64(st + OL_MONEY, OL_START_MONEY);
+    store64(st + OL_TIER, 0);
+    store64(st + OL_CROWNS, 0);
+    store64(st + OL_LASTDAY, 0);
+    # runtime scratch
+    store64(st + OL_STABLE, alloc(OL_STABLE_MAX * CMP_SIZE));
+    store64(st + OL_SCREEN, OSCR_STABLE);
+    store64(st + OL_SEL, 0);
+    store64(st + OL_MSG, alloc(256));
+    store8(load64(st + OL_MSG), 0);
+    store64(st + OL_FIELD, alloc(OL_FIELD_MAX * 8));
+    store64(st + OL_ORDER, alloc(OL_FIELD_MAX * 8));
+    # the founding team: a Blue-faction chariot, modest across the board
+    store64(st + OL_NCOMP, 1);
+    ol_make_competitor(st, 0, EV_CHARIOT,
+        OL_STAT_START, OL_STAT_START, OL_STAT_START, OL_STAT_START,
+        100, FAC_BLUE, 0);
+    return st;
+}
+
+# === Flavour name tables ===
+
+fn ol_faction_name(f): i64 {
+    if (f == FAC_BLUE)  { return "Blue"; }
+    if (f == FAC_GREEN) { return "Green"; }
+    if (f == FAC_RED)   { return "Red"; }
+    return "White";
+}
+
+# A team's name by table index (your founding team is 0; rivals draw
+# from the rest in bite 2).
+fn ol_team_name(id): i64 {
+    if (id == 0) { return "the Boreads"; }
+    if (id == 1) { return "the Thessalian Grays"; }
+    if (id == 2) { return "the Korinthian Bays"; }
+    if (id == 3) { return "the Black of Thebes"; }
+    if (id == 4) { return "the Sons of Notos"; }
+    if (id == 5) { return "the Rhodian Suns"; }
+    if (id == 6) { return "the Spartan Lash"; }
+    return "the Wreck-makers";
+}
+
+# === Door contract (minimal at bite 1; the stable hub + the race land
+# in bites 2-3) ===
+
+fn ol_is_over(st): i64 {
+    if (load64(st + OL_OVER) != 0) { return 1; }
+    return 0;
+}
+
+# Leaderboard score: crowns dominate, money breaks ties.
+fn ol_final_score(st): i64 {
+    return load64(st + OL_CROWNS) * 1000000 + load64(st + OL_MONEY);
+}
+
+fn ol_rank(score): i64 {
+    if (score >= 3000000) { return "Editor of the Games"; }
+    if (score >= 1000000) { return "Champion Owner"; }
+    if (score >= 500000)  { return "Rising Faction"; }
+    return "Backmarker";
+}
+
+# Render the owner's hub: day / money / actions + the stable roster. The
+# race + wager screens are added in bites 2-3.
+fn ol_render(st, buf, cap): i64 {
+    var pos = 0;
+    var screen = load64(st + OL_SCREEN);
+    pos = emit_sgr(buf, pos, 33);
+    pos = emit_cstr(buf, pos, "== THE OLYMPIAD ==");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Day ");
+    pos = emit_int(buf, pos, load64(st + OL_DAY));
+    pos = emit_cstr(buf, pos, "   Denarii ");
+    pos = emit_int(buf, pos, load64(st + OL_MONEY));
+    pos = emit_cstr(buf, pos, "   Actions ");
+    pos = emit_int(buf, pos, load64(st + OL_ACTIONS));
+    pos = emit_crlf(buf, pos);
+
+    if (screen == OSCR_OVER) {
+        pos = emit_cstr(buf, pos, "-- THE GAMES CLOSE --");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Crowns: ");
+        pos = emit_int(buf, pos, load64(st + OL_CROWNS));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Standing: ");
+        pos = emit_cstr(buf, pos, ol_rank(ol_final_score(st)));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        return pos;
+    }
+
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Your stable:");
+    pos = emit_crlf(buf, pos);
+    var n = load64(st + OL_NCOMP);
+    var sel = load64(st + OL_SEL);
+    var i = 0;
+    while (i < n) {
+        var c = ol_comp(st, i);
+        if (i == sel) { pos = emit_cstr(buf, pos, " > "); }
+        else          { pos = emit_cstr(buf, pos, "   "); }
+        pos = emit_cstr(buf, pos, ol_faction_name(load64(c + CMP_FACTION)));
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_cstr(buf, pos, ol_team_name(load64(c + CMP_NAMEID)));
+        pos = emit_cstr(buf, pos, "  Spd ");
+        pos = emit_int(buf, pos, load64(c + CMP_SPEED));
+        pos = emit_cstr(buf, pos, " Sta ");
+        pos = emit_int(buf, pos, load64(c + CMP_STAMINA));
+        pos = emit_cstr(buf, pos, " Hnd ");
+        pos = emit_int(buf, pos, load64(c + CMP_HANDLE));
+        pos = emit_cstr(buf, pos, " Nrv ");
+        pos = emit_int(buf, pos, load64(c + CMP_NERVE));
+        pos = emit_cstr(buf, pos, " Cond ");
+        pos = emit_int(buf, pos, load64(c + CMP_COND));
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "[1-4] train Spd/Sta/Hnd/Nrv  [R]est  [N]ext-day  [Q]uit");
+    pos = emit_crlf(buf, pos);
+
+    var msg = load64(st + OL_MSG);
+    if ((load8(msg) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, msg);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+# Train the selected competitor's stat at offset `stat_off`, spending an
+# action; messages the result. Shared by the four train keys.
+fn ol_do_train(st, stat_off, label): i64 {
+    if (ol_spend_action(st) == 0) {
+        ol_msg(st, "No training left today. [N]ext-day to rest the stable.");
+        return 0;
+    }
+    var c = ol_comp(st, load64(st + OL_SEL));
+    var gained = ol_train(c, stat_off);
+    var m = load64(st + OL_MSG);
+    var p = 0;
+    if (gained <= 0) {
+        p = emit_cstr(m, p, label);
+        p = emit_cstr(m, p, " is already at its peak.");
+    } else {
+        p = emit_cstr(m, p, "Worked the ");
+        p = emit_cstr(m, p, label);
+        p = emit_cstr(m, p, " hard (+");
+        p = emit_int(m, p, gained);
+        p = emit_cstr(m, p, ", but they tire).");
+    }
+    store8(m + p, 0);
+    return 0;
+}
+
+# Feed one input line to the owner hub. 0 stay / 1 exit.
+fn ol_feed(st, line, len): i64 {
+    ol_msg(st, "");
+    var screen = load64(st + OL_SCREEN);
+    if (screen == OSCR_OVER) { return 1; }
+    var k = door_key(line, len);
+    if (k == 113) { return 1; }                                    # q
+    if (k == 49)  { return ol_do_train(st, CMP_SPEED,   "Speed"); }    # 1
+    if (k == 50)  { return ol_do_train(st, CMP_STAMINA, "Stamina"); }  # 2
+    if (k == 51)  { return ol_do_train(st, CMP_HANDLE,  "Handling"); } # 3
+    if (k == 52)  { return ol_do_train(st, CMP_NERVE,   "Nerve"); }    # 4
+    if (k == 114) {                                                # r — rest
+        if (ol_spend_action(st) == 0) { ol_msg(st, "No actions left. [N]ext-day."); return 0; }
+        ol_rest(ol_comp(st, load64(st + OL_SEL)));
+        ol_msg(st, "The team rests; condition recovers.");
+        return 0;
+    }
+    if (k == 110) {                                                # n — next day
+        ol_day_advance(st);
+        ol_msg(st, "A new day at the Games. Actions refilled.");
+        return 0;
+    }
+    ol_msg(st, "Unknown command.");
+    return 0;
+}
