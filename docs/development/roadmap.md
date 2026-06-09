@@ -1,6 +1,6 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-05-23
+> **Last Updated**: 2026-06-09
 >
 > Versioned milestones through v1.0. Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), this file lists what's shipped, what's next, what's deferred, and the v1.0 criteria. Per-tag chronology lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state in [`state.md`](state.md).
 
@@ -62,7 +62,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 **Prior — 1.3.0 Chat area + Eliza shipped 2026-06-08.** All three bites landed ([ADR 0011](../adr/0011-chat-area.md)): (1) the chat surface — per-channel `flock`'d **ring transcript** under `<store>/.chat/<channel>/`, a new `MODE_CHAT` with **live-tail by sequence number** on the `CHAT_POLL_SECS` recv-timeout tick (a `-EAGAIN` read in chat flushes new lines instead of disconnecting), `chat [channel]` / `/leave` / `/help`, login-gated; (2) **Eliza** (`src/eliza.cyr`) — the Weizenbaum 1966 DOCTOR as a pure decomposition/reassembly engine, reachable as a `play eliza` door + a private `/eliza` side-channel (replies only to the asker, never the room); (3) closeout. A pre-cut multi-agent adversarial review caught + fixed three real defects (Eliza `you`→`me` / `you are`→`I am` reflection grammar; a chat live-tail watermark drop under burst). 141 → **155 tests** (t142-t155); 678,776 → **730,792 B** (on cyrius 6.1.5 → **6.1.9**); cross-session + live-tail proven by `11-chat.sh`, both Eliza surfaces + privacy by `12-eliza.sh`. Detail: [ADR 0011](../adr/0011-chat-area.md) + CHANGELOG [1.3.0] + [`state.md`](state.md).
 
-**Next planned (see *Planned* below):** 1.3.4 Wager (the shared casino primitive, [ADR 0013](../adr/0013-wagering-module-rng-fairness.md)) → 1.3.5 casino integrations → 1.3.6 training sim → 1.3.7 war-game ([ADR 0014](../adr/0014-async-shared-world-strategy.md), the deliberate MUD on-ramp) → 1.4.0 Descent link (BBS → MUD gateway). Deeper Universe (PA alliances/mines, Handler intercepts/sabotage, Smuggler aggregate price pressure) and further chatbot personalities (ALICE/Racter on the script engine; MegaHAL Markov generation as a sibling to Jabberwacky's retrieval) stay unpinned until pulled ([`roadmap-future.md`](roadmap-future.md)).
+**Next planned (see *Planned* below):** **1.4.0 Descent link** (BBS → MUD gateway) — the whole 1.3.x door arc (Chat+Eliza → PARRY → QUEST → Jabberwacky → Wager → casino integrations → Olympiad → Ashes of Empire) has shipped, with the 1.3.7 war-game deliberately retiring the shared-state-mutation-between-callers concurrency risk on the way. Deeper Universe (PA alliances/mines, Handler intercepts/sabotage, Smuggler aggregate price pressure), the Olympiad's later events (gladiators/athletics/boat crews), and further chatbot personalities (ALICE/Racter on the script engine; MegaHAL Markov generation as a sibling to Jabberwacky's retrieval) stay unpinned until pulled ([`roadmap-future.md`](roadmap-future.md)).
 
 **Deferred (pull when a deployment asks):**
 
@@ -73,32 +73,7 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 ## Planned
 
-### 1.3.0 — Chat area + Eliza
-
-A **chat area** is the public-assembly surface agora hasn't built yet: the classic BBS *teleconference* / CB-simulator where logged-in citizens talk in shared, named channels in (near) real time — distinct from the asynchronous post boards. **Eliza** — a faithful pure-module port of Weizenbaum's 1966 Rogerian psychotherapist chatbot — is its anchor inhabitant: a nostalgic BBS staple, a zero-dependency pure transform, and a low-risk first thing to put *in* the room.
-
-**Design fit (why it slots cleanly into agora):**
-
-- **Eliza is a pure module** (`src/eliza.cyr`), exactly the [ADR 0009](../adr/0009-door-games-subsystem.md) shape the games already use: a deterministic, side-effect-free `(input line) → (reflected response)` transform — keyword-ranked decomposition + reassembly-rule templates + pronoun reflection (I↔you, my↔your). Unit-testable without a socket (canned exchanges → fixed replies), no external deps, no RNG required (or a seeded `door.cyr` PRNG for reply variety, keeping replays reproducible). She's reachable two ways: as a `play eliza` **door** (solo, immediately), and as a **bot participant** in the chat area.
-- **The chat area is a new shared surface** that builds directly on the **1.2.0 `flock`'d shared-disk framework** (the world-transaction pattern, generalized): a per-channel append-only, `flock`'d transcript that connected sessions tail — the same fork-per-accept-safe, on-disk-is-the-only-shared-state discipline ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) the Universe work establishes. So it is **gated behind 1.2.0** for the shared-state machinery, not a from-scratch concurrency build.
-- **Login-gated, like Universe** — a chat presence is a persistent-ish actor, so it needs a sigil identity; anonymous users can still read/post on boards.
-- **No new dependencies** — pattern-matching + flat-file transcripts are agora's existing idioms.
-
-**Open questions for its ADR (when 1.3.0 pulls forward):** live-tail delivery model (poll-on-input vs. a notify mechanism under fork-per-accept), channel lifecycle + scrollback retention, whether Eliza runs as an always-present bot writing into the transcript or a private `/eliza` side-channel, and an Eliza script format (built-in DOCTOR script vs. operator-loadable rule files). Earns a dedicated ADR when the chat surface is cut.
-
-### 1.3.4–1.3.7 — The casino mechanic + two new doors
-
-Three decisions, sequenced across four slots so the shared abstraction is built before its consumers. The throughline: **build the wagering primitive once, then make every game richer with it** — and use the war-game to retire a concurrency risk on the way to the MUD.
-
-**1.3.4 — Wager (the shared module; [ADR 0013](../adr/0013-wagering-module-rng-fairness.md)).** A standalone casino door would be thin: it is the same loop — bet, draw, resolve, settle — no matter the skin. The value is the *mechanic embedded across games*, so the work is a **single shared module** (`src/wager.cyr`) built once: bet validation, payout tables, the entropy draw, house edge. Every game calls it. This is the exact "one shared abstraction under many games" pattern agora already uses for the door PRNG (`door.cyr`'s seedable xorshift) and the world-transaction framework — very consistent with how the codebase is built.
-- **Open ADR question — wager fairness vs. replayability.** The games deliberately use a *seeded, replayable* PRNG (`door.cyr` § header: "the stdlib only has the kernel CSPRNG, which is non-reproducible — wrong for games"). A casino wants the opposite: an *unpredictable, non-replayable* draw, or a savvy player who can reconstruct the seed can predict the wheel. So the wager module likely needs its own **kernel-CSPRNG entropy source** for the draw (distinct from the games' seeded determinism), plus a documented house edge. That tension — fair-and-unpredictable vs. reproducible-for-tests — is the module's core design decision and earns the ADR. (Unit tests pin the *payout math* and *bet validation*, which are pure; the draw itself is mocked/seeded in tests.)
-
-**1.3.5 — Casino integrations.** Where the module earns its keep: drop it into the **existing** doors as flavour with stakes — a cantina gambling table in **Port Authority**, a back-alley dice game in **Smuggler's Ledger**, a tavern card game in **QUEST**. Same underlying module, many contexts; every game gets richer and there is no fifth thing to maintain.
-
-**1.3.6 — Training sim (the cheap reskin).** Mechanically this is **QUEST's daily-turn progression wearing a sports skin**: train across rationed daily turns → stats improve → a periodic competition resolves the outcome (fighter bouts / horse races). The turn economy is already designed and shipped (`qu_day_tick` rationing, the wall-clock daily reset) — the sim reuses that skeleton. It is also the **wager module's flagship integration**: betting on your own fighter or on the races is the obvious tie-in, so two of the three decisions reinforce each other. The lowest-risk of the three because almost nothing here is new.
-
-**1.3.7 — War-game (the new-capability proof; [ADR 0014](../adr/0014-async-shared-world-strategy.md)).** This is the high-value door because it proves a layer nothing else does: **asynchronous shared-world strategy** — multiple players acting on a common map *between* sessions, alliances, turn-batched combat resolution. It is the conceptual bridge between the single-user doors and the concurrent MUD, so it is not genre-filling — it **retires a real risk on the way to 1.4.0**. Built knowing that is its job, it deliberately exercises the **shared-state-mutation-between-callers** path that the Descent MUD will later do in real time, on the proven 1.2.0 `flock`'d world-transaction framework ([ADR 0010](../adr/0010-persistent-universe.md)) scaled from per-game snapshots to a shared map + alliance state + a turn-batch resolution pass.
-- **Open questions (its ADR):** the shared-map data model + snapshot size under the flock; the turn-batch resolution cadence (wall-clock tick vs. on-Nth-action vs. operator-run) and who runs it under fork-per-accept (no daemon — likely a lazy "resolve overdue turns on next caller" pattern, mirroring QUEST's daily-reset-on-entry); the alliance/diplomacy model; and async-PvP notification (the next-login notice, already prototyped by QUEST/PA). Sequenced **last** of the four, immediately before 1.4.0, precisely so the concurrency lessons feed the MUD link.
+> The 1.3.x door arc — Chat+Eliza ([ADR 0011](../adr/0011-chat-area.md)), PARRY, QUEST, Jabberwacky ([ADR 0015](../adr/0015-jabberwacky-corpus-learning.md)), Wager ([ADR 0013](../adr/0013-wagering-module-rng-fairness.md)), casino integrations, Olympiad ([ADR 0016](../adr/0016-olympiad-competition-primitive.md)), and Ashes of Empire ([ADR 0014](../adr/0014-async-shared-world-strategy.md)) — has all shipped (see the release table + *In progress* above; full rationale in each ADR + [`CHANGELOG.md`](../../CHANGELOG.md)). The only pinned item remaining is the Descent link.
 
 ### 1.4.0 — Descent link (BBS → MUD gateway)
 
@@ -167,7 +142,7 @@ Six pillars for the v2.x sovereignty layer — identity continuity (sigil-portab
 
 - [`docs/development/state.md`](state.md) — live state snapshot (current version, binary size, in-flight slot, **next-session boot guide**).
 - [`docs/development/roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars (post-v1.0, unpinned).
-- [`docs/adr/`](../adr/) — **eight ADRs as of 0.9.0** (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / **PostHeaders struct ABI**). 0.7.0 added no new ADR (the audit doc is the record); 0.8.0 added ADR 0007; 0.9.0 added ADR 0008.
+- [`docs/adr/`](../adr/) — **sixteen ADRs (0001–0016)**, all Accepted/Evergreen. 0001-0008 land across M1–0.9.0 (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / PostHeaders struct ABI); the 1.x door arc adds 0009 (door subsystem), 0010 (Persistent Universe), 0011 (chat area), 0012 (chatbot framework), 0013 (wager/RNG fairness), 0014 (async shared-world war-game — Accepted at 1.3.7), 0015 (Jabberwacky corpus-learning), 0016 (Olympiad competition primitive).
 - [`docs/audit/`](../audit/) — security audit ledger; first entry 2026-05-23 (0.7.0 sweep).
 - [`docs/doc-health.md`](../doc-health.md) — fresh/stale ledger across the whole doc tree.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
