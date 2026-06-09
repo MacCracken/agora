@@ -327,6 +327,15 @@ enum SLScreen {
     SCR_FIXER    = 12;
     SCR_ENC      = 13;     # cops: fight or run
     SCR_OVER     = 14;     # game over
+    SCR_DICE     = 15;     # 1.3.5: back-alley bones (shared wager module, ADR 0013)
+}
+
+# 1.3.5 back-alley dice (ADR 0013). Even-money Low/High call; the fixer's
+# bones run a touch hot — SL_DICE_EDGE basis points of house edge applied
+# by wager_resolve as a haircut on a winning payout.
+enum SLDice {
+    SL_DICE_EDGE = 600;
+    SL_DICE_MIN  = 5;       # table minimum stake (cash)
 }
 
 enum SLShop {
@@ -731,7 +740,7 @@ fn sl_render(st, buf, cap): i64 {
     if (screen == SCR_MAIN) {
         pos = sl_render_market(st, buf, pos);
         pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "[B]uy  [S]ell  [J]et  [L]oanshark  ban[K]  [F]ixer  [Q]uit");
+        pos = emit_cstr(buf, pos, "[B]uy  [S]ell  [J]et  [L]oanshark  ban[K]  [F]ixer  [D]ice  [Q]uit");
         pos = emit_crlf(buf, pos);
     }
     if (screen == SCR_BUY) {
@@ -809,6 +818,20 @@ fn sl_render(st, buf, cap): i64 {
         pos = emit_cstr(buf, pos, "(x back)");
         pos = emit_crlf(buf, pos);
     }
+    if (screen == SCR_DICE) {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "-- The Back Alley: Bones --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  1 LOW   (1-3 pips)");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  2 HIGH  (4-6 pips)   even money");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Call: <stake> <1-2>   (min ");
+        pos = emit_int(buf, pos, SL_DICE_MIN);
+        pos = emit_cstr(buf, pos, ", x to leave)");
+        pos = emit_crlf(buf, pos);
+    }
     if (screen == SCR_ENC) {
         pos = emit_sgr(buf, pos, 31);
         pos = emit_cstr(buf, pos, "!! THE LAW !!");
@@ -845,6 +868,7 @@ fn sl_feed_main(st, line, len): i64 {
     if (k == 108) { store64(st + SL_SCREEN, SCR_SHARK); return 0; } # l
     if (k == 107) { store64(st + SL_SCREEN, SCR_BANK);  return 0; } # k
     if (k == 102) { store64(st + SL_SCREEN, SCR_FIXER); return 0; } # f
+    if (k == 100) { store64(st + SL_SCREEN, SCR_DICE);  return 0; } # d — dice
     sl_msg(st, "Unknown command.");
     return 0;
 }
@@ -1053,6 +1077,68 @@ fn sl_feed_enc(st, line, len): i64 {
 
 # Dispatch one input line to the current screen. Returns 0 to stay in
 # the game, 1 to exit back to the BBS.
+# Name of a dice outcome by its index (0 LOW / 1 HIGH).
+fn sl_dice_name(i): i64 {
+    if (i == 0) { return "LOW"; }
+    return "HIGH";
+}
+
+# Fill a caller-allocated wager table (WT_SIZE) with the back-alley bones:
+# two outcomes (Low/High), equal weight, even money, SL_DICE_EDGE house
+# haircut, SL_DICE_MIN floor, no ceiling. Extracted for unit-testing the
+# tuning (t187); the weights/mults arrays outlive the borrowed table.
+fn sl_dice_table(tbl): i64 {
+    var w = alloc(2 * 8); store64(w, 1); store64(w + 8, 1);
+    var m = alloc(2 * 8); store64(m, 1); store64(m + 8, 1);
+    return wager_table_init(tbl, SL_DICE_MIN, 0, SL_DICE_EDGE, 2, w, m);
+}
+
+# SCR_DICE — the back-alley bones (1.3.5, shared wager.cyr; ADR 0013).
+# An even-money Low/High call resolved on the KERNEL-CSPRNG draw (a
+# casino must be non-replayable — distinct from the game's seeded PRNG):
+# two outcomes, equal weight, each pays 1x, then an SL_DICE_EDGE haircut
+# (the fixer's bones run hot). One bet per line, "<stake> <1-2>". Only
+# SL_CASH moves (already serialized) — no new save state.
+fn sl_feed_dice(st, line, len): i64 {
+    var k = sl_key(line, len);
+    if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }   # x — leave
+    var pick = alloc(8);
+    var stake = door_parse_2int(line, len, pick);
+    var call = load64(pick);
+    if (stake < 0) { sl_msg(st, "Call it like '50 1' -- stake, then 1 Low or 2 High.  x to leave."); return 0; }
+    if (call < 1)  { sl_msg(st, "Call 1 for LOW (1-3) or 2 for HIGH (4-6).  x to leave."); return 0; }
+    var tbl = alloc(WT_SIZE);
+    sl_dice_table(tbl);
+    var choice = call - 1;                      # player 1-2 → outcome 0-1
+    var bal = load64(st + SL_CASH);
+    var rc = wager_validate(tbl, bal, stake, choice);
+    if (rc != WAGER_OK) { sl_msg(st, wager_reason(rc)); return 0; }
+    var outcome = wager_draw_csprng(tbl);
+    if (outcome < 0) { sl_msg(st, "The bones skitter into the gutter -- bet refused, cash untouched."); return 0; }
+    var delta = wager_resolve(tbl, stake, choice, outcome);
+    store64(st + SL_CASH, wager_settle(bal, delta));
+    var msg = load64(st + SL_MSG);
+    var p = 0;
+    p = emit_cstr(msg, p, "The bones come up ");
+    p = emit_cstr(msg, p, sl_dice_name(outcome));
+    p = emit_cstr(msg, p, " -- ");
+    if (outcome == choice) {
+        if (delta > 0) {
+            p = emit_cstr(msg, p, "you take ");
+            p = emit_int(msg, p, delta);
+            p = emit_cstr(msg, p, "!");
+        } else {
+            p = emit_cstr(msg, p, "a push; your stake holds.");
+        }
+    } else {
+        p = emit_cstr(msg, p, "you're out ");
+        p = emit_int(msg, p, stake);
+        p = emit_cstr(msg, p, ".");
+    }
+    store8(msg + p, 0);
+    return 0;
+}
+
 fn sl_feed(st, line, len): i64 {
     sl_msg(st, "");
     var screen = load64(st + SL_SCREEN);
@@ -1071,6 +1157,7 @@ fn sl_feed(st, line, len): i64 {
     if (screen == SCR_BANKWD)   { return sl_feed_bankwd(st, line, len); }
     if (screen == SCR_FIXER)    { return sl_feed_fixer(st, line, len); }
     if (screen == SCR_ENC)      { return sl_feed_enc(st, line, len); }
+    if (screen == SCR_DICE)     { return sl_feed_dice(st, line, len); }
     return 0;
 }
 

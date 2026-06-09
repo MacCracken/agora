@@ -350,6 +350,51 @@ fn door_parse_int(buf, len): i64 {
     return val;
 }
 
+# Parse up to two space-separated non-negative integers from buf[0..len).
+# Returns the FIRST integer (or 0-1 if none); writes the SECOND into
+# *second_ptr (0-1 if absent). Leading spaces skipped; the first non-digit
+# non-space byte ends each number. Used by the 1.3.5 wager tables, whose
+# bet line is "<stake> <choice>" (e.g. "50 3" = stake 50 on outcome 3).
+fn door_parse_2int(buf, len, second_ptr): i64 {
+    var i = 0;
+    var got1 = 0;
+    var v1 = 0;
+    var s1 = 1;
+    while (s1 == 1) {
+        if (i >= len) { s1 = 0; continue; }
+        var c = load8(buf + i) & 0xFF;
+        if (c == 32) {
+            if (got1 == 0) { i = i + 1; continue; }   # skip leading space
+            s1 = 0; continue;                           # space ends the number
+        }
+        if (c < 48) { s1 = 0; continue; }
+        if (c > 57) { s1 = 0; continue; }
+        v1 = v1 * 10 + (c - 48);
+        got1 = 1;
+        i = i + 1;
+    }
+    var got2 = 0;
+    var v2 = 0;
+    var s2 = 1;
+    while (s2 == 1) {
+        if (i >= len) { s2 = 0; continue; }
+        var c2 = load8(buf + i) & 0xFF;
+        if (c2 == 32) {
+            if (got2 == 0) { i = i + 1; continue; }
+            s2 = 0; continue;
+        }
+        if (c2 < 48) { s2 = 0; continue; }
+        if (c2 > 57) { s2 = 0; continue; }
+        v2 = v2 * 10 + (c2 - 48);
+        got2 = 1;
+        i = i + 1;
+    }
+    if (got2 == 0) { store64(second_ptr, 0 - 1); }
+    else           { store64(second_ptr, v2); }
+    if (got1 == 0) { return 0 - 1; }
+    return v1;
+}
+
 # Lowercase the first non-space byte of a line (a single menu key).
 # Returns 0 for a blank line (bare Enter).
 fn door_key(line, len): i64 {

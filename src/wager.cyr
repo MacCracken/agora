@@ -152,6 +152,19 @@ fn wager_validate(tbl, balance, stake, choice): i64 {
     return WAGER_OK;
 }
 
+# Human-readable string for a WAGER_E_* code (shared by the 1.3.5 game
+# integrations so every table surfaces the same vocabulary). Pure — a
+# pointer to a static literal. WAGER_OK maps to the empty string.
+fn wager_reason(rc): i64 {
+    if (rc == WAGER_E_STAKE0) { return "Your stake must be positive."; }
+    if (rc == WAGER_E_FUNDS)  { return "You don't have that much to wager."; }
+    if (rc == WAGER_E_MIN)    { return "That's below the table minimum."; }
+    if (rc == WAGER_E_MAX)    { return "That's over the table maximum."; }
+    if (rc == WAGER_E_CHOICE) { return "No such bet on this table."; }
+    if (rc == WAGER_E_DRAW)   { return "The draw faulted — bet refused."; }
+    return "";
+}
+
 # === The draw ===
 #
 # wager_pick is the PURE mapping from a uniform value to an outcome:

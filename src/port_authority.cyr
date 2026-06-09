@@ -326,6 +326,14 @@ enum PAScreen {
     PSCR_COMBAT    = 10;
     PSCR_OVER      = 11;
     PSCR_GARRISON  = 12;    # 1.2.0 bite 3: deploy fighters as a sector garrison (Universe)
+    PSCR_GAMBLE    = 13;    # 1.3.5: the cantina dabo wheel (shared wager module, ADR 0013)
+}
+
+# 1.3.5 cantina (ADR 0013). House edge on the dabo wheel, in basis points
+# (300 = 3%) — applied as a haircut on a winning payout by wager_resolve.
+enum PAGamble {
+    PA_DABO_EDGE = 300;
+    PA_DABO_MIN  = 5;        # table minimum stake (credits)
 }
 
 enum PADock {
@@ -758,7 +766,7 @@ fn pa_render(st, buf, cap): i64 {
         pos = pa_render_warps(st, buf, pos);
         pos = pa_render_cargo(st, buf, pos);
         pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "[B]uy [S]ell [M]ove [D]ock [P]lanet [N]ext-day [Q]uit");
+        pos = emit_cstr(buf, pos, "[B]uy [S]ell [M]ove [D]ock [P]lanet [C]antina [N]ext-day [Q]uit");
         pos = emit_crlf(buf, pos);
         if (pa_is_universe(st) == 1) {
             pos = emit_cstr(buf, pos, "[G]arrison — deploy fighters to hold this sector");
@@ -840,6 +848,22 @@ fn pa_render(st, buf, cap): i64 {
         pos = emit_cstr(buf, pos, "Deploy how many to garrison this sector? (Enter cancels)");
         pos = emit_crlf(buf, pos);
     }
+    if (screen == PSCR_GAMBLE) {
+        pos = emit_sgr(buf, pos, 35);
+        pos = emit_cstr(buf, pos, "-- The Cantina: Dabo Wheel --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  1 Green  pays 1x  (the safe light)");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  2 Amber  pays 2x");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  3 Red    pays 5x  (chase the jackpot)");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Bet: <amount> <1-3>   (min ");
+        pos = emit_int(buf, pos, PA_DABO_MIN);
+        pos = emit_cstr(buf, pos, ", x to leave)");
+        pos = emit_crlf(buf, pos);
+    }
     if (screen == PSCR_COMBAT) {
         pos = emit_sgr(buf, pos, 31);
         pos = emit_cstr(buf, pos, "!! RAIDERS !!");
@@ -876,6 +900,7 @@ fn pa_feed_main(st, line, len): i64 {
         return 0;
     }
     if (k == 112) { store64(st + PA_SCREEN, PSCR_PLANET); return 0; } # p
+    if (k == 99)  { store64(st + PA_SCREEN, PSCR_GAMBLE); return 0; } # c — cantina
     if (k == 103) {                                                   # g garrison (Universe only)
         if (pa_is_universe(st) == 1) { store64(st + PA_SCREEN, PSCR_GARRISON); }
         else { pa_msg(st, "Garrisons are a Universe feature."); }
@@ -1088,6 +1113,74 @@ fn pa_feed_combat(st, line, len): i64 {
     return 0;
 }
 
+# Name of a dabo-wheel light by its outcome index (0 Green / 1 Amber / 2 Red).
+fn pa_dabo_name(i): i64 {
+    if (i == 0) { return "Green"; }
+    if (i == 1) { return "Amber"; }
+    return "Red";
+}
+
+# Fill a caller-allocated wager table (WT_SIZE) with the dabo wheel:
+# three lights, weights 3/2/1, payouts 1x/2x/5x (fair odds), PA_DABO_EDGE
+# house haircut, PA_DABO_MIN floor, no ceiling. Extracted from the feed
+# handler so the tuning is unit-testable (t186). The weights/mults arrays
+# are bump-allocated so they outlive the borrowed table.
+fn pa_dabo_table(tbl): i64 {
+    var w = alloc(3 * 8); store64(w, 3); store64(w + 8, 2); store64(w + 16, 1);
+    var m = alloc(3 * 8); store64(m, 1); store64(m + 8, 2); store64(m + 16, 5);
+    return wager_table_init(tbl, PA_DABO_MIN, 0, PA_DABO_EDGE, 3, w, m);
+}
+
+# PSCR_GAMBLE — the cantina dabo wheel (1.3.5, the first user-reachable
+# wager.cyr surface; ADR 0013). Three lights spin on the KERNEL-CSPRNG
+# draw (not the game's seeded PRNG — a casino must be non-replayable):
+# Green 3/6 → 1x, Amber 2/6 → 2x, Red 1/6 → 5x (fair odds, then a
+# PA_DABO_EDGE haircut on a win). One bet per line, "<stake> <1-3>".
+# Only PA_CREDITS moves — already serialized, so the wheel adds no save
+# state. Available in every mode (Practice gambles ephemeral credits).
+fn pa_feed_gamble(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }   # x — leave
+    var pick = alloc(8);
+    var stake = door_parse_2int(line, len, pick);
+    var sym = load64(pick);
+    if (stake < 0) { pa_msg(st, "Bet like '50 3' -- stake, then 1-3.  x to leave."); return 0; }
+    if (sym < 1)   { pa_msg(st, "Pick a light: 1 Green, 2 Amber, 3 Red.  x to leave."); return 0; }
+    var tbl = alloc(WT_SIZE);
+    pa_dabo_table(tbl);
+    var choice = sym - 1;                       # player 1-3 → outcome 0-2
+    var bal = load64(st + PA_CREDITS);
+    var rc = wager_validate(tbl, bal, stake, choice);
+    if (rc != WAGER_OK) { pa_msg(st, wager_reason(rc)); return 0; }
+    var outcome = wager_draw_csprng(tbl);
+    if (outcome < 0) { pa_msg(st, "The wheel's lamp shorts out -- bet refused, credits untouched."); return 0; }
+    var delta = wager_resolve(tbl, stake, choice, outcome);
+    store64(st + PA_CREDITS, wager_settle(bal, delta));
+    # Compose the result straight into PA_MSG (256-byte buffer). Decide
+    # win/wash/loss by the match, NOT delta's sign — a tiny winning stake
+    # can floor to 0 profit (a wash), which is not a loss.
+    var msg = load64(st + PA_MSG);
+    var p = 0;
+    p = emit_cstr(msg, p, "The wheel lands on ");
+    p = emit_cstr(msg, p, pa_dabo_name(outcome));
+    p = emit_cstr(msg, p, " -- ");
+    if (outcome == choice) {
+        if (delta > 0) {
+            p = emit_cstr(msg, p, "you win ");
+            p = emit_int(msg, p, delta);
+            p = emit_cstr(msg, p, " cr!");
+        } else {
+            p = emit_cstr(msg, p, "a wash; your stake holds.");
+        }
+    } else {
+        p = emit_cstr(msg, p, "you lose ");
+        p = emit_int(msg, p, stake);
+        p = emit_cstr(msg, p, " cr.");
+    }
+    store8(msg + p, 0);
+    return 0;
+}
+
 # Dispatch one input line to the current screen. 0 stay / 1 exit.
 fn pa_feed(st, line, len): i64 {
     pa_msg(st, "");
@@ -1105,6 +1198,7 @@ fn pa_feed(st, line, len): i64 {
     if (screen == PSCR_PLANETWD)  { return pa_feed_planetwd(st, line, len); }
     if (screen == PSCR_COMBAT)    { return pa_feed_combat(st, line, len); }
     if (screen == PSCR_GARRISON)  { return pa_feed_garrison(st, line, len); }
+    if (screen == PSCR_GAMBLE)    { return pa_feed_gamble(st, line, len); }
     return 0;
 }
 

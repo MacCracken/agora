@@ -83,6 +83,14 @@ enum QUScreen {
     QSCR_BANKWD  = 6;
     QSCR_INN     = 7;
     QSCR_OVER    = 8;
+    QSCR_CARDS   = 9;             # 1.3.5: the tavern card table (shared wager module, ADR 0013)
+}
+
+# 1.3.5 tavern card table (ADR 0013). "Pick the suit", pays 3:1 on the
+# kernel-CSPRNG draw, with QU_CARD_EDGE basis points of house edge.
+enum QUCards {
+    QU_CARD_EDGE = 400;
+    QU_CARD_MIN  = 5;             # table minimum stake (gold on hand)
 }
 
 enum QUFoe {
@@ -451,7 +459,8 @@ fn qu_render_town(st, buf, pos): i64 {
     pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "  (F) the Forest      (H) the Healer"); pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "  (B) the Bank        (I) the Inn"); pos = emit_crlf(buf, pos);
-    pos = emit_cstr(buf, pos, "  (S) your reflection (Q) save & quit"); pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (C) the card table  (S) your reflection"); pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (Q) save & quit"); pos = emit_crlf(buf, pos);
     return pos;
 }
 
@@ -588,6 +597,7 @@ fn qu_render(st, buf, cap): i64 {
     pos = qu_render_status(st, buf, pos);
     pos = emit_crlf(buf, pos);
     if (screen == QSCR_OVER)    { pos = qu_render_over(st, buf, pos);   return pos; }
+    if (screen == QSCR_CARDS)   { pos = qu_render_cards(st, buf, pos); pos = qu_render_msg(st, buf, pos); return pos; }
     if (screen == QSCR_FOREST)  { pos = qu_render_forest(st, buf, pos); }
     else { if (screen == QSCR_FIGHT)   { pos = qu_render_fight(st, buf, pos); }
     else { if (screen == QSCR_HEALER)  { pos = qu_render_healer(st, buf, pos); }
@@ -608,12 +618,13 @@ fn qu_feed_town(st, line, len): i64 {
     if (k == 104) { store64(st + QU_SCREEN, QSCR_HEALER); return 0; }   # h
     if (k == 98)  { store64(st + QU_SCREEN, QSCR_BANK);   return 0; }   # b
     if (k == 105) { store64(st + QU_SCREEN, QSCR_INN);    return 0; }   # i
+    if (k == 99)  { store64(st + QU_SCREEN, QSCR_CARDS);  return 0; }   # c — card table
     if (k == 115) {                                                     # s — reflection
         qu_msg(st, "You look like someone the Work is not finished with.");
         return 0;
     }
     if (k == 113) { return 1; }                                          # q — save & quit
-    qu_msg(st, "The town waits. (F H B I S Q)");
+    qu_msg(st, "The town waits. (F H B I C S Q)");
     return 0;
 }
 
@@ -763,6 +774,87 @@ fn qu_feed_inn(st, line, len): i64 {
 }
 
 # Route one line to the active screen.
+# Name of a card suit by its outcome index (0 Hearts .. 3 Spades).
+fn qu_suit_name(i): i64 {
+    if (i == 0) { return "Hearts"; }
+    if (i == 1) { return "Diamonds"; }
+    if (i == 2) { return "Clubs"; }
+    return "Spades";
+}
+
+# Fill a caller-allocated wager table (WT_SIZE) with the tavern deck:
+# four suits, equal weight, 3:1 payout (pick the suit), QU_CARD_EDGE
+# house haircut, QU_CARD_MIN floor, no ceiling. Extracted for unit-
+# testing the tuning (t188); the weights/mults arrays outlive the table.
+fn qu_cards_table(tbl): i64 {
+    var w = alloc(4 * 8); store64(w, 1); store64(w + 8, 1); store64(w + 16, 1); store64(w + 24, 1);
+    var m = alloc(4 * 8); store64(m, 3); store64(m + 8, 3); store64(m + 16, 3); store64(m + 24, 3);
+    return wager_table_init(tbl, QU_CARD_MIN, 0, QU_CARD_EDGE, 4, w, m);
+}
+
+fn qu_render_cards(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "-- The Tavern Card Table --");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Call the suit; the deal pays 3 to 1.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  1 Hearts   2 Diamonds   3 Clubs   4 Spades");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Stake: <gold> <1-4>   (min ");
+    pos = emit_int(buf, pos, QU_CARD_MIN);
+    pos = emit_cstr(buf, pos, ", x to leave)");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+# QSCR_CARDS — the tavern card table (1.3.5, shared wager.cyr; ADR 0013).
+# "Pick the suit", a 4-outcome uniform draw paying 3:1, resolved on the
+# KERNEL-CSPRNG (a casino must be non-replayable, unlike QUEST's seeded
+# forest/combat PRNG). One stake per line, "<gold> <1-4>". Only QU_GOLD
+# (gold on hand) moves — already serialized, so the table adds no save
+# state. Gold on hand is the muggable purse, so the tavern bets the
+# vulnerable money, never the banked vault — thematically right.
+fn qu_feed_cards(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 120) { store64(st + QU_SCREEN, QSCR_TOWN); return 0; }   # x — leave
+    var pick = alloc(8);
+    var stake = door_parse_2int(line, len, pick);
+    var suit = load64(pick);
+    if (stake < 0) { qu_msg(st, "Stake like '20 3' -- gold, then a suit 1-4.  x to leave."); return 0; }
+    if (suit < 1)  { qu_msg(st, "Name a suit: 1 Hearts, 2 Diamonds, 3 Clubs, 4 Spades.  x to leave."); return 0; }
+    var tbl = alloc(WT_SIZE);
+    qu_cards_table(tbl);
+    var choice = suit - 1;                      # player 1-4 → outcome 0-3
+    var bal = load64(st + QU_GOLD);
+    var rc = wager_validate(tbl, bal, stake, choice);
+    if (rc != WAGER_OK) { qu_msg(st, wager_reason(rc)); return 0; }
+    var outcome = wager_draw_csprng(tbl);
+    if (outcome < 0) { qu_msg(st, "The dealer fumbles the cut -- bet refused, gold untouched."); return 0; }
+    var delta = wager_resolve(tbl, stake, choice, outcome);
+    store64(st + QU_GOLD, wager_settle(bal, delta));
+    var msg = load64(st + QU_MSG);
+    var p = 0;
+    p = emit_cstr(msg, p, "The deal turns up ");
+    p = emit_cstr(msg, p, qu_suit_name(outcome));
+    p = emit_cstr(msg, p, " -- ");
+    if (outcome == choice) {
+        if (delta > 0) {
+            p = emit_cstr(msg, p, "you win ");
+            p = emit_int(msg, p, delta);
+            p = emit_cstr(msg, p, " gold!");
+        } else {
+            p = emit_cstr(msg, p, "a wash; your stake holds.");
+        }
+    } else {
+        p = emit_cstr(msg, p, "you lose ");
+        p = emit_int(msg, p, stake);
+        p = emit_cstr(msg, p, " gold.");
+    }
+    store8(msg + p, 0);
+    return 0;
+}
+
 fn qu_feed(st, line, len): i64 {
     qu_msg(st, "");
     var screen = load64(st + QU_SCREEN);
@@ -775,6 +867,7 @@ fn qu_feed(st, line, len): i64 {
     if (screen == QSCR_BANKDEP) { return qu_feed_bankdep(st, line, len); }
     if (screen == QSCR_BANKWD)  { return qu_feed_bankwd(st, line, len); }
     if (screen == QSCR_INN)     { return qu_feed_inn(st, line, len); }
+    if (screen == QSCR_CARDS)   { return qu_feed_cards(st, line, len); }
     return 0;
 }
 

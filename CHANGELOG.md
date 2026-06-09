@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-06-08 (Casino integrations: the wager module earns its keep)
+
+**One module, three tables.** 1.3.4 built `src/wager.cyr` (the `bet → draw → resolve → settle` primitive) but left it unreachable — built ahead of its consumers. 1.3.5 embeds that *same* module as flavour-with-stakes across the three existing doors, so this is the **first user-reachable wager surface**: a cantina Dabo Wheel in **Port Authority**, back-alley Bones in **Smuggler's Ledger**, and a tavern Card Table in **QUEST**. No fifth door to maintain — three skins over one reviewed primitive, each a different table shape (a weighted 3-light wheel, an even-money binary, a 4-suit uniform draw) drawing from the kernel CSPRNG. Each table debits/credits only the game's existing gold field, so no save-format changes. No new dependencies. 185 → **188 tests**; 801,288 B → **812,528 B** (the wager module is now reachable code, not DCE-NOPed).
+
+### Added
+
+- **Port Authority — the cantina Dabo Wheel** (`PSCR_GAMBLE`, key `[C]`). Three lights on a weighted draw: Green 3/6 → 1×, Amber 2/6 → 2×, Red 1/6 → 5× (fair odds, then a 3% house edge). One bet per line, `<stake> <1-3>`; min 5 credits, no ceiling. Debits/credits `PA_CREDITS`.
+- **Smuggler's Ledger — back-alley Bones** (`SCR_DICE`, key `[D]`). An even-money Low/High call (two equal outcomes, 1× each) with a steeper 6%-edge haircut — the fixer's bones run hot. `<stake> <1-2>`; min 5 cash. Debits/credits `SL_CASH`.
+- **QUEST — the tavern Card Table** (`QSCR_CARDS`, town key `[C]`). "Pick the suit", a 4-outcome uniform draw paying 3:1 with a 4% edge. `<stake> <1-4>` (Hearts/Diamonds/Clubs/Spades); min 5 gold. Bets `QU_GOLD` (gold on hand — the muggable purse, never the banked vault, thematically right).
+- **`door_parse_2int`** (`src/door.cyr`) — the shared `<stake> <choice>` bet-line parser (first int returned, second written out, `(0-1)` for an absent field). Unit-tested t185.
+- **`wager_reason`** (`src/wager.cyr`) — maps a `WAGER_E_*` reject code to a shared human-readable string, so every table surfaces the same vocabulary.
+- **Per-game table builders** (`pa_dabo_table` / `sl_dice_table` / `qu_cards_table`) — each game's payout table extracted into a named function so its tuning (weights / multipliers / edge / minimum) is unit-tested against accidental change (t186–t188 pin the edge-floored payouts: a 100-credit Red win pays 485, an even-money bones win pays 94, a suit hit pays 288).
+- **`docs/examples/16-casino.sh`** — drives all three tables over telnet (cantina + dice + cards), asserting each renders and resolves a bet. The first wager wire-smoke (1.3.4 had no user surface).
+
+### Changed
+
+- **Toolchain pin 6.1.14 → 6.1.15** (`cyrius.cyml`). The local wrapper advanced again mid-cut; suite + clean DCE build stay green, no source change required.
+- **`src/wager.cyr` include moved** ahead of the game modules (right after `door.cyr`) in both `main.cyr` and `test.cyr`, since the games now call into it.
+- Connect banner + MOTD now advertise the casino tables.
+- **ADR 0013** gains a 1.3.5 implementation note recording the three integrations.
+
 ## [1.3.4] — 2026-06-08 (Wager: the shared casino primitive)
 
 **A casino is a mechanic, not a door.** Strip the skin off roulette, craps, a card hand, or a fighter bout and the loop is identical — **bet → draw → resolve → settle** — so agora builds it **once**, as a shared module ([ADR 0013](docs/adr/0013-wagering-module-rng-fairness.md)), the same "one abstraction under many games" pattern the door PRNG and the world-transaction framework already use. `src/wager.cyr` owns bet validation, per-game payout tables, an explicit per-table house edge, the entropy draw, and settlement. This cut ships the **primitive ahead of its consumers**: nothing calls it yet (DCE NOPs it in the binary), exactly as the 1.2.0 world-transaction framework was built before the games used it. The **1.3.5** integrations wire it into Port Authority / Smuggler / QUEST; the **1.3.6** training-sim flagships it (bet on your own fighter). No new dependencies — the entropy source is a syscall agora already has. 178 → **184 tests**; 797,640 B → **801,288 B**.
