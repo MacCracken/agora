@@ -174,7 +174,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.3.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky");
+    println("v1.3.4 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky");
     return 0;
 }
 
@@ -1531,7 +1531,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.3.3 — telnet BBS + door games + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.4 — telnet BBS + door games + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2655,7 +2655,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.3.3");
+    println("agora 1.3.4");
     return 0;
 }
 

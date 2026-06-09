@@ -164,7 +164,7 @@ fn wager_pick(tbl, r): i64 {
     var w = load64(tbl + WT_WEIGHTS);
     var acc = 0;
     var i = 0;
-    var pick = n - 1;            # default: the last legal outcome
+    var pick = 0 - 1;           # sentinel: no bucket has caught r yet
     var scanning = 1;
     while (scanning == 1) {
         if (i >= n) { scanning = 0; continue; }
@@ -172,7 +172,15 @@ fn wager_pick(tbl, r): i64 {
         if (r < acc) { pick = i; scanning = 0; continue; }
         i = i + 1;
     }
-    return pick;
+    if (pick >= 0) { return pick; }
+    # Nothing caught r. Two distinct degenerate cases, kept distinct so a
+    # MISCONFIGURED table resolves to the safe slot, not the jackpot slot:
+    #   - zero-total table (acc <= 0): outcome 0, the conventional low/safe
+    #     slot. (A real draw never reaches here — wager_draw_csprng guards
+    #     total<=1 — but a direct caller might.)
+    #   - r >= total (out-of-range residual): the last legal index, n-1.
+    if (acc <= 0) { return 0; }
+    return n - 1;
 }
 
 # Uniform value in [0, n) from the kernel CSPRNG (sys_getrandom, flags=0
@@ -198,7 +206,7 @@ fn wager_uniform_csprng(n): i64 {
 # (caller maps that to WAGER_E_DRAW and refuses the bet — no settlement).
 fn wager_draw_csprng(tbl): i64 {
     var total = wager_weight_total(tbl);
-    if (total <= 1) { return wager_pick(tbl, 0); }   # degenerate → outcome 0/last
+    if (total <= 1) { return wager_pick(tbl, 0); }   # degenerate: the lone populated outcome, else 0
     var r = wager_uniform_csprng(total);
     if (r < 0) { return 0 - 1; }
     return wager_pick(tbl, r);
@@ -214,13 +222,33 @@ fn wager_draw_csprng(tbl): i64 {
 # On a loss the delta is -stake. Edge math is integer: a fractional
 # basis-point cut floors in the house's favor, the conventional rounding.
 fn wager_resolve(tbl, stake, choice, outcome): i64 {
+    # Self-contained seam guards (defense-in-depth — resolve does not rely
+    # on the caller having run wager_validate or checked the draw):
+    #   outcome < 0  — the CSPRNG-refusal sentinel (0-1) leaked in. NEVER
+    #                  settle a bad draw: net zero (a push), never a debit.
+    #   choice OOB   — an illegal bet cannot win and must not index mults[]
+    #                  out of bounds: treat as a loss before the deref.
+    if (outcome < 0) { return 0; }
+    var n = load64(tbl + WT_NOUT);
+    if (choice < 0)  { return 0 - stake; }
+    if (choice >= n) { return 0 - stake; }
     if (outcome != choice) { return 0 - stake; }
     var mult  = load64(load64(tbl + WT_MULTS) + choice * 8);
     var gross = stake * mult;
-    var edge  = load64(tbl + WT_EDGEBPS);
-    var kept  = WAGER_EDGE_DENOM - edge;
-    if (kept < 0) { kept = 0; }                  # an absurd edge can't pay negative
-    var profit = (gross * kept) / WAGER_EDGE_DENOM;
+    # Overflow guard: stake*mult past i64 wraps to garbage gold. Unreachable
+    # at BBS scale (needs stake*mult > ~9.2e18), but this is real-stakes
+    # math — a wrapped multiply nets zero (a push), never a garbage credit.
+    if (mult != 0) {
+        if (gross / mult != stake) { return 0; }
+    }
+    var edge = load64(tbl + WT_EDGEBPS);
+    var kept = WAGER_EDGE_DENOM - edge;
+    if (kept < 0) { kept = 0; }                            # absurd edge (>100%) can't pay negative
+    if (kept > WAGER_EDGE_DENOM) { kept = WAGER_EDGE_DENOM; }  # negative edge can't overpay above gross
+    # Edge haircut, staged divide-before-multiply so the intermediate never
+    # forms gross*10000 (the realistic overflow). Floors in the house's
+    # favor — identical to (gross*kept)/DENOM for any in-range gross.
+    var profit = (gross / WAGER_EDGE_DENOM) * kept + ((gross % WAGER_EDGE_DENOM) * kept) / WAGER_EDGE_DENOM;
     return profit;
 }
 
@@ -230,6 +258,13 @@ fn wager_resolve(tbl, stake, choice, outcome): i64 {
 # gold below zero through a wager (ADR 0013 § Decision).
 fn wager_settle(balance, delta): i64 {
     var next = balance + delta;
-    if (next < 0) { next = 0; }
+    if (next < 0) {
+        # A winning delta that wrapped i64 (astronomically large balance +
+        # win) must NOT zero a rich player's gold — leave it unchanged. A
+        # genuine over-loss (delta <= 0) clamps to zero (the no-negative
+        # invariant). Tell them apart by the sign of delta.
+        if (delta > 0) { return balance; }
+        next = 0;
+    }
     return next;
 }

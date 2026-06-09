@@ -4006,6 +4006,15 @@ fn t180_wager_pick(): i64 {
     wager_table_init(zt, 1, 0, 0, 1, zw, zm);
     if (wager_weight_total(zt) != 0)   { test_fail("t180_wager_pick", "ztotal"); return 1; }
     if (wager_pick(zt, 0) != 0)        { test_fail("t180_wager_pick", "zpick"); return 1; }
+    # multi-outcome zero-total: falls to outcome 0 (safe slot), NOT last/jackpot
+    var mzw = alloc(3 * 8); store64(mzw, 0); store64(mzw + 8, 0); store64(mzw + 16, 0);
+    var mzm = alloc(3 * 8); store64(mzm, 1); store64(mzm + 8, 1); store64(mzm + 16, 9);
+    var mzt = alloc(WT_SIZE);
+    wager_table_init(mzt, 1, 0, 0, 3, mzw, mzm);
+    if (wager_pick(mzt, 0) != 0)       { test_fail("t180_wager_pick", "multizero"); return 1; }
+    # r >= total: defensive residual returns the last legal index n-1
+    if (wager_pick(tbl, 6) != 2)       { test_fail("t180_wager_pick", "residual6"); return 1; }
+    if (wager_pick(tbl, 100) != 2)     { test_fail("t180_wager_pick", "residual100"); return 1; }
     test_pass("t180_wager_pick");
     return 0;
 }
@@ -4030,6 +4039,15 @@ fn t181_wager_resolve(): i64 {
     # absurd edge > 100% clamps kept to 0 -> a "win" pays 0, never negative
     var at = wt_fixture(20000);
     if (wager_resolve(at, 10, 0, 0) != 0)          { test_fail("t181_wager_resolve", "absurd"); return 1; }
+    # negative edge is clamped high-side: the house never pays ABOVE gross
+    # even on a sign-typo'd table (edge -250 -> kept capped at 10000 -> +50)
+    var nt = wt_fixture(0 - 250);
+    if (wager_resolve(nt, 10, 0, 0) != 50)         { test_fail("t181_wager_resolve", "negedge"); return 1; }
+    # seam guards: a refused-draw sentinel nets zero (never debits); an
+    # out-of-range or negative choice loses before any mults[] deref
+    if (wager_resolve(tbl, 10, 0, (0 - 1)) != 0)       { test_fail("t181_wager_resolve", "sentinel"); return 1; }
+    if (wager_resolve(tbl, 10, 5, 0) != (0 - 10))      { test_fail("t181_wager_resolve", "choiceoob"); return 1; }
+    if (wager_resolve(tbl, 10, (0 - 1), 0) != (0 - 10)){ test_fail("t181_wager_resolve", "choiceneg"); return 1; }
     test_pass("t181_wager_resolve");
     return 0;
 }
@@ -4042,6 +4060,10 @@ fn t182_wager_settle(): i64 {
     if (wager_settle(100, (0 - 100)) != 0)  { test_fail("t182_wager_settle", "zero"); return 1; }
     # defense-in-depth: an over-large loss clamps rather than going negative
     if (wager_settle(100, (0 - 250)) != 0)  { test_fail("t182_wager_settle", "clamp"); return 1; }
+    # positive-overflow defense: a winning delta that wraps i64 must not zero
+    # a rich balance — leave it unchanged (2^62 + 2^62 wraps to i64-min)
+    var big = 4611686018427387904;
+    if (wager_settle(big, big) != big)      { test_fail("t182_wager_settle", "ovf"); return 1; }
     test_pass("t182_wager_settle");
     return 0;
 }
@@ -4069,6 +4091,31 @@ fn t183_wager_draw_csprng(): i64 {
     if (load64(hit + 8) < 1)  { test_fail("t183_wager_draw_csprng", "outcome 1 never hit"); return 1; }
     if (load64(hit + 16) < 1) { test_fail("t183_wager_draw_csprng", "outcome 2 never hit"); return 1; }
     test_pass("t183_wager_draw_csprng");
+    return 0;
+}
+
+# t184 — the degenerate (entropy-free) draw branches: a single-mass table
+# resolves to that outcome deterministically without touching the CSPRNG,
+# and an all-zero table resolves to outcome 0 (the safe slot). These are
+# the only deterministic, unit-testable branches of the impure draw fn.
+fn t184_wager_draw_degenerate(): i64 {
+    # weights [0,1,0], total 1 -> always outcome 1, no entropy read
+    var w1 = alloc(3 * 8); store64(w1, 0); store64(w1 + 8, 1); store64(w1 + 16, 0);
+    var m1 = alloc(3 * 8); store64(m1, 1); store64(m1 + 8, 1); store64(m1 + 16, 1);
+    var t1 = alloc(WT_SIZE);
+    wager_table_init(t1, 1, 0, 0, 3, w1, m1);
+    var i = 0;
+    while (i < 50) {
+        if (wager_draw_csprng(t1) != 1) { test_fail("t184_wager_draw_degenerate", "single mass"); return 1; }
+        i = i + 1;
+    }
+    # weights [0,0,0], total 0 -> outcome 0 (safe slot), no entropy read
+    var w0 = alloc(3 * 8); store64(w0, 0); store64(w0 + 8, 0); store64(w0 + 16, 0);
+    var m0 = alloc(3 * 8); store64(m0, 1); store64(m0 + 8, 1); store64(m0 + 16, 9);
+    var t0 = alloc(WT_SIZE);
+    wager_table_init(t0, 1, 0, 0, 3, w0, m0);
+    if (wager_draw_csprng(t0) != 0) { test_fail("t184_wager_draw_degenerate", "zero total"); return 1; }
+    test_pass("t184_wager_draw_degenerate");
     return 0;
 }
 
@@ -4265,6 +4312,7 @@ fn main(): i64 {
     t181_wager_resolve();
     t182_wager_settle();
     t183_wager_draw_csprng();
+    t184_wager_draw_degenerate();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

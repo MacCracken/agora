@@ -1,7 +1,9 @@
 # 0013 — Shared wager module (a casino is a mechanic, not a door) + the wager-RNG fairness decision
 
-> **Status**: Proposed — planned for **1.3.4** (the shared module), with **1.3.5** integrations across the existing doors and the **1.3.6** training-sim as the flagship consumer. See the [roadmap](../development/roadmap.md) 1.3.4–1.3.6 entries.
-> **Date**: 2026-06-08
+> **Status**: Accepted — realized at **1.3.4** (`src/wager.cyr`, the shared module + the CSPRNG fairness split, tests t179–t184). **1.3.5** wires the integrations across the existing doors and the **1.3.6** training-sim is the flagship consumer. See the [roadmap](../development/roadmap.md) 1.3.4–1.3.6 entries.
+> **Date**: 2026-06-08 (proposed); accepted 2026-06-08 at the 1.3.4 cut.
+
+> **Implementation note (1.3.4 cut)**: built as specified — bet validation, payout tables with an explicit per-table basis-point house edge, the kernel-CSPRNG draw (`wager_uniform_csprng` → `sys_getrandom(buf, 8, 0)`, the open-question "which primitive" resolved to the direct syscall), and pure resolve/settle with a structural no-negative-balance invariant. The "which CSPRNG primitive" open question landed on `sys_getrandom` directly (no `lib/random.cyr` wrapper introduced — deferred until a second caller needs it). A pre-cut multi-agent adversarial review (11 confirmed / 1 refuted, no critical/high) hardened the gold-accounting edges the § Consequences section flagged: an edge-haircut overflow (now staged divide-before-multiply), `wager_resolve` self-guards against the draw-refusal sentinel and out-of-range choice, a high-side edge clamp against a negative-edge overpay, a settle positive-overflow guard, and the `wager_pick` degenerate-vs-residual contract (zero-total → outcome 0, out-of-range `r` → last index). The deferred open questions (a `flock`'d wager audit log; per-game vs global edge; commit-reveal provable fairness) remain deferred — revisit after the 1.3.5 integrations show whether the edge values actually diverge.
 
 ## Context
 
