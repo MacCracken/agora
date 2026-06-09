@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-06-08 (QUEST: a Legend of the Red Dragon homage door)
+
+**The BBS gets an RPG.** QUEST — "Quest of the Undying Emerald Sovereign Throne" — is a homage to **Legend of the Red Dragon** (Seth Robinson, 1989), the definitive BBS RPG: re-themed cast, original prose. Its load-bearing mechanic is LORD's **daily turn rationing** — a fixed number of forest fights per real day, so "see you tomorrow" is built into the loop. Underneath the fantasy climb runs a buried structure that is never labelled: the twelve level-masters trace the alchemical **Great Work** in four acts of three (Nigredo → Albedo → Citrinitas → Rubedo), and four **Emerald fragments** assemble into the Tablet — beat the Level-12 Sovereign and "as above, so below" surfaces exactly once. No new dependencies. 160 → **166 tests**; 752,240 B → **782,064 B**.
+
+### Added
+
+- **QUEST** (`src/quest.cyr`) — a full pure-module door RPG in the ADR 0009 shape (town hub + forest grind + turn-based combat + 12 masters + endgame), solo-saveable (`QUST1` positional save) with a cross-game leaderboard. **Town hub**: Forest, Healer, Bank, Inn, reflection, save+quit. **Daily-rationed forest** (wall-clock reset, 15 fights/day) → scaling beasts → the named **level-master** gating each advance. **The twelve masters** across the four Great-Work acts, palette-tracked (grey → white → gold → red; the Sovereign emerald). **The Emerald-fragment spine** — a fragment at masters L3 / 6 / 9 / 12, the tablet's look changing as it assembles (dark → washed → gilded → whole). **Town services**: the Healer (pay-to-mend), the Bank (10%/day interest + a real **mugger risk** on carrying gold — the bank's whole point), the Inn (a flirt-to-romance NPC). **Ascension endgame** — beat the Level-12 Undying Emerald Sovereign, the tablet completes, and you take the Throne. Reachable via `play quest [practice|solo]`; finished runs post to `scores quest`. Async-PvP / shared-world Universe is a roadmapped follow-on; this cut is the single-player climb. Unit-tested t161–t166; smoke `14-quest.sh`.
+
+### Changed
+
+- **Toolchain pin 6.1.9 → 6.1.10** (`cyrius.cyml`). Suite + crypto stay green; no source change required.
+
+### Fixed
+
+- Pre-release adversarial review (multi-agent, each finding verified) caught three real defects before the cut: **(critical)** `play quest universe` reached the unwired Universe branch, left `g_door_state` NULL, and segfaulted the forked worker — QUEST is now coerced to its supported solo mode (mirroring how the chatbots are coerced to practice); **(high)** the daily ration reset used the *monotonic* clock against a persisted day index, so a server reboot permanently soft-locked the refill — now uses the realtime (epoch) clock and self-heals a backward clock; **(low)** `scores quest` was unmapped, so QUEST leaderboard entries were written but never displayable — now mapped.
+
 ## [1.3.1] — 2026-06-08 (PARRY: the paranoid foil to Eliza)
 
 **Eliza gets a sparring partner.** PARRY (Kenneth Colby, 1972) joins as agora's second chatbot — and where Eliza is stateless input→template reflection, PARRY is **affect-driven**: it carries internal **fear / anger / mistrust** that decays toward a wary baseline, spikes when provoked, and *gates* which response it gives. Touch one of its delusion "flare" topics (the Mafia, his bookie, the gambling debt, being watched, the police) and it stops answering and starts telling its paranoid story. Reachable the same two ways as Eliza: a `play parry` door and a private `/parry` chat side-channel. No new dependencies. 155 → **160 tests**; 730,792 B → **752,240 B**.

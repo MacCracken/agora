@@ -17,6 +17,7 @@ include "src/handler.cyr"
 include "src/chat.cyr"
 include "src/eliza.cyr"
 include "src/parry.cyr"
+include "src/quest.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -3584,6 +3585,118 @@ fn t160_py_steerback(): i64 {
     return 0;
 }
 
+# === 1.3.2 QUEST (LORD homage) — t161-t166 ===
+
+# daily-turn rationing: refill on a new wall-clock day + bank interest;
+# same-day calls are no-ops.
+fn t161_qu_day_tick(): i64 {
+    var st = qu_new(7, 0, 0);
+    if (qu_day_tick(st, 100) != 1)            { test_fail("t161_qu_day_tick", "first rollover"); return 1; }
+    if (load64(st + QU_FOREST) != QU_FOREST_DAILY) { test_fail("t161_qu_day_tick", "refill"); return 1; }
+    if (load64(st + QU_LASTDAY) != 100)       { test_fail("t161_qu_day_tick", "lastday"); return 1; }
+    store64(st + QU_FOREST, 3);
+    store64(st + QU_BANK, 100);
+    if (qu_day_tick(st, 100) != 0)            { test_fail("t161_qu_day_tick", "same day no-op"); return 1; }
+    if (load64(st + QU_FOREST) != 3)          { test_fail("t161_qu_day_tick", "no refill same day"); return 1; }
+    if (qu_day_tick(st, 101) != 1)            { test_fail("t161_qu_day_tick", "next day"); return 1; }
+    if (load64(st + QU_FOREST) != QU_FOREST_DAILY) { test_fail("t161_qu_day_tick", "refill 2"); return 1; }
+    if (load64(st + QU_BANK) != 110)          { test_fail("t161_qu_day_tick", "interest 10%"); return 1; }
+    test_pass("t161_qu_day_tick");
+    return 0;
+}
+
+# master victory: advance + stat boost + full heal + a turning-point
+# fragment; the level-12 Sovereign = ascension (won + over).
+fn t162_qu_master_victory(): i64 {
+    var st = qu_new(7, 0, 0);
+    store64(st + QU_LEVEL, 3);
+    store64(st + QU_MAXHP, 50); store64(st + QU_HP, 10); store64(st + QU_STR, 10);
+    if (qu_master_victory(st) != 0)           { test_fail("t162_qu_master_victory", "not ended"); return 1; }
+    if (load64(st + QU_FRAGS) != 1)           { test_fail("t162_qu_master_victory", "fragment at L3"); return 1; }
+    if (load64(st + QU_LEVEL) != 4)           { test_fail("t162_qu_master_victory", "advanced"); return 1; }
+    if (load64(st + QU_MAXHP) != 58)          { test_fail("t162_qu_master_victory", "maxhp+8"); return 1; }
+    if (load64(st + QU_STR) != 13)            { test_fail("t162_qu_master_victory", "str+3"); return 1; }
+    if (load64(st + QU_HP) != load64(st + QU_MAXHP)) { test_fail("t162_qu_master_victory", "full heal"); return 1; }
+    # ascension
+    var s2 = qu_new(7, 0, 0);
+    store64(s2 + QU_LEVEL, 12); store64(s2 + QU_FRAGS, 3);
+    if (qu_master_victory(s2) != 1)           { test_fail("t162_qu_master_victory", "ascension ends"); return 1; }
+    if (load64(s2 + QU_WON) != 1)             { test_fail("t162_qu_master_victory", "won"); return 1; }
+    if (load64(s2 + QU_OVER) != 1)            { test_fail("t162_qu_master_victory", "over"); return 1; }
+    if (load64(s2 + QU_FRAGS) != 4)           { test_fail("t162_qu_master_victory", "4th fragment"); return 1; }
+    test_pass("t162_qu_master_victory");
+    return 0;
+}
+
+# spawn scaling + the Sovereign at L12; master-ready gate.
+fn t163_qu_spawn(): i64 {
+    var st = qu_new(7, 0, 0);
+    store64(st + QU_LEVEL, 5);
+    qu_spawn_beast(st);
+    if (load64(st + QU_FOE_KIND) != FOE_BEAST) { test_fail("t163_qu_spawn", "beast kind"); return 1; }
+    if (load64(st + QU_FOE_HP) <= 0)          { test_fail("t163_qu_spawn", "beast hp"); return 1; }
+    qu_spawn_master(st);
+    if (load64(st + QU_FOE_KIND) != FOE_MASTER) { test_fail("t163_qu_spawn", "master kind"); return 1; }
+    store64(st + QU_LEVEL, 12);
+    qu_spawn_master(st);
+    if (load64(st + QU_FOE_KIND) != FOE_SOVEREIGN) { test_fail("t163_qu_spawn", "sovereign"); return 1; }
+    store64(st + QU_LVLWINS, 2);
+    if (qu_master_ready(st) != 0)             { test_fail("t163_qu_spawn", "not ready"); return 1; }
+    store64(st + QU_LVLWINS, QU_MASTER_AT);
+    if (qu_master_ready(st) != 1)             { test_fail("t163_qu_spawn", "ready"); return 1; }
+    test_pass("t163_qu_spawn");
+    return 0;
+}
+
+# save round-trip (positional QUST1).
+fn t164_qu_save(): i64 {
+    var st = qu_new(123, 1, 0);
+    store64(st + QU_LEVEL, 7); store64(st + QU_HP, 33); store64(st + QU_MAXHP, 70);
+    store64(st + QU_STR, 18); store64(st + QU_GOLD, 250); store64(st + QU_BANK, 99);
+    store64(st + QU_FRAGS, 2); store64(st + QU_FOUGHT, 40); store64(st + QU_LASTDAY, 555);
+    var buf = alloc(QU_SAVE_CAP);
+    var n = qu_save_format(st, buf, QU_SAVE_CAP);
+    var st2 = qu_load_parse(buf, n);
+    if (st2 == 0)                       { test_fail("t164_qu_save", "parse"); return 1; }
+    if (load64(st2 + QU_LEVEL) != 7)    { test_fail("t164_qu_save", "level"); return 1; }
+    if (load64(st2 + QU_GOLD) != 250)   { test_fail("t164_qu_save", "gold"); return 1; }
+    if (load64(st2 + QU_FRAGS) != 2)    { test_fail("t164_qu_save", "frags"); return 1; }
+    if (load64(st2 + QU_LASTDAY) != 555){ test_fail("t164_qu_save", "lastday"); return 1; }
+    if (load64(st2 + QU_STR) != 18)     { test_fail("t164_qu_save", "str"); return 1; }
+    if (qu_load_parse("NOPE", 4) != 0)  { test_fail("t164_qu_save", "bad header"); return 1; }
+    test_pass("t164_qu_save");
+    return 0;
+}
+
+# score / rank / heal cost.
+fn t165_qu_score(): i64 {
+    var st = qu_new(7, 0, 0);
+    store64(st + QU_LEVEL, 5); store64(st + QU_FOUGHT, 20); store64(st + QU_FRAGS, 2);
+    if (qu_final_score(st) != 6200)    { test_fail("t165_qu_score", "score"); return 1; }
+    store64(st + QU_WON, 1);
+    if (qu_final_score(st) != 56200)   { test_fail("t165_qu_score", "won bonus"); return 1; }
+    if (streq(qu_rank(56200), "Sovereign of the Emerald Throne") == 0) { test_fail("t165_qu_score", "rank top"); return 1; }
+    if (streq(qu_rank(100), "Pilgrim of the Mud") == 0) { test_fail("t165_qu_score", "rank low"); return 1; }
+    store64(st + QU_MAXHP, 50); store64(st + QU_HP, 30);
+    if (qu_heal_cost(st) != 40)        { test_fail("t165_qu_score", "heal cost"); return 1; }
+    test_pass("t165_qu_score");
+    return 0;
+}
+
+# feed: hunting in the forest spends a ration and enters a fight.
+fn t166_qu_feed(): i64 {
+    var st = qu_new(7, 0, 0);
+    qu_start(st);
+    store64(st + QU_SCREEN, QSCR_FOREST);
+    store64(st + QU_FOREST, 5);
+    qu_feed(st, "y", 1);
+    if (load64(st + QU_SCREEN) != QSCR_FIGHT) { test_fail("t166_qu_feed", "enter fight"); return 1; }
+    if (load64(st + QU_FOREST) != 4)          { test_fail("t166_qu_feed", "ration spent"); return 1; }
+    if (load64(st + QU_FOE_HP) <= 0)          { test_fail("t166_qu_feed", "foe spawned"); return 1; }
+    test_pass("t166_qu_feed");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -3750,6 +3863,12 @@ fn main(): i64 {
     t158_py_mood();
     t159_py_respond();
     t160_py_steerback();
+    t161_qu_day_tick();
+    t162_qu_master_victory();
+    t163_qu_spawn();
+    t164_qu_save();
+    t165_qu_score();
+    t166_qu_feed();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

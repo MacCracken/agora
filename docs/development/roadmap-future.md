@@ -20,6 +20,8 @@ Still unpinned **beyond** 1.2.0:
 
 ### QUEST — "Quest of the Undying Emerald Sovereign Throne" (a LORD homage)
 
+> **✅ Single-player climb SHIPPED at 1.3.2** (`src/quest.cyr`, `play quest`): town hub + daily-rationed forest + the twelve Great-Work masters + the Emerald-fragment spine + the Sovereign ascension; solo save + `scores quest`. The design below stands as the full spec; **what remains unpinned is the async-PvP / shared-world Universe layer** (attack stored characters with next-login notice, on the 1.2.0 world transaction + PA garrison model) and the deeper-endgame flourishes.
+
 A fourth door game: an homage to **Legend of the Red Dragon** (Seth Robinson, 1989) — the definitive BBS RPG. Re-themed name + cast per the style-not-copy rule (like Smuggler's abstract goods + Port Authority's re-themed commodities): **"Quest of the Undying Emerald Sovereign Throne" — `play quest`**. A strong fit, because the mechanics that made LORD *LORD* are the patterns agora's door subsystem already implements — QUEST is mostly assembly of existing machinery plus the one thing that can't be reused: voice.
 
 **What actually makes LORD LORD (the design lessons worth stealing):**

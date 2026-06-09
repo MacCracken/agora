@@ -24,4 +24,8 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0007 | [Concurrent connections via fork-per-accept](0007-fork-per-accept-concurrency.md) | Accepted (2026-05-23) |
 | 0008 | [Post header parameters as a struct (pre-1.0 ABI shape)](0008-post-headers-struct.md) | Accepted (2026-05-23) |
 | 0009 | [Door / games subsystem architecture](0009-door-games-subsystem.md) | Accepted (2026-06-07) |
-| 0010 | [Persistent Universe (shared-world multiplayer for door games)](0010-persistent-universe.md) | Proposed (2026-06-07) — 1.2.0 |
+| 0010 | [Persistent Universe (shared-world multiplayer for door games)](0010-persistent-universe.md) | Accepted (2026-06-08) — 1.2.0 |
+| 0011 | [Chat area (live multi-user teleconference)](0011-chat-area.md) | Accepted (2026-06-08) — 1.3.0 |
+| 0012 | [Chatbot framework (Eliza, PARRY, and the fixed-script family)](0012-chatbot-framework.md) | Accepted (2026-06-08) — 1.3.0/1.3.1 |
+| 0013 | [Shared wager module + the wager-RNG fairness decision](0013-wagering-module-rng-fairness.md) | Proposed (2026-06-08) — 1.3.4 |
+| 0014 | [War-game door: async shared-world strategy as the MUD on-ramp](0014-async-shared-world-strategy.md) | Proposed (2026-06-08) — 1.3.7 |

@@ -1,0 +1,80 @@
+# 0013 — Shared wager module (a casino is a mechanic, not a door) + the wager-RNG fairness decision
+
+> **Status**: Proposed — planned for **1.3.4** (the shared module), with **1.3.5** integrations across the existing doors and the **1.3.6** training-sim as the flagship consumer. See the [roadmap](../development/roadmap.md) 1.3.4–1.3.6 entries.
+> **Date**: 2026-06-08
+
+## Context
+
+The roadmap (1.3.4–1.3.6) sequences a casino mechanic across three slots so the shared abstraction is built before its consumers. The temptation is to ship a casino as a fifth game door alongside Smuggler / Port Authority / QUEST. But a standalone casino door is *thin*: strip the skin and it is one loop — **bet → draw → resolve → settle** — that is identical whether the wheel is roulette, the table is blackjack, the dice are craps, or the draw is which fighter wins the next bout. A roulette door and a card door differ only in their payout table and their entropy mapping; the validation, the settlement, the house-edge accounting are the same code wearing five costumes.
+
+agora already has a name for this shape. The door PRNG ([ADR 0009](0009-door-games-subsystem.md)) is one seedable xorshift64 under all three games' economy/event rolls. The world-transaction framework ([ADR 0010](0010-persistent-universe.md)) is one lock-read-compute-write discipline under three shared worlds. "One shared abstraction under many games" is how this codebase is built — and a wagering primitive is the next instance of it.
+
+There is a second force, and it is the harder one. The games **deliberately** use a deterministic, seedable, replayable PRNG. `src/door.cyr` says so in its own header (§ "Deterministic PRNG (xorshift64)"):
+
+> a deterministic seedable PRNG (xorshift64) so a save can store its seed and a test can pin a known stream (the stdlib only has the kernel CSPRNG, which is non-reproducible — wrong for games)
+
+Replayability is a *feature* there: a Solo save stores its seed and replays the same galaxy/market; a unit test pins `rng_seed(&s, K)` and asserts an exact stream (`rng_next` in t81; `rng_below` / `rng_range` in t82). Practice mode seeds from the monotonic clock (`rng_seed_from_clock` → `clock_now_ns`) only to *vary* the arcade run, not to make it unpredictable to an adversary — there is no adversary in a single-player economy sim.
+
+A casino inverts that requirement. The wager draw must be **unpredictable and non-replayable**, because here there *is* an adversary: the player betting against the house. If the wheel/deal is driven by the same seedable xorshift the games use, a player who reconstructs the seed — and the seed is clock-derived, stored in a save, or otherwise observable — predicts the next outcome and the house edge is fiction. The very property the games want (reproducibility) is the property a casino must not have on the draw.
+
+So the open question 1.3.4 answers, and the reason this earns an ADR rather than a roadmap line: **where does the wager draw get its randomness, given that agora's only randomness story is a deliberately-reproducible game PRNG — and how do we keep the rest of the wager logic pure and unit-testable when the one thing that must not be reproducible is the draw?**
+
+### What randomness primitives actually exist today
+
+Grepping `lib/` for the entropy surface, the inventory is:
+
+- **`door.cyr`'s seedable xorshift64** — `rng_seed` / `rng_next` / `rng_below` / `rng_range` / `rng_chance`. Explicitly **not cryptographic** (its own comment), reproducible by design. This is the games' RNG.
+- **The raw `sys_getrandom` syscall wrapper** in `lib/syscalls_linux_common.cyr` (`SYS_GETRANDOM` = 318 on x86_64, 278 on aarch64) — "Fill `buf` with `len` bytes from the kernel CSPRNG." This is the kernel CSPRNG and is exactly the non-reproducible source a wager draw needs.
+- **`/dev/urandom`** read directly inside `lib/sigil.cyr` (keypair / nonce generation) — proof the CSPRNG path is already exercised in the binary, just not exposed as a games-facing helper.
+- **`clock_epoch_ns` (CLOCK_REALTIME) vs `clock_now_ns` (CLOCK_MONOTONIC)** in `lib/chrono.cyr` — wall vs monotonic time. Neither is an entropy source; both are predictable.
+
+Notably, the `sys_getrandom` comment references a `lib/random.cyr` for the `GRND_*` flag constants — **and that file does not exist** (no `lib/random.cyr`; `GRND_NONBLOCK` / `GRND_RANDOM` / `GRND_INSECURE` are defined nowhere in the tree). So the CSPRNG syscall is reachable, but there is no high-level wrapper and no flag constants. The first cut either calls `sys_getrandom(buf, len, 0)` directly (blocking flags = 0, the safe default) or reads `/dev/urandom` the way sigil already does. Picking which is an open sub-question below — it is a *plumbing* choice, not a design one; both yield the same non-reproducible bytes.
+
+## Decision
+
+**Build one shared wagering module, `src/wager.cyr` — bet validation, payout tables, house edge, settlement — and make the draw, and only the draw, pull from a fresh kernel-CSPRNG entropy source distinct from the games' seeded PRNG. A casino is a mechanic, not a door; every game calls the module.**
+
+Scope: a content-free wagering primitive built once at 1.3.4, integrated into the existing doors at 1.3.5, and flagshipped by the 1.3.6 training-sim. No new game door. No new external dependency — the CSPRNG is a syscall agora already has.
+
+### The module (1.3.4)
+
+`src/wager.cyr` owns the loop every game shares:
+
+- **Bet validation (pure).** A bet is rejected before any randomness or settlement runs: `stake > 0`, `stake <= balance` (no betting gold you don't have), `stake` within the per-game table's `[min, max]` limits, and the chosen outcome legal for the table. Validation is a pure transform `(table, balance, bet) → ok | reason` — unit-testable, no draw, no I/O.
+- **Payout tables (pure data + pure lookup).** Per-game tables map an outcome to a payout multiplier (a roulette straight-up, a dice point, a card hand, a race finish). The table also carries the **house edge** for that game (see below). Looking up the payout for a resolved outcome is a pure function.
+- **The entropy draw (the one non-deterministic point).** `wager_draw(n)` returns a uniform value in `[0, n)` sourced from the **kernel CSPRNG** (`sys_getrandom` / `/dev/urandom`), *not* from `door.cyr`'s xorshift. This is deliberately the one place in the whole games subsystem where non-determinism is the correct behavior. The draw is the *only* part of the module that touches randomness, and the *only* part that is not directly unit-testable on its own output.
+- **House edge — explicit, per-game configurable.** Edge is not an emergent rounding artifact; it is a named field on each game's table, applied as a documented haircut on the payout (or a tilt on the draw mapping). Different games carry different edges; the value is visible in the table, not buried in a magic constant.
+- **Settlement (pure decision, atomic apply).** Resolving a bet computes a signed gold delta (`+winnings` or `-stake`) as a pure function of `(bet, resolved outcome, payout table)`. Applying it to the player's balance is atomic and **has no negative-balance path**: validation already guaranteed `stake <= balance`, and settlement clamps so a player can never be driven below zero by a wager. Where a wager touches *shared* gold (a Universe context), the apply rides the existing world-transaction (ADR 0010): lock → read balance → settle → write → unlock.
+
+### The fairness split (the core decision)
+
+The module draws a hard line between the two kinds of randomness:
+
+- **Game determinism stays seeded.** Everything the games already do — galaxy generation, market drift, event rolls, combat — keeps using `door.cyr`'s reproducible xorshift. Saves still store seeds; tests still pin streams. Nothing about 1.3.4 weakens or changes the games' RNG. The wager module does **not** call `rng_*`.
+- **The wager draw is CSPRNG-fresh.** The bet outcome comes from kernel entropy, fetched fresh per draw, never seeded, never stored, never replayed. A player who knows every byte of their save and the exact clock cannot predict the next wheel, because the bytes never came from anything they can observe. This is the property a casino requires and the property the games specifically reject.
+- **Tests mock the draw, pin everything else.** Because the *only* non-deterministic point is `wager_draw`, the rest of the module is pure and gets ordinary unit tests: validation accepts/rejects the right bets, the payout table returns the right multipliers, settlement produces the right signed delta and never goes negative, the house edge takes the right cut. The draw is injected — tests pass a seeded/fixed draw (a function pointer or a value) to exercise a *known* outcome deterministically, while production wires the CSPRNG. So we get full coverage of the math without the test suite ever depending on real entropy, and without the real path ever being reproducible. (Same shape as ADR 0009's pure-render / wired-I/O split and ADR 0010's pure-transform / wired-lock split: the impure edge is one injected seam.)
+
+### Integrations (1.3.5) and the flagship (1.3.6)
+
+- **1.3.5** embeds the *same* module across the existing doors as flavor-with-stakes: a cantina gambling table in **Port Authority**, a back-alley dice game in **Smuggler's Ledger**, a tavern card game in **QUEST**. Same `wager.cyr`, three contexts, three payout tables, no fifth thing to maintain.
+- **1.3.6**, the training-sim, is the module's flagship integration — betting on your own fighter / on the races is the natural tie-in — layered on a QUEST-economy reskin (the rationed daily-turn progression already shipped). Two roadmap decisions reinforcing each other on one shared primitive.
+
+## Consequences
+
+- **Positive** — one wagering primitive, written and audited once, makes four+ contexts richer with no new door to maintain; the same "one abstraction under many games" pattern the codebase already trusts (door PRNG, world-transaction). The fairness split is *correct*: the games keep the reproducibility they need, the casino gets the unpredictability it needs, and the boundary is a single injected seam. The pure majority (validation, tables, edge, settlement) is fully unit-testable; the impure draw is isolated to one function and mocked in tests. No new dependency — the kernel CSPRNG is a syscall already in the tree and already used by sigil. The no-negative-balance invariant is structural (validated before, clamped at apply), not a runtime hope.
+- **Negative** — the module introduces agora's **first deliberately non-reproducible code path in the games subsystem**, which breaks the otherwise-total "pin a seed, replay the stream" testability the door subsystem has enjoyed; that one path can only be integration-tested for *distribution* (does it terminate, stay in range, look uniform over many draws), never for an exact value — and a flaky CSPRNG read (blocking, partial, or `-errno`) is now a failure mode the module must handle gracefully (refuse the bet, never settle on a bad draw). House-edge math plus gold settlement is real-stakes accounting: an off-by-one in the payout table or a sign error in settlement is a player-visible gold bug, so this code earns a harder review than the flavor games did.
+- **Neutral** — wagering only matters where there is persistent gold to win or lose, so the rich integrations are login-gated / Solo-or-Universe contexts; a Practice-mode table can run on ephemeral chips for fun. The CSPRNG draw is slightly more expensive per call than an xorshift step (a syscall vs a few shifts), negligible at human-paced betting. House edge being per-game configurable means each integration ships an explicit tuning knob, not a global constant — more surface to set correctly, but the right place to set it.
+
+## Alternatives considered
+
+- **A fifth standalone casino door** — the obvious framing (a `play casino` alongside the other games). Rejected: the door would be thin and the value is the *mechanic embedded across the existing games*, not a fourth place to gamble. A standalone casino is one payout loop with a roulette skin; the shared module is that same loop reachable from the cantina, the back alley, the tavern, and the track. Build the loop once, skin it everywhere.
+- **Reuse `door.cyr`'s seeded xorshift for the wager draw** — tempting because it's the RNG already in hand and it would keep the module 100% reproducible/testable. Rejected as the *central* mistake this ADR exists to avoid: a seeded, reproducible draw is predictable, and a predictable casino draw is exploitable the moment a player reconstructs the seed (which is clock-derived or save-stored by design). The games *want* reproducibility; a casino must not have it. These are opposite requirements and must use opposite randomness sources.
+- **Per-game bespoke wagering** — let each door roll its own bet/draw/settle. Rejected for the same reason ADR 0010 rejected per-game bespoke concurrency: three (then four) divergent implementations of stake validation, payout math, and gold settlement is three+ times the surface for a real-stakes accounting bug, and three+ places to get the entropy source wrong. One module, many tables.
+- **Make the draw reproducible-but-hidden (encrypt/derive the seed)** — keep a seeded stream but make the seed unknowable to the player (e.g. a per-session secret). Rejected: this is rolling a weak CSPRNG out of a non-cryptographic xorshift plus a secret, when the kernel CSPRNG is already a syscall away and is the right tool. Reach for the actual CSPRNG, not a homemade one — `door.cyr` itself flags xorshift as "NOT cryptographic."
+- **A provably-fair commit-reveal scheme (seed hash committed before the bet, revealed after)** — the online-casino standard, genuinely auditable by the player. Rejected for the first cut as far more machinery than a BBS door needs: it requires a commitment store, a reveal protocol, and a per-bet audit record. The kernel CSPRNG plus a documented house edge is honest and sufficient at BBS scale; commit-reveal can be a later opt-in if a wager ever needs a player-verifiable audit trail (see open questions).
+
+### Open questions (deferred, not gaps)
+
+- **Which CSPRNG primitive** — call `sys_getrandom(buf, len, 0)` directly, or read `/dev/urandom` the way `sigil.cyr` already does, and whether to finally land the referenced-but-missing `lib/random.cyr` (with the `GRND_*` constants the `sys_getrandom` comment already points at) as the shared wrapper. A plumbing decision for 1.3.4; both sources yield the same non-reproducible bytes.
+- **Whether wagers ever need an audit trail** — a `flock`'d per-game wager log (stake, outcome, delta, timestamp) for dispute/debug, or even the commit-reveal scheme above. Deferred until a real need (operator dispute, "the house cheated" complaint) appears; the first cut settles silently against the balance.
+- **Per-game vs global house edge** — this ADR picks per-game configurable. If every integration ends up wanting the same edge, a global default with per-game override is a trivial later consolidation; if they diverge (a cantina vs a card table want different odds), per-game was right. Revisit after the 1.3.5 integrations show whether the values actually differ.

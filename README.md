@@ -2,7 +2,7 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: **v1.3.1 — 2026-06-08** adds **PARRY** (Kenneth Colby, 1972) — the paranoid foil to Eliza and agora's first **affect-driven** chatbot: internal fear/anger/mistrust that decays, spikes when provoked, and gates its replies, with a Mafia/bookie delusion story it steers toward; reachable as a `play parry` door and a private `/parry` chat side-channel. Built on **v1.3.0** (2026-06-08) — the **chat area + Eliza** ([ADR 0011](docs/adr/0011-chat-area.md)): the synchronous public-assembly surface — a live, multi-user, login-gated teleconference on a per-channel `flock`'d ring transcript, live-tailed **by sequence number** on the recv-timeout poll tick (fork-per-accept-safe, no daemon), reachable via `chat [channel]` — plus **Eliza** (Weizenbaum's 1966 DOCTOR) as a pure-module chatbot, reachable as a `play eliza` door and a private `/eliza` side-channel. No new dependencies. Built on **v1.2.0** (2026-06-08) — the **Persistent Universe** ([ADR 0010](docs/adr/0010-persistent-universe.md)): shared-world multiplayer for all three door games over a `flock`'d on-disk world transaction (fork-per-accept-safe). **Port Authority** gets a shared galaxy — depletable port stock that moves the market + exclusive planet ownership + async-PvP garrisons; **Smuggler's Ledger** gets shared district heat; **The Handler** gets shared city alerts; all three feed **cross-game leaderboards** (`scores <game>`). Reach it via `play <game> universe` (login-gated). Built on **v1.1.0** (2026-06-07) — the BBS **door / games** subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three in-session text games (**Smuggler's Ledger**, **Port Authority**, **The Handler**) via `play <game> [practice|solo]`. And on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
+**Status**: **v1.3.2 — 2026-06-08** adds **QUEST** ("Quest of the Undying Emerald Sovereign Throne", `play quest`) — a **Legend of the Red Dragon** homage door RPG: a town hub + LORD's daily-rationed forest grind + twelve level-masters that secretly trace the alchemical Great Work + an Emerald-Tablet fragment spine + the Sovereign ascension; solo-saveable with a leaderboard. Built on **v1.3.1** (2026-06-08) — **PARRY** (Kenneth Colby, 1972), the paranoid foil to Eliza and agora's first **affect-driven** chatbot: internal fear/anger/mistrust that decays, spikes when provoked, and gates its replies, with a Mafia/bookie delusion story it steers toward; reachable as a `play parry` door and a private `/parry` chat side-channel. Built on **v1.3.0** (2026-06-08) — the **chat area + Eliza** ([ADR 0011](docs/adr/0011-chat-area.md)): the synchronous public-assembly surface — a live, multi-user, login-gated teleconference on a per-channel `flock`'d ring transcript, live-tailed **by sequence number** on the recv-timeout poll tick (fork-per-accept-safe, no daemon), reachable via `chat [channel]` — plus **Eliza** (Weizenbaum's 1966 DOCTOR) as a pure-module chatbot, reachable as a `play eliza` door and a private `/eliza` side-channel. No new dependencies. Built on **v1.2.0** (2026-06-08) — the **Persistent Universe** ([ADR 0010](docs/adr/0010-persistent-universe.md)): shared-world multiplayer for all three door games over a `flock`'d on-disk world transaction (fork-per-accept-safe). **Port Authority** gets a shared galaxy — depletable port stock that moves the market + exclusive planet ownership + async-PvP garrisons; **Smuggler's Ledger** gets shared district heat; **The Handler** gets shared city alerts; all three feed **cross-game leaderboards** (`scores <game>`). Reach it via `play <game> universe` (login-gated). Built on **v1.1.0** (2026-06-07) — the BBS **door / games** subsystem ([ADR 0009](docs/adr/0009-door-games-subsystem.md)): three in-session text games (**Smuggler's Ledger**, **Port Authority**, **The Handler**) via `play <game> [practice|solo]`. And on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, fork-per-connection concurrency, audit-hardened input, and a frozen ABI. All v1.0 criteria met (M0-M6 + security sweep + hardening shipped; `cyrius audit` clean; archaemenid telnet round-trip green; 8-user concurrent fanout green; 0.7.0 audit findings all discharged; full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance). Live state in [`docs/development/state.md`](docs/development/state.md); doc currency in [`docs/doc-health.md`](docs/doc-health.md). Post-1.0 directions in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md).
 
 ## Etymology
 
@@ -28,12 +28,12 @@ cyrius build src/main.cyr build/agora
 ./build/agora serve 2323     # telnet on localhost:2323
 ```
 
-End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–13). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
+End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–14). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
 
 ## Architecture
 
 ```
-agora binary (~752 KB static ELF at 1.3.1)
+agora binary (~782 KB static ELF at 1.3.2)
 ├── src/main.cyr            argv dispatch + telnet handle_client + session helpers
 │                           + login flow + CLI keygen/register/whoami
 │                           + fork-per-accept loop (ADR 0007)
@@ -53,7 +53,8 @@ agora binary (~752 KB static ELF at 1.3.1)
 ├── src/chat.cyr            live chat area: flock'd ring transcript (ADR 0011)
 ├── src/eliza.cyr           ELIZA DOCTOR chatbot: play eliza + /eliza (ADR 0011)
 ├── src/parry.cyr           PARRY affect-engine chatbot: play parry + /parry
-└── src/test.cyr            160-test conformance suite
+├── src/quest.cyr           QUEST: a LORD-homage door RPG (play quest)
+└── src/test.cyr            166-test conformance suite
 ```
 
 Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darshana (SGR) + sigil + freelist + bigint + ct (the ed25519 call chain). No external deps beyond cyrius.
@@ -66,7 +67,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darsha
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — thirteen runnable smoke scripts covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`).
+- [`docs/examples/`](docs/examples/) — fourteen runnable smoke scripts covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (10 ns/byte hot path, unchanged across every release since M1-close).
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.
 - [`CLAUDE.md`](CLAUDE.md) — durable rules for agent sessions.

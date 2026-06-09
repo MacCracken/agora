@@ -26,6 +26,7 @@ include "src/handler.cyr"
 include "src/chat.cyr"
 include "src/eliza.cyr"
 include "src/parry.cyr"
+include "src/quest.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -169,7 +170,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.3.1 — civic-marketplace BBS for AGNOS; chat area + Eliza + PARRY");
+    println("v1.3.2 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST (LORD homage)");
     return 0;
 }
 
@@ -347,7 +348,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door game: smuggler | port | handler | eliza | parry  [practice|solo|universe]\r\n");
+        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  help            this message\r\n");
@@ -719,7 +720,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest> [practice|solo]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -749,8 +750,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(gbuf, "handler") != 0)  { game = GAME_HANDLER; }
         if (streq(gbuf, "eliza") != 0)    { game = GAME_ELIZA; }
         if (streq(gbuf, "parry") != 0)    { game = GAME_PARRY; }
+        if (streq(gbuf, "quest") != 0)    { game = GAME_QUEST; }
         if (game == GAME_NONE) {
-            send_str(cfd, "unknown game. try: play smuggler | play port | play handler | play eliza | play parry\r\n");
+            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest\r\n");
             return MODE_COMMAND;
         }
         var dmode = DOOR_PRACTICE;
@@ -761,6 +763,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # solo/universe machinery entirely.
         if (game == GAME_ELIZA) { dmode = DOOR_PRACTICE; }
         if (game == GAME_PARRY) { dmode = DOOR_PRACTICE; }
+        # 1.3.2: QUEST has no Universe yet (async-PvP is a follow-on). It
+        # IS a real solo/practice game, so don't force practice — just
+        # downgrade a `universe` request to solo. Without this, `play
+        # quest universe` falls into the unwired DOOR_UNIVERSE branch,
+        # leaves g_door_state NULL, and qu_render(0) segfaults the worker.
+        if (game == GAME_QUEST) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -826,6 +834,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(lbuf, ln); }
                     if (game == GAME_PORT)     { g_door_state = pa_load_parse(lbuf, ln); }
                     if (game == GAME_HANDLER)  { g_door_state = th_load_parse(lbuf, ln); }
+                    if (game == GAME_QUEST)    { g_door_state = qu_load_parse(lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
             }
@@ -836,12 +845,14 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (game == GAME_HANDLER)  { g_door_state = th_new(seed, dmode, TH_DEF_DAYS); }
             if (game == GAME_ELIZA)    { g_door_state = ez_new(seed, dmode, EZ_DEF_DAYS); }
             if (game == GAME_PARRY)    { g_door_state = py_new(seed, dmode, PY_DEF_DAYS); }
+            if (game == GAME_QUEST)    { g_door_state = qu_new(seed, dmode, 0); }
         }
         if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
         if (game == GAME_PORT)     { pa_start(g_door_state); }
         if (game == GAME_HANDLER)  { th_start(g_door_state); }
         if (game == GAME_ELIZA)    { ez_start(g_door_state); }
         if (game == GAME_PARRY)    { py_start(g_door_state); }
+        if (game == GAME_QUEST)    { qu_start(g_door_state); }
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -862,7 +873,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var scgl = scsp - scgs;
         if (scgl <= 0) {
-            send_str(cfd, "usage: scores <smuggler|port|handler>\r\n");
+            send_str(cfd, "usage: scores <smuggler|port|handler|quest>\r\n");
             return MODE_COMMAND;
         }
         if (scgl > 15) { scgl = 15; }
@@ -873,8 +884,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(scgb, "smuggler") != 0) { scgame = GAME_SMUGGLER; }
         if (streq(scgb, "port") != 0)     { scgame = GAME_PORT; }
         if (streq(scgb, "handler") != 0)  { scgame = GAME_HANDLER; }
+        if (streq(scgb, "quest") != 0)    { scgame = GAME_QUEST; }
         if (scgame == GAME_NONE) {
-            send_str(cfd, "unknown game. try: scores smuggler | scores port | scores handler\r\n");
+            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest\r\n");
             return MODE_COMMAND;
         }
         door_render_leaderboard(cfd, scgame);
@@ -969,6 +981,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_HANDLER)  { return "handler"; }
     if (game == GAME_ELIZA)    { return "eliza"; }
     if (game == GAME_PARRY)    { return "parry"; }
+    if (game == GAME_QUEST)    { return "quest"; }
     return "game";
 }
 
@@ -1196,6 +1209,7 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_HANDLER)  { n = th_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_ELIZA)    { n = ez_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_PARRY)    { n = py_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_QUEST)    { n = qu_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1210,6 +1224,7 @@ fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_ELIZA)    { return ez_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_PARRY)    { return py_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_QUEST)    { return qu_feed(g_door_state, line, line_len); }
     return 1;
 }
 
@@ -1217,6 +1232,7 @@ fn door_is_over(): i64 {
     if (g_door_game == GAME_SMUGGLER) { return sl_is_over(g_door_state); }
     if (g_door_game == GAME_PORT)     { return pa_is_over(g_door_state); }
     if (g_door_game == GAME_HANDLER)  { return th_is_over(g_door_state); }
+    if (g_door_game == GAME_QUEST)    { return qu_is_over(g_door_state); }
     return 0;
 }
 
@@ -1275,6 +1291,7 @@ fn door_post_score(game): i64 {
     if (game == GAME_PORT)     { score = pa_final_score(g_door_state); rank = pa_rank(score); }
     if (game == GAME_SMUGGLER) { score = sl_final_score(g_door_state); rank = sl_rank(score); }
     if (game == GAME_HANDLER)  { score = th_score(g_door_state);       rank = th_rank(score); }
+    if (game == GAME_QUEST)    { score = qu_final_score(g_door_state);  rank = qu_rank(score); }
     var path = alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var line = alloc(256);
@@ -1371,6 +1388,7 @@ fn door_save_on_exit(cfd): i64 {
                 if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_QUEST)    { n = qu_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
             }
         }
@@ -1476,7 +1494,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.3.1 — telnet BBS + door games + chat + Eliza/PARRY\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.2 — telnet BBS + door games + chat + Eliza/PARRY + QUEST\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2599,7 +2617,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.3.1");
+    println("agora 1.3.2");
     return 0;
 }
 

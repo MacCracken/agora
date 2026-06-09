@@ -1,0 +1,799 @@
+# quest.cyr — "Quest of the Undying Emerald Sovereign Throne" (QUEST),
+# a Legend of the Red Dragon (Seth Robinson, 1989) homage door game
+# (1.3.2). Style homage, NOT a copy: re-themed cast, original prose.
+#
+# The hook (LORD's load-bearing design): DAILY TURN RATIONING. You get a
+# fixed number of forest fights per real day; nobody grinds infinitely,
+# so "see you tomorrow" is built into the loop. The forest is the grind
+# — beasts scaling to your level — gated by a named LEVEL MASTER you must
+# beat to advance. The town is a menu of flavour (Healer, Bank-with-
+# interest-and-muggers, the Inn) where the personality lives.
+#
+# The buried reference (never labelled — it lives only in structure,
+# colour, and naming): the twelve masters trace the alchemical GREAT
+# WORK in four acts of three — Nigredo (blackening) / Albedo (whitening)
+# / Citrinitas (yellowing) / Rubedo (reddening). The four turning-point
+# masters (levels 3 / 6 / 9 / 12) each drop one EMERALD fragment, and the
+# fragments visibly change as they accumulate (dark → washed → gilded →
+# whole). Beat the Level-12 Undying Emerald Sovereign and the tablet
+# completes: you ascend the Throne, and "as above, so below" surfaces
+# exactly once, as the artifact's own inscription. A first-time caller
+# reads a fantasy climb; a hermetically-literate one reads the Work.
+#
+# Architecture: a pure-module state machine in the ADR 0009 shape (render
+# into a buffer, consume one line, return 0 stay / 1 exit). main.cyr owns
+# socket I/O + persistence; solo save under .users/<fp16>/games/quest.sav,
+# finished runs post to the cross-game leaderboard. Combat/economy run on
+# door.cyr's seedable PRNG for replayable determinism. Async-PvP (attack
+# stored characters) is a roadmapped Universe-mode follow-on; this cut is
+# the single-player climb.
+#
+# Deps resolved upstream: door.cyr (rng_*, emit_*, door_key, save_*),
+# board.cyr / lib (alloc, memset, memcpy, strlen, load64/store64).
+
+# === Constants ===
+
+enum QUConfig {
+    QU_MAX_LEVEL    = 12;
+    QU_FOREST_DAILY = 15;          # forest fights granted per real day
+    QU_MASTER_AT    = 3;           # forest wins at a level before the master appears
+    QU_START_HP     = 30;
+    QU_START_STR    = 6;
+    QU_SAVE_CAP     = 512;
+    QU_NS_PER_DAY   = 86400000000000;   # ns/day — wall-clock daily reset
+}
+
+# Persistent + runtime state. One alloc(QU_SIZE), 8-byte i64 fields. The
+# fields above QU_SCREEN are saved; QU_SCREEN and below are runtime
+# (re-derived on load — a mid-fight save resumes in town).
+enum QU {
+    QU_SEED      = 0;
+    QU_RNG       = 8;              # PRNG cell (pass &(st+QU_RNG) to rng_*)
+    QU_MODE      = 16;             # DoorMode
+    QU_OVER      = 24;             # 0 playing, 1 ended
+    QU_WON       = 32;             # 1 ascended the Throne, 0 otherwise
+    QU_LEVEL     = 40;             # 1..12
+    QU_HP        = 48;
+    QU_MAXHP     = 56;
+    QU_STR       = 64;
+    QU_GOLD      = 72;             # on hand (muggable)
+    QU_BANK      = 80;             # banked (safe, earns interest)
+    QU_FOREST    = 88;             # forest fights left today
+    QU_FRAGS     = 96;            # emerald fragments 0..4
+    QU_CHARM     = 104;           # Inn romance progress
+    QU_LVLWINS   = 112;           # forest wins at the current level
+    QU_FOUGHT    = 120;           # lifetime forest wins (score)
+    QU_LASTDAY   = 128;           # last wall-clock day index seen
+    # --- runtime below (not saved) ---
+    QU_SCREEN    = 136;
+    QU_FOE_HP    = 144;
+    QU_FOE_STR   = 152;
+    QU_FOE_KIND  = 160;           # 0 beast, 1 master, 2 the Sovereign
+    QU_MSG       = 168;           # ptr -> message buffer
+    QU_SIZE      = 176;
+}
+
+enum QUScreen {
+    QSCR_TOWN    = 0;
+    QSCR_FOREST  = 1;             # forest menu (hunt / seek master / return)
+    QSCR_FIGHT   = 2;             # a combat round (attack / flee)
+    QSCR_HEALER  = 3;
+    QSCR_BANK    = 4;
+    QSCR_BANKDEP = 5;
+    QSCR_BANKWD  = 6;
+    QSCR_INN     = 7;
+    QSCR_OVER    = 8;
+}
+
+enum QUFoe {
+    FOE_BEAST     = 0;
+    FOE_MASTER    = 1;
+    FOE_SOVEREIGN = 2;
+}
+
+# === Small helpers ===
+
+fn qu_clampv(v, lo, hi): i64 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+# Set the transient one-line message rendered under each screen.
+fn qu_msg(st, s): i64 {
+    var m = load64(st + QU_MSG);
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+# === Flavour tables (the buried Great Work; nothing is labelled) ===
+
+# The twelve level masters.
+fn qu_master_name(lvl): i64 {
+    if (lvl == 1)  { return "the Mudlark Warden"; }
+    if (lvl == 2)  { return "the Sister of Black Bile"; }
+    if (lvl == 3)  { return "the Drowned King"; }
+    if (lvl == 4)  { return "the Pale Laundress"; }
+    if (lvl == 5)  { return "the Argent Twins"; }
+    if (lvl == 6)  { return "the White Queen"; }
+    if (lvl == 7)  { return "the Gilded Augur"; }
+    if (lvl == 8)  { return "the Brass Alchemist"; }
+    if (lvl == 9)  { return "the Sunwise Lord"; }
+    if (lvl == 10) { return "the Crimson Bride"; }
+    if (lvl == 11) { return "the Keeper of the Last Fire"; }
+    return "the Undying Emerald Sovereign";
+}
+
+# The four-act colour arc (acts of three). Never named "alchemy".
+fn qu_phase_name(lvl): i64 {
+    if (lvl <= 3) { return "the Blackening"; }
+    if (lvl <= 6) { return "the Whitening"; }
+    if (lvl <= 9) { return "the Yellowing"; }
+    return "the Reddening";
+}
+
+# SGR colour tracking the phase (grey -> white -> gold -> red; the
+# Sovereign himself is emerald).
+fn qu_phase_color(lvl): i64 {
+    if (lvl >= 12) { return 32; }     # emerald
+    if (lvl <= 3)  { return 90; }     # near-black grey
+    if (lvl <= 6)  { return 37; }     # white
+    if (lvl <= 9)  { return 33; }     # gold
+    return 31;                        # red
+}
+
+# A forest beast's name, themed loosely to the current phase. Picks one
+# of three by the PRNG so the woods don't read canned.
+fn qu_beast_name(st, lvl): i64 {
+    var r = rng_below(st + QU_RNG, 3);
+    if (lvl <= 3) {
+        if (r == 0) { return "a bog-rotted hound"; }
+        if (r == 1) { return "a thing of mud and teeth"; }
+        return "a drowned reveller";
+    }
+    if (lvl <= 6) {
+        if (r == 0) { return "a pale moth the size of a shield"; }
+        if (r == 1) { return "a sleepwalking penitent"; }
+        return "a creature of salt and moonlight";
+    }
+    if (lvl <= 9) {
+        if (r == 0) { return "a brass-plated automaton"; }
+        if (r == 1) { return "a gilded carrion-bird"; }
+        return "a sun-blind zealot";
+    }
+    if (r == 0) { return "a smouldering revenant"; }
+    if (r == 1) { return "a wedding-guest who would not leave"; }
+    return "a coal-eyed hound of the last fire";
+}
+
+# How the assembled tablet looks at `frags` fragments (the spine).
+fn qu_tablet_look(frags): i64 {
+    if (frags <= 0) { return "a blank, tarnished disk"; }
+    if (frags == 1) { return "a shard so dark it is almost black"; }
+    if (frags == 2) { return "two shards, the second washed pale — faint markings surfacing"; }
+    if (frags == 3) { return "three shards, gold-green, their markings beginning to align"; }
+    return "the Emerald Tablet, whole and legible";
+}
+
+# === Daily-turn rationing (wall-clock) ===
+#
+# `today` is the wall-clock day index (clock_epoch_ns / QU_NS_PER_DAY),
+# passed in so the logic stays pure + testable. On ANY day change (not
+# just forward — a backward clock or restart self-heals rather than
+# freezing): refill forest rations and pay bank interest (10%). Returns
+# 1 if a rollover happened, else 0.
+fn qu_day_tick(st, today): i64 {
+    if (today == load64(st + QU_LASTDAY)) { return 0; }
+    var first = 0;
+    if (load64(st + QU_LASTDAY) == 0) { first = 1; }
+    store64(st + QU_LASTDAY, today);
+    store64(st + QU_FOREST, QU_FOREST_DAILY);
+    # bank interest (skip the very first init so a fresh char isn't paid)
+    if (first == 0) {
+        var b = load64(st + QU_BANK);
+        store64(st + QU_BANK, b + b / 10);
+    }
+    return 1;
+}
+
+# === Combat ===
+
+# Spawn a forest beast scaled to the player's level into the foe slots.
+fn qu_spawn_beast(st): i64 {
+    var lvl = load64(st + QU_LEVEL);
+    store64(st + QU_FOE_HP,   6 + lvl * 3 + rng_below(st + QU_RNG, lvl * 2 + 1));
+    store64(st + QU_FOE_STR,  2 + lvl * 2);
+    store64(st + QU_FOE_KIND, FOE_BEAST);
+    return 0;
+}
+
+# Spawn the current level's master (the Sovereign at level 12).
+fn qu_spawn_master(st): i64 {
+    var lvl = load64(st + QU_LEVEL);
+    store64(st + QU_FOE_HP,  25 + lvl * 7);
+    store64(st + QU_FOE_STR, 4 + lvl * 3);
+    if (lvl >= QU_MAX_LEVEL) { store64(st + QU_FOE_KIND, FOE_SOVEREIGN); }
+    else                     { store64(st + QU_FOE_KIND, FOE_MASTER); }
+    return 0;
+}
+
+# Player's strike damage (min 1).
+fn qu_player_hit(st): i64 {
+    var s = load64(st + QU_STR);
+    var d = s + rng_below(st + QU_RNG, s / 2 + 1);
+    if (d < 1) { d = 1; }
+    return d;
+}
+
+# Foe's strike damage (min 1).
+fn qu_foe_hit(st): i64 {
+    var d = load64(st + QU_FOE_STR) + rng_below(st + QU_RNG, 3);
+    if (d < 1) { d = 1; }
+    return d;
+}
+
+# Reward + progression for a felled beast.
+fn qu_beast_reward(st): i64 {
+    var lvl = load64(st + QU_LEVEL);
+    var g = 4 + lvl * 2 + rng_below(st + QU_RNG, lvl + 1);
+    store64(st + QU_GOLD, load64(st + QU_GOLD) + g);
+    store64(st + QU_LVLWINS, load64(st + QU_LVLWINS) + 1);
+    store64(st + QU_FOUGHT, load64(st + QU_FOUGHT) + 1);
+    # occasional constitution gain
+    if (rng_chance(st + QU_RNG, 25) == 1) {
+        store64(st + QU_MAXHP, load64(st + QU_MAXHP) + 1);
+    }
+    return 0;
+}
+
+# Victory over a level master: advance, stat boosts, full heal, the
+# turning-point fragment, and at level 12 the ascension. Returns 1 if the
+# game ended (ascended), else 0.
+fn qu_master_victory(st): i64 {
+    var lvl = load64(st + QU_LEVEL);
+    var turning = 0;
+    if (lvl == 3)  { turning = 1; }
+    if (lvl == 6)  { turning = 1; }
+    if (lvl == 9)  { turning = 1; }
+    if (lvl == 12) { turning = 1; }
+    if (turning == 1) { store64(st + QU_FRAGS, load64(st + QU_FRAGS) + 1); }
+
+    if (lvl >= QU_MAX_LEVEL) {
+        # the Sovereign falls; the fourth fragment completes the tablet.
+        store64(st + QU_WON, 1);
+        store64(st + QU_OVER, 1);
+        store64(st + QU_SCREEN, QSCR_OVER);
+        return 1;
+    }
+    # advance one level
+    store64(st + QU_LEVEL, lvl + 1);
+    store64(st + QU_LVLWINS, 0);
+    store64(st + QU_MAXHP, load64(st + QU_MAXHP) + 8);
+    store64(st + QU_STR,   load64(st + QU_STR) + 3);
+    store64(st + QU_HP,    load64(st + QU_MAXHP));   # full heal on ascent
+    store64(st + QU_GOLD,  load64(st + QU_GOLD) + 25 + lvl * 10);
+    return 0;
+}
+
+# Player death -> game over.
+fn qu_die(st): i64 {
+    store64(st + QU_HP, 0);
+    store64(st + QU_OVER, 1);
+    store64(st + QU_WON, 0);
+    store64(st + QU_SCREEN, QSCR_OVER);
+    return 0;
+}
+
+# 1 if the current level's master can be challenged.
+fn qu_master_ready(st): i64 {
+    if (load64(st + QU_LVLWINS) >= QU_MASTER_AT) { return 1; }
+    return 0;
+}
+
+# === Town services ===
+
+fn qu_heal_cost(st): i64 {
+    return (load64(st + QU_MAXHP) - load64(st + QU_HP)) * 2;
+}
+
+# Walking back into town with coin on you is an invitation. 20% chance
+# to lose a third of your ON-HAND gold (banked gold is safe) — the
+# mechanical reason the Bank exists. Sets a message on a hit.
+fn qu_mugger_check(st): i64 {
+    var g = load64(st + QU_GOLD);
+    if (g < 50) { return 0; }                              # not worth their trouble
+    if (rng_chance(st + QU_RNG, 20) == 0) { return 0; }
+    store64(st + QU_GOLD, g - g / 3);
+    qu_msg(st, "A cutpurse takes you in an alley. Should have banked it.");
+    return 0;
+}
+
+# === Save / load (positional i64, header QUST1) ===
+
+fn qu_save_format(st, buf, cap): i64 {
+    var pos = 0;
+    memcpy(buf + pos, "QUST1\n", 6); pos = pos + 6;
+    pos = save_put_i64(buf, pos, load64(st + QU_SEED));
+    pos = save_put_i64(buf, pos, load64(st + QU_RNG));
+    pos = save_put_i64(buf, pos, load64(st + QU_MODE));
+    pos = save_put_i64(buf, pos, load64(st + QU_OVER));
+    pos = save_put_i64(buf, pos, load64(st + QU_WON));
+    pos = save_put_i64(buf, pos, load64(st + QU_LEVEL));
+    pos = save_put_i64(buf, pos, load64(st + QU_HP));
+    pos = save_put_i64(buf, pos, load64(st + QU_MAXHP));
+    pos = save_put_i64(buf, pos, load64(st + QU_STR));
+    pos = save_put_i64(buf, pos, load64(st + QU_GOLD));
+    pos = save_put_i64(buf, pos, load64(st + QU_BANK));
+    pos = save_put_i64(buf, pos, load64(st + QU_FOREST));
+    pos = save_put_i64(buf, pos, load64(st + QU_FRAGS));
+    pos = save_put_i64(buf, pos, load64(st + QU_CHARM));
+    pos = save_put_i64(buf, pos, load64(st + QU_LVLWINS));
+    pos = save_put_i64(buf, pos, load64(st + QU_FOUGHT));
+    pos = save_put_i64(buf, pos, load64(st + QU_LASTDAY));
+    return pos;
+}
+
+fn qu_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "QUST1\n", 6) == 0) { return 0; }
+    var st = alloc(QU_SIZE);
+    memset(st, 0, QU_SIZE);
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + QU_SEED,    save_get_i64(buf, len, cur));
+    store64(st + QU_RNG,     save_get_i64(buf, len, cur));
+    store64(st + QU_MODE,    save_get_i64(buf, len, cur));
+    store64(st + QU_OVER,    save_get_i64(buf, len, cur));
+    store64(st + QU_WON,     save_get_i64(buf, len, cur));
+    store64(st + QU_LEVEL,   save_get_i64(buf, len, cur));
+    store64(st + QU_HP,      save_get_i64(buf, len, cur));
+    store64(st + QU_MAXHP,   save_get_i64(buf, len, cur));
+    store64(st + QU_STR,     save_get_i64(buf, len, cur));
+    store64(st + QU_GOLD,    save_get_i64(buf, len, cur));
+    store64(st + QU_BANK,    save_get_i64(buf, len, cur));
+    store64(st + QU_FOREST,  save_get_i64(buf, len, cur));
+    store64(st + QU_FRAGS,   save_get_i64(buf, len, cur));
+    store64(st + QU_CHARM,   save_get_i64(buf, len, cur));
+    store64(st + QU_LVLWINS, save_get_i64(buf, len, cur));
+    store64(st + QU_FOUGHT,  save_get_i64(buf, len, cur));
+    store64(st + QU_LASTDAY, save_get_i64(buf, len, cur));
+    return st;
+}
+
+# === Door contract: new / start ===
+
+fn qu_new(seed, mode, max_days): i64 {
+    var st = alloc(QU_SIZE);
+    memset(st, 0, QU_SIZE);
+    store64(st + QU_SEED, seed);
+    rng_seed(st + QU_RNG, seed);
+    store64(st + QU_MODE, mode);
+    store64(st + QU_LEVEL, 1);
+    store64(st + QU_HP, QU_START_HP);
+    store64(st + QU_MAXHP, QU_START_HP);
+    store64(st + QU_STR, QU_START_STR);
+    store64(st + QU_GOLD, 0);
+    store64(st + QU_FOREST, QU_FOREST_DAILY);
+    store64(st + QU_LASTDAY, 0);
+    return st;
+}
+
+# Allocate runtime fields; refresh the daily ration from the wall clock;
+# open in town (or the over screen). Call once after new / load_parse.
+fn qu_start(st): i64 {
+    store64(st + QU_MSG, alloc(256));
+    store8(load64(st + QU_MSG), 0);
+    store64(st + QU_FOE_HP, 0);
+    # REALTIME (epoch) day index, NOT the monotonic clock: epoch days
+    # survive a server reboot, so the persisted QU_LASTDAY stays
+    # comparable across restarts (a monotonic index would reset toward 0
+    # on reboot and permanently freeze the ration refill).
+    qu_day_tick(st, clock_epoch_ns() / QU_NS_PER_DAY);
+    store64(st + QU_SCREEN, QSCR_TOWN);
+    if (load64(st + QU_OVER) != 0) { store64(st + QU_SCREEN, QSCR_OVER); }
+    return 0;
+}
+
+# === Render ===
+
+fn qu_render_status(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, qu_phase_color(load64(st + QU_LEVEL)));
+    pos = emit_cstr(buf, pos, "== QUEST OF THE UNDYING EMERALD SOVEREIGN THRONE ==");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Level ");
+    pos = emit_int(buf, pos, load64(st + QU_LEVEL));
+    pos = emit_cstr(buf, pos, "/12  (");
+    pos = emit_cstr(buf, pos, qu_phase_name(load64(st + QU_LEVEL)));
+    pos = emit_cstr(buf, pos, ")   facing ");
+    pos = emit_cstr(buf, pos, qu_master_name(load64(st + QU_LEVEL)));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "HP ");
+    pos = emit_int(buf, pos, load64(st + QU_HP));
+    pos = emit_cstr(buf, pos, "/");
+    pos = emit_int(buf, pos, load64(st + QU_MAXHP));
+    pos = emit_cstr(buf, pos, "   STR ");
+    pos = emit_int(buf, pos, load64(st + QU_STR));
+    pos = emit_cstr(buf, pos, "   Gold ");
+    pos = emit_int(buf, pos, load64(st + QU_GOLD));
+    pos = emit_cstr(buf, pos, " (Bank ");
+    pos = emit_int(buf, pos, load64(st + QU_BANK));
+    pos = emit_cstr(buf, pos, ")");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Forest fights left today: ");
+    pos = emit_int(buf, pos, load64(st + QU_FOREST));
+    pos = emit_cstr(buf, pos, "   Fragments: ");
+    pos = emit_int(buf, pos, load64(st + QU_FRAGS));
+    pos = emit_cstr(buf, pos, "/4");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_msg(st, buf, pos): i64 {
+    var m = load64(st + QU_MSG);
+    if ((load8(m) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 36);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, m);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+fn qu_render_town(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "You stand in the muddy square of a town that has seen better"); pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "centuries. A road leads to the dark forest.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (F) the Forest      (H) the Healer"); pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (B) the Bank        (I) the Inn"); pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (S) your reflection (Q) save & quit"); pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_forest(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "The forest closes over the road. Something is always watching.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    if (load64(st + QU_FOREST) <= 0) {
+        pos = emit_cstr(buf, pos, "You are spent for today. The woods will keep until tomorrow.");
+        pos = emit_crlf(buf, pos);
+    } else {
+        pos = emit_cstr(buf, pos, "  (Y) hunt a beast");
+        pos = emit_crlf(buf, pos);
+        if (qu_master_ready(st) == 1) {
+            pos = emit_cstr(buf, pos, "  (M) seek ");
+            pos = emit_cstr(buf, pos, qu_master_name(load64(st + QU_LEVEL)));
+            pos = emit_crlf(buf, pos);
+        } else {
+            pos = emit_cstr(buf, pos, "  (the master will not show until you have proven yourself here)");
+            pos = emit_crlf(buf, pos);
+        }
+    }
+    pos = emit_cstr(buf, pos, "  (R) back to town");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_fight(st, buf, pos): i64 {
+    var kind = load64(st + QU_FOE_KIND);
+    pos = emit_sgr(buf, pos, qu_phase_color(load64(st + QU_LEVEL)));
+    if (kind == FOE_BEAST) {
+        pos = emit_cstr(buf, pos, "Before you: ");
+        pos = emit_cstr(buf, pos, qu_beast_name(st, load64(st + QU_LEVEL)));
+        pos = emit_cstr(buf, pos, ".");
+    } else {
+        pos = emit_cstr(buf, pos, "You face ");
+        pos = emit_cstr(buf, pos, qu_master_name(load64(st + QU_LEVEL)));
+        pos = emit_cstr(buf, pos, ".");
+    }
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Its vigour: ");
+    pos = emit_int(buf, pos, load64(st + QU_FOE_HP));
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (A) attack    (F) flee");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_healer(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "The Healer smells of camphor and judgement.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Full mending would cost ");
+    pos = emit_int(buf, pos, qu_heal_cost(st));
+    pos = emit_cstr(buf, pos, " gold.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (H) be healed    (R) back to town");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_bank(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "The Bank is a strongbox with opinions. It pays 10% a day");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "on what you leave — and the streets have muggers who do not.");
+    pos = emit_crlf(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  On hand: ");
+    pos = emit_int(buf, pos, load64(st + QU_GOLD));
+    pos = emit_cstr(buf, pos, "   Banked: ");
+    pos = emit_int(buf, pos, load64(st + QU_BANK));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (D) deposit    (W) withdraw    (R) back to town");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_inn(st, buf, pos): i64 {
+    pos = emit_cstr(buf, pos, "The Inn is warm. Lirit the alewife leans on the bar and");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "looks at you like you are a riddle she half wants solved.");
+    pos = emit_crlf(buf, pos);
+    if (load64(st + QU_CHARM) > 0) {
+        pos = emit_cstr(buf, pos, "(She remembers you. The bar gets quieter when you enter.)");
+        pos = emit_crlf(buf, pos);
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "  (T) try your luck with a line    (R) back to town");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render_over(st, buf, pos): i64 {
+    pos = emit_crlf(buf, pos);
+    if (load64(st + QU_WON) == 1) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "-- THE WORK IS COMPLETE --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "The four fragments lock together; the Tablet is whole and");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "legible at last. You take the Throne, and you do not die.");
+        pos = emit_crlf(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Across the green stone, one line: ");
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "as above, so below.");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    } else {
+        pos = emit_sgr(buf, pos, 31);
+        pos = emit_cstr(buf, pos, "-- YOU HAVE FALLEN --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "The dark forest keeps what it takes. The Work goes on");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "without you, as it always has.");
+        pos = emit_crlf(buf, pos);
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "You carried: ");
+    pos = emit_cstr(buf, pos, qu_tablet_look(load64(st + QU_FRAGS)));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Press Enter to leave the tale.");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+fn qu_render(st, buf, cap): i64 {
+    var pos = 0;
+    var screen = load64(st + QU_SCREEN);
+    pos = qu_render_status(st, buf, pos);
+    pos = emit_crlf(buf, pos);
+    if (screen == QSCR_OVER)    { pos = qu_render_over(st, buf, pos);   return pos; }
+    if (screen == QSCR_FOREST)  { pos = qu_render_forest(st, buf, pos); }
+    else { if (screen == QSCR_FIGHT)   { pos = qu_render_fight(st, buf, pos); }
+    else { if (screen == QSCR_HEALER)  { pos = qu_render_healer(st, buf, pos); }
+    else { if (screen == QSCR_BANK)    { pos = qu_render_bank(st, buf, pos); }
+    else { if (screen == QSCR_BANKDEP) { pos = emit_cstr(buf, pos, "How much to deposit? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
+    else { if (screen == QSCR_BANKWD)  { pos = emit_cstr(buf, pos, "How much to withdraw? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
+    else { if (screen == QSCR_INN)     { pos = qu_render_inn(st, buf, pos); }
+    else                               { pos = qu_render_town(st, buf, pos); } } } } } } }
+    pos = qu_render_msg(st, buf, pos);
+    return pos;
+}
+
+# === Feed (per-screen; returns 0 stay / 1 exit the door) ===
+
+fn qu_feed_town(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 102) { store64(st + QU_SCREEN, QSCR_FOREST); return 0; }   # f
+    if (k == 104) { store64(st + QU_SCREEN, QSCR_HEALER); return 0; }   # h
+    if (k == 98)  { store64(st + QU_SCREEN, QSCR_BANK);   return 0; }   # b
+    if (k == 105) { store64(st + QU_SCREEN, QSCR_INN);    return 0; }   # i
+    if (k == 115) {                                                     # s — reflection
+        qu_msg(st, "You look like someone the Work is not finished with.");
+        return 0;
+    }
+    if (k == 113) { return 1; }                                          # q — save & quit
+    qu_msg(st, "The town waits. (F H B I S Q)");
+    return 0;
+}
+
+fn qu_feed_forest(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 114) { store64(st + QU_SCREEN, QSCR_TOWN); qu_mugger_check(st); return 0; }   # r
+    if (k == 121) {                                                      # y — hunt a beast
+        if (load64(st + QU_FOREST) <= 0) { qu_msg(st, "You are too spent. Tomorrow."); return 0; }
+        store64(st + QU_FOREST, load64(st + QU_FOREST) - 1);
+        qu_spawn_beast(st);
+        store64(st + QU_SCREEN, QSCR_FIGHT);
+        qu_msg(st, "");
+        return 0;
+    }
+    if (k == 109) {                                                      # m — seek the master
+        if (qu_master_ready(st) == 0) { qu_msg(st, "The master does not show. Prove yourself first."); return 0; }
+        if (load64(st + QU_FOREST) <= 0) { qu_msg(st, "Too spent to face a master today."); return 0; }
+        store64(st + QU_FOREST, load64(st + QU_FOREST) - 1);
+        qu_spawn_master(st);
+        store64(st + QU_SCREEN, QSCR_FIGHT);
+        qu_msg(st, "");
+        return 0;
+    }
+    qu_msg(st, "The trees do not understand you. (Y M R)");
+    return 0;
+}
+
+fn qu_feed_fight(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 102) {                                                      # f — flee
+        if (rng_chance(st + QU_RNG, 55) == 1) {
+            store64(st + QU_SCREEN, QSCR_FOREST);
+            qu_msg(st, "You crash back through the brush, heart hammering.");
+            return 0;
+        }
+        var fd = qu_foe_hit(st);
+        store64(st + QU_HP, load64(st + QU_HP) - fd);
+        if (load64(st + QU_HP) <= 0) { qu_die(st); return 0; }
+        qu_msg(st, "It catches you as you turn. You stay and fight.");
+        return 0;
+    }
+    if (k == 97) {                                                       # a — attack
+        var dmg = qu_player_hit(st);
+        store64(st + QU_FOE_HP, load64(st + QU_FOE_HP) - dmg);
+        if (load64(st + QU_FOE_HP) <= 0) {
+            # foe dies
+            var kind = load64(st + QU_FOE_KIND);
+            if (kind == FOE_BEAST) {
+                qu_beast_reward(st);
+                store64(st + QU_SCREEN, QSCR_FOREST);
+                qu_msg(st, "It falls. You are a little stronger, a little richer.");
+                return 0;
+            }
+            # a master / the Sovereign
+            var was_turning = 0;
+            var lvl = load64(st + QU_LEVEL);
+            if (lvl == 3)  { was_turning = 1; }
+            if (lvl == 6)  { was_turning = 1; }
+            if (lvl == 9)  { was_turning = 1; }
+            if (lvl == 12) { was_turning = 1; }
+            var ended = qu_master_victory(st);
+            if (ended == 1) { return 0; }   # ascended → over screen already set
+            store64(st + QU_SCREEN, QSCR_FOREST);
+            if (was_turning == 1) {
+                qu_msg(st, "The master falls — and leaves a fragment behind. It changes in your hand.");
+            } else {
+                qu_msg(st, "The master falls. The road opens to the next stage.");
+            }
+            return 0;
+        }
+        # foe survives — it hits back
+        var fd2 = qu_foe_hit(st);
+        store64(st + QU_HP, load64(st + QU_HP) - fd2);
+        if (load64(st + QU_HP) <= 0) { qu_die(st); return 0; }
+        qu_msg(st, "Blow for blow.");
+        return 0;
+    }
+    qu_msg(st, "Fight or flee. (A F)");
+    return 0;
+}
+
+fn qu_feed_healer(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 114) { store64(st + QU_SCREEN, QSCR_TOWN); return 0; }      # r
+    if (k == 104) {                                                      # h — heal
+        var cost = qu_heal_cost(st);
+        if (cost <= 0) { qu_msg(st, "You are already whole."); return 0; }
+        if (cost > load64(st + QU_GOLD)) { qu_msg(st, "The Healer counts your gold and frowns. Not enough."); return 0; }
+        store64(st + QU_GOLD, load64(st + QU_GOLD) - cost);
+        store64(st + QU_HP, load64(st + QU_MAXHP));
+        qu_msg(st, "Warmth, then pain, then whole.");
+        return 0;
+    }
+    qu_msg(st, "(H) heal or (R) leave.");
+    return 0;
+}
+
+fn qu_feed_bank(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 114) { store64(st + QU_SCREEN, QSCR_TOWN); return 0; }      # r
+    if (k == 100) { store64(st + QU_SCREEN, QSCR_BANKDEP); qu_msg(st, ""); return 0; }   # d
+    if (k == 119) { store64(st + QU_SCREEN, QSCR_BANKWD);  qu_msg(st, ""); return 0; }   # w
+    qu_msg(st, "(D) deposit (W) withdraw (R) leave.");
+    return 0;
+}
+
+fn qu_feed_bankdep(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    store64(st + QU_SCREEN, QSCR_BANK);
+    if (amt <= 0) { qu_msg(st, "Never mind."); return 0; }
+    if (amt > load64(st + QU_GOLD)) { amt = load64(st + QU_GOLD); }
+    store64(st + QU_GOLD, load64(st + QU_GOLD) - amt);
+    store64(st + QU_BANK, load64(st + QU_BANK) + amt);
+    qu_msg(st, "Deposited. The strongbox approves.");
+    return 0;
+}
+
+fn qu_feed_bankwd(st, line, len): i64 {
+    var amt = door_parse_int(line, len);
+    store64(st + QU_SCREEN, QSCR_BANK);
+    if (amt <= 0) { qu_msg(st, "Never mind."); return 0; }
+    if (amt > load64(st + QU_BANK)) { amt = load64(st + QU_BANK); }
+    store64(st + QU_BANK, load64(st + QU_BANK) - amt);
+    store64(st + QU_GOLD, load64(st + QU_GOLD) + amt);
+    qu_msg(st, "Withdrawn. Mind the streets.");
+    return 0;
+}
+
+fn qu_feed_inn(st, line, len): i64 {
+    var k = door_key(line, len);
+    if (k == 114) { store64(st + QU_SCREEN, QSCR_TOWN); return 0; }      # r
+    if (k == 116) {                                                      # t — try a line
+        var c = load64(st + QU_CHARM);
+        store64(st + QU_CHARM, c + 1);
+        if (c == 0) { qu_msg(st, "Lirit laughs despite herself. 'Smoother than you look.'"); return 0; }
+        if (c == 1) { qu_msg(st, "'You again.' She refills your cup without being asked."); return 0; }
+        if (c == 2) {
+            store64(st + QU_MAXHP, load64(st + QU_MAXHP) + 3);
+            qu_msg(st, "She slips you a charm 'for the forest.' You feel hardier. (+3 max HP)");
+            return 0;
+        }
+        qu_msg(st, "'Go on, hero. The Throne won't woo itself.' She winks you out the door.");
+        return 0;
+    }
+    qu_msg(st, "(T) try your luck or (R) leave.");
+    return 0;
+}
+
+# Route one line to the active screen.
+fn qu_feed(st, line, len): i64 {
+    qu_msg(st, "");
+    var screen = load64(st + QU_SCREEN);
+    if (screen == QSCR_OVER)    { return 1; }
+    if (screen == QSCR_TOWN)    { return qu_feed_town(st, line, len); }
+    if (screen == QSCR_FOREST)  { return qu_feed_forest(st, line, len); }
+    if (screen == QSCR_FIGHT)   { return qu_feed_fight(st, line, len); }
+    if (screen == QSCR_HEALER)  { return qu_feed_healer(st, line, len); }
+    if (screen == QSCR_BANK)    { return qu_feed_bank(st, line, len); }
+    if (screen == QSCR_BANKDEP) { return qu_feed_bankdep(st, line, len); }
+    if (screen == QSCR_BANKWD)  { return qu_feed_bankwd(st, line, len); }
+    if (screen == QSCR_INN)     { return qu_feed_inn(st, line, len); }
+    return 0;
+}
+
+# === Door contract: status / scoring ===
+
+fn qu_is_over(st): i64 {
+    return load64(st + QU_OVER);
+}
+
+fn qu_final_score(st): i64 {
+    var s = load64(st + QU_LEVEL) * 1000 + load64(st + QU_FOUGHT) * 10 + load64(st + QU_FRAGS) * 500;
+    if (load64(st + QU_WON) == 1) { s = s + 50000; }
+    return s;
+}
+
+fn qu_rank(score): i64 {
+    if (score >= 50000) { return "Sovereign of the Emerald Throne"; }
+    if (score >= 9000)  { return "Adept of the Reddening"; }
+    if (score >= 6000)  { return "Journeyman of the Yellowing"; }
+    if (score >= 3000)  { return "Penitent of the Whitening"; }
+    return "Pilgrim of the Mud";
+}
