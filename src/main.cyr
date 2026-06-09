@@ -176,7 +176,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.3.6 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad");
+    println("v1.3.7 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire");
     return 0;
 }
 
@@ -908,7 +908,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var scgl = scsp - scgs;
         if (scgl <= 0) {
-            send_str(cfd, "usage: scores <smuggler|port|handler|quest|olympiad>\r\n");
+            send_str(cfd, "usage: scores <smuggler|port|handler|quest|olympiad|ashes>\r\n");
             return MODE_COMMAND;
         }
         if (scgl > 15) { scgl = 15; }
@@ -921,8 +921,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(scgb, "handler") != 0)  { scgame = GAME_HANDLER; }
         if (streq(scgb, "quest") != 0)    { scgame = GAME_QUEST; }
         if (streq(scgb, "olympiad") != 0) { scgame = GAME_OLYMPIAD; }
+        if (streq(scgb, "ashes") != 0)    { scgame = GAME_ASHES; }
         if (scgame == GAME_NONE) {
-            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest | olympiad\r\n");
+            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest | olympiad | ashes\r\n");
             return MODE_COMMAND;
         }
         door_render_leaderboard(cfd, scgame);
@@ -1579,7 +1580,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.3.6 — telnet BBS + door games (casino + Olympiad) + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.3.7 — telnet BBS + door games (casino + Olympiad + Ashes of Empire) + chat + Eliza/PARRY + QUEST + Jabberwacky\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2703,7 +2704,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.3.6");
+    println("agora 1.3.7");
     return 0;
 }
 
