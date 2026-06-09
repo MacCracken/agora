@@ -4500,6 +4500,165 @@ fn t200_ashw_window(): i64 {
     return 0;
 }
 
+# t201: queued orders + adjacency. Push round-trips through the snapshot, the
+# queue caps at ASH_MAXORD, clear empties it, and the ring adjacency is right.
+fn t201_ash_orders(): i64 {
+    var w = ashw_new(ASH_WORLD_SEED);
+    if (ashw_norders(w) != 0)                  { test_fail("t201_ash_orders", "fresh empty"); return 1; }
+    if (ashw_order_push(w, 100, 0, 1, 7) != 1) { test_fail("t201_ash_orders", "push1"); return 1; }
+    if (ashw_order_push(w, 200, 5, 6, 3) != 1) { test_fail("t201_ash_orders", "push2"); return 1; }
+    if (ashw_norders(w) != 2)                  { test_fail("t201_ash_orders", "count"); return 1; }
+    if (ashw_ord_owner(w, 0) != 100)           { test_fail("t201_ash_orders", "owner0"); return 1; }
+    if (ashw_ord_src(w, 0) != 0)               { test_fail("t201_ash_orders", "src0"); return 1; }
+    if (ashw_ord_dst(w, 0) != 1)               { test_fail("t201_ash_orders", "dst0"); return 1; }
+    if (ashw_ord_qty(w, 0) != 7)               { test_fail("t201_ash_orders", "qty0"); return 1; }
+    if (ashw_ord_owner(w, 1) != 200)           { test_fail("t201_ash_orders", "owner1"); return 1; }
+    if (ashw_ord_qty(w, 1) != 3)               { test_fail("t201_ash_orders", "qty1"); return 1; }
+    ashw_orders_clear(w);
+    if (ashw_norders(w) != 0)                  { test_fail("t201_ash_orders", "cleared"); return 1; }
+    # queue cap: fill to ASH_MAXORD, the next push is refused
+    var i = 0;
+    while (i < ASH_MAXORD) {
+        if (ashw_order_push(w, 100, 0, 1, 1) != 1) { test_fail("t201_ash_orders", "fill"); return 1; }
+        i = i + 1;
+    }
+    if (ashw_order_push(w, 100, 0, 1, 1) != 0) { test_fail("t201_ash_orders", "cap"); return 1; }
+    if (ashw_norders(w) != ASH_MAXORD)         { test_fail("t201_ash_orders", "cap count"); return 1; }
+    # adjacency: ring wraps, self + distant are not adjacent
+    if (ash_adjacent(0, 1) != 1)               { test_fail("t201_ash_orders", "adj 0-1"); return 1; }
+    if (ash_adjacent(0, 11) != 1)              { test_fail("t201_ash_orders", "adj wrap"); return 1; }
+    if (ash_adjacent(0, 2) != 0)               { test_fail("t201_ash_orders", "non-adj"); return 1; }
+    if (ash_adjacent(5, 5) != 0)               { test_fail("t201_ash_orders", "self"); return 1; }
+    test_pass("t201_ash_orders");
+    return 0;
+}
+
+# t202: the combat transform — occupy a neutral, multi-player collision at one
+# province, reinforcement, and mutual ruin. Terrain is folded in via
+# ash_province_defense so the test stays seed-independent.
+fn t202_ash_combat(): i64 {
+    # --- occupy/attack a neutral province ---
+    var w = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w, 0, 100); ashw_set_army(w, 0, 12);
+    ashw_set_owner(w, 1, 0);   ashw_set_army(w, 1, 2);
+    ashw_order_push(w, 100, 0, 1, 12);
+    var d1 = ash_province_defense(w, 1);
+    ash_resolve_combat(w);
+    if (ashw_owner(w, 0) != 100)               { test_fail("t202_ash_combat", "src owner"); return 1; }
+    if (ashw_army(w, 0) != 0)                  { test_fail("t202_ash_combat", "src drained"); return 1; }
+    if (ashw_owner(w, 1) != 100)               { test_fail("t202_ash_combat", "taken"); return 1; }
+    if (ashw_army(w, 1) != 12 - 2 - d1)        { test_fail("t202_ash_combat", "attrition"); return 1; }
+    if (ashw_norders(w) != 0)                  { test_fail("t202_ash_combat", "queue cleared"); return 1; }
+
+    # --- collision: A (20) and B (8) both march into neutral province 1 ---
+    var w2 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w2, 0, 100); ashw_set_army(w2, 0, 20);
+    ashw_set_owner(w2, 2, 200); ashw_set_army(w2, 2, 8);
+    ashw_set_owner(w2, 1, 0);   ashw_set_army(w2, 1, 3);
+    ashw_order_push(w2, 100, 0, 1, 20);
+    ashw_order_push(w2, 200, 2, 1, 8);
+    ash_resolve_combat(w2);
+    # A (power 20) wins; runner-up power = max(B's 8, neutral 3+def<=8) = 8; surv 12
+    if (ashw_owner(w2, 1) != 100)              { test_fail("t202_ash_combat", "collision winner"); return 1; }
+    if (ashw_army(w2, 1) != 12)                { test_fail("t202_ash_combat", "collision surv"); return 1; }
+    if (ashw_army(w2, 0) != 0)                 { test_fail("t202_ash_combat", "A drained"); return 1; }
+    if (ashw_army(w2, 2) != 0)                 { test_fail("t202_ash_combat", "B drained"); return 1; }
+
+    # --- reinforcement: same-owner arrival adds to the holder, no combat ---
+    var w3 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w3, 0, 100); ashw_set_army(w3, 0, 10);
+    ashw_set_owner(w3, 1, 100); ashw_set_army(w3, 1, 4);
+    ashw_order_push(w3, 100, 0, 1, 6);
+    ash_resolve_combat(w3);
+    if (ashw_owner(w3, 1) != 100)              { test_fail("t202_ash_combat", "reinforce owner"); return 1; }
+    if (ashw_army(w3, 1) != 10)                { test_fail("t202_ash_combat", "reinforce army"); return 1; }
+    if (ashw_army(w3, 0) != 4)                 { test_fail("t202_ash_combat", "reinforce src"); return 1; }
+
+    # --- mutual ruin: two equal attackers tie -> the province falls to ash ---
+    var w4 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w4, 0, 100); ashw_set_army(w4, 0, 5);
+    ashw_set_owner(w4, 2, 200); ashw_set_army(w4, 2, 5);
+    ashw_set_owner(w4, 1, 0);   ashw_set_army(w4, 1, 0);
+    ashw_order_push(w4, 100, 0, 1, 5);
+    ashw_order_push(w4, 200, 2, 1, 5);
+    ash_resolve_combat(w4);
+    # A wins the power tie (lower fp) but loses 5 bodies to B's 5 -> 0 -> neutral
+    if (ashw_owner(w4, 1) != 0)                { test_fail("t202_ash_combat", "ruin neutral"); return 1; }
+    if (ashw_army(w4, 1) != 0)                 { test_fail("t202_ash_combat", "ruin army"); return 1; }
+    test_pass("t202_ash_combat");
+    return 0;
+}
+
+# t203: over-commit capping, illegal-order voiding, and ORDER-INDEPENDENCE —
+# the same orders in a different queue sequence resolve to an identical board
+# (the property that makes simultaneous multi-player resolution correct).
+fn t203_ash_resolve_rules(): i64 {
+    # --- over-commit: 10 armies, two orders of 7 each; queue-order capping ---
+    var w = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w, 0, 100); ashw_set_army(w, 0, 10);
+    ashw_set_owner(w, 1, 100); ashw_set_army(w, 1, 0);
+    ashw_set_owner(w, 11, 100); ashw_set_army(w, 11, 0);
+    ashw_order_push(w, 100, 0, 1, 7);    # delivers 7 (budget 10 -> 3)
+    ashw_order_push(w, 100, 0, 11, 7);   # delivers only 3 (budget 3 -> 0)
+    ash_resolve_combat(w);
+    if (ashw_army(w, 0) != 0)                  { test_fail("t203_ash_resolve_rules", "src drained"); return 1; }
+    if (ashw_army(w, 1) != 7)                  { test_fail("t203_ash_resolve_rules", "first full"); return 1; }
+    if (ashw_army(w, 11) != 3)                 { test_fail("t203_ash_resolve_rules", "second capped"); return 1; }
+
+    # --- illegal orders: non-adjacent + forged owner are both voided ---
+    var w2 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w2, 0, 100); ashw_set_army(w2, 0, 10);
+    ashw_set_owner(w2, 3, 200); ashw_set_army(w2, 3, 5);
+    ashw_order_push(w2, 100, 0, 6, 5);   # 0 and 6 not adjacent -> void
+    ashw_order_push(w2, 100, 3, 4, 3);   # owner 100 doesn't own province 3 -> void
+    ash_resolve_combat(w2);
+    if (ashw_army(w2, 0) != 10)                { test_fail("t203_ash_resolve_rules", "non-adj void"); return 1; }
+    if (ashw_owner(w2, 3) != 200)              { test_fail("t203_ash_resolve_rules", "forged owner"); return 1; }
+    if (ashw_army(w2, 3) != 5)                 { test_fail("t203_ash_resolve_rules", "forged drain"); return 1; }
+
+    # --- order-independence: collision resolved with the orders queued in the
+    # opposite sequence yields the identical board as t202's collision ---
+    var wa = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(wa, 0, 100); ashw_set_army(wa, 0, 20);
+    ashw_set_owner(wa, 2, 200); ashw_set_army(wa, 2, 8);
+    ashw_set_owner(wa, 1, 0);   ashw_set_army(wa, 1, 3);
+    ashw_order_push(wa, 200, 2, 1, 8);   # B first this time
+    ashw_order_push(wa, 100, 0, 1, 20);  # A second
+    ash_resolve_combat(wa);
+    if (ashw_owner(wa, 1) != 100)              { test_fail("t203_ash_resolve_rules", "indep winner"); return 1; }
+    if (ashw_army(wa, 1) != 12)                { test_fail("t203_ash_resolve_rules", "indep surv"); return 1; }
+    test_pass("t203_ash_resolve_rules");
+    return 0;
+}
+
+# t204: the growth phase + a full resolved turn (combat, growth, turn++). Owned
+# provinces raise reinforcements (capped), neutral ash slowly regrows.
+fn t204_ash_growth_turn(): i64 {
+    var w = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w, 0, 100); ashw_set_army(w, 0, 10);
+    ashw_set_owner(w, 1, 0);   ashw_set_army(w, 1, 1);
+    ashw_set_owner(w, 2, 100); ashw_set_army(w, 2, ASH_ARMY_CAP);
+    var g0 = ASH_GROWTH;
+    if (ash_terrain(ashw_seed(w), 0) == ASH_FORT) { g0 = g0 + 1; }
+    ash_resolve_growth(w);
+    if (ashw_army(w, 0) != 10 + g0)            { test_fail("t204_ash_growth_turn", "owned growth"); return 1; }
+    if (ashw_army(w, 1) != 2)                  { test_fail("t204_ash_growth_turn", "neutral regrow"); return 1; }
+    if (ashw_army(w, 2) != ASH_ARMY_CAP)       { test_fail("t204_ash_growth_turn", "cap"); return 1; }
+
+    # full turn: no orders -> combat is a no-op, growth applies, turn advances
+    var w2 = ashw_new(ASH_WORLD_SEED);
+    ashw_set_owner(w2, 0, 100); ashw_set_army(w2, 0, 10);
+    var t0 = ashw_turn(w2);
+    var g = ASH_GROWTH;
+    if (ash_terrain(ashw_seed(w2), 0) == ASH_FORT) { g = g + 1; }
+    ash_resolve_turn(w2);
+    if (ashw_turn(w2) != t0 + 1)               { test_fail("t204_ash_growth_turn", "turn++"); return 1; }
+    if (ashw_owner(w2, 0) != 100)              { test_fail("t204_ash_growth_turn", "holder kept"); return 1; }
+    if (ashw_army(w2, 0) != 10 + g)            { test_fail("t204_ash_growth_turn", "turn growth"); return 1; }
+    test_pass("t204_ash_growth_turn");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4716,6 +4875,10 @@ fn main(): i64 {
     t198_ashw_snapshot();
     t199_ash_terrain();
     t200_ashw_window();
+    t201_ash_orders();
+    t202_ash_combat();
+    t203_ash_resolve_rules();
+    t204_ash_growth_turn();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

@@ -37,15 +37,21 @@
 # restart self-heals rather than freezing. The order-resolution transform
 # that fills this hook is bite 2; this bite establishes the hook + the map.
 #
-# === Bite 1 scope (this file, the foundation) ===
+# === Progress ===
 #
-# The shared-map snapshot: version + seed + turn counter + last-resolved
-# window, plus per-province (owner fp, army). Terrain is regenerated
-# deterministically from the seed (mutable bits live in the snapshot, the
-# fixed structure does not — exactly as PA regenerates galaxy structure from
-# its seed). Pure accessors + the lazy turn-window helper. Orders + the batch
-# transform are bite 2; alliances bite 3; the door UI + async-PvP notice
-# bite 4; concurrency smoke + scores + closeout bite 5.
+# Bite 1 (the foundation): the shared-map snapshot — version + seed + turn
+# counter + last-resolved window, plus per-province (owner fp, army). Terrain
+# is regenerated deterministically from the seed (mutable bits live in the
+# snapshot, the fixed structure does not — exactly as PA regenerates galaxy
+# structure from its seed). Pure accessors + the lazy turn-window helper.
+#
+# Bite 2 (this revision, snapshot v2): queued MARCH orders + the pure
+# batch-resolution combat transform (departures capped per source, then
+# order-independent per-destination contests, then growth). The hard pure
+# function ADR 0014 flagged — fully unit-testable without a socket.
+#
+# Still ahead: alliances bite 3; the door UI + async-PvP notice bite 4;
+# multi-process concurrency smoke + scores + closeout bite 5.
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr — rng_seed/rng_below (seeded terrain), save_put/get_i64,
@@ -59,6 +65,10 @@ enum ASH {
     ASH_NS_PER_TURN = 86400000000000; # ns/turn-window — daily batch (proven QUEST cadence)
     ASH_NEUT_BASE   = 4;              # baseline neutral garrison every province starts with
     ASH_WORLD_SEED  = 1453;          # the one shared map everyone fights over (Constantinople, 1453)
+    ASH_MAXORD      = 64;            # queued-order ceiling in one window (snapshot-bounded)
+    ASH_ORDCELLS    = 4;             # per-order snapshot cells (owner fp, src, dst, qty)
+    ASH_ARMY_CAP    = 99;            # garrison ceiling (growth never exceeds this)
+    ASH_GROWTH      = 2;             # armies an owned province raises per resolved turn
 }
 
 # Terrain kinds — derived from the world seed, never stored. They modify
@@ -78,6 +88,11 @@ enum ASHTerr {
 #                                  resolved batch; 0 = never resolved)
 #   [map_base + t*ASH_CELLS + 0]   owner fp for province t (0 = neutral)
 #   [map_base + t*ASH_CELLS + 1]   army count garrisoning province t
+#   [orders_base]                  norders (queued orders this window)
+#   [orders_base + 1 + i*ASH_ORDCELLS + 0]  order i owner fp
+#   [orders_base + 1 + i*ASH_ORDCELLS + 1]  order i src province
+#   [orders_base + 1 + i*ASH_ORDCELLS + 2]  order i dst province
+#   [orders_base + 1 + i*ASH_ORDCELLS + 3]  order i army qty
 enum ASHWOff {
     ASHW_OFF_VERSION = 0;
     ASHW_OFF_SEED    = 1;
@@ -86,14 +101,16 @@ enum ASHWOff {
     ASHW_OFF_MAP     = 4;     # first per-province cell
 }
 
-# Snapshot format version. v1 (bite 1): map only. Bite 2 bumps to v2 to
-# append the queued-orders section; bite 3 v3 for alliances — exactly the
+# Snapshot format version. v1 (bite 1): map only. v2 (bite 2): appends the
+# queued-orders section; bite 3 bumps to v3 for alliances — exactly the
 # append-and-bump discipline PA used (PAW_VERSION 1 -> 2 added garrisons).
-enum ASHWVer { ASHW_VERSION = 1; }
+enum ASHWVer { ASHW_VERSION = 2; }
 
-# Section sizing (all in i64 words).
-fn ashw_word_count(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
-fn ashw_byte_size(): i64  { return ashw_word_count() * 8; }
+# Section base offsets + sizing (all in i64 words). The orders section
+# (norders + ASH_MAXORD order records) is appended after the map.
+fn ashw_orders_base(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
+fn ashw_word_count(): i64  { return ashw_orders_base() + 1 + ASH_MAXORD * ASH_ORDCELLS; }
+fn ashw_byte_size(): i64   { return ashw_word_count() * 8; }
 
 # === Terrain (derived from seed, not stored) ===
 #
@@ -237,4 +254,297 @@ fn ashw_window_tick(w, now): i64 {
     var due = ashw_windows_elapsed(ashw_last_window(w), now);
     ashw_set_last_window(w, now);
     return due;
+}
+
+# === Map adjacency ===
+#
+# The twelve provinces form a ring: province t borders t-1 and t+1 (mod 12).
+# A march order is legal only between adjacent provinces — armies cross a
+# shared front, they don't teleport. Pure + trivially testable.
+fn ash_adjacent(a, b): i64 {
+    if (a < 0) { return 0; }
+    if (b < 0) { return 0; }
+    if (a >= ASH_TERR) { return 0; }
+    if (b >= ASH_TERR) { return 0; }
+    var nx = a + 1;
+    if (nx == ASH_TERR) { nx = 0; }
+    var pv = a - 1;
+    if (pv < 0) { pv = ASH_TERR - 1; }
+    if (b == nx) { return 1; }
+    if (b == pv) { return 1; }
+    return 0;
+}
+
+# === Queued orders (snapshot v2) ===
+#
+# An order is a MARCH: send `qty` armies from `src` (a province you own) to an
+# adjacent `dst`. The same order is a MOVE (dst is yours / empty), an ATTACK
+# (dst is hostile), or a reinforcement — the resolver decides from dst's owner
+# at the window boundary, so there is one order type, three intents. Orders
+# queue in the snapshot (they outlive the issuing session) and are resolved as
+# one batch when the window rolls over, then cleared.
+
+fn ashw_norders(w): i64 { return load64(w + ashw_orders_base() * 8); }
+fn ashw_set_norders(w, v): i64 { store64(w + ashw_orders_base() * 8, v); return 0; }
+
+fn ashw_ord_cell(w, i, f): i64 {
+    return (ashw_orders_base() + 1 + i * ASH_ORDCELLS + f);
+}
+fn ashw_ord_owner(w, i): i64 { return load64(w + ashw_ord_cell(w, i, 0) * 8); }
+fn ashw_ord_src(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 1) * 8); }
+fn ashw_ord_dst(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 2) * 8); }
+fn ashw_ord_qty(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 3) * 8); }
+
+# Append a march order. Returns 1 if queued, 0 if the queue is full. Order
+# legality (you own src, src adjacent to dst, qty in range) is enforced both
+# here at issue time AND again at resolution (defense in depth — the snapshot
+# is shared state, never trusted blindly).
+fn ashw_order_push(w, owner, src, dst, qty): i64 {
+    var n = ashw_norders(w);
+    if (n >= ASH_MAXORD) { return 0; }
+    store64(w + ashw_ord_cell(w, n, 0) * 8, owner);
+    store64(w + ashw_ord_cell(w, n, 1) * 8, src);
+    store64(w + ashw_ord_cell(w, n, 2) * 8, dst);
+    store64(w + ashw_ord_cell(w, n, 3) * 8, qty);
+    ashw_set_norders(w, n + 1);
+    return 1;
+}
+
+fn ashw_orders_clear(w): i64 { ashw_set_norders(w, 0); return 0; }
+
+# === The batch-resolution combat transform (ADR 0014 — the hard pure fn) ===
+#
+# Resolved simultaneously from the WINDOW-START snapshot, so the outcome does
+# not depend on the order processing sequence (the one property that makes a
+# concurrent, multi-player batch correct):
+#
+#   1. DEPARTURE — every legal march debits its source garrison. A source's
+#      own orders are capped at its start garrison, processed in queue order
+#      (a player who over-commits one province loses the surplus orders). The
+#      defender army that STAYS is the start garrison minus what marched out.
+#   2. ARRIVAL / COMBAT — per destination, gather all incoming forces (from the
+#      start snapshot) grouped by owner. Same-owner-as-defender forces
+#      reinforce; every other owner is an attacker. The contest depends only on
+#      the multiset of forces at that province — never on iteration order.
+#   3. CLEAR — the queue empties; the window is resolved.
+#
+# A province conquered this window does not let its new garrison march this
+# window (orders were issued last window against last window's holdings) — no
+# cascade, fully deterministic. Growth is a SEPARATE phase (ash_resolve_growth)
+# so combat is unit-testable in isolation.
+
+# The defender bonus terrain confers at a province (seed-derived, not stored).
+fn ash_province_defense(w, t): i64 {
+    return ash_terrain_defense(ash_terrain(ashw_seed(w), t));
+}
+
+# Is contender A preferred over B at a contested province? Higher power wins;
+# on a power tie a real owner beats neutral, then the lower fp wins (a total
+# order, so the winner is deterministic). Neutral never wins a tie.
+fn ash_better(a_fp, a_pow, b_fp, b_pow): i64 {
+    if (a_pow > b_pow) { return 1; }
+    if (a_pow < b_pow) { return 0; }
+    if (a_fp == 0) { return 0; }
+    if (b_fp == 0) { return 1; }
+    if (a_fp < b_fp) { return 1; }
+    return 0;
+}
+
+# Resolve one contested province. Contenders = the incumbent defender (army +
+# terrain power) plus `natt` distinct attacking owners (raw army = power). The
+# strongest power takes the province; it loses bodies equal to the runner-up's
+# power (terrain makes a fortified defender costlier to overcome). If the
+# winner's surviving army is <= 0 the province is ground to neutral ash.
+# Writes [new_fp, new_army] into out (out+0, out+8). Pure.
+fn ash_contest(def_fp, def_army, def_terr, att_fp, att_army, natt, out): i64 {
+    var nc = natt + 1;
+    var c_fp  = alloc(nc * 8);
+    var c_arm = alloc(nc * 8);
+    var c_pow = alloc(nc * 8);
+    # slot 0 = incumbent defender (terrain-boosted power)
+    store64(c_fp, def_fp);
+    store64(c_arm, def_army);
+    store64(c_pow, def_army + def_terr);
+    var i = 0;
+    while (i < natt) {
+        store64(c_fp + (i + 1) * 8, load64(att_fp + i * 8));
+        store64(c_arm + (i + 1) * 8, load64(att_army + i * 8));
+        store64(c_pow + (i + 1) * 8, load64(att_army + i * 8));
+        i = i + 1;
+    }
+    # winner = best by the total order
+    var win = 0;
+    var k = 1;
+    while (k < nc) {
+        if (ash_better(load64(c_fp + k * 8), load64(c_pow + k * 8),
+                       load64(c_fp + win * 8), load64(c_pow + win * 8)) == 1) {
+            win = k;
+        }
+        k = k + 1;
+    }
+    # runner-up power = the highest power among the non-winners
+    var second = 0;
+    var j = 0;
+    while (j < nc) {
+        if (j != win) {
+            var p = load64(c_pow + j * 8);
+            if (p > second) { second = p; }
+        }
+        j = j + 1;
+    }
+    var surv = load64(c_arm + win * 8) - second;
+    if (surv > 0) {
+        store64(out, load64(c_fp + win * 8));
+        store64(out + 8, surv);
+        return 0;
+    }
+    store64(out, 0);        # mutual ruin — the province falls to ash (neutral)
+    store64(out + 8, 0);
+    return 0;
+}
+
+# Index of fp in the attacker table att_fp[0..natt), or (0-1) if absent.
+fn ash_arr_find(att_fp, natt, fp): i64 {
+    var i = 0;
+    var found = 0 - 1;
+    while (i < natt) {
+        if (load64(att_fp + i * 8) == fp) { found = i; }
+        i = i + 1;
+    }
+    return found;
+}
+
+# The combat transform: departures, then per-destination contests, then clear.
+# Mutates the snapshot w in place. Pure w.r.t. the inputs (no socket / fs).
+fn ash_resolve_combat(w): i64 {
+    var n = ASH_TERR;
+    var no = ashw_norders(w);
+    # snapshot the window-START map (departures + defense read from this)
+    var s_owner = alloc(n * 8);
+    var s_army  = alloc(n * 8);
+    var remain  = alloc(n * 8);
+    var t = 0;
+    while (t < n) {
+        store64(s_owner + t * 8, ashw_owner(w, t));
+        store64(s_army + t * 8, ashw_army(w, t));
+        store64(remain + t * 8, ashw_army(w, t));
+        t = t + 1;
+    }
+    # arrivals as a flat list of (dst, owner, army), capped at ASH_MAXORD
+    var a_dst  = alloc(ASH_MAXORD * 8);
+    var a_fp   = alloc(ASH_MAXORD * 8);
+    var a_army = alloc(ASH_MAXORD * 8);
+    var na = 0;
+    # DEPARTURE — per source province, in queue order, capped at its garrison
+    var s = 0;
+    while (s < n) {
+        var budget = load64(s_army + s * 8);
+        var so = load64(s_owner + s * 8);
+        var i = 0;
+        while (i < no) {
+            if (ashw_ord_src(w, i) == s) {
+                var owner = ashw_ord_owner(w, i);
+                var dst = ashw_ord_dst(w, i);
+                var qty = ashw_ord_qty(w, i);
+                # legality: real owner, owns src at window start, adjacent, positive
+                var ok = 0;
+                if (owner != 0) {
+                    if (owner == so) {
+                        if (qty > 0) {
+                            if (ash_adjacent(s, dst) == 1) { ok = 1; }
+                        }
+                    }
+                }
+                if (ok == 1) {
+                    var deliver = imin(qty, budget);
+                    if (deliver > 0) {
+                        budget = budget - deliver;
+                        store64(a_dst + na * 8, dst);
+                        store64(a_fp + na * 8, owner);
+                        store64(a_army + na * 8, deliver);
+                        na = na + 1;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        store64(remain + s * 8, budget);
+        s = s + 1;
+    }
+    # ARRIVAL / COMBAT — per destination, gather forces and contest
+    var att_fp  = alloc(n * 8);
+    var att_arm = alloc(n * 8);
+    var out = alloc(16);
+    t = 0;
+    while (t < n) {
+        var def_fp = load64(s_owner + t * 8);
+        var def_army = load64(remain + t * 8);
+        var natt = 0;
+        var k = 0;
+        while (k < na) {
+            if (load64(a_dst + k * 8) == t) {
+                var ofp = load64(a_fp + k * 8);
+                var oar = load64(a_army + k * 8);
+                if (ofp == def_fp) {
+                    def_army = def_army + oar;       # reinforce the holder
+                } else {
+                    var idx = ash_arr_find(att_fp, natt, ofp);
+                    if (idx < 0) {
+                        store64(att_fp + natt * 8, ofp);
+                        store64(att_arm + natt * 8, oar);
+                        natt = natt + 1;
+                    } else {
+                        store64(att_arm + idx * 8, load64(att_arm + idx * 8) + oar);
+                    }
+                }
+            }
+            k = k + 1;
+        }
+        if (natt > 0) {
+            ash_contest(def_fp, def_army, ash_province_defense(w, t), att_fp, att_arm, natt, out);
+            ashw_set_owner(w, t, load64(out));
+            ashw_set_army(w, t, load64(out + 8));
+        } else {
+            ashw_set_owner(w, t, def_fp);
+            ashw_set_army(w, t, def_army);
+        }
+        t = t + 1;
+    }
+    ashw_orders_clear(w);
+    return 0;
+}
+
+# Growth phase (separate from combat so each is testable alone): every province
+# an owner holds raises ASH_GROWTH reinforcements (+1 more in a fortress),
+# capped at ASH_ARMY_CAP. Neutral provinces slowly regrow a garrison back
+# toward ASH_NEUT_BASE so ground-to-ash ground is never free forever.
+fn ash_resolve_growth(w): i64 {
+    var t = 0;
+    while (t < ASH_TERR) {
+        var o = ashw_owner(w, t);
+        var a = ashw_army(w, t);
+        if (o != 0) {
+            var g = ASH_GROWTH;
+            if (ash_terrain(ashw_seed(w), t) == ASH_FORT) { g = g + 1; }
+            a = a + g;
+            if (a > ASH_ARMY_CAP) { a = ASH_ARMY_CAP; }
+            ashw_set_army(w, t, a);
+        } else {
+            if (a < ASH_NEUT_BASE) { ashw_set_army(w, t, a + 1); }
+        }
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Resolve one full turn: batch combat, then growth, then advance the counter.
+# The lazy window hook (ashw_window_tick) returns how many windows are due; the
+# caller (main.cyr, bite 4) runs this once per due window to catch an idle
+# world up. Queued orders resolve in the first such turn; later catch-up turns
+# are growth-only (the queue is already cleared).
+fn ash_resolve_turn(w): i64 {
+    ash_resolve_combat(w);
+    ash_resolve_growth(w);
+    ashw_set_turn(w, ashw_turn(w) + 1);
+    return 0;
 }
