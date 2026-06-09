@@ -1,7 +1,7 @@
 # 0014 — War-game door — asynchronous shared-world strategy as the MUD on-ramp
 
-> **Status**: Proposed — **planned 1.3.7**, the last door before **1.4.0 Descent link**.
-> **Date**: 2026-06-08
+> **Status**: Accepted — **in progress 1.3.7** (the war-game door, "Ashes of Empire"), the last door before **1.4.0 Descent link**.
+> **Date**: 2026-06-08 (accepted 2026-06-09, bite 1: the shared-world snapshot foundation)
 
 ## Context
 

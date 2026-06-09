@@ -1,0 +1,240 @@
+# ashes.cyr — Ashes of Empire: an async shared-world strategy door (1.3.7, ADR 0014).
+#
+# The provinces of a fallen empire lie in ashes. Logged-in citizens of the
+# agora seize them, raise armies, forge and betray alliances, and grind the
+# map between them turn by turn. It is agora's first GENUINELY shared-world
+# game where players' orders collide on a COMMON map — the deliberate
+# rehearsal of shared-state mutation between concurrent callers, on the way
+# to the 1.4.0 Descent/MUD link (ADR 0014 § Decision).
+#
+# === Why this door exists (ADR 0014) ===
+#
+# Everything agora ships today is asynchronous (boards, the Universe doors
+# resolve at YOUR turn from a snapshot) or single-process-live (chat tails a
+# flock'd transcript). Real-time shared mutation between concurrent actors is
+# the MUD's hard problem, and agora has never rehearsed it. Ashes is that
+# rehearsal: a common map + per-province ownership + alliance state, with
+# turn-batch combat resolved LAZILY on the next caller's entry — no daemon.
+#
+# === Built on the proven framework — does NOT reinvent it ===
+#
+# Ashes runs on the exact door.cyr world transaction the Universe doors use:
+#   world_lock_acquire -> world_read -> PURE transform -> world_write -> release.
+# What scales is the CONTENTS of the snapshot (a shared map + ownership +,
+# later, queued orders + alliances), not the discipline. The transform stays
+# a pure, unit-testable (world, action) -> (world', result) — the most
+# valuable property in the door tree, preserved since ADR 0009. This file is
+# the SHARED-WORLD layer only: a flat-i64 snapshot + pure accessors + the
+# lazy turn-window helper. No socket / filesystem here — the flock'd txn
+# wrapper (door.cyr world helpers + main.cyr) supplies those.
+#
+# === Lazy resolve-on-entry (mirrors QUEST's qu_day_tick) ===
+#
+# Under fork-per-accept with no background process, "who runs the batch
+# resolution?" has one answer that fits agora: the next caller does, on
+# entry, inside the world transaction. ashw_window_tick mirrors qu_day_tick
+# (resolve-overdue-on-entry, driven by clock_epoch_ns): a backward clock or a
+# restart self-heals rather than freezing. The order-resolution transform
+# that fills this hook is bite 2; this bite establishes the hook + the map.
+#
+# === Bite 1 scope (this file, the foundation) ===
+#
+# The shared-map snapshot: version + seed + turn counter + last-resolved
+# window, plus per-province (owner fp, army). Terrain is regenerated
+# deterministically from the seed (mutable bits live in the snapshot, the
+# fixed structure does not — exactly as PA regenerates galaxy structure from
+# its seed). Pure accessors + the lazy turn-window helper. Orders + the batch
+# transform are bite 2; alliances bite 3; the door UI + async-PvP notice
+# bite 4; concurrency smoke + scores + closeout bite 5.
+#
+# Deps resolved upstream in the main.cyr / test.cyr include chain:
+#   door.cyr — rng_seed/rng_below (seeded terrain), save_put/get_i64,
+#              clock_epoch_ns, imin/imax/iclamp, world_* (the flock'd txn)
+
+# === Constants ===
+
+enum ASH {
+    ASH_TERR        = 12;              # provinces on the map (a fallen empire's twelve)
+    ASH_CELLS       = 2;              # per-province snapshot cells (owner fp, army)
+    ASH_NS_PER_TURN = 86400000000000; # ns/turn-window — daily batch (proven QUEST cadence)
+    ASH_NEUT_BASE   = 4;              # baseline neutral garrison every province starts with
+    ASH_WORLD_SEED  = 1453;          # the one shared map everyone fights over (Constantinople, 1453)
+}
+
+# Terrain kinds — derived from the world seed, never stored. They modify
+# combat (the defender bonus) in bite 2; here they exist + are named.
+enum ASHTerr {
+    ASH_PLAINS = 0;   # open ground — no defensive bonus
+    ASH_HILL   = 1;   # high ground — modest defense
+    ASH_FOREST = 2;   # cover — modest defense, blunts cavalry
+    ASH_FORT   = 3;   # fortified — strong defense, the prize provinces
+}
+
+# Flat-i64 world snapshot layout (the bytes written to disk verbatim):
+#   [0]                            version
+#   [1]                            seed (map terrain regenerates from this)
+#   [2]                            turn (windows resolved so far)
+#   [3]                            last_window (epoch-window index of the last
+#                                  resolved batch; 0 = never resolved)
+#   [map_base + t*ASH_CELLS + 0]   owner fp for province t (0 = neutral)
+#   [map_base + t*ASH_CELLS + 1]   army count garrisoning province t
+enum ASHWOff {
+    ASHW_OFF_VERSION = 0;
+    ASHW_OFF_SEED    = 1;
+    ASHW_OFF_TURN    = 2;
+    ASHW_OFF_WINDOW  = 3;
+    ASHW_OFF_MAP     = 4;     # first per-province cell
+}
+
+# Snapshot format version. v1 (bite 1): map only. Bite 2 bumps to v2 to
+# append the queued-orders section; bite 3 v3 for alliances — exactly the
+# append-and-bump discipline PA used (PAW_VERSION 1 -> 2 added garrisons).
+enum ASHWVer { ASHW_VERSION = 1; }
+
+# Section sizing (all in i64 words).
+fn ashw_word_count(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
+fn ashw_byte_size(): i64  { return ashw_word_count() * 8; }
+
+# === Terrain (derived from seed, not stored) ===
+#
+# A province's terrain is a deterministic function of (seed, province): the
+# fixed map structure regenerates from the seed, only the mutable owner/army
+# bits live in the snapshot. We borrow door.cyr's seeded xorshift on a scratch
+# cell so the derivation is pure (no global PRNG state) and reproducible.
+fn ash_terrain(seed, t): i64 {
+    var cell = alloc(8);
+    rng_seed(cell, seed + t * 2654435761 + 1);
+    return rng_below(cell, 4);
+}
+
+fn ash_terrain_name(terr): i64 {
+    if (terr == ASH_HILL)   { return "hills"; }
+    if (terr == ASH_FOREST) { return "forest"; }
+    if (terr == ASH_FORT)   { return "fortress"; }
+    return "plains";
+}
+
+# The defender bonus terrain confers (added to the garrison's effective
+# strength in bite 2's combat transform). Plains 0, hills/forest +2, fort +5.
+fn ash_terrain_defense(terr): i64 {
+    if (terr == ASH_FORT)   { return 5; }
+    if (terr == ASH_HILL)   { return 2; }
+    if (terr == ASH_FOREST) { return 2; }
+    return 0;
+}
+
+# Province names — the twelve provinces of the fallen empire.
+fn ash_terr_name(t): i64 {
+    if (t == 0)  { return "Thessaly"; }
+    if (t == 1)  { return "Illyria"; }
+    if (t == 2)  { return "Pannonia"; }
+    if (t == 3)  { return "Dacia"; }
+    if (t == 4)  { return "Thrace"; }
+    if (t == 5)  { return "Galatia"; }
+    if (t == 6)  { return "Cilicia"; }
+    if (t == 7)  { return "Numidia"; }
+    if (t == 8)  { return "Hispania"; }
+    if (t == 9)  { return "Aquitania"; }
+    if (t == 10) { return "Belgica"; }
+    if (t == 11) { return "Britannia"; }
+    return "the Wastes";
+}
+
+# A fresh province's neutral garrison — small, terrain-scaled so the fortress
+# provinces cost more to take than the plains. Pure (scratch RNG on seed,t).
+fn ash_neutral_army(seed, t): i64 {
+    var cell = alloc(8);
+    rng_seed(cell, seed + t * 40503 + 7);
+    var terr = ash_terrain(seed, t);
+    return ASH_NEUT_BASE + ash_terrain_defense(terr) + rng_below(cell, 4);
+}
+
+# === Construction ===
+
+# A fresh world: every province neutral (owner 0), garrisoned by its
+# terrain-scaled neutral army, turn 0, never resolved. Returns the flat
+# buffer (ashw_byte_size() bytes), built with alloc like paw_new.
+fn ashw_new(seed): i64 {
+    var n = ashw_word_count();
+    var w = alloc(n * 8);
+    memset(w, 0, n * 8);
+    store64(w + ASHW_OFF_VERSION * 8, ASHW_VERSION);
+    store64(w + ASHW_OFF_SEED * 8, seed);
+    var t = 0;
+    while (t < ASH_TERR) {
+        store64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8, ash_neutral_army(seed, t));
+        t = t + 1;
+    }
+    return w;
+}
+
+# A snapshot is valid if it's exactly our size and the version matches.
+fn ashw_valid(buf, len): i64 {
+    if (len != ashw_byte_size()) { return 0; }
+    if (load64(buf + ASHW_OFF_VERSION * 8) != ASHW_VERSION) { return 0; }
+    return 1;
+}
+
+# === Accessors ===
+
+fn ashw_seed(w): i64 { return load64(w + ASHW_OFF_SEED * 8); }
+fn ashw_turn(w): i64 { return load64(w + ASHW_OFF_TURN * 8); }
+fn ashw_set_turn(w, v): i64 { store64(w + ASHW_OFF_TURN * 8, v); return 0; }
+fn ashw_last_window(w): i64 { return load64(w + ASHW_OFF_WINDOW * 8); }
+fn ashw_set_last_window(w, v): i64 { store64(w + ASHW_OFF_WINDOW * 8, v); return 0; }
+
+fn ashw_owner(w, t): i64 {
+    return load64(w + (ASHW_OFF_MAP + t * ASH_CELLS) * 8);
+}
+fn ashw_set_owner(w, t, fp): i64 {
+    store64(w + (ASHW_OFF_MAP + t * ASH_CELLS) * 8, fp);
+    return 0;
+}
+fn ashw_army(w, t): i64 {
+    return load64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8);
+}
+fn ashw_set_army(w, t, v): i64 {
+    store64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8, v);
+    return 0;
+}
+
+# Count the provinces a given owner fp holds (the win-progress metric — the
+# whole map is the victory condition, decided in a later bite).
+fn ashw_holdings(w, fp): i64 {
+    var held = 0;
+    var t = 0;
+    while (t < ASH_TERR) {
+        if (ashw_owner(w, t) == fp) { held = held + 1; }
+        t = t + 1;
+    }
+    return held;
+}
+
+# === Lazy turn-window resolution hook (mirrors qu_day_tick) ===
+#
+# `now` is the wall-clock turn-window index (clock_epoch_ns / ASH_NS_PER_TURN),
+# passed in so the logic stays pure + testable. Returns how many windows are
+# due for batch resolution:
+#   - same window as last resolved          -> 0 (nothing due)
+#   - never resolved (last == 0, the init sentinel; real epoch windows are
+#     never 0) -> 0, just records `now` (a fresh world has no queued batch)
+#   - forward by k windows                   -> k (batch-resolve k boundaries)
+#   - backward (clock skew / restart)        -> 1 (self-heal, never freeze)
+# Pure: depends only on the two scalars. The world store happens in the caller
+# that owns the lock (kept separate so this stays unit-testable).
+fn ashw_windows_elapsed(last, now): i64 {
+    if (last == now) { return 0; }
+    if (last == 0)   { return 0; }      # first contact: record only, nothing queued
+    if (now > last)  { return now - last; }
+    return 1;                           # backward clock: resolve one, self-heal
+}
+
+# The resolve-on-entry hook the caller runs while holding the world lock:
+# compute how many windows are due, advance the recorded marker to `now`, and
+# return the due count so the (bite-2) batch transform can resolve that many.
+# Recording `now` unconditionally is what self-heals a backward clock.
+fn ashw_window_tick(w, now): i64 {
+    var due = ashw_windows_elapsed(ashw_last_window(w), now);
+    ashw_set_last_window(w, now);
+    return due;
+}

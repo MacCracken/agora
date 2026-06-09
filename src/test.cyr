@@ -21,6 +21,7 @@ include "src/parry.cyr"
 include "src/quest.cyr"
 include "src/jabberwacky.cyr"
 include "src/olympiad.cyr"
+include "src/ashes.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -4412,6 +4413,93 @@ fn t197_ol_saveload(): i64 {
     return 0;
 }
 
+# === 1.3.7 Ashes of Empire (shared-world snapshot foundation) ===
+
+# t198: the flat-i64 world snapshot — fresh world is valid + neutral, the
+# header fields and per-province owner/army round-trip, holdings counts, and
+# ashw_valid rejects a wrong size or a wrong version.
+fn t198_ashw_snapshot(): i64 {
+    var w = ashw_new(ASH_WORLD_SEED);
+    if (ashw_valid(w, ashw_byte_size()) != 1)  { test_fail("t198_ashw_snapshot", "valid"); return 1; }
+    if (ashw_seed(w) != ASH_WORLD_SEED)        { test_fail("t198_ashw_snapshot", "seed"); return 1; }
+    if (ashw_turn(w) != 0)                     { test_fail("t198_ashw_snapshot", "turn0"); return 1; }
+    if (ashw_last_window(w) != 0)              { test_fail("t198_ashw_snapshot", "win0"); return 1; }
+    # fresh map: every province neutral with a positive neutral garrison
+    var t = 0;
+    while (t < ASH_TERR) {
+        if (ashw_owner(w, t) != 0)             { test_fail("t198_ashw_snapshot", "neutral"); return 1; }
+        if (ashw_army(w, t) < ASH_NEUT_BASE)   { test_fail("t198_ashw_snapshot", "garrison"); return 1; }
+        t = t + 1;
+    }
+    # owner + army round-trip; turn + window setters
+    ashw_set_owner(w, 3, 1234);
+    ashw_set_army(w, 3, 40);
+    ashw_set_owner(w, 7, 1234);
+    ashw_set_turn(w, 5);
+    ashw_set_last_window(w, 99);
+    if (ashw_owner(w, 3) != 1234)              { test_fail("t198_ashw_snapshot", "owner rt"); return 1; }
+    if (ashw_army(w, 3) != 40)                 { test_fail("t198_ashw_snapshot", "army rt"); return 1; }
+    if (ashw_turn(w) != 5)                     { test_fail("t198_ashw_snapshot", "turn rt"); return 1; }
+    if (ashw_last_window(w) != 99)             { test_fail("t198_ashw_snapshot", "win rt"); return 1; }
+    if (ashw_holdings(w, 1234) != 2)           { test_fail("t198_ashw_snapshot", "holdings"); return 1; }
+    if (ashw_holdings(w, 0) != ASH_TERR - 2)   { test_fail("t198_ashw_snapshot", "neutral count"); return 1; }
+    # validity guards
+    if (ashw_valid(w, ashw_byte_size() - 8) != 0) { test_fail("t198_ashw_snapshot", "size guard"); return 1; }
+    store64(w + ASHW_OFF_VERSION * 8, 99);
+    if (ashw_valid(w, ashw_byte_size()) != 0)  { test_fail("t198_ashw_snapshot", "version guard"); return 1; }
+    test_pass("t198_ashw_snapshot");
+    return 0;
+}
+
+# t199: terrain is a deterministic, in-range [0,3] function of (seed,province)
+# — the fixed map structure regenerates from the seed, not the snapshot —
+# the defense table is monotone-sane, and names are non-null.
+fn t199_ash_terrain(): i64 {
+    var t = 0;
+    while (t < ASH_TERR) {
+        var k = ash_terrain(ASH_WORLD_SEED, t);
+        if (k < 0)                             { test_fail("t199_ash_terrain", "lo"); return 1; }
+        if (k > 3)                             { test_fail("t199_ash_terrain", "hi"); return 1; }
+        if (ash_terrain(ASH_WORLD_SEED, t) != k) { test_fail("t199_ash_terrain", "deterministic"); return 1; }
+        t = t + 1;
+    }
+    # a different seed yields a different layout for at least one province
+    var diff = 0;
+    var u = 0;
+    while (u < ASH_TERR) {
+        if (ash_terrain(ASH_WORLD_SEED, u) != ash_terrain(ASH_WORLD_SEED + 1, u)) { diff = 1; }
+        u = u + 1;
+    }
+    if (diff != 1)                             { test_fail("t199_ash_terrain", "seed varies"); return 1; }
+    # defense table: fort strongest, plains zero
+    if (ash_terrain_defense(ASH_FORT) <= ash_terrain_defense(ASH_HILL)) { test_fail("t199_ash_terrain", "fort def"); return 1; }
+    if (ash_terrain_defense(ASH_PLAINS) != 0)  { test_fail("t199_ash_terrain", "plains def"); return 1; }
+    test_pass("t199_ash_terrain");
+    return 0;
+}
+
+# t200: the lazy turn-window helper (mirrors qu_day_tick) — same window is a
+# no-op, the init sentinel (last==0) records only, a forward jump returns the
+# elapsed window count, and a backward clock self-heals to 1 (never freezes).
+# ashw_window_tick records `now` unconditionally (the self-heal), returns due.
+fn t200_ashw_window(): i64 {
+    if (ashw_windows_elapsed(100, 100) != 0)   { test_fail("t200_ashw_window", "same"); return 1; }
+    if (ashw_windows_elapsed(0, 100) != 0)     { test_fail("t200_ashw_window", "init sentinel"); return 1; }
+    if (ashw_windows_elapsed(100, 103) != 3)   { test_fail("t200_ashw_window", "forward"); return 1; }
+    if (ashw_windows_elapsed(100, 95) != 1)    { test_fail("t200_ashw_window", "backward heal"); return 1; }
+    # the stateful hook: first contact records `now`, returns 0; a later jump
+    # returns the gap and re-records; a backward clock heals to 1.
+    var w = ashw_new(ASH_WORLD_SEED);
+    if (ashw_window_tick(w, 500) != 0)         { test_fail("t200_ashw_window", "first due"); return 1; }
+    if (ashw_last_window(w) != 500)            { test_fail("t200_ashw_window", "first rec"); return 1; }
+    if (ashw_window_tick(w, 504) != 4)         { test_fail("t200_ashw_window", "jump due"); return 1; }
+    if (ashw_last_window(w) != 504)            { test_fail("t200_ashw_window", "jump rec"); return 1; }
+    if (ashw_window_tick(w, 502) != 1)         { test_fail("t200_ashw_window", "back due"); return 1; }
+    if (ashw_last_window(w) != 502)            { test_fail("t200_ashw_window", "back rec"); return 1; }
+    test_pass("t200_ashw_window");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4623,6 +4711,11 @@ fn main(): i64 {
     t195_wager_payout();
     t196_ol_ladder();
     t197_ol_saveload();
+
+    # === 1.3.7 Ashes of Empire (shared-world snapshot foundation) ===
+    t198_ashw_snapshot();
+    t199_ash_terrain();
+    t200_ashw_window();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);
