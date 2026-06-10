@@ -31,6 +31,7 @@ include "src/quest.cyr"
 include "src/jabberwacky.cyr"
 include "src/olympiad.cyr"
 include "src/ashes.cyr"
+include "src/descent.cyr"
 
 # Default port. 23 is the IANA-assigned telnet port but requires
 # root on Linux for bind. Override via `agora serve <port>`.
@@ -357,6 +358,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
+        send_str(cfd, "  descent         step through the portal into the Yeoman's Descent MUD\r\n");
         send_str(cfd, "  help            this message\r\n");
         send_str(cfd, "  quit            close the session\r\n\r\n");
         return MODE_COMMAND;
@@ -984,6 +986,21 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # recv becomes a tail tick (handle_client) instead of a hangup.
         sock_set_recv_timeout(cfd, CHAT_POLL_SECS, 0);
         return MODE_CHAT;
+    }
+
+    # 1.4.0 (ADR 0017): `descent` — step through the portal into the
+    # sibling Yeoman's Descent MUD. Login-gated like chat (a citizen
+    # steps through; the MUD still runs its own login). descent_run
+    # blocks in the transparent proxy until the MUD session ends, then
+    # returns and we drop straight back to the BBS command prompt. All
+    # of descent_run's failure paths are soft (print + return).
+    if (line_has_prefix(line, len, "descent") != 0) {
+        if ((load8(g_session_fp) & 0xFF) == 0) {
+            send_str(cfd, "descent needs an identity — log in first ('login <handle>').\r\n");
+            return MODE_COMMAND;
+        }
+        descent_run(cfd, g_store_buf, g_session_handle);
+        return MODE_COMMAND;
     }
 
     if (line_has_prefix(line, len, "quit") != 0) {

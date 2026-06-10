@@ -22,6 +22,7 @@ include "src/quest.cyr"
 include "src/jabberwacky.cyr"
 include "src/olympiad.cyr"
 include "src/ashes.cyr"
+include "src/descent.cyr"
 
 var test_count = 0;
 var fail_count = 0;
@@ -4747,6 +4748,56 @@ fn t206_ash_alliance_combat(): i64 {
     return 0;
 }
 
+# === 1.4.0 Descent link (ADR 0017) — endpoint parsing ===
+# The pure half of the gateway: the proxy socket loop is wire-smoke
+# territory (20-descent.sh), but the operator-config parser is unit-
+# pinned here — a misread endpoint must FAIL closed, never silently dial
+# the wrong host.
+fn t207_descent_dec_ipv4(): i64 {
+    # descent_dec: plain decimal in a span, fail-closed on junk
+    if (descent_dec("4000", 0, 4) != 4000)        { test_fail("t207_descent_dec_ipv4", "dec basic"); return 1; }
+    if (descent_dec("007", 0, 3) != 7)            { test_fail("t207_descent_dec_ipv4", "dec leading-zero"); return 1; }
+    if (descent_dec("12x", 0, 3) != (0 - 1))      { test_fail("t207_descent_dec_ipv4", "dec nondigit"); return 1; }
+    if (descent_dec("", 0, 0) != (0 - 1))         { test_fail("t207_descent_dec_ipv4", "dec empty"); return 1; }
+    # descent_parse_ipv4: 127.0.0.1 → 0x0100007F (127 | 1<<24)
+    if (descent_parse_ipv4("127.0.0.1", 0, 9) != 0x0100007F) { test_fail("t207_descent_dec_ipv4", "loopback pack"); return 1; }
+    # 10.0.0.5 → 10 | 5<<24
+    if (descent_parse_ipv4("10.0.0.5", 0, 8) != 10 + (5 * 16777216)) { test_fail("t207_descent_dec_ipv4", "host pack"); return 1; }
+    # too few octets / too many / out-of-range → fail closed
+    if (descent_parse_ipv4("1.2.3", 0, 5) != (0 - 1))     { test_fail("t207_descent_dec_ipv4", "three octets"); return 1; }
+    if (descent_parse_ipv4("1.2.3.4.5", 0, 9) != (0 - 1)) { test_fail("t207_descent_dec_ipv4", "five octets"); return 1; }
+    if (descent_parse_ipv4("1.2.3.300", 0, 9) != (0 - 1)) { test_fail("t207_descent_dec_ipv4", "octet>255"); return 1; }
+    test_pass("t207_descent_dec_ipv4");
+    return 0;
+}
+
+fn t208_descent_endpoint(): i64 {
+    var ap = alloc(8);
+    var pp = alloc(8);
+    # bare port → loopback host, that port
+    if (descent_parse_endpoint("4000", 4, ap, pp) != 0) { test_fail("t208_descent_endpoint", "bare ok"); return 1; }
+    if (load64(ap) != 0x0100007F)                       { test_fail("t208_descent_endpoint", "bare addr"); return 1; }
+    if (load64(pp) != 4000)                             { test_fail("t208_descent_endpoint", "bare port"); return 1; }
+    # explicit host:port
+    if (descent_parse_endpoint("10.0.0.5:23", 11, ap, pp) != 0) { test_fail("t208_descent_endpoint", "host ok"); return 1; }
+    if (load64(ap) != 10 + (5 * 16777216))              { test_fail("t208_descent_endpoint", "host addr"); return 1; }
+    if (load64(pp) != 23)                               { test_fail("t208_descent_endpoint", "host port"); return 1; }
+    # trailing CR/LF + surrounding spaces trimmed
+    if (descent_parse_endpoint("  127.0.0.1:4000\r\n", 18, ap, pp) != 0) { test_fail("t208_descent_endpoint", "trim ok"); return 1; }
+    if (load64(ap) != 0x0100007F)                       { test_fail("t208_descent_endpoint", "trim addr"); return 1; }
+    if (load64(pp) != 4000)                             { test_fail("t208_descent_endpoint", "trim port"); return 1; }
+    # reject paths — must all fail closed (return 1)
+    if (descent_parse_endpoint("", 0, ap, pp) != 1)              { test_fail("t208_descent_endpoint", "empty"); return 1; }
+    if (descent_parse_endpoint("   ", 3, ap, pp) != 1)           { test_fail("t208_descent_endpoint", "blank"); return 1; }
+    if (descent_parse_endpoint("abc", 3, ap, pp) != 1)           { test_fail("t208_descent_endpoint", "nonnumeric"); return 1; }
+    if (descent_parse_endpoint(":4000", 5, ap, pp) != 1)         { test_fail("t208_descent_endpoint", "empty host"); return 1; }
+    if (descent_parse_endpoint("1.2.3:5", 7, ap, pp) != 1)       { test_fail("t208_descent_endpoint", "short ip"); return 1; }
+    if (descent_parse_endpoint("127.0.0.1:0", 11, ap, pp) != 1)  { test_fail("t208_descent_endpoint", "port 0"); return 1; }
+    if (descent_parse_endpoint("127.0.0.1:99999", 15, ap, pp) != 1) { test_fail("t208_descent_endpoint", "port hi"); return 1; }
+    test_pass("t208_descent_endpoint");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -4969,6 +5020,10 @@ fn main(): i64 {
     t204_ash_growth_turn();
     t205_ash_diplomacy();
     t206_ash_alliance_combat();
+
+    # === 1.4.0 Descent link (endpoint parsing) ===
+    t207_descent_dec_ipv4();
+    t208_descent_endpoint();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

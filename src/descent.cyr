@@ -1,0 +1,265 @@
+# src/descent.cyr — 1.4.0 Descent link (ADR 0017)
+#
+# Bridge a logged-in agora session into the sibling Yeoman's Descent MUD
+# (../cyrius-yeomans-descent) over the shared telnet substrate. agora
+# stays the BBS: this is a *gateway*, not an absorption of MUD semantics.
+# The wire-proxy is the only coupling, so the two projects keep
+# independent release cycles (roadmap § 1.4.0 "boundary discipline").
+#
+# Model: a TRANSPARENT TCP proxy. The MUD owns its own world loop; agora
+# dials the operator-configured endpoint and shuttles bytes both ways
+# until either side closes, then drops the citizen back at the BBS prompt.
+# Because the shuttle is byte-transparent, the MUD's own telnet IAC
+# negotiation (RFC 1143 WILL ECHO / SGA, passphrase echo suppression)
+# flows through to the client verbatim — the MUD authenticates the player
+# itself. Sigil identity hand-off across the link is DEFERRED (ADR 0017
+# § Decision): the MUD as built has no external-identity path, so a true
+# hand-off needs an MUD-side protocol — a follow-on bite.
+#
+# Endpoint is OPERATOR config only (<store>/.descent), never client-
+# supplied, so there is no SSRF surface: a citizen cannot point the proxy
+# at an arbitrary host.
+#
+# Split per CLAUDE.md "pure parsing is testable; socket I/O is wired":
+#   - descent_parse_endpoint / descent_parse_ipv4 / descent_dec — pure,
+#     unit-tested (t207+).
+#   - descent_run / descent_proxy — socket I/O, covered by the wire
+#     smoke 20-descent.sh (like the accept loop, not unit-testable).
+
+enum DescentConst {
+    DESCENT_CFG_CAP    = 128;        # max bytes read from <store>/.descent
+    DESCENT_PATH_CAP   = 512;        # <store>/.descent path buffer (cf PATH_MAX_BYTES)
+    DESCENT_PROXY_BUF  = 4096;       # bidirectional shuttle buffer
+    DESCENT_CONNECT_MS = 4000;       # bounded connect timeout (net_connect_nb)
+    DESCENT_POLL_MS    = 1000;       # poll tick in ms
+    DESCENT_IDLE_MS    = 1800000;    # 30 min pure-silence bound (slowloris)
+    DESCENT_DEC_MAX    = 16777216;   # overflow guard for the decimal parser
+    # poll(2) revents bits (Linux, cross-arch identical). POLLIN=1 drives
+    # the shuttle; POLLHUP|POLLERR (16|8 = 24) means the peer is gone.
+    DESCENT_POLLIN     = 1;
+    DESCENT_POLLDEAD   = 24;
+}
+
+# Parse a non-negative decimal in buf[s, e). Returns the value, or (0-1)
+# on an empty span, a non-digit, or overflow past DESCENT_DEC_MAX. Pure.
+fn descent_dec(buf, s, e): i64 {
+    if (s >= e) { return 0 - 1; }
+    var v = 0;
+    var i = s;
+    var bad = 0;
+    while (i < e) {
+        var ch = load8(buf + i) & 0xFF;
+        if (ch < 48) { bad = 1; i = e; }
+        else { if (ch > 57) { bad = 1; i = e; }
+        else {
+            v = v * 10 + (ch - 48);
+            if (v > DESCENT_DEC_MAX) { bad = 1; i = e; }
+            else { i = i + 1; }
+        } }
+    }
+    if (bad != 0) { return 0 - 1; }
+    return v;
+}
+
+# Parse "A.B.C.D" in buf[s, e) into a packed network-byte-order uint32
+# (A | B<<8 | C<<16 | D<<24 — the shape sockaddr_in / net_connect_nb want;
+# 127.0.0.1 → 0x0100007F). Returns the packed addr, or (0-1) on a bad
+# octet count, a non-numeric octet, or an octet > 255. Pure.
+fn descent_parse_ipv4(buf, s, e): i64 {
+    var count = 0;
+    var seg = s;
+    var i = s;
+    var packed = 0;
+    var bad = 0;
+    var go = 1;
+    while (go == 1) {
+        var atend = 0;
+        if (i >= e) { atend = 1; }
+        var issep = 0;
+        if (atend == 1) { issep = 1; }
+        else { if ((load8(buf + i) & 0xFF) == 46) { issep = 1; } }   # '.'
+        if (issep == 1) {
+            var oc = descent_dec(buf, seg, i);
+            if (oc < 0) { bad = 1; go = 0; }
+            else { if (oc > 255) { bad = 1; go = 0; }
+            else {
+                packed = packed | (oc << (count * 8));
+                count = count + 1;
+                seg = i + 1;
+                if (atend == 1) { go = 0; } else { i = i + 1; }
+            } }
+        } else { i = i + 1; }
+    }
+    if (bad != 0) { return 0 - 1; }
+    if (count != 4) { return 0 - 1; }
+    return packed;
+}
+
+# Parse an operator endpoint string buf[0, len) into a packed addr
+# (*out_addr) + host-order port (*out_port). Accepts:
+#   "A.B.C.D:PORT"  — explicit host
+#   "PORT"          — bare port, host defaults to 127.0.0.1 (co-located MUD)
+# Leading/trailing whitespace + CR/LF are trimmed. Returns 0 on success,
+# 1 on any parse failure. Pure.
+fn descent_parse_endpoint(buf, len, out_addr, out_port): i64 {
+    var s = 0;
+    var e = len;
+    # trim leading whitespace
+    var tl = 1;
+    while (tl == 1) {
+        if (s >= e) { tl = 0; }
+        else {
+            var lc = load8(buf + s) & 0xFF;
+            if (lc == 32) { s = s + 1; } else { if (lc == 9) { s = s + 1; } else { tl = 0; } }
+        }
+    }
+    # trim trailing whitespace + CR/LF
+    var tr = 1;
+    while (tr == 1) {
+        if (e <= s) { tr = 0; }
+        else {
+            var rc = load8(buf + e - 1) & 0xFF;
+            if (rc == 10) { e = e - 1; }
+            else { if (rc == 13) { e = e - 1; }
+            else { if (rc == 32) { e = e - 1; }
+            else { if (rc == 9) { e = e - 1; }
+            else { tr = 0; } } } }
+        }
+    }
+    if (e <= s) { return 1; }
+    # locate ':'
+    var colon = 0 - 1;
+    var ci = s;
+    var fc = 1;
+    while (fc == 1) {
+        if (ci >= e) { fc = 0; }
+        else { if ((load8(buf + ci) & 0xFF) == 58) { colon = ci; fc = 0; } else { ci = ci + 1; } }
+    }
+    var addr = 0x0100007F;       # 127.0.0.1 default (bare-port form)
+    var pstart = s;
+    if (colon >= 0) {
+        var ip = descent_parse_ipv4(buf, s, colon);
+        if (ip < 0) { return 1; }
+        addr = ip;
+        pstart = colon + 1;
+    }
+    var port = descent_dec(buf, pstart, e);
+    if (port < 1) { return 1; }
+    if (port > 65535) { return 1; }
+    store64(out_addr, addr);
+    store64(out_port, port);
+    return 0;
+}
+
+# Build "<store>/.descent" into out (cstring). Returns the length.
+fn descent_cfg_path(store, out): i64 {
+    var sl = strlen(store);
+    memcpy(out, store, sl);
+    memcpy(out + sl, "/.descent", 9);
+    store8(out + sl + 9, 0);
+    return sl + 9;
+}
+
+# The transparent shuttle. poll(2) both the client fd (cfd) and the MUD
+# fd (mfd) for POLLIN; forward whatever arrives to the other side via the
+# full-write send_buf. Returns when either side closes, errors, or the
+# session sits silent past DESCENT_IDLE_MS (slowloris bound — a live MUD
+# pushes ticks, so genuine play resets the idle counter constantly).
+#
+# pollfd layout (matches net_connect_nb): { i32 fd; i16 events; i16 revents }
+# = 8 bytes; two entries = 16 bytes. poll = syscall 7 on x86_64 Linux
+# (same convention the existing net_connect_nb uses).
+fn descent_proxy(cfd, mfd): i64 {
+    var buf  = alloc(DESCENT_PROXY_BUF);
+    var pfds = alloc(16);
+    var idle = 0;
+    var done = 0;
+    while (done == 0) {
+        # (re)arm both pollfds — kernel overwrites revents each call.
+        store32(pfds + 0, cfd);  store16(pfds + 4,  DESCENT_POLLIN); store16(pfds + 6,  0);
+        store32(pfds + 8, mfd);  store16(pfds + 12, DESCENT_POLLIN); store16(pfds + 14, 0);
+        var pr = syscall(7, pfds, 2, DESCENT_POLL_MS);
+        if (pr < 0) { done = 1; }
+        else { if (pr == 0) {
+            idle = idle + DESCENT_POLL_MS;
+            if (idle >= DESCENT_IDLE_MS) {
+                send_str(cfd, "\r\n(idle — leaving the Descent)\r\n");
+                done = 1;
+            }
+        } else {
+            idle = 0;
+            var cre = load16(pfds + 6)  & 0xFFFF;
+            var mre = load16(pfds + 14) & 0xFFFF;
+            # client → MUD
+            if ((cre & DESCENT_POLLIN) != 0) {
+                var cn = sys_read(cfd, buf, DESCENT_PROXY_BUF);
+                if (cn <= 0) { done = 1; }
+                else { if (send_buf(mfd, buf, cn) != 0) { done = 1; } }
+            }
+            # MUD → client
+            if (done == 0) {
+                if ((mre & DESCENT_POLLIN) != 0) {
+                    var mn = sys_read(mfd, buf, DESCENT_PROXY_BUF);
+                    if (mn <= 0) { done = 1; }
+                    else { if (send_buf(cfd, buf, mn) != 0) { done = 1; } }
+                }
+            }
+            # hangup / error on either side
+            if (done == 0) {
+                if ((cre & DESCENT_POLLDEAD) != 0) { done = 1; }
+                if ((mre & DESCENT_POLLDEAD) != 0) { done = 1; }
+            }
+        } }
+    }
+    return 0;
+}
+
+# `descent` verb body: read the operator endpoint, dial it, shuttle, and
+# return to the BBS. All failure paths are soft — they print a line and
+# return 0 (the caller stays in MODE_COMMAND). sess_handle is the bound
+# agora handle (cstring) for the courtesy note; the MUD still logs in.
+fn descent_run(cfd, store, sess_handle): i64 {
+    var path = alloc(DESCENT_PATH_CAP);
+    descent_cfg_path(store, path);
+    var cfg = alloc(DESCENT_CFG_CAP + 1);
+    var n = file_read_all(path, cfg, DESCENT_CFG_CAP);
+    if (n <= 0) {
+        send_str(cfd, "\r\nNo Descent linked.\r\n");
+        send_str(cfd, "(operator: put 'host:port' or a bare port in <store>/.descent)\r\n");
+        return 0;
+    }
+    var ap = alloc(8);
+    var pp = alloc(8);
+    if (descent_parse_endpoint(cfg, n, ap, pp) != 0) {
+        send_str(cfd, "\r\nThe Descent endpoint is misconfigured (expected 'host:port' or a bare port).\r\n");
+        return 0;
+    }
+    var addr = load64(ap);
+    var port = load64(pp);
+
+    var sr = tcp_socket();
+    if (is_ok(sr) == 0) {
+        send_str(cfd, "\r\nCould not open a socket to the Descent.\r\n");
+        return 0;
+    }
+    var mfd = result_unwrap(sr);
+    if (net_connect_nb(mfd, addr, port, DESCENT_CONNECT_MS) != 0) {
+        send_str(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
+        sock_close(mfd);
+        return 0;
+    }
+
+    send_str(cfd, "\r\n-- stepping through the portal into Yeoman's Descent --\r\n");
+    if ((load8(sess_handle) & 0xFF) != 0) {
+        send_str(cfd, "(you are ");
+        send_str(cfd, sess_handle);
+        send_str(cfd, " on agora; the Descent runs its own login — identity hand-off is a future link)\r\n");
+    }
+    send_str(cfd, "\r\n");
+
+    descent_proxy(cfd, mfd);
+
+    sock_close(mfd);
+    send_str(cfd, "\r\n-- back at the agora --\r\n");
+    return 0;
+}
