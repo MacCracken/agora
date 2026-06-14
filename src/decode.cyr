@@ -1,0 +1,721 @@
+# decode.cyr — Decode: the code-breaking door (1.4.1, ADR 0018).
+#
+# A single door whose game is "crack the hidden code from feedback". Two
+# variants share ONE engine:
+#   - Numbers (1.4.1) — classic Mastermind: a 4-long code of colors 1..6,
+#     ten guesses, feedback as exact/present counts (black/white pegs).
+#   - Words   (1.4.2) — Wordle: a 5-letter word, six guesses, the SAME
+#     feedback rendered per-letter (green/yellow/gray).
+#
+# === The signature pattern, a fourth time ===
+#
+# door PRNG -> wager tables (ADR 0013) -> compete() events (ADR 0016) ->
+# DECODE. The pure heart is `decode_classify`: a per-position
+# exact/present classifier over a byte array, symbol-agnostic (digits OR
+# letters), with the duplicate-handling the naive scorer gets wrong. From
+# it both variants derive — Numbers sums the marks into peg counts; Words
+# colors each position by its mark. It is the injected, unit-pinned test
+# seam, exactly like `ol_pick_weighted` / `wager_pick`.
+#
+# === Bite 1 scope (this file, 1.4.1) ===
+#
+# The classify primitive + the generic DG state + the Numbers variant +
+# the full door contract (new/start/render/feed/is_over/save/load/score).
+# The Words variant + the [n]/[w] select screen land in 1.4.2 on this same
+# state; the Handler decrypt lever reuses this engine in 1.4.3 (ADR 0019).
+#
+# The secret is minted once at decode_new from the clock-seeded door PRNG
+# (the player can't reconstruct it; no wager/CSPRNG fairness stake here)
+# and persisted in the solo save — same hidden-state trust model as The
+# Handler's mole. Pure parsing/scoring; main.cyr owns socket I/O.
+#
+# Deps resolved upstream in the main.cyr / test.cyr include chain:
+#   door.cyr — emit_*, door_key, save_put/get_i64, rng_seed/rng_range
+
+# === Constants ===
+
+enum DecodeVariant {
+    DV_NONE    = 0;
+    DV_NUMBERS = 1;   # Mastermind (1.4.1)
+    DV_WORDS   = 2;   # Wordle (1.4.2)
+}
+
+enum DecodeScreen {
+    DSCR_PLAY   = 0;
+    DSCR_OVER   = 1;
+    DSCR_SELECT = 2;  # the [n]/[w] variant picker (1.4.2)
+}
+
+# Per-position mark from decode_classify.
+enum DecodeMark {
+    MK_ABSENT  = 0;   # gray  — symbol not in the code (after exacts/presents)
+    MK_PRESENT = 1;   # yellow — right symbol, wrong position
+    MK_EXACT   = 2;   # green  — right symbol, right position
+}
+
+# Guess-validation reject codes.
+enum DecodeRej {
+    DEC_OK      = 0;
+    DEC_BADLEN  = 1;   # wrong number of symbols
+    DEC_BADSYM  = 2;   # a symbol out of range (Numbers)
+    DEC_BADWORD = 3;   # not in the dictionary (Words, 1.4.2)
+}
+
+# Variant configs + buffer ceilings (sized for the widest variant).
+enum DecodeCfg {
+    DN_LEN    = 4;     # Numbers: code length
+    DN_COLORS = 6;     # Numbers: colors 1..6
+    DN_TRIES  = 10;    # Numbers: guesses allowed
+    DW_LEN     = 5;    # Words: letters
+    DW_SYMBOLS = 26;   # Words: the 26-letter alphabet
+    DW_TRIES   = 6;    # Words: guesses allowed
+    DECODE_CODE_MAX  = 8;    # max code length across variants (row stride)
+    DECODE_TRIES_MAX = 10;   # max guesses across variants (history rows)
+}
+
+# The decode game state. Runtime fields (screen/msg) are NOT serialized.
+enum DG {
+    DG_VARIANT  = 0;
+    DG_LEN      = 8;     # active code length
+    DG_SYMBOLS  = 16;    # active symbol-space size (colors / 26)
+    DG_MAXTRIES = 24;
+    DG_TRIES    = 32;    # guesses made so far
+    DG_OVER     = 40;    # 0 play / 1 cracked (won) / 2 burned (lost)
+    DG_MODE     = 48;    # DOOR_PRACTICE / DOOR_SOLO
+    DG_SEED     = 56;
+    DG_RNG      = 64;    # live seeded PRNG cell (secret generation)
+    DG_WORDID   = 72;    # Words: answer table index (flavor + scoring; 1.4.2)
+    DG_SECRET   = 80;    # ptr -> DECODE_CODE_MAX bytes (hidden code)
+    DG_GUESSES  = 88;    # ptr -> TRIES_MAX * CODE_MAX bytes (guess history)
+    DG_MARKS    = 96;    # ptr -> TRIES_MAX * CODE_MAX bytes (feedback history)
+    # runtime-only (rebuilt on load, never serialized):
+    DG_SCREEN   = 104;
+    DG_MSG      = 112;   # ptr -> 256-byte transient message
+    DG_SIZE     = 120;
+}
+
+# === The classify primitive (the pure heart — ADR 0018) ===
+
+# Classify each guess position against the secret, writing a DecodeMark
+# into out_marks[i]: MK_EXACT (right symbol+position), MK_PRESENT (right
+# symbol, wrong position), or MK_ABSENT. Symbol-agnostic over raw bytes,
+# so Numbers (values 1..6) and Words (letters) share it verbatim.
+#
+# Two passes with a 256-entry symbol tally — the ONLY correct way to score
+# duplicates (the trap a naive scorer fails): pass 1 fixes the exacts and
+# tallies every secret symbol NOT consumed by an exact; pass 2 awards a
+# present to each remaining guess position only while the tally for that
+# symbol lasts. Pure; len must be <= DECODE_CODE_MAX. Unit-pinned.
+fn decode_classify(code, guess, len, out_marks): i64 {
+    var tally = alloc(256);
+    memset(tally, 0, 256);
+    var i = 0;
+    while (i < len) {
+        var s = load8(code + i) & 0xFF;
+        var g = load8(guess + i) & 0xFF;
+        if (s == g) {
+            store8(out_marks + i, MK_EXACT);
+        } else {
+            store8(out_marks + i, MK_ABSENT);
+            store8(tally + s, (load8(tally + s) & 0xFF) + 1);
+        }
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < len) {
+        if ((load8(out_marks + j) & 0xFF) == MK_ABSENT) {
+            var gg = load8(guess + j) & 0xFF;
+            var t = load8(tally + gg) & 0xFF;
+            if (t > 0) {
+                store8(out_marks + j, MK_PRESENT);
+                store8(tally + gg, t - 1);
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# Count marks of a given kind across a feedback row. Pure.
+fn decode_count_mark(marks, len, kind): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < len) {
+        if ((load8(marks + i) & 0xFF) == kind) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn decode_exact(marks, len): i64 {
+    return decode_count_mark(marks, len, MK_EXACT);
+}
+
+fn decode_present(marks, len): i64 {
+    return decode_count_mark(marks, len, MK_PRESENT);
+}
+
+# 1 if every position is exact (the code is cracked). Pure.
+fn decode_solved(marks, len): i64 {
+    if (decode_exact(marks, len) == len) { return 1; }
+    return 0;
+}
+
+# === Numbers variant ===
+
+# Mint a fresh Numbers secret into DG_SECRET from the seeded PRNG: each
+# position an independent color in [1, DN_COLORS] (repeats allowed —
+# classic Mastermind). Replayable from the stored seed.
+fn decode_gen_numbers(st): i64 {
+    var rp = st + DG_RNG;
+    var code = load64(st + DG_SECRET);
+    var i = 0;
+    while (i < DN_LEN) {
+        store8(code + i, rng_range(rp, 1, DN_COLORS));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Configure the state for the Numbers variant and mint its secret.
+fn decode_set_numbers(st): i64 {
+    store64(st + DG_VARIANT,  DV_NUMBERS);
+    store64(st + DG_LEN,      DN_LEN);
+    store64(st + DG_SYMBOLS,  DN_COLORS);
+    store64(st + DG_MAXTRIES, DN_TRIES);
+    store64(st + DG_TRIES,    0);
+    store64(st + DG_OVER,     0);
+    decode_gen_numbers(st);
+    return 0;
+}
+
+# Parse a Numbers guess from line[0..len) into out[0..code_len) as values
+# 1..colors. Accepts spaced ("4 1 6 2") or packed ("4162") digits; any
+# space is a separator. Returns DEC_OK / DEC_BADLEN / DEC_BADSYM. Pure.
+fn decode_parse_numbers(line, len, out, code_len, colors): i64 {
+    var count = 0;
+    var bad = 0;
+    var i = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(line + i) & 0xFF;
+        if (c == 32) { i = i + 1; continue; }     # space separates
+        if (c < 48)  { bad = 1; scanning = 0; continue; }
+        if (c > 57)  { bad = 1; scanning = 0; continue; }
+        var v = c - 48;
+        if (v < 1)      { bad = 1; scanning = 0; continue; }
+        if (v > colors) { bad = 1; scanning = 0; continue; }
+        if (count < code_len) { store8(out + count, v); }
+        count = count + 1;                          # overshoot -> BADLEN
+        i = i + 1;
+    }
+    if (bad == 1)           { return DEC_BADSYM; }
+    if (count != code_len)  { return DEC_BADLEN; }
+    return DEC_OK;
+}
+
+# === Words variant (Wordle, 1.4.2) ===
+#
+# Symbols are lowercase ASCII letters (97..122); the classifier is the same
+# byte-wise scorer. The dictionary (src/decode_words.cyr) is BOTH the answer
+# pool and the valid-guess set.
+
+# Index of a 5-letter lowercased word in the dictionary, or (0 - 1) if absent.
+# `w` points at DW_LEN lowercase bytes. Linear memeq scan — fine at BBS scale.
+fn decode_word_index(w): i64 {
+    var n = decode_word_count();
+    var i = 0;
+    var found = 0 - 1;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= n) { scanning = 0; continue; }
+        if (memeq(decode_word(i), w, DW_LEN) != 0) { found = i; scanning = 0; continue; }
+        i = i + 1;
+    }
+    return found;
+}
+
+# Mint a fresh Words secret: draw a word id from the seeded PRNG and copy its
+# letters into DG_SECRET (lowercase ASCII bytes). Replayable from the seed.
+fn decode_gen_words(st): i64 {
+    var rp = st + DG_RNG;
+    var id = rng_below(rp, decode_word_count());
+    store64(st + DG_WORDID, id);
+    var code = load64(st + DG_SECRET);
+    memcpy(code, decode_word(id), DW_LEN);
+    return 0;
+}
+
+# Configure the state for the Words variant and mint its secret.
+fn decode_set_words(st): i64 {
+    store64(st + DG_VARIANT,  DV_WORDS);
+    store64(st + DG_LEN,      DW_LEN);
+    store64(st + DG_SYMBOLS,  DW_SYMBOLS);
+    store64(st + DG_MAXTRIES, DW_TRIES);
+    store64(st + DG_TRIES,    0);
+    store64(st + DG_OVER,     0);
+    decode_gen_words(st);
+    return 0;
+}
+
+# Parse a Words guess from line[0..len) into out[0..DW_LEN) as lowercase ASCII
+# letters. Skips leading/trailing spaces; an interior space or non-letter is a
+# reject. Returns DEC_OK / DEC_BADLEN (not 5 letters) / DEC_BADWORD (not in the
+# dictionary). Pure.
+fn decode_parse_words(line, len, out): i64 {
+    var count = 0;
+    var bad = 0;
+    var i = 0;
+    # skip leading spaces
+    var lead = 1;
+    while (lead == 1) {
+        if (i >= len) { lead = 0; continue; }
+        if ((load8(line + i) & 0xFF) == 32) { i = i + 1; continue; }
+        lead = 0;
+    }
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        var c = load8(line + i) & 0xFF;
+        if (c == 32)  { scanning = 0; continue; }       # a space ends the word
+        if (c == 13)  { scanning = 0; continue; }       # CR ends it
+        if (c == 10)  { scanning = 0; continue; }       # LF ends it
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }   # A-Z -> a-z
+        if (c < 97)  { bad = 1; scanning = 0; continue; }
+        if (c > 122) { bad = 1; scanning = 0; continue; }
+        if (count < DW_LEN) { store8(out + count, c); }
+        count = count + 1;
+        i = i + 1;
+    }
+    if (bad == 1)         { return DEC_BADWORD; }       # non-letter junk
+    if (count != DW_LEN)  { return DEC_BADLEN; }
+    if (decode_word_index(out) < 0) { return DEC_BADWORD; }
+    return DEC_OK;
+}
+
+# === Guess commit (variant-agnostic) ===
+
+# Record a validated guess (guessbuf[0..DG_LEN)) into the history, classify
+# it, advance the try counter, and set the over/screen state on a crack or
+# an exhausted board. Pure (no I/O).
+fn decode_commit_guess(st, guessbuf): i64 {
+    var len   = load64(st + DG_LEN);
+    var tries = load64(st + DG_TRIES);
+    var maxt  = load64(st + DG_MAXTRIES);
+    var grow = load64(st + DG_GUESSES) + tries * DECODE_CODE_MAX;
+    var mrow = load64(st + DG_MARKS)   + tries * DECODE_CODE_MAX;
+    memcpy(grow, guessbuf, len);
+    decode_classify(load64(st + DG_SECRET), grow, len, mrow);
+    store64(st + DG_TRIES, tries + 1);
+    if (decode_solved(mrow, len) == 1) {
+        store64(st + DG_OVER, 1);
+        store64(st + DG_SCREEN, DSCR_OVER);
+    } else {
+        if (tries + 1 >= maxt) {
+            store64(st + DG_OVER, 2);
+            store64(st + DG_SCREEN, DSCR_OVER);
+        }
+    }
+    return 0;
+}
+
+# === Construction ===
+
+fn decode_msg(st, s): i64 {
+    var m = load64(st + DG_MSG);
+    var n = strlen(s);
+    if (n > 255) { n = 255; }
+    memcpy(m, s, n);
+    store8(m + n, 0);
+    return 0;
+}
+
+# Build a new decode game. Opens on the [n]/[w] variant-select screen (1.4.2);
+# the secret is minted when the player picks. Allocates the secret/history
+# buffers at the widest variant's ceiling so the variant choice needs no
+# realloc. (1.4.1 opened straight into Numbers; the select screen generalizes
+# it without changing the door contract.)
+fn decode_new(seed, mode): i64 {
+    var st = alloc(DG_SIZE);
+    memset(st, 0, DG_SIZE);
+    store64(st + DG_SEED, seed);
+    rng_seed(st + DG_RNG, seed);
+    store64(st + DG_MODE, mode);
+    store64(st + DG_VARIANT, DV_NONE);
+    store64(st + DG_WORDID, 0);
+    store64(st + DG_SECRET,  alloc(DECODE_CODE_MAX));
+    store64(st + DG_GUESSES, alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
+    store64(st + DG_MARKS,   alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
+    store64(st + DG_MSG, alloc(256));
+    store8(load64(st + DG_MSG), 0);
+    store64(st + DG_SCREEN, DSCR_SELECT);
+    return st;
+}
+
+# Door-contract start hook: a fresh game sits on the select screen until the
+# player picks a variant; a loaded game already has its variant + secret, so
+# there is nothing extra to wire (kept for dispatch symmetry).
+fn decode_start(st): i64 {
+    return 0;
+}
+
+# === Door contract ===
+
+fn decode_is_over(st): i64 {
+    if (load64(st + DG_OVER) != 0) { return 1; }
+    return 0;
+}
+
+# Leaderboard score: only a crack scores. Fewer guesses -> higher. Words is
+# the harder variant (a 26-letter alphabet, only six tries) so a Words crack
+# carries a flat difficulty bonus on top. Pure.
+fn decode_final_score(st): i64 {
+    if (load64(st + DG_OVER) != 1) { return 0; }
+    var maxt  = load64(st + DG_MAXTRIES);
+    var tries = load64(st + DG_TRIES);
+    var base = (maxt - tries + 1) * 100;
+    if (load64(st + DG_VARIANT) == DV_WORDS) { base = base + 200; }
+    return base;
+}
+
+fn decode_rank(score): i64 {
+    if (score >= 900) { return "Cryptanalyst"; }
+    if (score >= 600) { return "Codebreaker"; }
+    if (score >= 300) { return "Cipher Clerk"; }
+    if (score > 0)    { return "Cadet"; }
+    return "Washed Out";
+}
+
+# === Render ===
+
+fn decode_render_msg(st, buf, pos): i64 {
+    var msg = load64(st + DG_MSG);
+    if ((load8(msg) & 0xFF) != 0) {
+        pos = emit_sgr(buf, pos, 32);
+        pos = emit_cstr(buf, pos, "> ");
+        pos = emit_cstr(buf, pos, msg);
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
+# Emit a Numbers guess row's digits, space-separated.
+fn decode_emit_digits(buf, pos, row, len): i64 {
+    var j = 0;
+    while (j < len) {
+        pos = emit_int(buf, pos, load8(row + j) & 0xFF);
+        if (j + 1 < len) { store8(buf + pos, 32); pos = pos + 1; }
+        j = j + 1;
+    }
+    return pos;
+}
+
+# Emit a Words guess row: each letter UPPERCASED + colored by its mark
+# (green = exact / yellow = present / gray = absent), space-separated.
+fn decode_emit_word_row(buf, pos, grow, mrow, len): i64 {
+    var j = 0;
+    while (j < len) {
+        var mk = load8(mrow + j) & 0xFF;
+        var code = 90;                          # absent -> gray (bright black)
+        if (mk == MK_PRESENT) { code = 33; }    # present -> yellow
+        if (mk == MK_EXACT)   { code = 32; }    # exact -> green
+        pos = emit_sgr(buf, pos, code);
+        var ch = load8(grow + j) & 0xFF;
+        if (ch >= 97) { if (ch <= 122) { ch = ch - 32; } }   # to uppercase
+        store8(buf + pos, ch); pos = pos + 1;
+        pos = emit_reset(buf, pos);
+        if (j + 1 < len) { store8(buf + pos, 32); pos = pos + 1; }
+        j = j + 1;
+    }
+    return pos;
+}
+
+# Reveal the secret on a burn: Words -> the uppercased word, Numbers -> digits.
+fn decode_emit_secret(st, buf, pos): i64 {
+    var sec = load64(st + DG_SECRET);
+    var len = load64(st + DG_LEN);
+    if (load64(st + DG_VARIANT) == DV_WORDS) {
+        var z = 0;
+        while (z < len) {
+            var ch = load8(sec + z) & 0xFF;
+            if (ch >= 97) { if (ch <= 122) { ch = ch - 32; } }
+            store8(buf + pos, ch); pos = pos + 1;
+            z = z + 1;
+        }
+        return pos;
+    }
+    return decode_emit_digits(buf, pos, sec, len);
+}
+
+fn decode_render(st, buf, cap): i64 {
+    var pos = 0;
+    var screen  = load64(st + DG_SCREEN);
+    var variant = load64(st + DG_VARIANT);
+
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "== DECODE ==");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+
+    # The [n]/[w] variant picker (a fresh game opens here).
+    if (screen == DSCR_SELECT) {
+        pos = emit_cstr(buf, pos, "Crack the hidden code from its feedback.");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  [n] Numbers -- a 4-digit code, digits 1-6 (Mastermind)");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "  [w] Words   -- a 5-letter word (Wordle)");
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Pick a variant, or [q]uit.");
+        pos = emit_crlf(buf, pos);
+        pos = decode_render_msg(st, buf, pos);
+        return pos;
+    }
+
+    var len   = load64(st + DG_LEN);
+    var maxt  = load64(st + DG_MAXTRIES);
+    var tries = load64(st + DG_TRIES);
+    var over  = load64(st + DG_OVER);
+
+    if (variant == DV_WORDS) {
+        pos = emit_cstr(buf, pos, "WORDS -- crack the hidden 5-letter word. (");
+        pos = emit_sgr(buf, pos, 32); pos = emit_cstr(buf, pos, "green"); pos = emit_reset(buf, pos);
+        pos = emit_cstr(buf, pos, "=spot ");
+        pos = emit_sgr(buf, pos, 33); pos = emit_cstr(buf, pos, "yellow"); pos = emit_reset(buf, pos);
+        pos = emit_cstr(buf, pos, "=in word ");
+        pos = emit_sgr(buf, pos, 90); pos = emit_cstr(buf, pos, "gray"); pos = emit_reset(buf, pos);
+        pos = emit_cstr(buf, pos, "=absent)");
+        pos = emit_crlf(buf, pos);
+    } else {
+        pos = emit_cstr(buf, pos, "NUMBERS -- crack the ");
+        pos = emit_int(buf, pos, len);
+        pos = emit_cstr(buf, pos, "-digit code, each digit 1-");
+        pos = emit_int(buf, pos, load64(st + DG_SYMBOLS));
+        pos = emit_cstr(buf, pos, ", repeats allowed.");
+        pos = emit_crlf(buf, pos);
+    }
+
+    var i = 0;
+    while (i < tries) {
+        var grow = load64(st + DG_GUESSES) + i * DECODE_CODE_MAX;
+        var mrow = load64(st + DG_MARKS)   + i * DECODE_CODE_MAX;
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, i + 1);
+        if (i + 1 < 10) { pos = emit_cstr(buf, pos, " ) "); }
+        else            { pos = emit_cstr(buf, pos, ") "); }
+        if (variant == DV_WORDS) {
+            pos = decode_emit_word_row(buf, pos, grow, mrow, len);
+        } else {
+            pos = decode_emit_digits(buf, pos, grow, len);
+            pos = emit_cstr(buf, pos, "   [");
+            pos = emit_int(buf, pos, decode_exact(mrow, len));
+            pos = emit_cstr(buf, pos, " exact, ");
+            pos = emit_int(buf, pos, decode_present(mrow, len));
+            pos = emit_cstr(buf, pos, " present]");
+        }
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+
+    if (over == 1) {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "-- CRACKED in ");
+        pos = emit_int(buf, pos, tries);
+        pos = emit_cstr(buf, pos, " --  ");
+        pos = emit_cstr(buf, pos, decode_rank(decode_final_score(st)));
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        pos = decode_render_msg(st, buf, pos);
+        return pos;
+    }
+    if (over == 2) {
+        pos = emit_sgr(buf, pos, 31);
+        pos = emit_cstr(buf, pos, "-- BURNED. The answer was ");
+        pos = decode_emit_secret(st, buf, pos);
+        pos = emit_cstr(buf, pos, " --");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "Press Enter to leave.");
+        pos = emit_crlf(buf, pos);
+        pos = decode_render_msg(st, buf, pos);
+        return pos;
+    }
+
+    pos = emit_cstr(buf, pos, "Guesses left: ");
+    pos = emit_int(buf, pos, maxt - tries);
+    pos = emit_crlf(buf, pos);
+    if (variant == DV_WORDS) {
+        pos = emit_cstr(buf, pos, "Enter a 5-letter word, or [q]uit.");
+    } else {
+        pos = emit_cstr(buf, pos, "Enter a guess (e.g. 1 2 3 4), or [q]uit.");
+    }
+    pos = emit_crlf(buf, pos);
+    pos = decode_render_msg(st, buf, pos);
+    return pos;
+}
+
+# === Feed ===
+
+# 1 if the line is a lone "q"/"Q" (the quit key) — i.e. a single q with only
+# spaces / CR / LF around it. This is the quit test rather than "first char is
+# q", because Words guesses like QUEEN / QUICK / QUIET / QUITE start with q and
+# must NOT be read as quit. Pure.
+fn decode_is_lone_q(line, len): i64 {
+    var i = 0;
+    var s1 = 1;
+    while (s1 == 1) {
+        if (i >= len) { s1 = 0; continue; }
+        if ((load8(line + i) & 0xFF) == 32) { i = i + 1; continue; }
+        s1 = 0;
+    }
+    if (i >= len) { return 0; }
+    var c = load8(line + i) & 0xFF;
+    if (c != 113) { if (c != 81) { return 0; } }   # not q/Q
+    i = i + 1;
+    var ok = 1;
+    var s2 = 1;
+    while (s2 == 1) {
+        if (i >= len) { s2 = 0; continue; }
+        var d = load8(line + i) & 0xFF;
+        if (d == 32) { i = i + 1; continue; }
+        if (d == 13) { i = i + 1; continue; }
+        if (d == 10) { i = i + 1; continue; }
+        ok = 0; s2 = 0;
+    }
+    return ok;
+}
+
+# Consume one input line. Returns 0 to stay in the door, 1 to exit. On the
+# over screen any line leaves; a lone 'q' quits from select or play; on the
+# select screen 'n'/'w' pick the variant; otherwise the line is parsed as a
+# guess for the active variant (a reject just messages and stays).
+fn decode_feed(st, line, len): i64 {
+    decode_msg(st, "");
+    if (load64(st + DG_OVER) != 0) { return 1; }
+    if (decode_is_lone_q(line, len) == 1) { return 1; }
+
+    var screen = load64(st + DG_SCREEN);
+    if (screen == DSCR_SELECT) {
+        var sk = door_key(line, len);
+        if (sk == 110) { decode_set_numbers(st); store64(st + DG_SCREEN, DSCR_PLAY); return 0; }   # n
+        if (sk == 119) { decode_set_words(st);   store64(st + DG_SCREEN, DSCR_PLAY); return 0; }   # w
+        decode_msg(st, "Pick [n] Numbers or [w] Words.");
+        return 0;
+    }
+
+    var guessbuf = alloc(DECODE_CODE_MAX);
+    if (load64(st + DG_VARIANT) == DV_WORDS) {
+        var rcw = decode_parse_words(line, len, guessbuf);
+        if (rcw == DEC_BADLEN)  { decode_msg(st, "Enter a 5-letter word."); return 0; }
+        if (rcw == DEC_BADWORD) { decode_msg(st, "Not in the word list -- try another."); return 0; }
+        decode_commit_guess(st, guessbuf);
+        return 0;
+    }
+
+    var rc = decode_parse_numbers(line, len, guessbuf,
+                                  load64(st + DG_LEN), load64(st + DG_SYMBOLS));
+    if (rc == DEC_BADLEN) {
+        var m = load64(st + DG_MSG);
+        var p = 0;
+        p = emit_cstr(m, p, "Enter exactly ");
+        p = emit_int(m, p, load64(st + DG_LEN));
+        p = emit_cstr(m, p, " digits.");
+        store8(m + p, 0);
+        return 0;
+    }
+    if (rc == DEC_BADSYM) {
+        var m2 = load64(st + DG_MSG);
+        var p2 = 0;
+        p2 = emit_cstr(m2, p2, "Each digit must be 1-");
+        p2 = emit_int(m2, p2, load64(st + DG_SYMBOLS));
+        p2 = emit_cstr(m2, p2, ".");
+        store8(m2 + p2, 0);
+        return 0;
+    }
+    decode_commit_guess(st, guessbuf);
+    return 0;
+}
+
+# === Persistence (solo save) ===
+#
+# Positional i64 save, header "DECO1". Config + seed/rng + secret bytes +
+# each played guess row (one i64 per byte). Marks are NOT stored — they are
+# recomputed from secret+guess on load (decode_classify is the single
+# source of truth, so a save can never carry stale feedback). Runtime
+# fields (screen/msg) are rebuilt.
+
+fn decode_save_format(st, buf, cap): i64 {
+    memcpy(buf, "DECO1\n", 6);
+    var pos = 6;
+    pos = save_put_i64(buf, pos, load64(st + DG_VARIANT));
+    pos = save_put_i64(buf, pos, load64(st + DG_LEN));
+    pos = save_put_i64(buf, pos, load64(st + DG_SYMBOLS));
+    pos = save_put_i64(buf, pos, load64(st + DG_MAXTRIES));
+    pos = save_put_i64(buf, pos, load64(st + DG_TRIES));
+    pos = save_put_i64(buf, pos, load64(st + DG_OVER));
+    pos = save_put_i64(buf, pos, load64(st + DG_MODE));
+    pos = save_put_i64(buf, pos, load64(st + DG_SEED));
+    pos = save_put_i64(buf, pos, load64(st + DG_RNG));
+    pos = save_put_i64(buf, pos, load64(st + DG_WORDID));
+    var len = load64(st + DG_LEN);
+    var sec = load64(st + DG_SECRET);
+    var i = 0;
+    while (i < len) { pos = save_put_i64(buf, pos, load8(sec + i) & 0xFF); i = i + 1; }
+    var tries = load64(st + DG_TRIES);
+    var t = 0;
+    while (t < tries) {
+        var grow = load64(st + DG_GUESSES) + t * DECODE_CODE_MAX;
+        var j = 0;
+        while (j < len) { pos = save_put_i64(buf, pos, load8(grow + j) & 0xFF); j = j + 1; }
+        t = t + 1;
+    }
+    return pos;
+}
+
+# Parse a saved game. Builds a fresh state (allocating the runtime scratch)
+# then overwrites the persisted fields and recomputes the feedback. Returns
+# the state, or 0 on a bad header. Lengths/counts are clamped to ceilings.
+fn decode_load_parse(buf, len): i64 {
+    if (len < 6) { return 0; }
+    if (memeq(buf, "DECO1\n", 6) == 0) { return 0; }
+    var st = decode_new(0, DOOR_SOLO);
+    var cur = alloc(8);
+    store64(cur, 6);
+    store64(st + DG_VARIANT,  save_get_i64(buf, len, cur));
+    store64(st + DG_LEN,      save_get_i64(buf, len, cur));
+    store64(st + DG_SYMBOLS,  save_get_i64(buf, len, cur));
+    store64(st + DG_MAXTRIES, save_get_i64(buf, len, cur));
+    var tries = save_get_i64(buf, len, cur);
+    store64(st + DG_OVER,     save_get_i64(buf, len, cur));
+    store64(st + DG_MODE,     save_get_i64(buf, len, cur));
+    store64(st + DG_SEED,     save_get_i64(buf, len, cur));
+    store64(st + DG_RNG,      save_get_i64(buf, len, cur));
+    store64(st + DG_WORDID,   save_get_i64(buf, len, cur));
+
+    var clen = load64(st + DG_LEN);
+    if (clen < 1)               { clen = 1; }
+    if (clen > DECODE_CODE_MAX)  { clen = DECODE_CODE_MAX; }
+    store64(st + DG_LEN, clen);
+    var sec = load64(st + DG_SECRET);
+    var i = 0;
+    while (i < clen) { store8(sec + i, save_get_i64(buf, len, cur)); i = i + 1; }
+
+    if (tries < 0)                 { tries = 0; }
+    if (tries > DECODE_TRIES_MAX)  { tries = DECODE_TRIES_MAX; }
+    store64(st + DG_TRIES, tries);
+    var t = 0;
+    while (t < tries) {
+        var grow = load64(st + DG_GUESSES) + t * DECODE_CODE_MAX;
+        var mrow = load64(st + DG_MARKS)   + t * DECODE_CODE_MAX;
+        var j = 0;
+        while (j < clen) { store8(grow + j, save_get_i64(buf, len, cur)); j = j + 1; }
+        decode_classify(sec, grow, clen, mrow);
+        t = t + 1;
+    }
+    if (load64(st + DG_OVER) != 0) { store64(st + DG_SCREEN, DSCR_OVER); }
+    else                           { store64(st + DG_SCREEN, DSCR_PLAY); }
+    return st;
+}

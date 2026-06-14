@@ -21,6 +21,8 @@ include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
 include "src/wager.cyr"
+include "src/decode_words.cyr"
+include "src/decode.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
@@ -177,7 +179,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.4.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link");
+    println("v1.4.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -355,7 +357,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
         send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes  [practice|solo|universe]\r\n");
+        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes | decode  [practice|solo|universe]\r\n");
         send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
         send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_str(cfd, "  descent         step through the portal into the Yeoman's Descent MUD\r\n");
@@ -728,7 +730,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad|ashes> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad|ashes|decode> [practice|solo]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -762,8 +764,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(gbuf, "jabberwacky") != 0) { game = GAME_JABBER; }
         if (streq(gbuf, "olympiad") != 0) { game = GAME_OLYMPIAD; }
         if (streq(gbuf, "ashes") != 0)    { game = GAME_ASHES; }
+        if (streq(gbuf, "decode") != 0)   { game = GAME_DECODE; }
         if (game == GAME_NONE) {
-            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes\r\n");
+            send_str(cfd, "unknown game. try: play smuggler | port | handler | eliza | parry | quest | jabberwacky | olympiad | ashes | decode\r\n");
             return MODE_COMMAND;
         }
         var dmode = DOOR_PRACTICE;
@@ -788,6 +791,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # stable persists across sessions) but has no Universe — coerce a
         # `universe` request to solo so it never hits the unwired branch.
         if (game == GAME_OLYMPIAD) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
+        # 1.4.1 (ADR 0018): Decode is a solo/practice code-breaking door — no
+        # shared world. Coerce a `universe` request to solo so it never hits
+        # the unwired DOOR_UNIVERSE branch (same guard as QUEST/Olympiad).
+        if (game == GAME_DECODE)   { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
         # 1.3.7 (ADR 0014): Ashes of Empire is inherently a shared world — the
         # map IS the game. There is no solo/practice; force universe so every
         # session runs the flock'd world transaction.
@@ -869,6 +876,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (game == GAME_QUEST)    { g_door_state = qu_load_parse(lbuf, ln); }
                     if (game == GAME_JABBER)   { g_door_state = jw_load_parse(lbuf, ln); }
                     if (game == GAME_OLYMPIAD) { g_door_state = ol_load_parse(lbuf, ln); }
+                    if (game == GAME_DECODE)   { g_door_state = decode_load_parse(lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
             }
@@ -882,6 +890,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (game == GAME_QUEST)    { g_door_state = qu_new(seed, dmode, 0); }
             if (game == GAME_JABBER)   { g_door_state = jw_new(seed, dmode, JW_DEF_DAYS); }
             if (game == GAME_OLYMPIAD) { g_door_state = ol_new(seed, dmode); }
+            if (game == GAME_DECODE)   { g_door_state = decode_new(seed, dmode); }
         }
         if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
         if (game == GAME_PORT)     { pa_start(g_door_state); }
@@ -890,6 +899,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (game == GAME_PARRY)    { py_start(g_door_state); }
         if (game == GAME_QUEST)    { qu_start(g_door_state); }
         if (game == GAME_JABBER)   { jw_start(g_door_state); }
+        if (game == GAME_DECODE)   { decode_start(g_door_state); }
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -910,7 +920,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var scgl = scsp - scgs;
         if (scgl <= 0) {
-            send_str(cfd, "usage: scores <smuggler|port|handler|quest|olympiad|ashes>\r\n");
+            send_str(cfd, "usage: scores <smuggler|port|handler|quest|olympiad|ashes|decode>\r\n");
             return MODE_COMMAND;
         }
         if (scgl > 15) { scgl = 15; }
@@ -924,8 +934,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (streq(scgb, "quest") != 0)    { scgame = GAME_QUEST; }
         if (streq(scgb, "olympiad") != 0) { scgame = GAME_OLYMPIAD; }
         if (streq(scgb, "ashes") != 0)    { scgame = GAME_ASHES; }
+        if (streq(scgb, "decode") != 0)   { scgame = GAME_DECODE; }
         if (scgame == GAME_NONE) {
-            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest | olympiad | ashes\r\n");
+            send_str(cfd, "unknown game. try: scores smuggler | port | handler | quest | olympiad | ashes | decode\r\n");
             return MODE_COMMAND;
         }
         door_render_leaderboard(cfd, scgame);
@@ -1039,6 +1050,7 @@ fn door_game_name(game): i64 {
     if (game == GAME_JABBER)   { return "jabberwacky"; }
     if (game == GAME_OLYMPIAD) { return "olympiad"; }
     if (game == GAME_ASHES)    { return "ashes"; }
+    if (game == GAME_DECODE)   { return "decode"; }
     return "game";
 }
 
@@ -1304,6 +1316,7 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_JABBER)   { n = jw_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_OLYMPIAD) { n = ol_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_ASHES)    { n = ash_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    if (g_door_game == GAME_DECODE)   { n = decode_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1321,6 +1334,7 @@ fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_game == GAME_QUEST)    { return qu_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_JABBER)   { return jw_feed(g_door_state, line, line_len); }
     if (g_door_game == GAME_OLYMPIAD) { return ol_feed(g_door_state, line, line_len); }
+    if (g_door_game == GAME_DECODE)   { return decode_feed(g_door_state, line, line_len); }
     return 1;
 }
 
@@ -1332,6 +1346,7 @@ fn door_is_over(): i64 {
     if (g_door_game == GAME_JABBER)   { return jw_is_over(g_door_state); }
     if (g_door_game == GAME_OLYMPIAD) { return ol_is_over(g_door_state); }
     if (g_door_game == GAME_ASHES)    { return ash_is_over(g_door_state); }
+    if (g_door_game == GAME_DECODE)   { return decode_is_over(g_door_state); }
     return 0;
 }
 
@@ -1393,6 +1408,7 @@ fn door_post_score(game): i64 {
     if (game == GAME_QUEST)    { score = qu_final_score(g_door_state);  rank = qu_rank(score); }
     if (game == GAME_OLYMPIAD) { score = ol_final_score(g_door_state);  rank = ol_rank(score); }
     if (game == GAME_ASHES)    { score = ash_final_score(g_door_state); rank = ash_rank(score); }
+    if (game == GAME_DECODE)   { score = decode_final_score(g_door_state); rank = decode_rank(score); }
     var path = alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var line = alloc(256);
@@ -1492,6 +1508,7 @@ fn door_save_on_exit(cfd): i64 {
                 if (g_door_game == GAME_QUEST)    { n = qu_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_JABBER)   { n = jw_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (g_door_game == GAME_OLYMPIAD) { n = ol_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+                if (g_door_game == GAME_DECODE)   { n = decode_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
                 if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
             }
         }
@@ -1597,7 +1614,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.4.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.4.3 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2721,7 +2738,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.4.0");
+    println("agora 1.4.3");
     return 0;
 }
 

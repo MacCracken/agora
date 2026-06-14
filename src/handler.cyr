@@ -99,7 +99,11 @@ enum TH {
     TH_MSG      = 136;
     TH_LASTBURN = 144;   # agents burned on the most recent day rollover
     TH_WORLD    = 152;   # 1.2.0 Universe (ADR 0010 bite 4): ptr → shared city-alert snapshot (0 = solo)
-    TH_SIZE     = 160;
+    # 1.4.3 (ADR 0019): the decode decrypt lever — all runtime-only, NOT serialized.
+    TH_DECODE   = 160;   # ptr → an active decode game during a crack (0 = not decrypting)
+    TH_CRACKED  = 168;   # ptr → TH_REG_MAX-byte runtime bitset of cracked cables
+    TH_DECRI    = 176;   # registry index of the cable being decrypted (-1 = none)
+    TH_SIZE     = 184;
 }
 
 # === Tables ===
@@ -310,6 +314,7 @@ enum HScreen {
     HSCR_FUNDAMT  = 8;
     HSCR_ACCUSE   = 9;    # name the mole
     HSCR_OVER     = 10;
+    HSCR_DECRYPT  = 11;   # 1.4.3 (ADR 0019): a decode round breaking a cable's cipher
 }
 
 enum THCost {
@@ -709,6 +714,13 @@ fn th_start(st): i64 {
     store64(st + TH_MSG, alloc(256));
     store8(load64(st + TH_MSG), 0);
     store64(st + TH_SCREEN, HSCR_MAIN);
+    # 1.4.3: the decrypt lever's runtime scratch. The cracked bitset is
+    # per-session (reset here, not serialized) — a reload re-locks the
+    # ciphers, but the verdict is re-derivable by cracking again.
+    store64(st + TH_DECODE, 0);
+    store64(st + TH_DECRI, 0 - 1);
+    store64(st + TH_CRACKED, alloc(TH_REG_MAX));
+    memset(load64(st + TH_CRACKED), 0, TH_REG_MAX);
     if (load64(st + TH_REGCOUNT) == 0) { th_gen_day(st); }
     if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); }
     return 0;
@@ -831,9 +843,107 @@ fn th_render_cable(st, buf, pos, cb): i64 {
     return pos;
 }
 
+# === 1.4.3 — the decode decrypt lever (ADR 0019) ===
+#
+# At the desk, the section chief breaks an intercepted cipher to read whether
+# a cable's routing is a DELIBERATE PLANT (the mole's forged metadata) or mere
+# clerical NOISE (an honest agent's false positive) — the one fact the cable
+# UI never shows (CB_ANOM, hidden ground truth). It reuses the decode engine
+# verbatim: a Numbers code for paperwork, a Words codename for intercepts. The
+# crack costs a dispatch point, so it can't be brute-forced across every cable
+# (which would trivialize the mole hunt) — it is a scarce, skill-gated probe.
+
+# Per-cable cracked flag (runtime bitset, one byte per registry slot).
+fn th_cracked_get(st, ri): i64 {
+    if (ri < 0)            { return 0; }
+    if (ri >= TH_REG_MAX)  { return 0; }
+    return load8(load64(st + TH_CRACKED) + ri) & 0xFF;
+}
+
+fn th_cracked_set(st, ri): i64 {
+    if (ri < 0)            { return 0; }
+    if (ri >= TH_REG_MAX)  { return 0; }
+    store8(load64(st + TH_CRACKED) + ri, 1);
+    return 0;
+}
+
+# Derive a DETERMINISTIC (variant, secret) for a cable's cipher from its own
+# fields (NR / agent / day / kind) — so the same cable always presents the
+# same crackable code (replayable, not a fresh random each open). Intercepts
+# get a Words codename; everything else a Numbers relay code. Writes the secret
+# (DECODE_CODE_MAX bytes) and returns the variant. Pure.
+fn th_cipher_for_cable(cb, out_secret): i64 {
+    var mix = load64(cb + CB_NR) * 131 + load64(cb + CB_AGENT) * 17
+            + load64(cb + CB_DAY) * 7 + load64(cb + CB_KIND) + 1;
+    var cell = alloc(8);
+    rng_seed(cell, mix);
+    if (load64(cb + CB_KIND) == 2) {                     # intercept -> Words
+        var id = rng_below(cell, decode_word_count());
+        memcpy(out_secret, decode_word(id), DW_LEN);
+        return DV_WORDS;
+    }
+    var i = 0;                                           # else -> Numbers
+    while (i < DN_LEN) {
+        store8(out_secret + i, rng_range(cell, 1, DN_COLORS));
+        i = i + 1;
+    }
+    return DV_NUMBERS;
+}
+
+# Stand up a decode round pinned to cable ri's derived cipher and switch to the
+# decrypt screen. Caller has already charged the dispatch point.
+fn th_begin_decrypt(st, ri): i64 {
+    var cb = th_cable_at(st, ri);
+    var sec = alloc(DECODE_CODE_MAX);
+    var variant = th_cipher_for_cable(cb, sec);
+    var dg = decode_new(clock_now_ns(), DOOR_PRACTICE);
+    if (variant == DV_WORDS) { decode_set_words(dg); }
+    else                     { decode_set_numbers(dg); }
+    memcpy(load64(dg + DG_SECRET), sec, load64(dg + DG_LEN));   # pin to the cable's code
+    store64(dg + DG_SCREEN, DSCR_PLAY);
+    store64(st + TH_DECODE, dg);
+    store64(st + TH_DECRI, ri);
+    store64(st + TH_SCREEN, HSCR_DECRYPT);
+    return 0;
+}
+
+# A successful crack marks the cable read. The verdict (plant vs noise) is
+# rendered from CB_ANOM by th_render_decrypt_line. Pure.
+fn th_apply_decrypt(st, ri): i64 {
+    th_cracked_set(st, ri);
+    return 0;
+}
+
+# The READ-screen line under a cable: the cryptanalysis verdict once cracked,
+# else the "[D] break the cipher" prompt (cost-gated).
+fn th_render_decrypt_line(st, buf, pos, ri): i64 {
+    if (th_cracked_get(st, ri) == 1) {
+        var cb = th_cable_at(st, ri);
+        pos = emit_sgr(buf, pos, 36);
+        pos = emit_cstr(buf, pos, " CRYPTANALYSIS: ");
+        if (load64(cb + CB_ANOM) == 1) {
+            pos = emit_cstr(buf, pos, "routing DELIBERATELY FORGED -- a plant.");
+        } else {
+            pos = emit_cstr(buf, pos, "clerical noise -- no plant here.");
+        }
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    } else {
+        pos = emit_cstr(buf, pos, " [D] break the cipher (1 dispatch pt) -- plant or noise?");
+        pos = emit_crlf(buf, pos);
+    }
+    return pos;
+}
+
 fn th_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + TH_SCREEN);
+
+    # 1.4.3: during a crack the decode engine owns the whole frame.
+    if (screen == HSCR_DECRYPT) {
+        return decode_render(load64(st + TH_DECODE), buf, cap);
+    }
+
     pos = th_render_status(st, buf, pos);
     pos = emit_crlf(buf, pos);
 
@@ -872,8 +982,11 @@ fn th_render(st, buf, cap): i64 {
     }
     if (screen == HSCR_READ) {
         var ri = th_nth_today(st, load64(st + TH_CURSOR));
-        if (ri >= 0) { pos = th_render_cable(st, buf, pos, th_cable_at(st, ri)); }
-        pos = emit_cstr(buf, pos, "[N]ext   [X] back");
+        if (ri >= 0) {
+            pos = th_render_cable(st, buf, pos, th_cable_at(st, ri));
+            pos = th_render_decrypt_line(st, buf, pos, ri);
+        }
+        pos = emit_cstr(buf, pos, "[N]ext   [D]ecrypt   [X] back");
         pos = emit_crlf(buf, pos);
     }
     if (screen == HSCR_ROSTER) {
@@ -981,7 +1094,46 @@ fn th_feed_read(st, line, len): i64 {
         store64(st + TH_SCREEN, HSCR_CABLES);
         return 0;
     }
-    store64(st + TH_SCREEN, HSCR_CABLES);
+    if (k == 100) {                                    # d -> break the cipher
+        var ri = th_nth_today(st, load64(st + TH_CURSOR));
+        if (ri < 0) { store64(st + TH_SCREEN, HSCR_CABLES); return 0; }
+        if (th_cracked_get(st, ri) == 1) {
+            th_msg(st, "Already decrypted -- the verdict stands above.");
+            return 0;
+        }
+        if (load64(st + TH_POINTS) <= 0) {
+            th_msg(st, "No dispatch points left today to run cryptanalysis.");
+            return 0;
+        }
+        store64(st + TH_POINTS, load64(st + TH_POINTS) - 1);
+        th_begin_decrypt(st, ri);
+        return 0;
+    }
+    store64(st + TH_SCREEN, HSCR_CABLES);              # x / any other -> back
+    return 0;
+}
+
+# Forward a line to the active decode round. When the round ends — cracked
+# (won), burned (out of guesses), or quit ('q') — resolve it and bounce back
+# to the cable. A crack reveals the plant/noise verdict; the dispatch point is
+# spent either way.
+fn th_feed_decrypt(st, line, len): i64 {
+    var dg = load64(st + TH_DECODE);
+    if (dg == 0) { store64(st + TH_SCREEN, HSCR_READ); return 0; }
+    var rc = decode_feed(dg, line, len);
+    var done = 0;
+    if (decode_is_over(dg) == 1) { done = 1; }
+    if (rc == 1) { done = 1; }
+    if (done == 0) { return 0; }
+    if (load64(dg + DG_OVER) == 1) {
+        th_apply_decrypt(st, load64(st + TH_DECRI));
+        th_msg(st, "Cipher broken -- cryptanalysis on the wire.");
+    } else {
+        th_msg(st, "The cipher holds. The dispatch point is spent.");
+    }
+    store64(st + TH_DECODE, 0);
+    store64(st + TH_DECRI, 0 - 1);
+    store64(st + TH_SCREEN, HSCR_READ);
     return 0;
 }
 
@@ -1086,6 +1238,7 @@ fn th_feed(st, line, len): i64 {
     if (screen == HSCR_MOVECITY) { return th_feed_movecity(st, line, len); }
     if (screen == HSCR_FUNDAMT)  { return th_feed_fundamt(st, line, len); }
     if (screen == HSCR_ACCUSE)   { return th_feed_accuse(st, line, len); }
+    if (screen == HSCR_DECRYPT)  { return th_feed_decrypt(st, line, len); }
     return 0;
 }
 

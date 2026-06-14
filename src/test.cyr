@@ -12,6 +12,8 @@ include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
 include "src/wager.cyr"
+include "src/decode_words.cyr"
+include "src/decode.cyr"
 include "src/smuggler.cyr"
 include "src/port_authority.cyr"
 include "src/handler.cyr"
@@ -4798,6 +4800,300 @@ fn t208_descent_endpoint(): i64 {
     return 0;
 }
 
+# === 1.4.1 Decode: the classify primitive + Numbers door (ADR 0018) ===
+
+# t209 — decode_classify: the duplicate-correct exact/present scorer (the
+# pure heart). Pins the Mastermind/Wordle duplicate traps a naive scorer
+# fails — counts must match true peg scoring.
+fn t209_decode_classify(): i64 {
+    var cbuf = alloc(8);
+    var gbuf = alloc(8);
+    var mbuf = alloc(8);
+    # secret 1 2 2 3, guess 2 2 4 2  -> 1 exact (pos1), 1 present (one 2 left)
+    store8(cbuf + 0, 1); store8(cbuf + 1, 2); store8(cbuf + 2, 2); store8(cbuf + 3, 3);
+    store8(gbuf + 0, 2); store8(gbuf + 1, 2); store8(gbuf + 2, 4); store8(gbuf + 3, 2);
+    decode_classify(cbuf, gbuf, 4, mbuf);
+    if (decode_exact(mbuf, 4) != 1)   { test_fail("t209_decode_classify", "dup exact"); return 1; }
+    if (decode_present(mbuf, 4) != 1) { test_fail("t209_decode_classify", "dup present"); return 1; }
+    # full permutation: secret 1 2 3 4, guess 4 3 2 1 -> 0 exact, 4 present
+    store8(cbuf + 0, 1); store8(cbuf + 1, 2); store8(cbuf + 2, 3); store8(cbuf + 3, 4);
+    store8(gbuf + 0, 4); store8(gbuf + 1, 3); store8(gbuf + 2, 2); store8(gbuf + 3, 1);
+    decode_classify(cbuf, gbuf, 4, mbuf);
+    if (decode_exact(mbuf, 4) != 0)   { test_fail("t209_decode_classify", "perm exact"); return 1; }
+    if (decode_present(mbuf, 4) != 4) { test_fail("t209_decode_classify", "perm present"); return 1; }
+    # exact match -> solved
+    store8(gbuf + 0, 1); store8(gbuf + 1, 2); store8(gbuf + 2, 3); store8(gbuf + 3, 4);
+    decode_classify(cbuf, gbuf, 4, mbuf);
+    if (decode_solved(mbuf, 4) != 1)  { test_fail("t209_decode_classify", "solved"); return 1; }
+    # secret 3 3 3 3, guess 3 3 1 1 -> 2 exact, 0 present (no spare 3 for the 1s)
+    store8(cbuf + 0, 3); store8(cbuf + 1, 3); store8(cbuf + 2, 3); store8(cbuf + 3, 3);
+    store8(gbuf + 0, 3); store8(gbuf + 1, 3); store8(gbuf + 2, 1); store8(gbuf + 3, 1);
+    decode_classify(cbuf, gbuf, 4, mbuf);
+    if (decode_exact(mbuf, 4) != 2)   { test_fail("t209_decode_classify", "row exact"); return 1; }
+    if (decode_present(mbuf, 4) != 0) { test_fail("t209_decode_classify", "row present"); return 1; }
+    test_pass("t209_decode_classify");
+    return 0;
+}
+
+# t210 — decode_parse_numbers: spaced + packed forms, and every reject path.
+fn t210_decode_parse_numbers(): i64 {
+    var out = alloc(8);
+    if (decode_parse_numbers("4 1 6 2", 7, out, 4, 6) != DEC_OK) { test_fail("t210_decode_parse_numbers", "spaced"); return 1; }
+    if ((load8(out + 0) & 0xFF) != 4) { test_fail("t210_decode_parse_numbers", "v0"); return 1; }
+    if ((load8(out + 3) & 0xFF) != 2) { test_fail("t210_decode_parse_numbers", "v3"); return 1; }
+    if (decode_parse_numbers("4162", 4, out, 4, 6) != DEC_OK) { test_fail("t210_decode_parse_numbers", "packed"); return 1; }
+    if ((load8(out + 2) & 0xFF) != 6) { test_fail("t210_decode_parse_numbers", "packed v2"); return 1; }
+    if (decode_parse_numbers("4 1 6", 5, out, 4, 6)  != DEC_BADLEN) { test_fail("t210_decode_parse_numbers", "short"); return 1; }
+    if (decode_parse_numbers("41623", 5, out, 4, 6)  != DEC_BADLEN) { test_fail("t210_decode_parse_numbers", "long"); return 1; }
+    if (decode_parse_numbers("4 1 7 2", 7, out, 4, 6) != DEC_BADSYM) { test_fail("t210_decode_parse_numbers", "over"); return 1; }
+    if (decode_parse_numbers("4 0 6 2", 7, out, 4, 6) != DEC_BADSYM) { test_fail("t210_decode_parse_numbers", "zero"); return 1; }
+    if (decode_parse_numbers("4 1 x 2", 7, out, 4, 6) != DEC_BADSYM) { test_fail("t210_decode_parse_numbers", "junk"); return 1; }
+    test_pass("t210_decode_parse_numbers");
+    return 0;
+}
+
+# Fill wbuf[0..DN_LEN) with a guess guaranteed to differ from the game's
+# secret at every position (so it can never accidentally solve). Helper.
+fn td_wrong_guess(st, wbuf): i64 {
+    var sec = load64(st + DG_SECRET);
+    var i = 0;
+    while (i < DN_LEN) {
+        var v = load8(sec + i) & 0xFF;
+        var w = v + 1;
+        if (w > DN_COLORS) { w = 1; }
+        store8(wbuf + i, w);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# t211 — decode_new + the win path: a fresh game, a wrong guess advances
+# without ending, the exact secret cracks it and scores.
+fn t211_decode_play(): i64 {
+    var st = decode_new(987, DOOR_PRACTICE);
+    decode_set_numbers(st);                 # pick the Numbers variant off the select screen
+    if (decode_is_over(st) != 0)        { test_fail("t211_decode_play", "fresh over"); return 1; }
+    if (load64(st + DG_TRIES) != 0)     { test_fail("t211_decode_play", "fresh tries"); return 1; }
+    if (load64(st + DG_LEN) != DN_LEN)  { test_fail("t211_decode_play", "len"); return 1; }
+    var wbuf = alloc(8);
+    td_wrong_guess(st, wbuf);
+    decode_commit_guess(st, wbuf);
+    if (load64(st + DG_TRIES) != 1)     { test_fail("t211_decode_play", "after1"); return 1; }
+    if (decode_is_over(st) != 0)        { test_fail("t211_decode_play", "wrong ends"); return 1; }
+    var win = alloc(8);
+    memcpy(win, load64(st + DG_SECRET), DN_LEN);
+    decode_commit_guess(st, win);
+    if (load64(st + DG_OVER) != 1)      { test_fail("t211_decode_play", "win flag"); return 1; }
+    if (decode_is_over(st) != 1)        { test_fail("t211_decode_play", "win over"); return 1; }
+    if (decode_final_score(st) <= 0)    { test_fail("t211_decode_play", "win score"); return 1; }
+    test_pass("t211_decode_play");
+    return 0;
+}
+
+# t212 — the burn path: exhausting all guesses loses, scores 0.
+fn t212_decode_exhaust(): i64 {
+    var st = decode_new(555, DOOR_PRACTICE);
+    decode_set_numbers(st);
+    var wbuf = alloc(8);
+    td_wrong_guess(st, wbuf);
+    var t = 0;
+    while (t < DN_TRIES) { decode_commit_guess(st, wbuf); t = t + 1; }
+    if (load64(st + DG_OVER) != 2)    { test_fail("t212_decode_exhaust", "burned flag"); return 1; }
+    if (decode_is_over(st) != 1)      { test_fail("t212_decode_exhaust", "burned over"); return 1; }
+    if (decode_final_score(st) != 0)  { test_fail("t212_decode_exhaust", "loss score"); return 1; }
+    test_pass("t212_decode_exhaust");
+    return 0;
+}
+
+# t213 — save/load round-trip: config + secret + guess history preserved,
+# and the feedback marks are recomputed (never stored) on load.
+fn t213_decode_saveload(): i64 {
+    var st = decode_new(777, DOOR_SOLO);
+    decode_set_numbers(st);
+    var wbuf = alloc(8);
+    td_wrong_guess(st, wbuf);
+    decode_commit_guess(st, wbuf);
+    decode_commit_guess(st, wbuf);
+    var buf = alloc(4096);
+    var n = decode_save_format(st, buf, 4096);
+    var st2 = decode_load_parse(buf, n);
+    if (st2 == 0)                                                 { test_fail("t213_decode_saveload", "parse null"); return 1; }
+    if (load64(st2 + DG_VARIANT) != load64(st + DG_VARIANT))      { test_fail("t213_decode_saveload", "variant"); return 1; }
+    if (load64(st2 + DG_LEN)     != load64(st + DG_LEN))          { test_fail("t213_decode_saveload", "len"); return 1; }
+    if (load64(st2 + DG_TRIES)   != load64(st + DG_TRIES))        { test_fail("t213_decode_saveload", "tries"); return 1; }
+    if (load64(st2 + DG_OVER)    != load64(st + DG_OVER))         { test_fail("t213_decode_saveload", "over"); return 1; }
+    if (memeq(load64(st + DG_SECRET), load64(st2 + DG_SECRET), DN_LEN) == 0) { test_fail("t213_decode_saveload", "secret"); return 1; }
+    if (memeq(load64(st + DG_GUESSES), load64(st2 + DG_GUESSES), DN_LEN) == 0) { test_fail("t213_decode_saveload", "guess row"); return 1; }
+    var mk = alloc(8);
+    decode_classify(load64(st2 + DG_SECRET), load64(st2 + DG_GUESSES), DN_LEN, mk);
+    if (decode_exact(load64(st2 + DG_MARKS), DN_LEN) != decode_exact(mk, DN_LEN)) { test_fail("t213_decode_saveload", "marks recomputed"); return 1; }
+    test_pass("t213_decode_saveload");
+    return 0;
+}
+
+# === 1.4.2 Decode / Words (Wordle) variant ===
+
+# Store the 5 letters of `w` (a NUL-terminated lowercase literal) into buf.
+fn td_letters(buf, w): i64 {
+    var i = 0;
+    while (i < 5) { store8(buf + i, load8(w + i) & 0xFF); i = i + 1; }
+    return 0;
+}
+
+# t214 — decode_classify over letters: the same scorer, the Wordle duplicate
+# trap. secret SASSY vs guess SWISS -> 2 exact (the two S in place), 1 present
+# (one spare S left for the guess's extra S).
+fn t214_decode_classify_words(): i64 {
+    var cbuf = alloc(8);
+    var gbuf = alloc(8);
+    var mbuf = alloc(8);
+    td_letters(cbuf, "sassy");
+    td_letters(gbuf, "swiss");
+    decode_classify(cbuf, gbuf, 5, mbuf);
+    if (decode_exact(mbuf, 5) != 2)   { test_fail("t214_decode_classify_words", "dup exact"); return 1; }
+    if (decode_present(mbuf, 5) != 1) { test_fail("t214_decode_classify_words", "dup present"); return 1; }
+    td_letters(gbuf, "sassy");
+    decode_classify(cbuf, gbuf, 5, mbuf);
+    if (decode_solved(mbuf, 5) != 1)  { test_fail("t214_decode_classify_words", "solved"); return 1; }
+    test_pass("t214_decode_classify_words");
+    return 0;
+}
+
+# t215 — the dictionary + the Words parser: membership, OK/lowercasing, and
+# the BADLEN / BADWORD reject paths.
+fn t215_decode_words_dict(): i64 {
+    if (decode_word_count() != 532)             { test_fail("t215_decode_words_dict", "count"); return 1; }
+    var w0 = alloc(8); td_letters(w0, "crane");
+    if (memeq(decode_word(0), w0, 5) == 0)      { test_fail("t215_decode_words_dict", "word0"); return 1; }
+    if (decode_word_index(w0) != 0)             { test_fail("t215_decode_words_dict", "index0"); return 1; }
+    var wz = alloc(8); td_letters(wz, "zzzzz");
+    if (decode_word_index(wz) != (0 - 1))       { test_fail("t215_decode_words_dict", "absent"); return 1; }
+    var out = alloc(8);
+    if (decode_parse_words("crane", 5, out) != DEC_OK)     { test_fail("t215_decode_words_dict", "ok"); return 1; }
+    if (memeq(out, w0, 5) == 0)                            { test_fail("t215_decode_words_dict", "ok bytes"); return 1; }
+    if (decode_parse_words("CRANE", 5, out) != DEC_OK)     { test_fail("t215_decode_words_dict", "upper"); return 1; }
+    if (decode_parse_words("cran", 4, out)  != DEC_BADLEN) { test_fail("t215_decode_words_dict", "short"); return 1; }
+    if (decode_parse_words("zzzzz", 5, out) != DEC_BADWORD) { test_fail("t215_decode_words_dict", "notword"); return 1; }
+    if (decode_parse_words("cr4ne", 5, out) != DEC_BADWORD) { test_fail("t215_decode_words_dict", "nonletter"); return 1; }
+    test_pass("t215_decode_words_dict");
+    return 0;
+}
+
+# t216 — the Words door flow: pick [w] off the select screen, the secret is a
+# real dictionary word, cracking it wins with the difficulty bonus; plus the
+# lone-q quit test (so QUEEN/QUICK aren't read as quit).
+fn t216_decode_words_play(): i64 {
+    var st = decode_new(321, DOOR_PRACTICE);
+    if (load64(st + DG_SCREEN) != DSCR_SELECT) { test_fail("t216_decode_words_play", "fresh select"); return 1; }
+    # feed 'w' to pick Words off the select screen
+    if (decode_feed(st, "w", 1) != 0)          { test_fail("t216_decode_words_play", "pick exits"); return 1; }
+    if (load64(st + DG_VARIANT) != DV_WORDS)   { test_fail("t216_decode_words_play", "variant"); return 1; }
+    if (load64(st + DG_LEN) != DW_LEN)         { test_fail("t216_decode_words_play", "len"); return 1; }
+    var sec = load64(st + DG_SECRET);
+    if (decode_word_index(sec) < 0)            { test_fail("t216_decode_words_play", "secret in dict"); return 1; }
+    # crack it: guess the secret word exactly
+    var win = alloc(8);
+    memcpy(win, sec, DW_LEN);
+    decode_commit_guess(st, win);
+    if (load64(st + DG_OVER) != 1)             { test_fail("t216_decode_words_play", "win"); return 1; }
+    if (decode_final_score(st) < 200)          { test_fail("t216_decode_words_play", "words bonus"); return 1; }
+    # lone-q quit vs q-initial words
+    if (decode_is_lone_q("q", 1) != 1)         { test_fail("t216_decode_words_play", "lone q"); return 1; }
+    if (decode_is_lone_q(" q ", 3) != 1)       { test_fail("t216_decode_words_play", "padded q"); return 1; }
+    if (decode_is_lone_q("queen", 5) != 0)     { test_fail("t216_decode_words_play", "queen not quit"); return 1; }
+    if (decode_is_lone_q("", 0) != 0)          { test_fail("t216_decode_words_play", "blank not quit"); return 1; }
+    test_pass("t216_decode_words_play");
+    return 0;
+}
+
+# === 1.4.3 The Handler decrypt lever (ADR 0019) ===
+
+# Build a decode guess line for `sec` under `variant`: Words -> the 5 letters;
+# Numbers -> "d d d d" (values rendered as ASCII digits). Returns the length.
+fn td_decode_guess_line(variant, sec, out): i64 {
+    if (variant == DV_WORDS) {
+        var i = 0;
+        while (i < DW_LEN) { store8(out + i, load8(sec + i) & 0xFF); i = i + 1; }
+        return DW_LEN;
+    }
+    var p = 0;
+    var j = 0;
+    while (j < DN_LEN) {
+        store8(out + p, (load8(sec + j) & 0xFF) + 48); p = p + 1;
+        if (j + 1 < DN_LEN) { store8(out + p, 32); p = p + 1; }
+        j = j + 1;
+    }
+    return p;
+}
+
+# t217 — th_cipher_for_cable: the same cable always yields the same crackable
+# code (deterministic, replayable); intercepts -> a real dictionary Words
+# codename, paperwork -> an in-range Numbers code.
+fn t217_th_cipher_deterministic(): i64 {
+    var cb = alloc(CB_SIZE);
+    memset(cb, 0, CB_SIZE);
+    store64(cb + CB_NR, 4242);
+    store64(cb + CB_AGENT, 2);
+    store64(cb + CB_DAY, 3);
+    store64(cb + CB_KIND, 0);                    # report -> Numbers
+    var s1 = alloc(DECODE_CODE_MAX);
+    var s2 = alloc(DECODE_CODE_MAX);
+    var v1 = th_cipher_for_cable(cb, s1);
+    var v2 = th_cipher_for_cable(cb, s2);
+    if (v1 != DV_NUMBERS)            { test_fail("t217_th_cipher_deterministic", "kind0 numbers"); return 1; }
+    if (v1 != v2)                    { test_fail("t217_th_cipher_deterministic", "variant stable"); return 1; }
+    if (memeq(s1, s2, DN_LEN) == 0)  { test_fail("t217_th_cipher_deterministic", "secret stable"); return 1; }
+    var i = 0;
+    while (i < DN_LEN) {
+        var d = load8(s1 + i) & 0xFF;
+        if (d < 1)         { test_fail("t217_th_cipher_deterministic", "digit lo"); return 1; }
+        if (d > DN_COLORS) { test_fail("t217_th_cipher_deterministic", "digit hi"); return 1; }
+        i = i + 1;
+    }
+    store64(cb + CB_KIND, 2);                     # intercept -> Words
+    var sw = alloc(DECODE_CODE_MAX);
+    if (th_cipher_for_cable(cb, sw) != DV_WORDS) { test_fail("t217_th_cipher_deterministic", "kind2 words"); return 1; }
+    if (decode_word_index(sw) < 0)               { test_fail("t217_th_cipher_deterministic", "word in dict"); return 1; }
+    test_pass("t217_th_cipher_deterministic");
+    return 0;
+}
+
+# t218 — the decrypt round end-to-end: begin a crack on a real cable, the
+# winning guess marks it cracked and bounces back to the cable; a quit leaves
+# it uncracked. Pure state transitions, no socket.
+fn t218_th_decrypt_flow(): i64 {
+    var st = th_new(123, DOOR_PRACTICE, TH_DEF_DAYS);
+    th_start(st);
+    if (th_today_count(st) <= 0)             { test_fail("t218_th_decrypt_flow", "no cables"); return 1; }
+    var ri = th_nth_today(st, 0);
+    if (ri < 0)                              { test_fail("t218_th_decrypt_flow", "ri"); return 1; }
+    if (th_cracked_get(st, ri) != 0)         { test_fail("t218_th_decrypt_flow", "starts uncracked"); return 1; }
+    var cb = th_cable_at(st, ri);
+    var sec = alloc(DECODE_CODE_MAX);
+    var variant = th_cipher_for_cable(cb, sec);
+    th_begin_decrypt(st, ri);
+    if (load64(st + TH_SCREEN) != HSCR_DECRYPT) { test_fail("t218_th_decrypt_flow", "screen"); return 1; }
+    if (load64(st + TH_DECODE) == 0)            { test_fail("t218_th_decrypt_flow", "decode state"); return 1; }
+    if (load64(st + TH_DECRI) != ri)            { test_fail("t218_th_decrypt_flow", "decri"); return 1; }
+    var line = alloc(32);
+    var ln = td_decode_guess_line(variant, sec, line);
+    th_feed_decrypt(st, line, ln);
+    if (th_cracked_get(st, ri) != 1)            { test_fail("t218_th_decrypt_flow", "cracked after win"); return 1; }
+    if (load64(st + TH_SCREEN) != HSCR_READ)    { test_fail("t218_th_decrypt_flow", "back to read"); return 1; }
+    if (load64(st + TH_DECODE) != 0)            { test_fail("t218_th_decrypt_flow", "decode cleared"); return 1; }
+
+    # quit path: a fresh crack that the player abandons stays uncracked
+    var st2 = th_new(777, DOOR_PRACTICE, TH_DEF_DAYS);
+    th_start(st2);
+    var ri2 = th_nth_today(st2, 0);
+    th_begin_decrypt(st2, ri2);
+    th_feed_decrypt(st2, "q", 1);
+    if (th_cracked_get(st2, ri2) != 0)          { test_fail("t218_th_decrypt_flow", "quit leaves uncracked"); return 1; }
+    if (load64(st2 + TH_SCREEN) != HSCR_READ)   { test_fail("t218_th_decrypt_flow", "quit back to read"); return 1; }
+    test_pass("t218_th_decrypt_flow");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -5024,6 +5320,17 @@ fn main(): i64 {
     # === 1.4.0 Descent link (endpoint parsing) ===
     t207_descent_dec_ipv4();
     t208_descent_endpoint();
+
+    t209_decode_classify();
+    t210_decode_parse_numbers();
+    t211_decode_play();
+    t212_decode_exhaust();
+    t213_decode_saveload();
+    t214_decode_classify_words();
+    t215_decode_words_dict();
+    t216_decode_words_play();
+    t217_th_cipher_deterministic();
+    t218_th_decrypt_flow();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

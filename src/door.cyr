@@ -64,6 +64,7 @@ enum DoorGame {
     GAME_JABBER   = 7;   # 1.3.3: Jabberwacky, the corpus-learning chatbot
     GAME_OLYMPIAD = 8;   # 1.3.6: Olympiad, the Greco-Roman games-owner sim (ADR 0016)
     GAME_ASHES    = 9;   # 1.3.7: Ashes of Empire, the async shared-world war-game (ADR 0014)
+    GAME_DECODE   = 10;  # 1.4.1: Decode, the Mastermind/Wordle code-breaking door (ADR 0018)
 }
 
 # === Integer helpers ===

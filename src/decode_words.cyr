@@ -1,0 +1,33 @@
+# decode_words.cyr — the Decode/Words 5-letter dictionary (1.4.2, ADR 0018).
+#
+# A curated, deduplicated table of 532 common 5-letter words, stored as one
+# 5-byte-stride lowercase blob (no separators) so decode_word(i) is just
+# blob + i*5. The SAME list doubles as the answer pool (the secret is drawn
+# from it) AND the valid-guess dictionary (a guess must be in it) — a
+# deliberate BBS-scale simplification (ADR 0018 § Consequences): many real
+# English words are rejected as "not a word"; the list can grow here without
+# touching the engine. Pure compile-time content, like ol_team_name /
+# th_city_name / the Jabberwacky seed corpus — no runtime I/O, so the Words
+# variant stays exercisable from the unit harness.
+#
+# Generated + validated (all entries exactly 5 ASCII lowercase letters,
+# distinct). Kept in its own module to keep src/decode.cyr (the engine) clean.
+
+enum DecodeWords {
+    WORD_COUNT  = 532;    # entries in the table
+    WORD_STRIDE = 5;     # bytes per word (== DW_LEN)
+}
+
+fn decode_word_count(): i64 {
+    return WORD_COUNT;
+}
+
+# The packed blob: WORD_COUNT words x 5 bytes, no separators.
+fn decode_word_blob(): i64 {
+    return "craneslateadieuaudiohousemouselightnightfightrightsightmightaboutaboveabuseactoracuteadmitadoptadultafteragainagentagreeaheadalarmalbumalertalikealiveallowalonealongalteramongangerangleangryapartappleapplyarenaarguearisearrayasideassetavoidawakeawardawarebadlybakerbasesbasicbeachbeganbeginbegunbeingbelowbenchbillybirthblackblameblankblastblindblockbloodboardboostboothboundbrainbrandbravebreadbreakbreedbriefbringbroadbrokebrownbuildbuiltbuyercablecachecargocarrycatchcausechainchairchaoscharmchartchasecheapcheckchesschestchiefchildchinachosecivilclaimclasscleanclearclickcliffclimbclockclosecloudcoachcoastcouldcountcourtcovercraftcrashcrazycreamcrimecrosscrowdcrowncrudecurvecycledailydancedateddealtdeathdebutdelaydepthdoingdoubtdozendraftdramadrankdrawndreamdressdrieddrinkdrivedrovedyingeagerearlyeartheighteliteemptyenemyenjoyenterentryequalerroreventeveryexactexistextrafaithfalsefaultfiberfieldfifthfiftyfinalfirstfixedflameflashfleetfloorfluidfocusforceforgeforthfortyforumfoundframefrankfraudfreshfrontfrostfruitfullyfunnyghostgiantgivenglassglobeglorygracegradegraingrandgrantgrassgravegreatgreengreetgriefgrossgroupgrownguardguessguestguidehappyharshheartheavyhencehorsehotelhumanidealimageindexinnerinputissuejointjudgeknownlabellaborlargelaserlaterlaughlayerlearnleaseleastleavelegallemonlevellimitliverlocallogiclooselowerloyalluckylunchlyingmagicmajormakermarchmatchmetalminorminusmixedmodelmoneymonthmoralmotormountmouthmoviemusicneedsnervenevernewlynoblenoisenorthnotednovelnurseoccuroceanofferoftenorderotheroughtpaintpanelpaperpartypeacephasephonephotopiecepilotpitchplaceplainplaneplantplatepointpoundpowerpresspriceprideprimeprintpriorprizeproofproudprovequeenquickquietquiteradioraiserangerapidratioreachreadyrealmrebelreferrelaxreplyriderridgeriflerigidrivalriverromanroughroundrouteroyalruralscalescenescopescoresenseservesevenshallshapesharesharpsheetshelfshellshiftshineshirtshockshootshortshownsincesixthsixtysizedskillsleepslidesmallsmartsmilesmokesolidsolvesorrysoundsouthspacesparespeakspeedspellspendspentspitesplitspokesportstaffstagestairstakestandstartstatesteamsteelsteepsteerstickstillstockstonestoodstorestormstorystripstuckstudystuffstylesugarsuitesupersweettabletakentastetaxesteachteeththankthefttheirthemetherethesethickthingthinkthirdthosethreethrewthrowtighttimestiredtitletodaytokentotaltouchtoughtowertracktradetrailtraintreattrendtrialtribetricktriedtriestrucktrulytrusttruthtwicetwisttyingultrauncleunderundueunionunityuntilupperupseturbanusageusualvalidvaluevideovirusvisitvitalvocalvoicewastewatchwaterwheelwherewhichwhilewhitewholewhosewomanworldworryworseworstworthwouldwoundwritewrongwroteyieldyoungyouth";
+}
+
+# Address of the i-th word (5 lowercase bytes, NOT NUL-terminated).
+fn decode_word(i): i64 {
+    return decode_word_blob() + i * WORD_STRIDE;
+}
