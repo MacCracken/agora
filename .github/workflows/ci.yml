@@ -26,18 +26,22 @@ jobs:
         # — the single source of truth per first-party-standards. Override
         # with CYRIUS_VERSION env var if a CI-side rebuild against a
         # different toolchain is ever needed.
+        #
+        # Uses the UPSTREAM installer (the same one patra / sigil use). Since
+        # 6.2.x, cyrius resolves stdlib modules from the version-matched
+        # snapshot at $HOME/.cyrius/versions/<ver>/lib — NOT a flat
+        # $HOME/.cyrius/lib copy. The old hand-rolled "extract tarball + cp
+        # lib/* into ~/.cyrius/lib" install produced the flat layout, so
+        # `cyrius deps` failed with "pins 6.2.2 but it is not installed at
+        # .../versions/6.2.2/lib" (and could not read sigil's u256/thread
+        # deps). install.sh lays out the versioned snapshot correctly.
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          set -e
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
         run: cyrius deps
