@@ -47,6 +47,10 @@ enum DoorCap {
     # produce a negative-as-huge value that slips a `cost > cash` guard.
     # 1e9 is far above any real economy figure; 1e9 * 1e9 = 1e18 < i64 max. [D1/D2]
     DOOR_INT_MAX   = 1000000000;
+    # [D3] The effectively-unbounded default for g_door_emit_cap — larger than
+    # any render buffer, so the emit_* bounds check is a no-op until a frame
+    # dispatch lowers the cap to the real buffer size.
+    DOOR_EMIT_UNBOUNDED = 2000000000;
 }
 
 # Per-game play mode. Practice = ephemeral (anon-OK, no save); Solo =
@@ -293,9 +297,18 @@ fn door_save_read(store, fp16, game, out_buf, cap): i64 {
 # so a game's render layer is exercisable from the unit harness (which
 # does not include darshana). Each writes into a caller buffer at `pos`
 # and returns the new position. Output is telnet-NVT CRLF.
+#
+# [D3] Bounds backstop: each helper refuses to write past `g_door_emit_cap`
+# (dropping the fragment and returning `pos` unchanged) so a frame that
+# outgrows its buffer truncates cleanly instead of overrunning the heap.
+# door_send_frame sets the cap to the frame's logical size before a render
+# and restores DOOR_EMIT_UNBOUNDED after; direct callers / unit tests render
+# into their own large buffers and are unaffected at the default.
+var g_door_emit_cap = 2000000000;   # = DOOR_EMIT_UNBOUNDED; effectively no bound
 
 fn emit_cstr(buf, pos, s): i64 {
     var n = strlen(s);
+    if (pos + n > g_door_emit_cap) { return pos; }
     memcpy(buf + pos, s, n);
     return pos + n;
 }
@@ -303,12 +316,14 @@ fn emit_cstr(buf, pos, s): i64 {
 fn emit_int(buf, pos, val): i64 {
     var tmp[24];
     var n = fmt_int_buf(val, &tmp);
+    if (pos + n > g_door_emit_cap) { return pos; }
     memcpy(buf + pos, &tmp, n);
     return pos + n;
 }
 
 # ESC [ <code> m  — one SGR escape (e.g. 36 = cyan, 0 = reset).
 fn emit_sgr(buf, pos, code): i64 {
+    if (pos + 16 > g_door_emit_cap) { return pos; }   # ESC [ <=3 digits> m fits in 16
     store8(buf + pos, 27); pos = pos + 1;   # ESC
     store8(buf + pos, 91); pos = pos + 1;   # '['
     pos = emit_int(buf, pos, code);
@@ -321,6 +336,7 @@ fn emit_reset(buf, pos): i64 {
 }
 
 fn emit_crlf(buf, pos): i64 {
+    if (pos + 2 > g_door_emit_cap) { return pos; }
     store8(buf + pos, 13); pos = pos + 1;
     store8(buf + pos, 10); pos = pos + 1;
     return pos;

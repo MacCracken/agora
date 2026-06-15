@@ -102,7 +102,7 @@ enum TS {
 
     TS_TERM_COLS = 88;    # window width  (NAWS, RFC 1073); 0 until peer reports
     TS_TERM_ROWS = 96;    # window height (NAWS); 0 until peer reports
-    TS_TERM_TYPE = 104;   # pointer to 256-byte ASCII terminal-type buffer
+    TS_TERM_TYPE = 104;   # pointer to (TERM_TYPE_CAP+1)-byte ASCII terminal-type buffer (room for a NUL)
     TS_TERM_TLEN = 112;   # actual length (bytes) of term_type string
 
     TS_LM_MODE   = 120;   # active LINEMODE MODE mask (RFC 1184); 0 until peer ACKs
@@ -190,10 +190,10 @@ fn telnet_state_new(): i64 {
     var sb = alloc(SB_BUF_CAP);
     var ou = alloc(256);
     var oh = alloc(256);
-    var tt = alloc(TERM_TYPE_CAP);
+    var tt = alloc(TERM_TYPE_CAP + 1);   # [T3] +1 byte so a full-length type is NUL-terminated in-bounds
     memset(ou, 0, 256);
     memset(oh, 0, 256);
-    memset(tt, 0, TERM_TYPE_CAP);
+    memset(tt, 0, TERM_TYPE_CAP + 1);
 
     store64(ts + TS_STATE,    ST_DATA);
     store64(ts + TS_VERB,     0);
@@ -642,6 +642,11 @@ fn telnet_handle_sb(ts): i64 {
         if (payload_len > TERM_TYPE_CAP) { payload_len = TERM_TYPE_CAP; }
         var tt = load64(ts + TS_TERM_TYPE);
         memcpy(tt, buf + 2, payload_len);
+        # [T3] NUL-terminate so any consumer that treats the type as a
+        # cstring stops at the real end — the buffer is TERM_TYPE_CAP+1,
+        # so this write at index <= TERM_TYPE_CAP is always in-bounds.
+        # (Also re-terminates after a shorter type follows a longer one.)
+        store8(tt + payload_len, 0);
         store64(ts + TS_TERM_TLEN, payload_len);
         return 0;
     }

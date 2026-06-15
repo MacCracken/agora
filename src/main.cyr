@@ -45,6 +45,11 @@ enum AgoraDefaults {
     # accept-loop worker. 60s of no traffic ends the connection.
     # Tuned for human-paced BBS use; trim for higher fanout.
     RECV_TIMEOUT_SECS = 60;
+    # Send-side counterpart [T2]: a slowloris-READ peer (connects but
+    # never drains its receive window) fills our kernel send buffer and
+    # would park a worker inside a blocking write() — the recv timeout
+    # never fires because the worker is in write(), not read(). Bound it.
+    SEND_TIMEOUT_SECS = 60;
     # Operator-supplied MOTD ceiling (--motd <path>). 4 KB covers
     # any reasonable BBS welcome banner. File contents are sent
     # verbatim; operators are responsible for using CRLF line
@@ -162,7 +167,8 @@ var g_parry_state  = 0;
 var g_jabber_state = 0;
 
 enum DoorRuntime {
-    DOOR_FRAME_CAP = 8192;        # per-frame render buffer
+    DOOR_FRAME_CAP = 8192;        # per-frame render buffer (logical cap; emit_* bound to this)
+    DOOR_FRAME_GUARD = 1024;      # [D3] slack past the cap so a raw-store8 tail can't overrun the alloc
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
     DOOR_WORLD_CAP = 8192;        # 1.2.0 Universe shared-world snapshot buffer (largest world fits)
 }
@@ -179,7 +185,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.4.4 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.4.5 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -1310,7 +1316,14 @@ fn door_universe_save(): i64 {
 
 # Render the active game's current frame and send it to the client.
 fn door_send_frame(cfd): i64 {
-    var buf = alloc(DOOR_FRAME_CAP);
+    # [D3] Render into a guard-banded buffer with the emit_* helpers bounded
+    # to DOOR_FRAME_CAP: the helpers (the bulk of every frame) refuse to write
+    # past the cap, the guard band absorbs any raw-store8 tail beyond it, and
+    # the send is clamped to the cap below — so a frame that outgrows 8192
+    # truncates cleanly instead of overrunning the heap. No frame does today;
+    # this enforces the invariant against future row-count growth.
+    var buf = alloc(DOOR_FRAME_CAP + DOOR_FRAME_GUARD);
+    g_door_emit_cap = DOOR_FRAME_CAP;
     var n = 0;
     if (g_door_game == GAME_SMUGGLER) { n = sl_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_PORT)     { n = pa_render(g_door_state, buf, DOOR_FRAME_CAP); }
@@ -1322,6 +1335,8 @@ fn door_send_frame(cfd): i64 {
     if (g_door_game == GAME_OLYMPIAD) { n = ol_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_ASHES)    { n = ash_render(g_door_state, buf, DOOR_FRAME_CAP); }
     if (g_door_game == GAME_DECODE)   { n = decode_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    g_door_emit_cap = DOOR_EMIT_UNBOUNDED;             # [D3] restore the default for non-frame emit users
+    if (n > DOOR_FRAME_CAP) { n = DOOR_FRAME_CAP; }    # [D3] clamp any overshoot — never send past the cap
     if (n > 0) { send_buf(cfd, buf, n); }
     return 0;
 }
@@ -1619,7 +1634,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.4.4 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.4.5 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1647,6 +1662,11 @@ fn handle_client(cfd): i64 {
     # accept-loop worker. recv() returns EWOULDBLOCK after timeout
     # with no traffic, which we treat as a clean disconnect.
     sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
+    # [T2] Bound the send side too: a peer that stops draining its
+    # receive window can't park this worker in a blocking write() —
+    # send_buf's write returns <= 0 on the SO_SNDTIMEO fire and the
+    # caller closes the connection (same as any short-write error).
+    sock_set_send_timeout(cfd, SEND_TIMEOUT_SECS, 0);
 
     # Per-connection telnet state.
     var ts = telnet_state_new();
@@ -2743,7 +2763,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.4.4");
+    println("agora 1.4.5");
     return 0;
 }
 
