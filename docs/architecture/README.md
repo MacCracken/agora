@@ -14,5 +14,4 @@ Per [first-party-documentation § Architecture Notes](https://github.com/MacCrac
 
 | # | Title | Affects |
 |---|---|---|
-
-*(empty — first note lands at M1 when the IAC parser surfaces an invariant worth capturing, e.g. partial-IAC sequences buffered across `recv()` calls)*
+| [001](001-cyrius-callptr-constraints.md) | Cyrius `callptr` / indirect-call constraints | door descriptor registry (ADR 0020); any fn-pointer dispatch |

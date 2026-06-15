@@ -185,7 +185,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.4.5 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.4.6 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -780,33 +780,20 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         var dmode = DOOR_PRACTICE;
         if (streq(mbuf, "solo") != 0)     { dmode = DOOR_SOLO; }
         if (streq(mbuf, "universe") != 0) { dmode = DOOR_UNIVERSE; }
-        # 1.3.0/1.3.1 (ADR 0011): the chatbots are stateless conversations
-        # — no save, no shared world. Force practice so they skip the
-        # solo/universe machinery entirely.
-        if (game == GAME_ELIZA) { dmode = DOOR_PRACTICE; }
-        if (game == GAME_PARRY) { dmode = DOOR_PRACTICE; }
-        # 1.3.2: QUEST has no Universe yet (async-PvP is a follow-on). It
-        # IS a real solo/practice game, so don't force practice — just
-        # downgrade a `universe` request to solo. Without this, `play
-        # quest universe` falls into the unwired DOOR_UNIVERSE branch,
-        # leaves g_door_state NULL, and qu_render(0) segfaults the worker.
-        if (game == GAME_QUEST) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
-        # 1.3.3 (ADR 0015): Jabberwacky is a real solo/practice door (its
-        # learned corpus is the per-user save) but has no Universe — coerce
-        # a `universe` request to solo so it never hits the unwired branch.
-        if (game == GAME_JABBER) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
-        # 1.3.6 (ADR 0016): Olympiad is a real solo/practice campaign (the
-        # stable persists across sessions) but has no Universe — coerce a
-        # `universe` request to solo so it never hits the unwired branch.
-        if (game == GAME_OLYMPIAD) { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
-        # 1.4.1 (ADR 0018): Decode is a solo/practice code-breaking door — no
-        # shared world. Coerce a `universe` request to solo so it never hits
-        # the unwired DOOR_UNIVERSE branch (same guard as QUEST/Olympiad).
-        if (game == GAME_DECODE)   { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
-        # 1.3.7 (ADR 0014): Ashes of Empire is inherently a shared world — the
-        # map IS the game. There is no solo/practice; force universe so every
-        # session runs the flock'd world transaction.
-        if (game == GAME_ASHES) { dmode = DOOR_UNIVERSE; }
+        # 1.4.6 (R7 / ADR 0020): per-game mode coercion is descriptor data
+        # (DD_MODE_POLICY). Chatbots force practice (no save, no world); the
+        # solo-only games (QUEST/Jabberwacky/Olympiad/Decode) downgrade a
+        # `universe` request to solo — without this they'd fall into the
+        # unwired DOOR_UNIVERSE branch, leave g_door_state NULL, and segfault
+        # the worker on the first render; Ashes forces universe (the map IS
+        # the game). Smuggler/Port/Handler are DM_NORMAL (all modes allowed).
+        var pd = door_desc_for(game);
+        if (pd != 0) {
+            var mp = load64(pd + DD_MODE_POLICY);
+            if (mp == DM_PRACTICE_ONLY)  { dmode = DOOR_PRACTICE; }
+            if (mp == DM_NO_UNIVERSE)    { if (dmode == DOOR_UNIVERSE) { dmode = DOOR_SOLO; } }
+            if (mp == DM_FORCE_UNIVERSE) { dmode = DOOR_UNIVERSE; }
+        }
 
         if (dmode == DOOR_UNIVERSE) {
             # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
@@ -824,29 +811,35 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 var ulbuf = alloc(DOOR_SAVE_CAP);
                 var uln = door_save_read(g_store_buf, g_session_fp, uslot, ulbuf, DOOR_SAVE_CAP);
                 if (uln > 0) {
-                    if (game == GAME_PORT)     { g_door_state = pa_load_parse(ulbuf, uln); }
-                    if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(ulbuf, uln); }
-                    if (game == GAME_HANDLER)  { g_door_state = th_load_parse(ulbuf, uln); }
-                    if (game == GAME_ASHES)    { g_door_state = ash_load_parse(ulbuf, uln); }
+                    var uld = door_desc_for(game);
+                    var ulfp = 0;
+                    if (uld != 0) { ulfp = load64(uld + DD_LOAD); }
+                    if (ulfp != 0) { g_door_state = callptr(ulfp, ulbuf, uln); }
                     if (g_door_state != 0) { uloaded = 1; }
                 }
             }
             if (uloaded == 0) {
-                var useed = clock_now_ns();
-                if (game == GAME_PORT)     { g_door_state = pa_new(PA_UNIVERSE_SEED, DOOR_UNIVERSE, PA_DEF_DAYS); }
-                if (game == GAME_SMUGGLER) { g_door_state = sl_new(useed, DOOR_UNIVERSE, SL_DEF_DAYS); }
-                if (game == GAME_HANDLER)  { g_door_state = th_new(useed, DOOR_UNIVERSE, TH_DEF_DAYS); }
-                if (game == GAME_ASHES)    { g_door_state = ash_new(useed, DOOR_UNIVERSE); }
+                var und = door_desc_for(game);
+                var unfp = 0;
+                var unseed = clock_now_ns();
+                var undays = 0;
+                if (und != 0) {
+                    unfp = load64(und + DD_NEW);
+                    undays = load64(und + DD_DEF_DAYS);
+                    var us = load64(und + DD_UNI_SEED);   # PA's galaxy seed; 0 -> clock for the rest
+                    if (us != 0) { unseed = us; }
+                }
+                if (unfp != 0) { g_door_state = callptr(unfp, unseed, DOOR_UNIVERSE, undays); }
             }
-            if (game == GAME_PORT) {
-                pa_start(g_door_state);
-                store64(g_door_state + PA_FP, hex16_to_i64(g_session_fp));
-            }
-            if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
-            if (game == GAME_HANDLER)  { th_start(g_door_state); }
-            if (game == GAME_ASHES) {
-                ash_start(g_door_state);
-                store64(g_door_state + AE_FP, hex16_to_i64(g_session_fp));
+            var usd = door_desc_for(game);
+            if (usd != 0) {
+                var ustfp = load64(usd + DD_START);
+                if (ustfp != 0) { var usr = callptr(ustfp, g_door_state); }
+                var ufpoff = load64(usd + DD_FP_OFF);
+                if (ufpoff != 0) {
+                    var realoff = ufpoff - 1;   # undo the +1 bias (AE_FP legitimately == 0)
+                    store64(g_door_state + realoff, hex16_to_i64(g_session_fp));
+                }
             }
             # Prime the world — mints + persists it on the first ever entry
             # — so the opening frame already reflects shared state. For Ashes,
@@ -855,7 +848,11 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             var ufd = door_world_begin();
             if (ufd >= 0) {
                 door_set_world(game, g_uni_world);
-                if (game == GAME_ASHES) { ash_on_entry(g_door_state); }
+                var oed = door_desc_for(game);
+                if (oed != 0) {
+                    var oefp = load64(oed + DD_ON_ENTRY);
+                    if (oefp != 0) { var oer = callptr(oefp, g_door_state); }
+                }
                 door_world_commit(ufd);
             }
             door_send_frame(cfd);
@@ -878,36 +875,27 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 var lbuf = alloc(DOOR_SAVE_CAP);
                 var ln = door_save_read(g_store_buf, g_session_fp, nm, lbuf, DOOR_SAVE_CAP);
                 if (ln > 0) {
-                    if (game == GAME_SMUGGLER) { g_door_state = sl_load_parse(lbuf, ln); }
-                    if (game == GAME_PORT)     { g_door_state = pa_load_parse(lbuf, ln); }
-                    if (game == GAME_HANDLER)  { g_door_state = th_load_parse(lbuf, ln); }
-                    if (game == GAME_QUEST)    { g_door_state = qu_load_parse(lbuf, ln); }
-                    if (game == GAME_JABBER)   { g_door_state = jw_load_parse(lbuf, ln); }
-                    if (game == GAME_OLYMPIAD) { g_door_state = ol_load_parse(lbuf, ln); }
-                    if (game == GAME_DECODE)   { g_door_state = decode_load_parse(lbuf, ln); }
+                    var sld = door_desc_for(game);
+                    var slfp = 0;
+                    if (sld != 0) { slfp = load64(sld + DD_LOAD); }
+                    if (slfp != 0) { g_door_state = callptr(slfp, lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
             }
         }
         if (loaded == 0) {
-            if (game == GAME_SMUGGLER) { g_door_state = sl_new(seed, dmode, SL_DEF_DAYS); }
-            if (game == GAME_PORT)     { g_door_state = pa_new(seed, dmode, PA_DEF_DAYS); }
-            if (game == GAME_HANDLER)  { g_door_state = th_new(seed, dmode, TH_DEF_DAYS); }
-            if (game == GAME_ELIZA)    { g_door_state = ez_new(seed, dmode, EZ_DEF_DAYS); }
-            if (game == GAME_PARRY)    { g_door_state = py_new(seed, dmode, PY_DEF_DAYS); }
-            if (game == GAME_QUEST)    { g_door_state = qu_new(seed, dmode, 0); }
-            if (game == GAME_JABBER)   { g_door_state = jw_new(seed, dmode, JW_DEF_DAYS); }
-            if (game == GAME_OLYMPIAD) { g_door_state = ol_new(seed, dmode); }
-            if (game == GAME_DECODE)   { g_door_state = decode_new(seed, dmode); }
+            var nd = door_desc_for(game);
+            if (nd != 0) {
+                var nfp = load64(nd + DD_NEW);
+                var ndays = load64(nd + DD_DEF_DAYS);
+                if (nfp != 0) { g_door_state = callptr(nfp, seed, dmode, ndays); }
+            }
         }
-        if (game == GAME_SMUGGLER) { sl_start(g_door_state); }
-        if (game == GAME_PORT)     { pa_start(g_door_state); }
-        if (game == GAME_HANDLER)  { th_start(g_door_state); }
-        if (game == GAME_ELIZA)    { ez_start(g_door_state); }
-        if (game == GAME_PARRY)    { py_start(g_door_state); }
-        if (game == GAME_QUEST)    { qu_start(g_door_state); }
-        if (game == GAME_JABBER)   { jw_start(g_door_state); }
-        if (game == GAME_DECODE)   { decode_start(g_door_state); }
+        var ssd = door_desc_for(game);
+        if (ssd != 0) {
+            var sstfp = load64(ssd + DD_START);
+            if (sstfp != 0) { var ssr = callptr(sstfp, g_door_state); }
+        }
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -1048,18 +1036,188 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 # these helpers own the socket I/O + persistence that the MODE_DOOR
 # dispatch and the `play` command call.
 
+# === 1.4.6 (R7): the per-game door descriptor registry ===
+#
+# Every door's identity + behavior lives in ONE descriptor record keyed by
+# its GAME_* id, instead of being smeared across ~16 `if (game == GAME_X)`
+# dispatch functions. Adding a door is now a single registry block, not an
+# edit to eighteen call sites. The behavior slots hold function addresses
+# (`&xx_render`, …) called via `callptr`; an absent capability is a 0 slot
+# the dispatcher falls back on (e.g. a chatbot has no save / no is_over).
+# Uniform signatures make this safe: render(st,buf,cap), feed(st,line,len),
+# is_over(st), save_format(st,buf,cap), new(seed,mode,days), load(buf,len).
+enum DoorDesc {
+    DD_NAME        = 0;     # cstring — the `play <name>` / leaderboard name
+    DD_USLOT       = 8;     # cstring — Universe per-player save slot ("<game>u"); 0 = solo-only
+    DD_RENDER      = 16;    # fn(st,buf,cap)->i64
+    DD_FEED        = 24;    # fn(st,line,len)->i64
+    DD_IS_OVER     = 32;    # fn(st)->i64  (0 = never over — chatbots)
+    DD_SAVE_FMT    = 40;    # fn(st,buf,cap)->i64  (0 = no save)
+    DD_NEW         = 48;    # fn(seed,mode,days)->st  (2-arg news ignore days)
+    DD_LOAD        = 56;    # fn(buf,len)->st  (0 = no load)
+    DD_DEF_DAYS    = 64;    # i64 — 3rd arg to NEW
+    DD_FLAGS       = 72;    # bitfield (DF_*)
+    DD_WORLD_BYTES = 80;    # fn()->i64 snapshot size (0 = not a Universe game; default 8)
+    DD_WORLD_VALID = 88;    # fn(buf,len)->i64
+    DD_WORLD_NEW   = 96;    # fn(seed)->ptr  (seedless world ctors ignore the arg)
+    DD_WORLD_SEED  = 104;   # i64 seed for WORLD_NEW
+    DD_WORLD_OFF   = 112;   # byte offset of the world ptr field inside the game state
+    DD_MSG         = 120;   # fn(st,cstr)  — Universe "world is busy" notice
+    DD_BUSY        = 128;   # cstring — the busy notice text
+    DD_SCORE       = 136;   # fn(st)->i64 final score (0 = no leaderboard)
+    DD_RANK        = 144;   # fn(score)->cstring rank label
+    DD_WORLD_TICK  = 152;   # fn(world,turn) lazy turn-batch resolve on world-open (0 = none)
+    DD_TICK_NS     = 160;   # i64 ns per turn (divisor for the tick turn number)
+    DD_START       = 168;   # fn(st) post-construction start hook (0 = none, e.g. Olympiad)
+    DD_FP_OFF      = 176;   # (byte offset + 1) to store the session fp (hex16->i64); 0 = none
+                            # (the +1 bias is because a real fp field can sit at offset 0, e.g. AE_FP)
+    DD_UNI_SEED    = 184;   # i64 game-state seed override for Universe new (0 = clock)
+    DD_ON_ENTRY    = 192;   # fn(st) Universe on-entry hook (Ashes founding); 0 = none
+    DD_MODE_POLICY = 200;   # DM_* mode coercion applied by the `play` launcher
+    DD_SIZE        = 208;
+    DF_UNIVERSE    = 1;     # DD_FLAGS bit — shared-world game
+    DM_NORMAL         = 0;  # practice / solo / universe all allowed
+    DM_PRACTICE_ONLY  = 1;  # chatbots — force practice (no save, no world)
+    DM_NO_UNIVERSE    = 2;  # real solo/practice game — downgrade a `universe` request to solo
+    DM_FORCE_UNIVERSE = 3;  # inherently shared world — force universe
+}
+
+var g_door_registry = 0;   # alloc'd: (GAME_DECODE+1) i64 slots, game id -> descriptor ptr
+
+# Allocate + zero a descriptor and slot it into the registry by game id.
+fn dd_new_desc(game): i64 {
+    var d = alloc(DD_SIZE);
+    memset(d, 0, DD_SIZE);
+    store64(g_door_registry + game * 8, d);
+    return d;
+}
+
+# Active descriptor for a game id, or 0 (uninitialized / out of range / NONE).
+fn door_desc_for(game): i64 {
+    if (g_door_registry == 0) { return 0; }
+    if (game < 1) { return 0; }
+    if (game > GAME_DECODE) { return 0; }
+    return load64(g_door_registry + game * 8);
+}
+
+# Build the registry once per process (guarded in handle_client). Each block
+# IS a door's entry — to add a game, add one block here and nothing else.
+fn door_registry_init(): i64 {
+    g_door_registry = alloc((GAME_DECODE + 1) * 8);
+    memset(g_door_registry, 0, (GAME_DECODE + 1) * 8);
+    var d = 0;
+
+    d = dd_new_desc(GAME_SMUGGLER);
+    store64(d + DD_NAME, "smuggler");      store64(d + DD_USLOT, "smuggleru");
+    store64(d + DD_RENDER, &sl_render);    store64(d + DD_FEED, &sl_feed);
+    store64(d + DD_IS_OVER, &sl_is_over);  store64(d + DD_SAVE_FMT, &sl_save_format);
+    store64(d + DD_NEW, &sl_new);          store64(d + DD_LOAD, &sl_load_parse);
+    store64(d + DD_DEF_DAYS, SL_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
+    store64(d + DD_WORLD_BYTES, &slw_byte_size); store64(d + DD_WORLD_VALID, &slw_valid);
+    store64(d + DD_WORLD_NEW, &slw_new);   store64(d + DD_WORLD_SEED, 0);
+    store64(d + DD_WORLD_OFF, SL_WORLD);
+    store64(d + DD_MSG, &sl_msg);          store64(d + DD_BUSY, "The streets are busy — try again.");
+    store64(d + DD_SCORE, &sl_final_score); store64(d + DD_RANK, &sl_rank);
+    store64(d + DD_START, &sl_start);
+
+    d = dd_new_desc(GAME_PORT);
+    store64(d + DD_NAME, "port");          store64(d + DD_USLOT, "portu");
+    store64(d + DD_RENDER, &pa_render);    store64(d + DD_FEED, &pa_feed);
+    store64(d + DD_IS_OVER, &pa_is_over);  store64(d + DD_SAVE_FMT, &pa_save_format);
+    store64(d + DD_NEW, &pa_new);          store64(d + DD_LOAD, &pa_load_parse);
+    store64(d + DD_DEF_DAYS, PA_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
+    store64(d + DD_WORLD_BYTES, &paw_byte_size); store64(d + DD_WORLD_VALID, &paw_valid);
+    store64(d + DD_WORLD_NEW, &paw_new);   store64(d + DD_WORLD_SEED, PA_UNIVERSE_SEED);
+    store64(d + DD_WORLD_OFF, PA_WORLD);
+    store64(d + DD_MSG, &pa_msg);          store64(d + DD_BUSY, "The galaxy is busy — try again.");
+    store64(d + DD_SCORE, &pa_final_score); store64(d + DD_RANK, &pa_rank);
+    store64(d + DD_START, &pa_start);       store64(d + DD_FP_OFF, PA_FP + 1);
+    store64(d + DD_UNI_SEED, PA_UNIVERSE_SEED);
+
+    d = dd_new_desc(GAME_HANDLER);
+    store64(d + DD_NAME, "handler");       store64(d + DD_USLOT, "handleru");
+    store64(d + DD_RENDER, &th_render);    store64(d + DD_FEED, &th_feed);
+    store64(d + DD_IS_OVER, &th_is_over);  store64(d + DD_SAVE_FMT, &th_save_format);
+    store64(d + DD_NEW, &th_new);          store64(d + DD_LOAD, &th_load_parse);
+    store64(d + DD_DEF_DAYS, TH_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
+    store64(d + DD_WORLD_BYTES, &thw_byte_size); store64(d + DD_WORLD_VALID, &thw_valid);
+    store64(d + DD_WORLD_NEW, &thw_new);   store64(d + DD_WORLD_SEED, 0);
+    store64(d + DD_WORLD_OFF, TH_WORLD);
+    store64(d + DD_MSG, &th_msg);          store64(d + DD_BUSY, "The registry is busy — try again.");
+    store64(d + DD_SCORE, &th_score);      store64(d + DD_RANK, &th_rank);
+    store64(d + DD_START, &th_start);
+
+    d = dd_new_desc(GAME_ELIZA);
+    store64(d + DD_NAME, "eliza");
+    store64(d + DD_RENDER, &ez_render);    store64(d + DD_FEED, &ez_feed);
+    store64(d + DD_NEW, &ez_new);          store64(d + DD_DEF_DAYS, EZ_DEF_DAYS);
+    store64(d + DD_START, &ez_start);       store64(d + DD_MODE_POLICY, DM_PRACTICE_ONLY);
+
+    d = dd_new_desc(GAME_PARRY);
+    store64(d + DD_NAME, "parry");
+    store64(d + DD_RENDER, &py_render);    store64(d + DD_FEED, &py_feed);
+    store64(d + DD_NEW, &py_new);          store64(d + DD_DEF_DAYS, PY_DEF_DAYS);
+    store64(d + DD_START, &py_start);       store64(d + DD_MODE_POLICY, DM_PRACTICE_ONLY);
+
+    d = dd_new_desc(GAME_QUEST);
+    store64(d + DD_NAME, "quest");
+    store64(d + DD_RENDER, &qu_render);    store64(d + DD_FEED, &qu_feed);
+    store64(d + DD_IS_OVER, &qu_is_over);  store64(d + DD_SAVE_FMT, &qu_save_format);
+    store64(d + DD_NEW, &qu_new);          store64(d + DD_LOAD, &qu_load_parse);
+    store64(d + DD_DEF_DAYS, 0);
+    store64(d + DD_SCORE, &qu_final_score); store64(d + DD_RANK, &qu_rank);
+    store64(d + DD_START, &qu_start);       store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
+
+    d = dd_new_desc(GAME_JABBER);
+    store64(d + DD_NAME, "jabberwacky");
+    store64(d + DD_RENDER, &jw_render);    store64(d + DD_FEED, &jw_feed);
+    store64(d + DD_IS_OVER, &jw_is_over);  store64(d + DD_SAVE_FMT, &jw_save_format);
+    store64(d + DD_NEW, &jw_new);          store64(d + DD_LOAD, &jw_load_parse);
+    store64(d + DD_DEF_DAYS, JW_DEF_DAYS);
+    store64(d + DD_START, &jw_start);       store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
+
+    d = dd_new_desc(GAME_OLYMPIAD);
+    store64(d + DD_NAME, "olympiad");
+    store64(d + DD_RENDER, &ol_render);    store64(d + DD_FEED, &ol_feed);
+    store64(d + DD_IS_OVER, &ol_is_over);  store64(d + DD_SAVE_FMT, &ol_save_format);
+    store64(d + DD_NEW, &ol_new);          store64(d + DD_LOAD, &ol_load_parse);
+    store64(d + DD_DEF_DAYS, 0);
+    store64(d + DD_SCORE, &ol_final_score); store64(d + DD_RANK, &ol_rank);
+    store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
+
+    d = dd_new_desc(GAME_ASHES);
+    store64(d + DD_NAME, "ashes");         store64(d + DD_USLOT, "ashesu");
+    store64(d + DD_RENDER, &ash_render);   store64(d + DD_FEED, &ash_feed);
+    store64(d + DD_IS_OVER, &ash_is_over); store64(d + DD_SAVE_FMT, &ash_save_format);
+    store64(d + DD_NEW, &ash_new);         store64(d + DD_LOAD, &ash_load_parse);
+    store64(d + DD_DEF_DAYS, 0);           store64(d + DD_FLAGS, DF_UNIVERSE);
+    store64(d + DD_WORLD_BYTES, &ashw_byte_size); store64(d + DD_WORLD_VALID, &ashw_valid);
+    store64(d + DD_WORLD_NEW, &ashw_new);  store64(d + DD_WORLD_SEED, ASH_WORLD_SEED);
+    store64(d + DD_WORLD_OFF, AE_WORLD);
+    store64(d + DD_MSG, &ash_msg);         store64(d + DD_BUSY, "the realm is busy — try again.");
+    store64(d + DD_SCORE, &ash_final_score); store64(d + DD_RANK, &ash_rank);
+    store64(d + DD_WORLD_TICK, &ash_world_tick); store64(d + DD_TICK_NS, ASH_NS_PER_TURN);
+    store64(d + DD_START, &ash_start);      store64(d + DD_FP_OFF, AE_FP + 1);
+    store64(d + DD_ON_ENTRY, &ash_on_entry); store64(d + DD_MODE_POLICY, DM_FORCE_UNIVERSE);
+
+    d = dd_new_desc(GAME_DECODE);
+    store64(d + DD_NAME, "decode");
+    store64(d + DD_RENDER, &decode_render);   store64(d + DD_FEED, &decode_feed);
+    store64(d + DD_IS_OVER, &decode_is_over); store64(d + DD_SAVE_FMT, &decode_save_format);
+    store64(d + DD_NEW, &decode_new);         store64(d + DD_LOAD, &decode_load_parse);
+    store64(d + DD_DEF_DAYS, 0);
+    store64(d + DD_SCORE, &decode_final_score); store64(d + DD_RANK, &decode_rank);
+    store64(d + DD_START, &decode_start);   store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
+
+    return 0;
+}
+
 fn door_game_name(game): i64 {
-    if (game == GAME_SMUGGLER) { return "smuggler"; }
-    if (game == GAME_PORT)     { return "port"; }
-    if (game == GAME_HANDLER)  { return "handler"; }
-    if (game == GAME_ELIZA)    { return "eliza"; }
-    if (game == GAME_PARRY)    { return "parry"; }
-    if (game == GAME_QUEST)    { return "quest"; }
-    if (game == GAME_JABBER)   { return "jabberwacky"; }
-    if (game == GAME_OLYMPIAD) { return "olympiad"; }
-    if (game == GAME_ASHES)    { return "ashes"; }
-    if (game == GAME_DECODE)   { return "decode"; }
-    return "game";
+    var d = door_desc_for(game);
+    if (d == 0) { return "game"; }
+    var nm = load64(d + DD_NAME);
+    if (nm == 0) { return "game"; }
+    return nm;
 }
 
 # === 1.3.0 chat glue (ADR 0011) ===
@@ -1196,30 +1354,31 @@ fn chat_bot_name(): i64 {
 
 # Snapshot byte size for a game's world.
 fn door_world_bytes(game): i64 {
-    if (game == GAME_PORT)     { return paw_byte_size(); }
-    if (game == GAME_SMUGGLER) { return slw_byte_size(); }
-    if (game == GAME_HANDLER)  { return thw_byte_size(); }
-    if (game == GAME_ASHES)    { return ashw_byte_size(); }
-    return 8;
+    var d = door_desc_for(game);
+    if (d == 0) { return 8; }
+    var fp = load64(d + DD_WORLD_BYTES);
+    if (fp == 0) { return 8; }
+    return callptr(fp, 0);   # byte-size ctors take no args; the extra reg is ignored (SysV)
 }
 
 # Validate a freshly-read snapshot for a game (size + version).
 fn door_world_valid(game, buf, len): i64 {
-    if (game == GAME_PORT)     { return paw_valid(buf, len); }
-    if (game == GAME_SMUGGLER) { return slw_valid(buf, len); }
-    if (game == GAME_HANDLER)  { return thw_valid(buf, len); }
-    if (game == GAME_ASHES)    { return ashw_valid(buf, len); }
-    return 0;
+    var d = door_desc_for(game);
+    if (d == 0) { return 0; }
+    var fp = load64(d + DD_WORLD_VALID);
+    if (fp == 0) { return 0; }
+    return callptr(fp, buf, len);
 }
 
 # Mint a fresh world for a game into buf (used when no/invalid snapshot
 # exists yet). PA's galaxy is seeded; Smuggler/Handler start clean.
 fn door_world_fresh_into(game, buf): i64 {
-    var src = 0;
-    if (game == GAME_PORT)     { src = paw_new(PA_UNIVERSE_SEED); }
-    if (game == GAME_SMUGGLER) { src = slw_new(); }
-    if (game == GAME_HANDLER)  { src = thw_new(); }
-    if (game == GAME_ASHES)    { src = ashw_new(ASH_WORLD_SEED); }
+    var d = door_desc_for(game);
+    if (d == 0) { return 0; }
+    var fp = load64(d + DD_WORLD_NEW);
+    if (fp == 0) { return 0; }
+    var seed = load64(d + DD_WORLD_SEED);
+    var src = callptr(fp, seed);
     if (src != 0) { memcpy(buf, src, door_world_bytes(game)); }
     return 0;
 }
@@ -1227,21 +1386,23 @@ fn door_world_fresh_into(game, buf): i64 {
 # Point the active game state's world field at ptr (so its pure
 # transforms read/write the in-memory snapshot during the transaction).
 fn door_set_world(game, ptr): i64 {
-    if (game == GAME_PORT)     { store64(g_door_state + PA_WORLD, ptr); }
-    if (game == GAME_SMUGGLER) { store64(g_door_state + SL_WORLD, ptr); }
-    if (game == GAME_HANDLER)  { store64(g_door_state + TH_WORLD, ptr); }
-    if (game == GAME_ASHES)    { store64(g_door_state + AE_WORLD, ptr); }
+    var d = door_desc_for(game);
+    if (d == 0) { return 0; }
+    var wb = load64(d + DD_WORLD_BYTES);
+    if (wb == 0) { return 0; }                       # not a Universe game (no world ctor)
+    var off = load64(d + DD_WORLD_OFF);
+    store64(g_door_state + off, ptr);
     return 0;
 }
 
 # The per-player Universe save slot for a game ("<game>u" — distinct
 # from the Solo slot so a player can keep both).
 fn door_universe_slot(game): i64 {
-    if (game == GAME_PORT)     { return "portu"; }
-    if (game == GAME_SMUGGLER) { return "smuggleru"; }
-    if (game == GAME_HANDLER)  { return "handleru"; }
-    if (game == GAME_ASHES)    { return "ashesu"; }
-    return "gameu";
+    var d = door_desc_for(game);
+    if (d == 0) { return "gameu"; }
+    var s = load64(d + DD_USLOT);
+    if (s == 0) { return "gameu"; }
+    return s;
 }
 
 # Open the world lock and load the active game's snapshot into
@@ -1257,11 +1418,19 @@ fn door_world_begin(): i64 {
         door_world_fresh_into(g_door_game, g_uni_world);
         world_write(g_store_buf, name, g_uni_world, cap);
     }
-    # 1.3.7 (ADR 0014): Ashes resolves overdue turn windows lazily on every
-    # world-open — the entering caller (already holding the lock) runs the
-    # batch resolution. The commit that follows persists the resolved world.
-    if (g_door_game == GAME_ASHES) {
-        ash_world_tick(g_uni_world, clock_epoch_ns() / ASH_NS_PER_TURN);
+    # 1.3.7 (ADR 0014): a Universe game can resolve overdue turn windows lazily
+    # on every world-open — the entering caller (already holding the lock) runs
+    # the batch resolution; the commit that follows persists it. Generalized at
+    # 1.4.6 (R7) via the descriptor's tick fp + ns-per-turn (Ashes is the only
+    # one today). `tr` holds the (unused) result — a bare callptr statement does
+    # not parse, so the result must be bound.
+    var dt = door_desc_for(g_door_game);
+    if (dt != 0) {
+        var tfp = load64(dt + DD_WORLD_TICK);
+        if (tfp != 0) {
+            var turn = clock_epoch_ns() / load64(dt + DD_TICK_NS);
+            var tr = callptr(tfp, g_uni_world, turn);
+        }
     }
     return fd;
 }
@@ -1283,19 +1452,21 @@ fn door_world_commit(fd): i64 {
 # control (1 = leave the game).
 fn door_universe_feed(line, len): i64 {
     var fd = door_world_begin();
+    var d = door_desc_for(g_door_game);
     if (fd < 0) {
-        if (g_door_game == GAME_PORT)     { pa_msg(g_door_state, "The galaxy is busy — try again."); }
-        if (g_door_game == GAME_SMUGGLER) { sl_msg(g_door_state, "The streets are busy — try again."); }
-        if (g_door_game == GAME_HANDLER)  { th_msg(g_door_state, "The registry is busy — try again."); }
-        if (g_door_game == GAME_ASHES)    { ash_msg(g_door_state, "the realm is busy — try again."); }
+        if (d != 0) {
+            var mfp = load64(d + DD_MSG);
+            var busy = load64(d + DD_BUSY);
+            if (mfp != 0) { var mr = callptr(mfp, g_door_state, busy); }
+        }
         return 0;
     }
     door_set_world(g_door_game, g_uni_world);
     var ctrl = 0;
-    if (g_door_game == GAME_PORT)     { ctrl = pa_feed(g_door_state, line, len); }
-    if (g_door_game == GAME_SMUGGLER) { ctrl = sl_feed(g_door_state, line, len); }
-    if (g_door_game == GAME_HANDLER)  { ctrl = th_feed(g_door_state, line, len); }
-    if (g_door_game == GAME_ASHES)    { ctrl = ash_feed(g_door_state, line, len); }
+    if (d != 0) {
+        var ffp = load64(d + DD_FEED);
+        if (ffp != 0) { ctrl = callptr(ffp, g_door_state, line, len); }
+    }
     door_world_commit(fd);
     return ctrl;
 }
@@ -1304,12 +1475,12 @@ fn door_universe_feed(line, len): i64 {
 # "<game>u" slot, keyed by fp — separate from the Solo save.
 fn door_universe_save(): i64 {
     if ((load8(g_session_fp) & 0xFF) == 0) { return 0; }
+    var d = door_desc_for(g_door_game);
+    if (d == 0) { return 0; }
+    var fp = load64(d + DD_SAVE_FMT);
+    if (fp == 0) { return 0; }
     var buf = alloc(DOOR_SAVE_CAP);
-    var n = 0;
-    if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-    if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-    if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-    if (g_door_game == GAME_ASHES)    { n = ash_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
+    var n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
     if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_universe_slot(g_door_game), buf, n); }
     return 0;
 }
@@ -1325,16 +1496,11 @@ fn door_send_frame(cfd): i64 {
     var buf = alloc(DOOR_FRAME_CAP + DOOR_FRAME_GUARD);
     g_door_emit_cap = DOOR_FRAME_CAP;
     var n = 0;
-    if (g_door_game == GAME_SMUGGLER) { n = sl_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_PORT)     { n = pa_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_HANDLER)  { n = th_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_ELIZA)    { n = ez_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_PARRY)    { n = py_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_QUEST)    { n = qu_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_JABBER)   { n = jw_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_OLYMPIAD) { n = ol_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_ASHES)    { n = ash_render(g_door_state, buf, DOOR_FRAME_CAP); }
-    if (g_door_game == GAME_DECODE)   { n = decode_render(g_door_state, buf, DOOR_FRAME_CAP); }
+    var d = door_desc_for(g_door_game);
+    if (d != 0) {
+        var fp = load64(d + DD_RENDER);
+        if (fp != 0) { n = callptr(fp, g_door_state, buf, DOOR_FRAME_CAP); }
+    }
     g_door_emit_cap = DOOR_EMIT_UNBOUNDED;             # [D3] restore the default for non-frame emit users
     if (n > DOOR_FRAME_CAP) { n = DOOR_FRAME_CAP; }    # [D3] clamp any overshoot — never send past the cap
     if (n > 0) { send_buf(cfd, buf, n); }
@@ -1346,28 +1512,19 @@ fn door_send_frame(cfd): i64 {
 # trades/claims hit the shared galaxy under the flock (ADR 0010 bite 2).
 fn door_feed_line(cfd, line, line_len): i64 {
     if (g_door_mode == DOOR_UNIVERSE) { return door_universe_feed(line, line_len); }
-    if (g_door_game == GAME_SMUGGLER) { return sl_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_PORT)     { return pa_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_HANDLER)  { return th_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_ELIZA)    { return ez_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_PARRY)    { return py_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_QUEST)    { return qu_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_JABBER)   { return jw_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_OLYMPIAD) { return ol_feed(g_door_state, line, line_len); }
-    if (g_door_game == GAME_DECODE)   { return decode_feed(g_door_state, line, line_len); }
-    return 1;
+    var d = door_desc_for(g_door_game);
+    if (d == 0) { return 1; }
+    var fp = load64(d + DD_FEED);
+    if (fp == 0) { return 1; }
+    return callptr(fp, g_door_state, line, line_len);
 }
 
 fn door_is_over(): i64 {
-    if (g_door_game == GAME_SMUGGLER) { return sl_is_over(g_door_state); }
-    if (g_door_game == GAME_PORT)     { return pa_is_over(g_door_state); }
-    if (g_door_game == GAME_HANDLER)  { return th_is_over(g_door_state); }
-    if (g_door_game == GAME_QUEST)    { return qu_is_over(g_door_state); }
-    if (g_door_game == GAME_JABBER)   { return jw_is_over(g_door_state); }
-    if (g_door_game == GAME_OLYMPIAD) { return ol_is_over(g_door_state); }
-    if (g_door_game == GAME_ASHES)    { return ash_is_over(g_door_state); }
-    if (g_door_game == GAME_DECODE)   { return decode_is_over(g_door_state); }
-    return 0;
+    var d = door_desc_for(g_door_game);
+    if (d == 0) { return 0; }
+    var fp = load64(d + DD_IS_OVER);
+    if (fp == 0) { return 0; }          # chatbots (Eliza/Parry): never over
+    return callptr(fp, g_door_state);
 }
 
 # === 1.2.0 bite 5 — cross-game leaderboards (generalizes the 1.1.0
@@ -1420,15 +1577,14 @@ fn door_format_score(handle, score, rank, buf): i64 {
 # Append the active player's final score for `game` to its leaderboard.
 fn door_post_score(game): i64 {
     if ((load8(g_session_handle) & 0xFF) == 0) { return 0; }
-    var score = 0;
+    var d = door_desc_for(game);
+    if (d == 0) { return 0; }
+    var sfp = load64(d + DD_SCORE);
+    if (sfp == 0) { return 0; }              # no leaderboard for this game (chatbots)
+    var score = callptr(sfp, g_door_state);
+    var rfp = load64(d + DD_RANK);
     var rank = "";
-    if (game == GAME_PORT)     { score = pa_final_score(g_door_state); rank = pa_rank(score); }
-    if (game == GAME_SMUGGLER) { score = sl_final_score(g_door_state); rank = sl_rank(score); }
-    if (game == GAME_HANDLER)  { score = th_score(g_door_state);       rank = th_rank(score); }
-    if (game == GAME_QUEST)    { score = qu_final_score(g_door_state);  rank = qu_rank(score); }
-    if (game == GAME_OLYMPIAD) { score = ol_final_score(g_door_state);  rank = ol_rank(score); }
-    if (game == GAME_ASHES)    { score = ash_final_score(g_door_state); rank = ash_rank(score); }
-    if (game == GAME_DECODE)   { score = decode_final_score(g_door_state); rank = decode_rank(score); }
+    if (rfp != 0) { rank = callptr(rfp, score); }
     var path = alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var line = alloc(256);
@@ -1520,16 +1676,16 @@ fn door_save_on_exit(cfd): i64 {
     } else { if (g_door_mode == DOOR_SOLO) {
         if ((load8(g_session_fp) & 0xFF) != 0) {
             if (door_is_over() == 0) {
-                var buf = alloc(DOOR_SAVE_CAP);
+                var d = door_desc_for(g_door_game);
                 var n = 0;
-                if (g_door_game == GAME_SMUGGLER) { n = sl_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_PORT)     { n = pa_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_HANDLER)  { n = th_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_QUEST)    { n = qu_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_JABBER)   { n = jw_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_OLYMPIAD) { n = ol_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (g_door_game == GAME_DECODE)   { n = decode_save_format(g_door_state, buf, DOOR_SAVE_CAP); }
-                if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
+                if (d != 0) {
+                    var fp = load64(d + DD_SAVE_FMT);
+                    if (fp != 0) {
+                        var buf = alloc(DOOR_SAVE_CAP);
+                        n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
+                        if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
+                    }
+                }
             }
         }
     } }
@@ -1634,7 +1790,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.4.5 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.4.6 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1667,6 +1823,10 @@ fn handle_client(cfd): i64 {
     # send_buf's write returns <= 0 on the SO_SNDTIMEO fire and the
     # caller closes the connection (same as any short-write error).
     sock_set_send_timeout(cfd, SEND_TIMEOUT_SECS, 0);
+
+    # [1.4.6 R7] Build the door descriptor registry once per worker process
+    # (forked children init their own copy on first connect; harmless + cheap).
+    if (g_door_registry == 0) { door_registry_init(); }
 
     # Per-connection telnet state.
     var ts = telnet_state_new();
@@ -2763,7 +2923,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.4.5");
+    println("agora 1.4.6");
     return 0;
 }
 

@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.6] — 2026-06-15 (R7: table-driven door dispatch — the descriptor registry)
+
+**One registry block per door, not eighteen edits.** This closes the last open item from the 2026-06-15 audit — finding **R7**, the per-game door-dispatch refactor ([ADR 0020](docs/adr/0020-door-descriptor-registry.md)). The ~130 `if (game == GAME_X)` branch sites that were smeared across ~16 dispatch functions in `src/main.cyr` (name, world bytes/valid/fresh/set/slot, world-begin tick, universe feed/save, render, feed, is_over, post-score, save-on-exit, and the `play` launcher's new/load/start clusters) collapse into a **single per-game descriptor record** keyed by `GAME_*` id, dispatched via `callptr` through function-address slots (`&xx_render`, `&xx_feed`, …). Adding the eleventh door is now one self-contained block in `door_registry_init` and nothing else. No behavior change — pure structural refactor; verified by the full example-smoke suite (all 13 door/universe/chat scripts green end-to-end). Also realigns the toolchain **6.2.7 → 6.2.8** (the active wrapper had advanced; the 6.2.8 stdlib snapshot already carries the 1.4.5 `sock_set_send_timeout` addition, so the bridge is now upstream). 221 tests (unchanged); 1,374,240 B → **1,375,360 B** (+1,120 B, the registry machinery net of the removed if-chains; the 6.2.7→6.2.8 codegen is byte-identical).
+
+### Changed
+
+- **Toolchain pin 6.2.7 → 6.2.8** (`cyrius.cyml [package].cyrius`) — closes the wrapper/manifest drift; `cyrius lib sync` refreshes `lib/` to the 6.2.8 snapshot, which already includes the additive `sock_set_send_timeout` (the 1.4.5 T2 stdlib change is now part of the stock toolchain, no longer a local bridge). Clean DCE build byte-identical at the bump (1,375,360 B), 221/221 green on 6.2.8 with no source change.
+- **Door dispatch is table-driven** (`src/main.cyr`, [ADR 0020](docs/adr/0020-door-descriptor-registry.md)) — new `enum DoorDesc` + `door_registry_init` (built once per worker, guarded in `handle_client`) + `door_desc_for`. Every door-cross-cutting function (`door_game_name`, `door_world_bytes`/`_valid`/`_fresh_into`/`_set_world`, `door_universe_slot`, `door_world_begin`, `door_universe_feed`/`_save`, `door_send_frame`, `door_feed_line`, `door_is_over`, `door_post_score`, `door_save_on_exit`) and the `play` launcher's new/load/start/fp-store clusters now read the active game's descriptor and `callptr` the relevant slot; a `0` slot means "capability absent" (chatbots have no save / no `is_over`; Olympiad has no `start`). The lazy Universe turn-tick (Ashes) is generalized to a `DD_WORLD_TICK` fp + `DD_TICK_NS`. The per-game game logic is untouched — only how `main.cyr` selects it changed.
+
+### Added
+
+- **ADR 0020** (door descriptor registry) and **architecture note [001](docs/architecture/001-cyrius-callptr-constraints.md)** — the latter records two Cyrius constraints this work surfaced (both undocumented): a bare `callptr(...)` statement does not parse (bind the result to a var even when unused; errors cascade to a misleading line), and `0` is a valid struct-field offset so an optional offset must be stored `+1`-biased (the Ashes fp field `AE_FP` is at offset 0 — the bug the bias fixes).
+
 ## [1.4.5] — 2026-06-15 (Hardening follow-up: the 1.4.4 deferred items)
 
 **Closes the three defense-in-depth items 1.4.4 deferred.** No new features — this finishes the hardening the audit ([`docs/audit/2026-06-15-audit.md`](docs/audit/2026-06-15-audit.md)) recorded for later: **T2** (the send-side socket timeout), **T3** (the `TERMINAL_TYPE` buffer), and **D3** (the door render-frame bound). The only remaining audit item is **R7** (the ~47-arm door-dispatch refactor), now scheduled as its own dedicated cut, **1.4.6**. 220 → **221 tests**; 1,373,424 B → **1,374,240 B**.
