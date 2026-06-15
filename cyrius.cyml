@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.2"
+cyrius = "6.2.7"
 
 [build]
 entry = "src/main.cyr"
@@ -25,12 +25,15 @@ stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "
 # into a caller-provided buffer instead of writing to fd 1, so the
 # rendered bytes go out over the telnet socket via send_buf.
 #
-# Pinned at 0.5.3 (current tip) — pre-1.0 by version label but the
-# functional surface we need (added at v0.5.3 for anuenue M6) is
-# stable. Bannermanor pins darshana at 0.3.5 for the same reason;
-# both will re-pin at darshana 1.0 when the API surface freezes.
+# Pinned at 0.7.0 (current tip) — pre-1.0 by version label but the
+# functional surface we need is stable. 0.7.0 is darshana's pre-freeze
+# hardening sweep: it carries breaking renames (tty_cooked/tty_itoa/
+# tty_clear_to_end/tty_apply_raw_flags) that agora is unaffected by —
+# agora only consumes the `_buf` SGR composers (tty_sgr_buf /
+# tty_sgr_reset_buf), whose signatures are unchanged across 0.5.3→0.7.0.
+# Both will re-pin at darshana 1.0 when the API surface freezes.
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.5.3"
+tag = "0.7.0"
 modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:

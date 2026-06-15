@@ -41,6 +41,12 @@ enum DoorCap {
     GAME_NAME_MAX  = 32;       # save-slot name ceiling (matches BOARD_NAME_MAX)
     SAVE_MAX_BYTES = 65536;    # max save-file size we read/write at once
     RNG_NONZERO    = 0x2545F491;  # nonzero fallback seed (xorshift fixed-point is 0)
+    # Quantity ceiling for client-entered integers (stake / qty / amount).
+    # door_parse_int pins the accumulator here so `val*10+digit` and any
+    # downstream multiply (e.g. sl_buy's price*qty) cannot wrap i64 and
+    # produce a negative-as-huge value that slips a `cost > cash` guard.
+    # 1e9 is far above any real economy figure; 1e9 * 1e9 = 1e18 < i64 max. [D1/D2]
+    DOOR_INT_MAX   = 1000000000;
 }
 
 # Per-game play mode. Practice = ephemeral (anon-OK, no save); Solo =
@@ -135,12 +141,6 @@ fn rng_seed(state_ptr, seed): i64 {
     if (s == 0) { s = RNG_NONZERO; }
     store64(state_ptr, s);
     return 0;
-}
-
-# Seed from the monotonic clock — for Practice/arcade nondeterminism.
-# Solo/replayable games seed from a value stored in the save instead.
-fn rng_seed_from_clock(state_ptr): i64 {
-    return rng_seed(state_ptr, clock_now_ns());
 }
 
 # Advance the state and return the next 64-bit value (may be negative).
@@ -346,6 +346,7 @@ fn door_parse_int(buf, len): i64 {
         if (c < 48) { scanning = 0; continue; }
         if (c > 57) { scanning = 0; continue; }
         val = val * 10 + (c - 48);
+        if (val > DOOR_INT_MAX) { val = DOOR_INT_MAX; }   # [D2] pin: no i64 wrap
         got = 1;
         i = i + 1;
     }
@@ -373,6 +374,7 @@ fn door_parse_2int(buf, len, second_ptr): i64 {
         if (c < 48) { s1 = 0; continue; }
         if (c > 57) { s1 = 0; continue; }
         v1 = v1 * 10 + (c - 48);
+        if (v1 > DOOR_INT_MAX) { v1 = DOOR_INT_MAX; }   # [D2] pin: no i64 wrap
         got1 = 1;
         i = i + 1;
     }
@@ -389,6 +391,7 @@ fn door_parse_2int(buf, len, second_ptr): i64 {
         if (c2 < 48) { s2 = 0; continue; }
         if (c2 > 57) { s2 = 0; continue; }
         v2 = v2 * 10 + (c2 - 48);
+        if (v2 > DOOR_INT_MAX) { v2 = DOOR_INT_MAX; }   # [D2] pin: no i64 wrap
         got2 = 1;
         i = i + 1;
     }

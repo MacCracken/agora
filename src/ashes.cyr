@@ -1087,7 +1087,11 @@ fn ash_scan_ints(line, len, start, out, maxn): i64 {
                         var dd = 0;
                         if (d >= 48) { if (d <= 57) { dd = 1; } }
                         if (dd == 0) { dg = 0; }
-                        else { v = v * 10 + (d - 48); p = p + 1; }
+                        else {
+                            v = v * 10 + (d - 48);
+                            if (v > DOOR_INT_MAX) { v = DOOR_INT_MAX; }   # [D1] pin: no i64 wrap
+                            p = p + 1;
+                        }
                     }
                 }
                 store64(out + cnt * 8, v);

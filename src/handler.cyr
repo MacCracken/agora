@@ -147,11 +147,6 @@ fn th_registry_count(st): i64 {
     return load64(st + TH_REGCOUNT);
 }
 
-fn th_has_mole(st): i64 {
-    if (load64(st + TH_MOLEIDX) >= 0) { return 1; }
-    return 0;
-}
-
 # === Construction ===
 
 fn th_new(seed, mode, max_days): i64 {
@@ -589,19 +584,6 @@ fn th_rank(score): i64 {
     return "Director's Chair";
 }
 
-# Format one standings line "<handle>\t<score>\t<rank>\n" into buf
-# (pure; main.cyr appends it to the shared standings file with flock).
-fn th_format_standing(st, handle, buf): i64 {
-    var pos = 0;
-    pos = emit_cstr(buf, pos, handle);
-    store8(buf + pos, 9); pos = pos + 1;
-    pos = emit_int(buf, pos, th_score(st));
-    store8(buf + pos, 9); pos = pos + 1;
-    pos = emit_cstr(buf, pos, th_rank(th_score(st)));
-    store8(buf + pos, 10); pos = pos + 1;
-    return pos;
-}
-
 # === Save / load ===
 
 fn th_save_format(st, buf, cap): i64 {
@@ -687,6 +669,13 @@ fn th_load_parse(buf, len): i64 {
         i = i + 1;
     }
     var n = save_get_i64(buf, len, cur);
+    # Clamp the file-supplied cable count to the registry ceiling before
+    # the write loop — th_cable_at does raw pointer arithmetic into a
+    # TH_REG_MAX*CB_SIZE alloc with no bounds check, so a tampered save
+    # with n > TH_REG_MAX would overrun the heap. Mirrors the same
+    # load-clamp discipline in ol_load_parse / decode_load_parse. [S1/R4]
+    if (n < 0) { n = 0; }
+    if (n > TH_REG_MAX) { n = TH_REG_MAX; }
     store64(st + TH_REGCOUNT, n);
     var j = 0;
     while (j < n) {

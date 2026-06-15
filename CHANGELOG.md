@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-06-15 (P(-1) hardening: toolchain 6.2.7, darshana 0.7.0, security sweep)
+
+**A hardening / refactor / security / optimization pass, no new features.** 1.4.4 realigns the toolchain (cyrius **6.2.2 → 6.2.7**) and the one git dependency (**darshana 0.5.3 → 0.7.0**, darshana's own pre-freeze hardening cut — agora is unaffected by its breaking renames since it only consumes the unchanged `tty_sgr_buf` / `tty_sgr_reset_buf` composers), then runs the full P(-1) audit ([`docs/audit/2026-06-15-audit.md`](docs/audit/2026-06-15-audit.md), four parallel line-by-line reads against the Security Hardening checklist + CVE-2020-10188 / CVE-2011-4862 parity). Six findings fixed (1 remote-DoS, 1 heap-overflow, 2 integer-overflow, 1 dead-return, plus a 7-function dead-code sweep); two LOW defense-in-depth items and one send-timeout finding recorded as deferred. No remote-compromise path found. 218 → **220 tests**; 1,371,808 B → **1,373,424 B** (net of the toolchain/darshana bump minus the dead-code removal); worldbench steady at ~42k flock'd txn/s (476 → 458 ms / 20k, within noise).
+
+### Security
+
+- **`send_buf` infinite busy-loop on partial-write error** (`src/main.cyr`, finding **T1**, HIGH) — a short/failed `sys_write` after a partial send left the loop spinning forever (`off < len` still true, the `done` flag only suppressed work, never terminated), pegging a CPU core. Remotely triggerable from the normal handshake by RST-ing mid-send; reachable from every ingress path (IAC drain, echo, MOTD/prompt). Fixed by `return`-ing on a short write instead of the broken flag+continue. No CVE (agora-specific I/O-layer bug), but the *class* is the same DoS surface BSD telnetd guards against.
+- **`th_load_parse` heap overflow from a tampered save** (`src/handler.cyr`, finding **S1/R4**, HIGH) — the cable count was read from the save file and used as the write-loop bound with no clamp, driving `th_cable_at` past the `TH_REG_MAX*CB_SIZE` (20,480 B) allocation by attacker-controlled i64 data. The lone divergence from the project's load-clamp discipline (`ol_load_parse`/`decode_load_parse`/`jw_load_parse` already clamp). Fixed by clamping the count to `[0, TH_REG_MAX]` before the loop. Regression-pinned by **t219**.
+- **Integer-overflow in the shared door parsers** (`src/door.cyr` `door_parse_int`/`door_parse_2int`, finding **D2**, MEDIUM; `src/ashes.cyr` `ash_scan_ints`, finding **D1**, MEDIUM) — unbounded `val*10+digit` accumulation let a long all-digit quantity wrap i64 negative and slip a downstream guard (`sl_buy`'s `cost = price*qty` → buy goods while cash *increases*). Fixed by pinning the accumulator at the new `DOOR_INT_MAX` (1e9) in all three parsers — well above any real figure, and `1e9*1e9 < i64 max` so no single downstream multiply can wrap. Regression-pinned by **t220**.
+
+### Changed
+
+- **Toolchain pin 6.2.2 → 6.2.7** (`cyrius.cyml [package].cyrius`) — closes the wrapper/manifest drift (the active `cycc` had advanced to 6.2.7). `cyrius lib sync` refreshes `lib/` to the 6.2.7 snapshot. 218/218 pre-fix tests green on 6.2.7 with no source change.
+- **darshana 0.5.3 → 0.7.0** (`cyrius.cyml [deps.darshana]`) — darshana's pre-freeze hardening sweep carries breaking renames (`tty_cooked`/`tty_itoa`/`tty_clear_to_end`/`tty_apply_raw_flags`) that agora does not touch; the only consumed functions (`tty_sgr_buf` / `tty_sgr_reset_buf`) are signature-identical across the bump.
+- **`door_world_commit` propagates its `world_write` result** (`src/main.cyr`, finding **R6**, LOW) — a failed shared-world snapshot write under the held lock was silently dropped; the status is now returned (lock still released on either path).
+
+### Removed
+
+- **7 dead functions** (finding **R3**): `ez_is_over` (`src/eliza.cyr`), `py_is_over` (`src/parry.cyr`), `qu_clampv` (`src/quest.cyr`, also a dup of `iclamp`), `rng_seed_from_clock` (`src/door.cyr`), `th_format_standing` + `th_has_mole` (`src/handler.cyr`), `paw_stock_cells` (`src/port_authority.cyr`) — all with zero non-definition references in source or tests. Binary −720 B; unreachable-fn count 1492 → 1485.
+
+### Deferred (recorded in the audit, not changed)
+
+- **T2 (MEDIUM) — no send-side socket timeout** (slowloris-read parks a forked worker in a blocking `sys_write`). The fix needs `SO_SNDTIMEO` in `lib/net.cyr`, which is a toolchain-synced module — a net-stdlib task, not an agora edit (CLAUDE.md: "the listener uses `lib/net.cyr` primitives, not raw syscalls").
+- **T3 / D3 (LOW)** — defense-in-depth only: the `TERMINAL_TYPE` subneg buffer is correctly in-bounds today but un-terminated; the door `*_render` functions don't check their `cap` (all current frames fit under 8192). Recorded for the v1.0 freeze.
+- **R7 (refactor)** — the ~47-arm per-game door dispatch in `main.cyr` is past the refactor threshold but stable and additive; a descriptor-table collapse is deferred per the no-speculative-refactor policy until the next door lands.
+
 ## [1.4.3] — 2026-06-14 (The Handler decrypt lever: decode as a cross-game mechanic)
 
 **One engine, two doors.** The decode engine ([ADR 0018](docs/adr/0018-decode-engine.md)) is embedded inside **The Handler** as a desk-bound cryptanalysis lever ([ADR 0019](docs/adr/0019-decode-handler-lever.md)) — agora's **first cross-game mechanic reuse**. Reading a cable, the section chief can spend one dispatch point to **break its cipher**: a decode round (a Numbers relay code for paperwork, a Words codename for an intercept) whose secret is derived *deterministically from the cable itself*. Cracking it reveals the one fact the cable UI never shows — `CB_ANOM`, the hidden planted-anomaly ground truth: whether the cable's discrepancy is a **deliberate PLANT** (the mole's forged routing) or mere **clerical NOISE** (an honest agent's false positive). That cuts the false-positive fog that *is* the mole hunt — and the dispatch-point cost keeps it from being brute-forced across every cable (which would trivialize the puzzle). The reward is purely *additive* (CB_ANOM is otherwise never shown); the visible metadata, the discrepancy verdict, and the **save format** are all untouched (the lever's state is runtime-only). 216 → **218 tests**; 1,367,728 B → **1,371,808 B**.

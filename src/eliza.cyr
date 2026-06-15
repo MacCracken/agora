@@ -844,9 +844,3 @@ fn ez_render(st, buf, cap): i64 {
     pos = emit_cstr(buf, pos, "(say what's on your mind, or 'bye' to leave) > ");
     return pos;
 }
-
-# Eliza never "wins/loses" — no score, no leaderboard. Always 0 so the
-# door framework treats a quit as a plain exit (door_save_on_exit no-op).
-fn ez_is_over(st): i64 {
-    return 0;
-}

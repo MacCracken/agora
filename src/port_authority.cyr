@@ -1244,7 +1244,6 @@ enum PAWOff {
 
 # Section base offsets + the full word count of the snapshot (all in i64
 # units). The deploy (garrison) section is 2 cells per sector.
-fn paw_stock_cells(): i64 { return PA_SECTORS * PA_COMM; }
 fn paw_planet_base(): i64 { return PAW_OFF_STOCK + PA_SECTORS * PA_COMM; }
 fn paw_deploy_base(): i64 { return paw_planet_base() + PA_SECTORS; }
 fn paw_word_count(): i64 { return paw_deploy_base() + PA_SECTORS * 2; }

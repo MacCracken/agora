@@ -179,7 +179,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.4.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.4.4 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -228,15 +228,17 @@ fn print_help(): i64 {
 # success, 1 on partial-write or socket error (caller closes conn).
 fn send_buf(cfd, buf, len): i64 {
     var off = 0;
-    var done = 0;
     while (off < len) {
-        if (done != 0) { continue; }
         var n = sys_write(cfd, buf + off, len - off);
-        if (n <= 0) { done = 1; continue; }
+        # A short / failed write (peer reset, transient error) returns 1
+        # so the caller closes the connection. `return` (not `break`)
+        # exits cleanly — the prior flag+continue idiom spun forever here:
+        # with off < len still true, `done` only suppressed work, never
+        # terminated the loop (a remotely-triggerable CPU-peg DoS). [T1]
+        if (n <= 0) { return 1; }
         off = off + n;
     }
-    if (off == len) { return 0; }
-    return 1;
+    return 0;
 }
 
 # Copy a cstring (NUL-terminated) into `buf` at `pos`. Returns new
@@ -1258,11 +1260,14 @@ fn door_world_begin(): i64 {
     return fd;
 }
 
-# Write g_uni_world back under the held lock and release it.
+# Write g_uni_world back under the held lock and release it. Returns the
+# world_write status (0 = persisted) so a caller can surface a failed
+# shared-world snapshot rather than silently losing the turn; the lock is
+# released either way so a write error can't strand the world locked. [R6]
 fn door_world_commit(fd): i64 {
-    world_write(g_store_buf, door_game_name(g_door_game), g_uni_world, door_world_bytes(g_door_game));
+    var wr = world_write(g_store_buf, door_game_name(g_door_game), g_uni_world, door_world_bytes(g_door_game));
     world_lock_release(fd);
-    return 0;
+    return wr;
 }
 
 # Feed one line to a Universe session inside the world transaction:
@@ -1587,7 +1592,7 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
 # The AGORA banner art was generated once via `bnrmr "AGORA"`
 # (block font, 5×5, bannermanor v1.0.0). The `#` bytes use `\x23`
 # escapes to dodge cyrius's line-comment lexer. SGR primitives are
-# darshana 0.5.3's `tty_sgr_buf` / `tty_sgr_reset_buf` — the `_buf`
+# darshana's `tty_sgr_buf` / `tty_sgr_reset_buf` — the `_buf`
 # variants compose into a buffer rather than writing to fd 1, which
 # is exactly what we need to send bytes back over the telnet socket.
 fn render_motd(buf): i64 {
@@ -1614,7 +1619,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.4.3 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.4.4 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2738,7 +2743,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.4.3");
+    println("agora 1.4.4");
     return 0;
 }
 

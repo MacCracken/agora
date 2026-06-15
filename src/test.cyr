@@ -5094,6 +5094,58 @@ fn t218_th_decrypt_flow(): i64 {
     return 0;
 }
 
+# t219 — [S1/R4] th_load_parse must clamp a file-supplied cable count to
+# TH_REG_MAX before the write loop. A tampered save claiming a huge count
+# would otherwise drive th_cable_at() past the TH_REG_MAX*CB_SIZE alloc and
+# overrun the heap. We hand-build a save (the newline-decimal format the
+# loader reads) with a hostile count and no cable bodies — save_get_i64 is
+# read-safe past EOF, so the only defense is the load-time clamp.
+fn t219_th_load_clamp(): i64 {
+    var buf = alloc(8192);
+    var pos = 0;
+    memcpy(buf + pos, "THDG1\n", 6); pos = pos + 6;
+    var k = 0;
+    while (k < 11) { pos = save_put_i64(buf, pos, 0); k = k + 1; }   # 11 header scalars
+    var af = 0;
+    while (af < 45) { pos = save_put_i64(buf, pos, 0); af = af + 1; }  # TH_AGENTS(5) * 9 fields
+    pos = save_put_i64(buf, pos, 100000);                              # hostile registry count
+    var st = th_load_parse(buf, pos);
+    if (st == 0)                              { test_fail("t219_th_load_clamp", "parse"); return 1; }
+    if (th_registry_count(st) != TH_REG_MAX)  { test_fail("t219_th_load_clamp", "clamp hi"); return 1; }
+
+    # a negative count must clamp to 0 (no negative TH_REGCOUNT leaking to render)
+    var b2 = alloc(8192);
+    var p2 = 0;
+    memcpy(b2 + p2, "THDG1\n", 6); p2 = p2 + 6;
+    var k2 = 0;
+    while (k2 < 11) { p2 = save_put_i64(b2, p2, 0); k2 = k2 + 1; }
+    var a2 = 0;
+    while (a2 < 45) { p2 = save_put_i64(b2, p2, 0); a2 = a2 + 1; }
+    p2 = save_put_i64(b2, p2, 0 - 5);
+    var st2 = th_load_parse(b2, p2);
+    if (st2 == 0)                             { test_fail("t219_th_load_clamp", "parse2"); return 1; }
+    if (th_registry_count(st2) != 0)          { test_fail("t219_th_load_clamp", "clamp neg"); return 1; }
+    test_pass("t219_th_load_clamp");
+    return 0;
+}
+
+# t220 — [D1/D2] the shared door integer parsers pin the accumulator at
+# DOOR_INT_MAX so a long all-digit run cannot wrap i64 into a negative
+# (which would slip downstream `cost > cash` / qty guards). Normal values
+# pass through unchanged; an overlong run saturates.
+fn t220_door_parse_int_cap(): i64 {
+    if (door_parse_int("42", 2) != 42)                              { test_fail("t220_door_parse_int_cap", "normal"); return 1; }
+    if (door_parse_int("99999999999999999999", 20) != DOOR_INT_MAX) { test_fail("t220_door_parse_int_cap", "pinned"); return 1; }
+    var snd = alloc(8);
+    if (door_parse_2int("88888888888888888888 77777777777777777777", 41, snd) != DOOR_INT_MAX) { test_fail("t220_door_parse_int_cap", "v1"); return 1; }
+    if (load64(snd) != DOOR_INT_MAX)                                { test_fail("t220_door_parse_int_cap", "v2"); return 1; }
+    # a normal pair still round-trips
+    if (door_parse_2int("50 3", 4, snd) != 50)                      { test_fail("t220_door_parse_int_cap", "pair1"); return 1; }
+    if (load64(snd) != 3)                                           { test_fail("t220_door_parse_int_cap", "pair2"); return 1; }
+    test_pass("t220_door_parse_int_cap");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -5331,6 +5383,8 @@ fn main(): i64 {
     t216_decode_words_play();
     t217_th_cipher_deterministic();
     t218_th_decrypt_flow();
+    t219_th_load_clamp();
+    t220_door_parse_int_cap();
 
     syscall(1, 1, "------------------------------------------------------\n", 56);
     syscall(1, 1, "tests: ", 7);

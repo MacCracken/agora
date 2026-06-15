@@ -489,7 +489,3 @@ fn py_render(st, buf, cap): i64 {
     pos = emit_cstr(buf, pos, "(say something, or 'bye' to leave) > ");
     return pos;
 }
-
-fn py_is_over(st): i64 {
-    return 0;
-}

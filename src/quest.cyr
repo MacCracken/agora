@@ -101,12 +101,6 @@ enum QUFoe {
 
 # === Small helpers ===
 
-fn qu_clampv(v, lo, hi): i64 {
-    if (v < lo) { return lo; }
-    if (v > hi) { return hi; }
-    return v;
-}
-
 # Set the transient one-line message rendered under each screen.
 fn qu_msg(st, s): i64 {
     var m = load64(st + QU_MSG);
