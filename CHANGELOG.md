@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-02 (agnos target — agora runs on AGNOS)
+
+**agora now builds `--agnos` and serves under mirshi.** The BBS was Linux-only (fork-per-accept);
+this cut makes it run on the sovereign target. Verified end-to-end: `agora_agnos serve` under mirshi
+(`--net-listen-any`) accepts a telnet client and renders the banner + door/chat menu over the socket.
+
+### Added
+- **agnos serial-accept concurrency path** (`cmd_serve_on`, `src/main.cyr`). agnos has **no fork** —
+  its process model is `spawn#3` (from an in-memory ELF, which can't inherit the accepted socket fd)
+  + a blocking per-pid `waitpid#4`, and there is no `WNOHANG`. Under `#ifdef CYRIUS_TARGET_AGNOS` the
+  accept loop drops the zombie-reaper and the `sys_fork` split, and instead serves **serially** —
+  `handle_client(cfd)` to completion in-process, then loop. Linux keeps fork-per-accept
+  (`#ifndef CYRIUS_TARGET_AGNOS`), unchanged. A single-process **epoll** event loop (descent's model,
+  for real agnos concurrency) is the follow-up.
+
+### Changed
+- **Toolchain pin `6.2.8` → `6.3.32`** — brings the agnos target + the freelist agnos-mmap fix
+  (cyrius 6.3.31) + `spawn#3`/`waitpid#4`. Host battery unchanged at **221/0**; `--agnos` builds clean.
+- **darshana dep `0.7.0` → `0.8.2`** (SGR/cursor `_buf` composers; the surface agora uses is stable).
+- **`[deps].stdlib` += `random`** — sigil's Ed25519 auth RNG (`random_bytes`, challenge nonces) is a
+  reachable transitive leaf on 6.3.32; declaring `random` (before `sigil`) resolves it (was an
+  undefined-function warning on the bump).
+
 ## [1.4.6] — 2026-06-15 (R7: table-driven door dispatch — the descriptor registry)
 
 **One registry block per door, not eighteen edits.** This closes the last open item from the 2026-06-15 audit — finding **R7**, the per-game door-dispatch refactor ([ADR 0020](docs/adr/0020-door-descriptor-registry.md)). The ~130 `if (game == GAME_X)` branch sites that were smeared across ~16 dispatch functions in `src/main.cyr` (name, world bytes/valid/fresh/set/slot, world-begin tick, universe feed/save, render, feed, is_over, post-score, save-on-exit, and the `play` launcher's new/load/start clusters) collapse into a **single per-game descriptor record** keyed by `GAME_*` id, dispatched via `callptr` through function-address slots (`&xx_render`, `&xx_feed`, …). Adding the eleventh door is now one self-contained block in `door_registry_init` and nothing else. No behavior change — pure structural refactor; verified by the full example-smoke suite (all 13 door/universe/chat scripts green end-to-end). Also realigns the toolchain **6.2.7 → 6.2.8** (the active wrapper had advanced; the 6.2.8 stdlib snapshot already carries the 1.4.5 `sock_set_send_timeout` addition, so the bridge is now upstream). 221 tests (unchanged); 1,374,240 B → **1,375,360 B** (+1,120 B, the registry machinery net of the removed if-chains; the 6.2.7→6.2.8 codegen is byte-identical).

@@ -2233,16 +2233,19 @@ fn cmd_serve_on(port): i64 {
 
     var stop = 0;
     while (stop == 0) {
+        #ifndef CYRIUS_TARGET_AGNOS
         # ADR 0007: drain any zombies that accumulated since the last
         # accept. Non-blocking — exits the loop immediately when no
         # zombies are ready. Without this the process table fills as
         # children exit and the kernel keeps their exit-status entries
-        # around indefinitely.
+        # around indefinitely. (Fork model only; agnos serves serially,
+        # so there are no children to reap — and agnos has no WNOHANG.)
         var reap = 1;
         while (reap == 1) {
             var rpid = sys_waitpid(0 - 1, 0, WNOHANG);
             if (rpid <= 0) { reap = 0; }
         }
+        #endif
 
         var ar = sock_accept(sfd);
         if (is_ok(ar) == 0) {
@@ -2252,6 +2255,18 @@ fn cmd_serve_on(port): i64 {
         }
         var cfd = result_unwrap(ar);
 
+        #ifdef CYRIUS_TARGET_AGNOS
+        # agnos has NO fork — its process model is spawn#3 (from an in-memory
+        # ELF, which can't inherit the accepted socket fd) + a blocking per-pid
+        # waitpid#4. So serve SERIALLY: handle this connection to completion in
+        # THIS process, then loop for the next. Session globals are reused
+        # across connections (handle_client re-inits per-conn state on entry).
+        # Concurrency (a single-process epoll event loop — descent's model)
+        # is the follow-up; this makes agora run under mirshi / on agnos today.
+        handle_client(cfd);
+        sock_close(cfd);
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
         # ADR 0007: fork-per-accept. Each connection becomes its own
         # process; the kernel handles per-conn memory cleanup at child
         # exit (closes audit M1) and globals are per-process (closes
@@ -2275,6 +2290,7 @@ fn cmd_serve_on(port): i64 {
         }
         # Parent: child owns cfd now via fork; we drop our copy.
         sock_close(cfd);
+        #endif
     }
 
     sock_close(sfd);
