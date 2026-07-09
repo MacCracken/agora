@@ -185,7 +185,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.5.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -1796,7 +1796,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.5.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2315,261 +2315,261 @@ fn process_rx(s, n): i64 {
     var mode = load64(s + SESS_MODE);
     var last_cr = load64(s + SESS_LAST_CR);
     var quit = load64(s + SESS_QUIT);
-        var i = 0;
-        while (i < n) {
-            if (load64(quit) != 0) { i = n; continue; }
-            var b = load8(rxbuf + i) & 0xFF;
-            var ev = telnet_feed(ts, b);
+    var i = 0;
+    while (i < n) {
+        if (load64(quit) != 0) { i = n; continue; }
+        var b = load8(rxbuf + i) & 0xFF;
+        var ev = telnet_feed(ts, b);
 
-            # Drain any IAC responses queued by the state machine
-            # before processing the data byte — keeps on-wire order
-            # matching RFC 854.
-            var tx_len = telnet_tx_len(ts);
-            if (tx_len > 0) {
-                send_buf(cfd, telnet_tx_buf(ts), tx_len);
-                telnet_tx_consume(ts);
+        # Drain any IAC responses queued by the state machine
+        # before processing the data byte — keeps on-wire order
+        # matching RFC 854.
+        var tx_len = telnet_tx_len(ts);
+        if (tx_len > 0) {
+            send_buf(cfd, telnet_tx_buf(ts), tx_len);
+            telnet_tx_consume(ts);
+        }
+
+        if (ev == EV_SB) {
+            telnet_handle_sb(ts);
+        }
+
+        if (ev == EV_DATA) {
+            var db = telnet_data_byte(ts) & 0xFF;
+            # M5-H input filter: drop NUL + ESC silently before
+            # they reach the line buffer or get echoed back to
+            # the client. See input_byte_ok for the reasoning.
+            if (input_byte_ok(db) == 0) {
+                i = i + 1;
+                continue;
+            }
+            # === EOL detection: CR is canonical; LF after CR is
+            # silently absorbed (consumed-here, NOT passed on to
+            # the printable-byte branch — would otherwise land at
+            # line[0] and corrupt the next command); lone LF also
+            # terminates (Unix clients). `eol == 1` means current
+            # byte completed a line; `consumed == 1` means current
+            # byte is the paired LF after CR — drop it entirely.
+            var eol = 0;
+            var consumed = 0;
+            if (db == 13) { eol = 1; last_cr = 1; }
+            else { if (db == 10) {
+                if (last_cr != 0) { last_cr = 0; consumed = 1; }
+                else              { eol = 1; }
+            } else { last_cr = 0; } }
+
+            if (consumed != 0) {
+                i = i + 1;
+                continue;
             }
 
-            if (ev == EV_SB) {
-                telnet_handle_sb(ts);
-            }
-
-            if (ev == EV_DATA) {
-                var db = telnet_data_byte(ts) & 0xFF;
-                # M5-H input filter: drop NUL + ESC silently before
-                # they reach the line buffer or get echoed back to
-                # the client. See input_byte_ok for the reasoning.
-                if (input_byte_ok(db) == 0) {
-                    i = i + 1;
-                    continue;
-                }
-                # === EOL detection: CR is canonical; LF after CR is
-                # silently absorbed (consumed-here, NOT passed on to
-                # the printable-byte branch — would otherwise land at
-                # line[0] and corrupt the next command); lone LF also
-                # terminates (Unix clients). `eol == 1` means current
-                # byte completed a line; `consumed == 1` means current
-                # byte is the paired LF after CR — drop it entirely.
-                var eol = 0;
-                var consumed = 0;
-                if (db == 13) { eol = 1; last_cr = 1; }
-                else { if (db == 10) {
-                    if (last_cr != 0) { last_cr = 0; consumed = 1; }
-                    else              { eol = 1; }
-                } else { last_cr = 0; } }
-
-                if (consumed != 0) {
-                    i = i + 1;
-                    continue;
-                }
-
-                if (eol != 0) {
-                    send_str(cfd, "\r\n");
-                    # Mode-aware line dispatch.
+            if (eol != 0) {
+                send_str(cfd, "\r\n");
+                # Mode-aware line dispatch.
+                if (mode == MODE_COMMAND) {
+                    mode = session_execute(cfd, line, line_pos, current_board, quit);
+                    line_pos = 0;
                     if (mode == MODE_COMMAND) {
-                        mode = session_execute(cfd, line, line_pos, current_board, quit);
-                        line_pos = 0;
-                        if (mode == MODE_COMMAND) {
-                            if (load64(quit) == 0) { send_prompt(cfd, current_board); }
+                        if (load64(quit) == 0) { send_prompt(cfd, current_board); }
+                    }
+                }
+                else { if (mode == MODE_LOGIN_AWAIT_SIG) {
+                    # M6-C: client sent `auth: <128-hex-sig>`.
+                    # Parse + verify against the parked challenge.
+                    # Heap-allocated buffers via alloc() — matches the
+                    # pattern other handle_client paths use for
+                    # session-scoped working memory (rxbuf / line /
+                    # post / subject above), and avoids the
+                    # cyrius `var buf[N]`-in-deep-nesting hazards
+                    # flagged in CLAUDE.md.
+                    #
+                    # 0.7.0 audit M6 — explicit 30 s deadline. Even
+                    # if the wire stayed warm (slowloris timeout
+                    # never tripped), a parked challenge older than
+                    # LOGIN_DEADLINE_MS is stale and must be rejected
+                    # before any signature work happens.
+                    if (g_login_started_ms > 0) {
+                        if (clock_now_ms() - g_login_started_ms > LOGIN_DEADLINE_MS) {
+                            send_str(cfd, "login failed (challenge timed out — retry 'login <handle>')\r\n");
+                            store8(g_login_fp, 0);
+                            store8(g_login_nonce, 0);
+                            g_login_started_ms = 0;
+                            line_pos = 0;
+                            mode = MODE_COMMAND;
+                            send_prompt(cfd, current_board);
+                            i = i + 1; continue;
                         }
                     }
-                    else { if (mode == MODE_LOGIN_AWAIT_SIG) {
-                        # M6-C: client sent `auth: <128-hex-sig>`.
-                        # Parse + verify against the parked challenge.
-                        # Heap-allocated buffers via alloc() — matches the
-                        # pattern other handle_client paths use for
-                        # session-scoped working memory (rxbuf / line /
-                        # post / subject above), and avoids the
-                        # cyrius `var buf[N]`-in-deep-nesting hazards
-                        # flagged in CLAUDE.md.
-                        #
-                        # 0.7.0 audit M6 — explicit 30 s deadline. Even
-                        # if the wire stayed warm (slowloris timeout
-                        # never tripped), a parked challenge older than
-                        # LOGIN_DEADLINE_MS is stale and must be rejected
-                        # before any signature work happens.
-                        if (g_login_started_ms > 0) {
-                            if (clock_now_ms() - g_login_started_ms > LOGIN_DEADLINE_MS) {
-                                send_str(cfd, "login failed (challenge timed out — retry 'login <handle>')\r\n");
-                                store8(g_login_fp, 0);
-                                store8(g_login_nonce, 0);
-                                g_login_started_ms = 0;
-                                line_pos = 0;
-                                mode = MODE_COMMAND;
-                                send_prompt(cfd, current_board);
-                                i = i + 1; continue;
-                            }
-                        }
-                        var sig_raw = alloc(ACCOUNT_SIG_BYTES);
-                        var sig_len = parse_auth_sig(line, line_pos, sig_raw);
-                        line_pos = 0;
-                        if (sig_len != ACCOUNT_SIG_BYTES) {
-                            send_str(cfd, "login failed (malformed auth)\r\n");
-                            store8(g_login_fp, 0);
-                            store8(g_login_nonce, 0);
-                            mode = MODE_COMMAND;
-                            send_prompt(cfd, current_board);
-                            i = i + 1; continue;
-                        }
-                        var pk_buf = alloc(ACCOUNT_PK_BYTES);
-                        if (account_lookup_pubkey(g_store_buf, g_login_fp, pk_buf) != 0) {
-                            send_str(cfd, "login failed (pubkey lookup)\r\n");
-                            store8(g_login_fp, 0);
-                            store8(g_login_nonce, 0);
-                            mode = MODE_COMMAND;
-                            send_prompt(cfd, current_board);
-                            i = i + 1; continue;
-                        }
-                        # Build challenge message = "agora-login:" + nonce_hex.
-                        var verify_msg = alloc(LOGIN_MSG_LEN);
-                        format_challenge_msg(g_login_nonce, verify_msg);
-                        var ok = ed25519_verify(pk_buf, verify_msg, LOGIN_MSG_LEN, sig_raw);
-                        # Single-use nonce: clear regardless of pass / fail.
-                        store8(g_login_nonce, 0);
-                        if (ok != 1) {
-                            send_str(cfd, "login failed (signature)\r\n");
-                            store8(g_login_fp, 0);
-                            mode = MODE_COMMAND;
-                            send_prompt(cfd, current_board);
-                            i = i + 1; continue;
-                        }
-                        # Bind session. Copy g_login_fp → g_session_fp
-                        # then resolve the handle from the bound fp.
-                        memcpy(g_session_fp, g_login_fp, ACCOUNT_FP_BUF_BYTES);
+                    var sig_raw = alloc(ACCOUNT_SIG_BYTES);
+                    var sig_len = parse_auth_sig(line, line_pos, sig_raw);
+                    line_pos = 0;
+                    if (sig_len != ACCOUNT_SIG_BYTES) {
+                        send_str(cfd, "login failed (malformed auth)\r\n");
                         store8(g_login_fp, 0);
-                        var hlen = account_lookup_handle(g_store_buf, g_session_fp, g_session_handle, ACCOUNT_HANDLE_BUF);
-                        if (hlen <= 0) { store8(g_session_handle, 0); }
-                        send_str(cfd, "welcome, ");
-                        if (hlen > 0) { send_buf(cfd, g_session_handle, hlen); }
-                        else          { send_str(cfd, "(no handle)"); }
-                        send_str(cfd, "\r\n");
+                        store8(g_login_nonce, 0);
                         mode = MODE_COMMAND;
                         send_prompt(cfd, current_board);
                         i = i + 1; continue;
                     }
-                    else { if (mode == MODE_DOOR) {
-                        # 1.1.0: route the completed line to the active
-                        # game. ctrl==1 means the game exited → save +
-                        # back to the BBS prompt; else paint the next frame.
-                        var dctrl = door_feed_line(cfd, line, line_pos);
-                        line_pos = 0;
-                        if (dctrl == 1) {
-                            door_save_on_exit(cfd);
-                            g_door_state = 0;
-                            g_door_game = GAME_NONE;
-                            mode = MODE_COMMAND;
-                            send_prompt(cfd, current_board);
-                        } else {
-                            door_send_frame(cfd);
-                        }
+                    var pk_buf = alloc(ACCOUNT_PK_BYTES);
+                    if (account_lookup_pubkey(g_store_buf, g_login_fp, pk_buf) != 0) {
+                        send_str(cfd, "login failed (pubkey lookup)\r\n");
+                        store8(g_login_fp, 0);
+                        store8(g_login_nonce, 0);
+                        mode = MODE_COMMAND;
+                        send_prompt(cfd, current_board);
                         i = i + 1; continue;
                     }
-                    else { if (mode == MODE_CHAT) {
-                        # 1.3.0 (ADR 0011): a completed line in chat is
-                        # either a '/'-command or a message said to the room.
-                        var clen = line_pos;
-                        line_pos = 0;
-                        var handled = 0;
-                        if (clen > 0) {
-                            if ((load8(line) & 0xFF) == 47) {     # leading '/'
-                                handled = 1;
-                                var cc = chat_cmd_dispatch(cfd, line, clen);
-                                if (cc == 1) {
-                                    # /leave — restore the command-mode recv
-                                    # timeout, drop the channel, back to BBS.
-                                    sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
-                                    store8(g_chat_channel, 0);
-                                    g_chat_seen = 0;
-                                    g_chat_bot = 0;
-                                    mode = MODE_COMMAND;
-                                    send_prompt(cfd, current_board);
-                                }
-                                if (cc == 2) { store64(quit, 1); }
-                            }
-                        }
-                        if (handled == 0) {
-                            if (g_chat_bot != 0) {
-                                # On the couch: this line goes only to the
-                                # active bot, never to the room. 'bye'
-                                # returns the user to the channel.
-                                if (clen > 0) {
-                                    var bs = chat_bot_state();
-                                    var bctrl = chat_bot_feed(line, clen);
-                                    send_str(cfd, chat_bot_name());
-                                    send_buf(cfd, load64(bs + EZ_RESP), load64(bs + EZ_RESPLEN));
-                                    send_str(cfd, "\r\n");
-                                    if (bctrl == 1) {
-                                        g_chat_bot = 0;
-                                        send_str(cfd, "(back in #");
-                                        send_str(cfd, g_chat_channel);
-                                        send_str(cfd, ")\r\n");
-                                    }
-                                }
-                            } else {
-                                # Ordinary line → sanitise + say to the room,
-                                # then flush so the speaker sees the canonical
-                                # "<handle> text" line (and any interleaved ones).
-                                if (clen > 0) {
-                                    var tbuf = alloc(CHAT_MSG_MAX + 1);
-                                    var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
-                                    if (tlen > 0) {
-                                        chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
-                                    }
-                                }
-                                chat_flush_tail(cfd);
-                            }
-                        }
+                    # Build challenge message = "agora-login:" + nonce_hex.
+                    var verify_msg = alloc(LOGIN_MSG_LEN);
+                    format_challenge_msg(g_login_nonce, verify_msg);
+                    var ok = ed25519_verify(pk_buf, verify_msg, LOGIN_MSG_LEN, sig_raw);
+                    # Single-use nonce: clear regardless of pass / fail.
+                    store8(g_login_nonce, 0);
+                    if (ok != 1) {
+                        send_str(cfd, "login failed (signature)\r\n");
+                        store8(g_login_fp, 0);
+                        mode = MODE_COMMAND;
+                        send_prompt(cfd, current_board);
                         i = i + 1; continue;
                     }
-                    else { if (mode == MODE_POSTING_SUBJECT) {
-                        # M5-D: capture the typed Subject line, then
-                        # transition into MODE_POSTING for the body.
-                        subject_len = line_pos;
-                        if (subject_len > SUBJECT_MAX_BYTES) {
-                            subject_len = SUBJECT_MAX_BYTES;
-                        }
-                        if (subject_len > 0) {
-                            memcpy(subject, line, subject_len);
-                        }
-                        store8(subject + subject_len, 0);
-                        line_pos = 0;
-                        send_str(cfd, "Compose post. End with '.' on a line by itself.\r\n");
-                        mode = MODE_POSTING;
+                    # Bind session. Copy g_login_fp → g_session_fp
+                    # then resolve the handle from the bound fp.
+                    memcpy(g_session_fp, g_login_fp, ACCOUNT_FP_BUF_BYTES);
+                    store8(g_login_fp, 0);
+                    var hlen = account_lookup_handle(g_store_buf, g_session_fp, g_session_handle, ACCOUNT_HANDLE_BUF);
+                    if (hlen <= 0) { store8(g_session_handle, 0); }
+                    send_str(cfd, "welcome, ");
+                    if (hlen > 0) { send_buf(cfd, g_session_handle, hlen); }
+                    else          { send_str(cfd, "(no handle)"); }
+                    send_str(cfd, "\r\n");
+                    mode = MODE_COMMAND;
+                    send_prompt(cfd, current_board);
+                    i = i + 1; continue;
+                }
+                else { if (mode == MODE_DOOR) {
+                    # 1.1.0: route the completed line to the active
+                    # game. ctrl==1 means the game exited → save +
+                    # back to the BBS prompt; else paint the next frame.
+                    var dctrl = door_feed_line(cfd, line, line_pos);
+                    line_pos = 0;
+                    if (dctrl == 1) {
+                        door_save_on_exit(cfd);
+                        g_door_state = 0;
+                        g_door_game = GAME_NONE;
+                        mode = MODE_COMMAND;
+                        send_prompt(cfd, current_board);
+                    } else {
+                        door_send_frame(cfd);
                     }
-                    else {
-                        # MODE_POSTING: '.' alone ends + commits.
-                        if (line_pos == 1) {
-                            if ((load8(line) & 0xFF) == 46) {
-                                session_finalize_post(cfd, current_board, subject, post, post_pos);
-                                post_pos = 0;
-                                subject_len = 0;
-                                store8(subject, 0);
-                                line_pos = 0;
+                    i = i + 1; continue;
+                }
+                else { if (mode == MODE_CHAT) {
+                    # 1.3.0 (ADR 0011): a completed line in chat is
+                    # either a '/'-command or a message said to the room.
+                    var clen = line_pos;
+                    line_pos = 0;
+                    var handled = 0;
+                    if (clen > 0) {
+                        if ((load8(line) & 0xFF) == 47) {     # leading '/'
+                            handled = 1;
+                            var cc = chat_cmd_dispatch(cfd, line, clen);
+                            if (cc == 1) {
+                                # /leave — restore the command-mode recv
+                                # timeout, drop the channel, back to BBS.
+                                sock_set_recv_timeout(cfd, RECV_TIMEOUT_SECS, 0);
+                                store8(g_chat_channel, 0);
+                                g_chat_seen = 0;
+                                g_chat_bot = 0;
                                 mode = MODE_COMMAND;
                                 send_prompt(cfd, current_board);
-                                i = i + 1; continue;
                             }
+                            if (cc == 2) { store64(quit, 1); }
                         }
-                        # Otherwise append line + CRLF to post body.
-                        if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
-                            memcpy(post + post_pos, line, line_pos);
-                            post_pos = post_pos + line_pos;
-                            store8(post + post_pos, 13); post_pos = post_pos + 1;
-                            store8(post + post_pos, 10); post_pos = post_pos + 1;
-                        }
-                        line_pos = 0;
-                    } } } } }
-} else {
-                    # === Printable byte: echo + append to line ===
-                    if (line_pos < LINE_BUF_CAP - 1) {
-                        store8(line + line_pos, db);
-                        line_pos = line_pos + 1;
-                        echo_byte(cfd, db);
                     }
+                    if (handled == 0) {
+                        if (g_chat_bot != 0) {
+                            # On the couch: this line goes only to the
+                            # active bot, never to the room. 'bye'
+                            # returns the user to the channel.
+                            if (clen > 0) {
+                                var bs = chat_bot_state();
+                                var bctrl = chat_bot_feed(line, clen);
+                                send_str(cfd, chat_bot_name());
+                                send_buf(cfd, load64(bs + EZ_RESP), load64(bs + EZ_RESPLEN));
+                                send_str(cfd, "\r\n");
+                                if (bctrl == 1) {
+                                    g_chat_bot = 0;
+                                    send_str(cfd, "(back in #");
+                                    send_str(cfd, g_chat_channel);
+                                    send_str(cfd, ")\r\n");
+                                }
+                            }
+                        } else {
+                            # Ordinary line → sanitise + say to the room,
+                            # then flush so the speaker sees the canonical
+                            # "<handle> text" line (and any interleaved ones).
+                            if (clen > 0) {
+                                var tbuf = alloc(CHAT_MSG_MAX + 1);
+                                var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
+                                if (tlen > 0) {
+                                    chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
+                                }
+                            }
+                            chat_flush_tail(cfd);
+                        }
+                    }
+                    i = i + 1; continue;
+                }
+                else { if (mode == MODE_POSTING_SUBJECT) {
+                    # M5-D: capture the typed Subject line, then
+                    # transition into MODE_POSTING for the body.
+                    subject_len = line_pos;
+                    if (subject_len > SUBJECT_MAX_BYTES) {
+                        subject_len = SUBJECT_MAX_BYTES;
+                    }
+                    if (subject_len > 0) {
+                        memcpy(subject, line, subject_len);
+                    }
+                    store8(subject + subject_len, 0);
+                    line_pos = 0;
+                    send_str(cfd, "Compose post. End with '.' on a line by itself.\r\n");
+                    mode = MODE_POSTING;
+                }
+                else {
+                    # MODE_POSTING: '.' alone ends + commits.
+                    if (line_pos == 1) {
+                        if ((load8(line) & 0xFF) == 46) {
+                            session_finalize_post(cfd, current_board, subject, post, post_pos);
+                            post_pos = 0;
+                            subject_len = 0;
+                            store8(subject, 0);
+                            line_pos = 0;
+                            mode = MODE_COMMAND;
+                            send_prompt(cfd, current_board);
+                            i = i + 1; continue;
+                        }
+                    }
+                    # Otherwise append line + CRLF to post body.
+                    if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
+                        memcpy(post + post_pos, line, line_pos);
+                        post_pos = post_pos + line_pos;
+                        store8(post + post_pos, 13); post_pos = post_pos + 1;
+                        store8(post + post_pos, 10); post_pos = post_pos + 1;
+                    }
+                    line_pos = 0;
+                } } } } }
+} else {
+                # === Printable byte: echo + append to line ===
+                if (line_pos < LINE_BUF_CAP - 1) {
+                    store8(line + line_pos, db);
+                    line_pos = line_pos + 1;
+                    echo_byte(cfd, db);
                 }
             }
-            i = i + 1;
         }
+        i = i + 1;
+    }
     store64(s + SESS_LINE_POS, line_pos);
     store64(s + SESS_POST_POS, post_pos);
     store64(s + SESS_SUBJECT_LEN, subject_len);
@@ -3365,7 +3365,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.5.0");
+    println("agora 1.6.0");
     return 0;
 }
 

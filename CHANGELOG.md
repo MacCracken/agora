@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-09 (single-process poll multiplex — concurrent players on agnos)
+
+**agora now serves many connections at once.** The 1.5.0 agnos path was *serial* (one telnet user at
+a time); this cut adds descent's **single-process poll multiplex** so multiple players connect
+concurrently — the epoll-model follow-up 1.5.0 flagged. The serve model is selectable at runtime via
+**`AGORA_SERVE={fork,poll}`**: Linux defaults to **fork** (classic per-connection crash-isolation),
+**agnos always polls** (it has no fork). Verified end-to-end on **both** platforms (Linux poll +
+agnos-via-mirshi): two clients — one deep in the Eliza door, one in the BBS — interleaved commands,
+**zero cross-session bleed**; the Linux fork path is unchanged (regression-green); a 66-client flood
+against the 64-slot pool greets 64 and returns "server full" to the rest without crashing.
+
+### Added
+- **`serve_poll` single-process multiplex** (`src/main.cyr`). One process serves all connections: each
+  ~20 ms sweep drains pending accepts (non-blocking), then services every active slot —
+  non-blocking recv → `process_rx` → non-blocking tx drain, swapping the active session's deep state
+  in/out around each dispatch. agnos reads via `sys_sock_recv#49` (inverted would-block sense) + paces
+  with `sys_sleep_ms`; Linux reads `O_NONBLOCK` sockets + paces with the portable `sleep_ms`.
+- **Runtime serve-model switch `AGORA_SERVE={fork,poll}`** (`serve_mode_from_env`). Default fork on
+  Linux, poll on agnos (no fork). `cmd_serve_on` prints the chosen model and dispatches.
+- **Pre-allocated session pool** (`MAX_SESS = 64` reusable slots; `session_alloc` / `session_pool_init`
+  / `session_acquire` / `session_reset` / `session_release`). Each slot is a heap struct snapshotting
+  the connection's full state + a non-blocking tx queue — no per-connection alloc/free churn. Pool
+  overflow returns a graceful "server full" and closes, never crashes.
+
+### Changed
+- **`handle_client` refactored into a driver over `process_rx`.** The byte-decode + line-dispatch loop
+  (telnet decode, mode-aware command dispatch) is extracted verbatim into `process_rx(s, n)`; the door
+  games, `session_execute`, and chat are **untouched** (ADR 0009: pure state machines). Per-session
+  state that was stack-local + process-global now rides in the session slot; the deep session globals
+  are swapped in/out (`sess_load` / `sess_save`) around each dispatch so those functions see exactly
+  the globals they always have. Fork/serial behaviour is byte-identical.
+- **`send_buf` is serve-model-aware.** In poll mode it enqueues to the active session's non-blocking tx
+  queue (drained by `session_drain`); in fork mode it blocking-writes as before. All `send_str` call
+  sites are unchanged.
+- **Toolchain pin `6.3.32` → `6.4.32`** (`cyrius.cyml`; `lib/` re-vendored via `cyrius lib sync --full`).
+
+### Notes
+- **epoll on Linux is deferred.** The poll path uses a `sleep_ms(20)`-paced sweep on both platforms; at
+  BBS/MUD scale the ~50 Hz idle wakeup is negligible CPU and the added latency is imperceptible. An
+  `epoll_wait`-driven Linux loop (descent already does this) is a later optimization — and since fork
+  stays the Linux default, the poll path carries no default-path cost.
+
 ## [1.5.0] — 2026-07-02 (agnos target — agora runs on AGNOS)
 
 **agora now builds `--agnos` and serves under mirshi.** The BBS was Linux-only (fork-per-accept);
