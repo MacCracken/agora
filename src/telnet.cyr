@@ -220,6 +220,26 @@ fn telnet_state_new(): i64 {
     return ts;
 }
 
+# Reset a telnet parser to its just-constructed state WITHOUT re-allocating its
+# sub-buffers (tx/sb/opt/term) — for the 1.6.0 session pool, which reuses one
+# parser per slot across connections. Mirrors telnet_state_new's field inits
+# (minus the allocs); keeps the buffer pointers, clears the negotiation state.
+fn telnet_state_reset(ts): i64 {
+    store64(ts + TS_STATE,    ST_DATA);
+    store64(ts + TS_VERB,     0);
+    store64(ts + TS_DATA_OUT, 0);
+    store64(ts + TS_TX_LEN,   0);
+    store64(ts + TS_SB_LEN,   0);
+    memset(load64(ts + TS_OPT_US),   0, 256);
+    memset(load64(ts + TS_OPT_HIM),  0, 256);
+    memset(load64(ts + TS_TERM_TYPE), 0, TERM_TYPE_CAP + 1);
+    store64(ts + TS_TERM_COLS, 0);
+    store64(ts + TS_TERM_ROWS, 0);
+    store64(ts + TS_TERM_TLEN, 0);
+    store64(ts + TS_LM_MODE,   0);
+    return 0;
+}
+
 # Active LINEMODE MODE mask (RFC 1184). 0 until peer confirms via
 # IAC SB LINEMODE MODE <mask> IAC SE — non-zero values include the
 # LM_MODE_ACK bit (0x04) plus whatever subset of EDIT/TRAPSIG/SOFT_TAB/

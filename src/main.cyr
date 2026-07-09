@@ -1813,6 +1813,245 @@ fn render_motd(buf): i64 {
 # terminator; the LF that often follows is paired and silently
 # absorbed. Lone LF also terminates (raw `nc -e` and similar clients
 # send only \n).
+# ============================================================================
+# 1.6.0 — single-process session-multiplex (poll) serve model.
+#
+# The classic path (serve_fork on Linux / serial-accept on agnos) serves one
+# connection at a time. serve_poll multiplexes N connections in ONE process via a
+# pre-allocated session POOL (no per-conn alloc/free): each slot is a heap struct
+# snapshotting every per-connection global + a non-blocking tx queue. The operator
+# picks the model at runtime with AGORA_SERVE={fork,poll}; agnos has no fork so it
+# always polls. Door games / dispatch are untouched (ADR 0009: pure state
+# machines) — the loop swaps the active session's deep state into the g_* session
+# globals around each dispatch (sess_load/sess_save), so session_execute /
+# door_feed_line / chat_* see exactly the globals they always have. The shallow
+# parse state (ts/line/mode/…) rides in process_rx's locals, loaded from the slot.
+# ============================================================================
+
+enum ServeMode {
+    SERVE_FORK = 0;      # classic: fork-per-conn (Linux) / serial-accept (agnos)
+    SERVE_POLL = 1;      # single-process poll-multiplex (both platforms)
+}
+var g_serve_mode  = 0;   # SERVE_FORK default; set from AGORA_SERVE / platform at serve start
+var g_active_sess = 0;   # session currently being dispatched (send_buf tx target in poll mode)
+var g_sess_pool   = 0;   # alloc(MAX_SESS*8): pre-allocated session slots, reused
+
+enum SessCap {
+    MAX_SESS    = 64;        # concurrent connections in poll mode
+    SESS_TX_CAP = 65536;     # per-session non-blocking tx queue (largest door frame + slack)
+}
+
+# Per-session struct offsets. One alloc(SESS_SIZE) block per pool slot, reused
+# across connections (session_reset clears it; no free — the pool is fixed-size).
+enum SessOff {
+    SESS_FD          = 0;    # accepted socket fd (-1 when free)
+    SESS_ACTIVE      = 8;    # 1 = slot in use
+    SESS_GREETED     = 16;   # 1 = announce+MOTD+first prompt already sent
+    SESS_LAST_MS     = 24;   # last-activity wall clock (idle reap)
+    SESS_TX          = 32;   # tx queue buffer (SESS_TX_CAP)
+    SESS_TX_LEN      = 40;   # bytes queued
+    SESS_TX_OFF      = 48;   # bytes already flushed
+    # --- shallow per-conn parse/scratch state (process_rx locals) ---
+    SESS_TS          = 56;   # telnet parser (telnet_state_new)
+    SESS_RXBUF       = 64;   # recv scratch (RECV_BUF_BYTES)
+    SESS_LINE        = 72;   # line accumulator (LINE_BUF_CAP)
+    SESS_LINE_POS    = 80;
+    SESS_POST        = 88;   # post compose buffer (POST_MAX_BYTES)
+    SESS_POST_POS    = 96;
+    SESS_SUBJECT     = 104;  # subject buffer (SUBJECT_MAX_BYTES+1)
+    SESS_SUBJECT_LEN = 112;
+    SESS_CURBOARD    = 120;  # current board name (BOARD_NAME_MAX+1)
+    SESS_MODE        = 128;  # MODE_*
+    SESS_LAST_CR     = 136;
+    SESS_QUIT        = 144;  # quit flag ptr (alloc(8); session_execute writes through it)
+    # --- deep session globals mirror (sess_load/sess_save swap surface) ---
+    SESS_SESSION_FP        = 152;
+    SESS_SESSION_HANDLE    = 160;
+    SESS_LOGIN_FP          = 168;
+    SESS_LOGIN_NONCE       = 176;
+    SESS_LOGIN_STARTED_MS  = 184;
+    SESS_DOOR_GAME         = 192;
+    SESS_DOOR_STATE        = 200;
+    SESS_DOOR_MODE         = 208;
+    SESS_UNI_WORLD         = 216;
+    SESS_CHAT_CHANNEL      = 224;
+    SESS_CHAT_SEEN         = 232;
+    SESS_CHAT_IDLE         = 240;
+    SESS_CHAT_BOT          = 248;
+    SESS_ELIZA             = 256;
+    SESS_PARRY             = 264;
+    SESS_JABBER            = 272;
+    SESS_REPLY_TO          = 280;
+    SESS_REPLY_SUBJECT     = 288;
+    SESS_REPLY_SUBJECT_LEN = 296;
+    SESS_SIZE              = 320;
+}
+
+# Build the pool once (at serve_poll start): MAX_SESS slots, each with its per-conn
+# buffers allocated ONCE and reused. Slots start free (SESS_ACTIVE=0, fd=-1).
+fn session_pool_init(): i64 {
+    g_sess_pool = alloc(MAX_SESS * 8);
+    var i = 0;
+    while (i < MAX_SESS) {
+        var s = alloc(SESS_SIZE);
+        memset(s, 0, SESS_SIZE);
+        store64(s + SESS_TS,             telnet_state_new());
+        store64(s + SESS_RXBUF,          alloc(RECV_BUF_BYTES));
+        store64(s + SESS_LINE,           alloc(LINE_BUF_CAP));
+        store64(s + SESS_POST,           alloc(POST_MAX_BYTES));
+        store64(s + SESS_SUBJECT,        alloc(SUBJECT_MAX_BYTES + 1));
+        store64(s + SESS_CURBOARD,       alloc(BOARD_NAME_MAX + 1));
+        store64(s + SESS_SESSION_FP,     alloc(ACCOUNT_FP_BUF_BYTES));
+        store64(s + SESS_SESSION_HANDLE, alloc(ACCOUNT_HANDLE_BUF));
+        store64(s + SESS_LOGIN_FP,       alloc(ACCOUNT_FP_BUF_BYTES));
+        store64(s + SESS_LOGIN_NONCE,    alloc(ACCOUNT_NONCE_BUF_BYTES));
+        store64(s + SESS_CHAT_CHANNEL,   alloc(CHAT_CHANNEL_MAX + 1));
+        store64(s + SESS_QUIT,           alloc(8));
+        store64(s + SESS_TX,             alloc(SESS_TX_CAP));
+        store64(s + SESS_FD, 0 - 1);
+        store64(g_sess_pool + i * 8, s);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Reset a slot's mutable per-connection state for a NEW connection on cfd. Buffers
+# are reused (contents reset, not freed). Mirrors handle_client's per-conn init.
+fn session_reset(s, cfd): i64 {
+    store64(s + SESS_FD, cfd);
+    store64(s + SESS_ACTIVE, 1);
+    store64(s + SESS_GREETED, 0);
+    store64(s + SESS_LAST_MS, clock_now_ms());
+    store64(s + SESS_TX_LEN, 0);
+    store64(s + SESS_TX_OFF, 0);
+    telnet_state_reset(load64(s + SESS_TS));
+    store64(s + SESS_LINE_POS, 0);
+    store64(s + SESS_POST_POS, 0);
+    store64(s + SESS_SUBJECT_LEN, 0);
+    var cb = load64(s + SESS_CURBOARD);
+    memcpy(cb, "main", 4);
+    store8(cb + 4, 0);
+    store64(s + SESS_MODE, MODE_COMMAND);
+    store64(s + SESS_LAST_CR, 0);
+    store64(load64(s + SESS_QUIT), 0);
+    store8(load64(s + SESS_SESSION_FP), 0);
+    store8(load64(s + SESS_SESSION_HANDLE), 0);
+    store8(load64(s + SESS_LOGIN_FP), 0);
+    store8(load64(s + SESS_LOGIN_NONCE), 0);
+    store64(s + SESS_LOGIN_STARTED_MS, 0);
+    store64(s + SESS_DOOR_GAME, GAME_NONE);
+    store64(s + SESS_DOOR_STATE, 0);
+    store64(s + SESS_DOOR_MODE, DOOR_PRACTICE);
+    store64(s + SESS_UNI_WORLD, 0);
+    store8(load64(s + SESS_CHAT_CHANNEL), 0);
+    store64(s + SESS_CHAT_SEEN, 0);
+    store64(s + SESS_CHAT_IDLE, 0);
+    store64(s + SESS_CHAT_BOT, 0);
+    store64(s + SESS_ELIZA, 0);
+    store64(s + SESS_PARRY, 0);
+    store64(s + SESS_JABBER, 0);
+    store64(s + SESS_REPLY_TO, 0);
+    store64(s + SESS_REPLY_SUBJECT, 0);
+    store64(s + SESS_REPLY_SUBJECT_LEN, 0);
+    return 0;
+}
+
+# Claim a free slot for cfd; returns the session ptr or 0 if the pool is full.
+fn session_acquire(cfd): i64 {
+    var i = 0;
+    while (i < MAX_SESS) {
+        var s = load64(g_sess_pool + i * 8);
+        if (load64(s + SESS_ACTIVE) == 0) {
+            session_reset(s, cfd);
+            return s;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Return a slot to the pool (buffers persist for reuse; transient game/bot allocs
+# on the slot are re-initialized by session_reset on the next claim).
+fn session_release(s): i64 {
+    store64(s + SESS_ACTIVE, 0);
+    store64(s + SESS_FD, 0 - 1);
+    return 0;
+}
+
+# Swap the active session's DEEP state into the g_* session globals the dispatch
+# functions read (sess_load), and back afterward (sess_save). Shallow parse state
+# (ts/line/mode/…) is handled by process_rx via its locals, not here.
+fn sess_load(s): i64 {
+    g_session_fp        = load64(s + SESS_SESSION_FP);
+    g_session_handle    = load64(s + SESS_SESSION_HANDLE);
+    g_login_fp          = load64(s + SESS_LOGIN_FP);
+    g_login_nonce       = load64(s + SESS_LOGIN_NONCE);
+    g_login_started_ms  = load64(s + SESS_LOGIN_STARTED_MS);
+    g_door_game         = load64(s + SESS_DOOR_GAME);
+    g_door_state        = load64(s + SESS_DOOR_STATE);
+    g_door_mode         = load64(s + SESS_DOOR_MODE);
+    g_uni_world         = load64(s + SESS_UNI_WORLD);
+    g_chat_channel      = load64(s + SESS_CHAT_CHANNEL);
+    g_chat_seen         = load64(s + SESS_CHAT_SEEN);
+    g_chat_idle         = load64(s + SESS_CHAT_IDLE);
+    g_chat_bot          = load64(s + SESS_CHAT_BOT);
+    g_eliza_state       = load64(s + SESS_ELIZA);
+    g_parry_state       = load64(s + SESS_PARRY);
+    g_jabber_state      = load64(s + SESS_JABBER);
+    g_reply_to          = load64(s + SESS_REPLY_TO);
+    g_reply_subject     = load64(s + SESS_REPLY_SUBJECT);
+    g_reply_subject_len = load64(s + SESS_REPLY_SUBJECT_LEN);
+    g_active_sess = s;
+    return 0;
+}
+
+fn sess_save(s): i64 {
+    store64(s + SESS_SESSION_FP,        g_session_fp);
+    store64(s + SESS_SESSION_HANDLE,    g_session_handle);
+    store64(s + SESS_LOGIN_FP,          g_login_fp);
+    store64(s + SESS_LOGIN_NONCE,       g_login_nonce);
+    store64(s + SESS_LOGIN_STARTED_MS,  g_login_started_ms);
+    store64(s + SESS_DOOR_GAME,         g_door_game);
+    store64(s + SESS_DOOR_STATE,        g_door_state);
+    store64(s + SESS_DOOR_MODE,         g_door_mode);
+    store64(s + SESS_UNI_WORLD,         g_uni_world);
+    store64(s + SESS_CHAT_CHANNEL,      g_chat_channel);
+    store64(s + SESS_CHAT_SEEN,         g_chat_seen);
+    store64(s + SESS_CHAT_IDLE,         g_chat_idle);
+    store64(s + SESS_CHAT_BOT,          g_chat_bot);
+    store64(s + SESS_ELIZA,             g_eliza_state);
+    store64(s + SESS_PARRY,             g_parry_state);
+    store64(s + SESS_JABBER,            g_jabber_state);
+    store64(s + SESS_REPLY_TO,          g_reply_to);
+    store64(s + SESS_REPLY_SUBJECT,     g_reply_subject);
+    store64(s + SESS_REPLY_SUBJECT_LEN, g_reply_subject_len);
+    return 0;
+}
+
+# Serve model from AGORA_SERVE ({fork,poll,epoll}). Default: fork on Linux
+# (classic/back-compat), poll on agnos (its only concurrent option; no fork).
+fn serve_mode_from_env(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var dflt = SERVE_POLL;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var dflt = SERVE_FORK;
+    #endif
+    var e = getenv("AGORA_SERVE");
+    if (e == 0) { return dflt; }
+    if (streq(e, "poll") == 1)  { return SERVE_POLL; }
+    if (streq(e, "epoll") == 1) { return SERVE_POLL; }
+    if (streq(e, "fork") == 1) {
+        #ifdef CYRIUS_TARGET_AGNOS
+        return SERVE_POLL;   # agnos has no fork; honor "single-process" intent via poll
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
+        return SERVE_FORK;
+        #endif
+    }
+    return dflt;
+}
+
 fn handle_client(cfd): i64 {
     # Slowloris defense: bound how long a quiet client can pin the
     # accept-loop worker. recv() returns EWOULDBLOCK after timeout
