@@ -4681,14 +4681,14 @@ fn t204_ash_growth_turn(): i64 {
 # pairs are rejected, and the pact table caps.
 fn t205_ash_diplomacy(): i64 {
     var w = ashw_new(ASH_WORLD_SEED);
-    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "fresh"); return 1; }
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "fresh"); return 1; }   #skip-lint
     # invalid: self + zero fp
     if (ash_pact_propose(w, 100, 100) != ASH_DIP_INVALID) { test_fail("t205_ash_diplomacy", "self"); return 1; }
     if (ash_pact_propose(w, 0, 200) != ASH_DIP_INVALID)   { test_fail("t205_ash_diplomacy", "zero"); return 1; }
-    # propose -> pending; re-propose same dir -> still pending; not yet allied
+    # propose -> pending; re-propose same dir -> still pending; not yet allied   #skip-lint
     if (ash_pact_propose(w, 100, 200) != ASH_DIP_PROPOSED) { test_fail("t205_ash_diplomacy", "propose"); return 1; }
     if (ash_pact_propose(w, 100, 200) != ASH_DIP_PENDING)  { test_fail("t205_ash_diplomacy", "re-propose"); return 1; }
-    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "not yet"); return 1; }
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "not yet"); return 1; }   #skip-lint
     # reciprocal proposal seals it; symmetric
     if (ash_pact_propose(w, 200, 100) != ASH_DIP_ALLIED) { test_fail("t205_ash_diplomacy", "seal"); return 1; }
     if (ash_allied(w, 100, 200) != 1)             { test_fail("t205_ash_diplomacy", "allied"); return 1; }
@@ -4697,7 +4697,7 @@ fn t205_ash_diplomacy(): i64 {
     if (ash_pact_propose(w, 100, 200) != ASH_DIP_PENDING) { test_fail("t205_ash_diplomacy", "already"); return 1; }
     # break is unilateral + frees the slot
     if (ash_pact_break(w, 200, 100) != 1)         { test_fail("t205_ash_diplomacy", "break"); return 1; }
-    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "broken"); return 1; }
+    if (ash_allied(w, 100, 200) != 0)             { test_fail("t205_ash_diplomacy", "broken"); return 1; }   #skip-lint
     if (ash_pact_break(w, 100, 200) != 0)         { test_fail("t205_ash_diplomacy", "break gone"); return 1; }
     # the freed slot is reusable — re-ally
     if (ash_pact_propose(w, 100, 200) != ASH_DIP_PROPOSED) { test_fail("t205_ash_diplomacy", "re-offer"); return 1; }

@@ -1,7 +1,12 @@
 # 0011 — Chat area (live multi-user teleconference)
 
-> **Status**: Accepted — implemented in 1.3.0 (in progress). Bite 1: the chat surface (channels, `flock`'d ring transcript, `MODE_CHAT`, live-tail poll). Eliza (the anchor inhabitant) lands as a separate concern in the same minor — a pure module reachable as a `play eliza` door and a private `/eliza` side-channel inside chat ([ADR 0009](0009-door-games-subsystem.md) shape, no new deps).
+> **Status**: Accepted — implemented in 1.3.0 (shipped 2026-06-08). Bite 1: the chat surface (channels, `flock`'d ring transcript, `MODE_CHAT`, live-tail poll). Eliza (the anchor inhabitant) lands as a separate concern in the same minor — a pure module reachable as a `play eliza` door and a private `/eliza` side-channel inside chat ([ADR 0009](0009-door-games-subsystem.md) shape, no new deps).
 > **Date**: 2026-06-08
+
+> **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That
+> premise is conditional since the poll multiplex — see [ADR 0023](0023-dual-serve-model.md)
+> § Relationship to ADR 0007. The disk + `flock` design here remains correct and is still required for
+> the fork path; what changed is that the *deferred* alternatives deserve a re-read.
 
 ## Context
 

@@ -4,6 +4,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.6] — 2026-07-26 (doc-truth and process: the non-code half of the roadmap sweep)
+
+**No behavior change. This closes the paperwork the 1.6.x line ran up.** The 2026-07-26 deferred-work
+sweep produced 68 open items; this cut does every one that is documentation, process or a comment, and
+leaves the four that change the running server on the roadmap. The theme is the same one the sweep
+found: *most of the open work was verification and doc-truth, not features.* 221/221 tests, both targets
+build, all smokes green. 14,571,688 → **14,571,744 B** (the deleted dead branch nets against three
+new comments).
+
+### Added
+
+- **[ADR 0023 — the dual serve model](docs/adr/0023-dual-serve-model.md).** The largest architecture
+  change since ADR 0007 — one process for all 64 sessions, `AGORA_SERVE={fork,poll}`, the session pool,
+  the `sess_load`/`sess_save` context swap, agnos always polling — **had no ADR**. The index jumped 0020
+  (1.4.6) → 0021 (1.6.2), and ADRs 0021 and 0022 both opened by retroactively narrating 1.6.0 because
+  there was nothing to cite. 0023 records it, including the 1.5.0 agnos serial-accept decision, and states
+  the lesson plainly: *ask what the old model was silently providing, not just what the new code does* —
+  fork was providing the free list, a bound on bad connections, and crash isolation, and the poll model
+  removed all three without a line of code saying so.
+- **Three allocator/deferral gates in CLAUDE.md's Closeout Pass** (new step 8). Each was a mitigation an
+  **Accepted ADR already relies on** while existing only as a sentence inside that ADR: *no bare
+  `alloc()` reachable from `process_rx`* (ADR 0021 — would have caught both halves of the 1.6.2 arena
+  miss), the *mixed-allocator scan* (ADR 0022 — an `alloc()` pointer reaching `fl_free` is heap
+  corruption), and the *tree-wide deferral check*.
+
+### Fixed
+
+- **ADR 0007 amended, and the four ADRs that reason from it corrected.** 0007 still ships and is still
+  the Linux default, but three of its statements are now conditional: its § Alternatives **rejects** the
+  single-thread event loop that 1.6.0 built; its § Positive claims audit M1/M2 closed "via address-space
+  isolation", which ADR 0021 measured as regressed under poll; and its § Negative — *"no shared state
+  across sessions"* — is cited **verbatim** by ADRs 0010/0011/0012/0014 as the reason a feature was
+  deferred. Under poll that premise is false, and on agnos it is *always* false. Each of the four now
+  carries a note pointing at ADR 0023 § Relationship to ADR 0007. Nothing is broken — disk + `flock`
+  remains correct and required while fork is supported — but *"fork forbids it"* is no longer a
+  sufficient reason to defer a feature, and four deferrals are now honestly re-evaluable.
+- **Untracked deferrals: 12 → 0, tree-wide.** `cyrius lint` reported **2**; it takes one file, and only
+  `main.cyr` was ever linted by habit, so `telnet.cyr`'s five were invisible. Each of the twelve got the
+  treatment it deserved: genuine ones now cross-reference a real roadmap entry (the gate is per-line, so
+  the citation must sit on the deferral's own line), stale ones were retired, and three **false
+  positives** are marked `#skip-lint` — `telnet.cyr`'s "follow-up subneg" means the subneg that *follows*
+  agreement, and two are string literals inside `test_fail(...)` calls.
+- **The unreachable agnos serial-accept branch is deleted** (`src/main.cyr`). `serve_mode_from_env`
+  returns `SERVE_POLL` on **every** agnos path — the default, an explicit `"poll"`, and an explicit
+  `"fork"` — so `cmd_serve_on` dispatches to `serve_poll` long before that loop. It had been dead since
+  1.6.0, and its comment still announced the poll multiplex as pending work that the same cut shipped.
+- **~20 stale comments retired.** The worst: `src/main.cyr`'s milestone map still marked **"M1 ← active"**
+  (every milestone closed at 1.0.0); three separate comments claimed *"the accept loop single-tracks"*,
+  false since 0.8.0 and doubly so since 1.6.0; `src/door.cyr` called `DOOR_UNIVERSE` "stubbed at 1.1.0"
+  (wired since 1.2.0) and said shared world state "lands later" 200 lines above the framework that
+  implements it; `src/ashes.cyr` said the victory condition would be "decided in a later bite" next to
+  `ash_is_over`; `src/board.cyr`'s header still described the M5-A no-headers format four milestones
+  after RFC-822 headers landed.
+- **ADR index and statuses.** 0013 and 0014 were listed **Proposed** in `docs/adr/README.md` though both
+  files and doc-health say Accepted; 0011 and 0014 carried in-file "in progress" statuses for releases
+  that shipped in June. Two long-open ADR questions are closed with their answers: **0014's
+  alliance/diplomacy model** (answered by 1.3.7's pact edge-list, union-find coalitions, and betrayal that
+  needed no code — the question outlived its answer by four months) and **0013's per-game vs global house
+  edge** (1.3.5's three deliberately different edges settled it).
+- **`CYRIUS_DCE=1` in CI and release.** CLAUDE.md states it as current practice; it was in **neither**
+  workflow, so CI had been measuring a different artifact than the one the docs describe — and binary
+  size is a tracked release metric.
+- **`state.md`'s orientation block** was five releases stale (it still opened with 1.6.0) even though its
+  header was current — the release post-hook is only half working. Rewritten, and pointed at
+  `roadmap.md` § Now as the single authoritative open-work list.
+
+### Notes
+
+- **What is deliberately still open**: roadmap § Now is now four items, **all code** — clean shutdown
+  (N1: no SIGINT/SIGTERM anywhere, and both `stop` flags are provably never assigned, so the server can
+  only be killed), crash-safe durable writes (N2), the two poll-mode holes (N3), and the fuzz harness
+  (N4). Plus § Cross-repo and a 28-row backlog.
+
 ## [1.6.5] — 2026-07-26 (the audit's LOWs — and the audit ledger closes)
 
 **Closes the last four findings from the 2026-07-26 audit.** With this cut **every HIGH, MEDIUM and LOW

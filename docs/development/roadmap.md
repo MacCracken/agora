@@ -68,9 +68,11 @@ entry. If an item has no citation it does not belong here.
 
 ## Now — pinned
 
-The next few cuts, in the order they should happen. Ordering rationale: correctness of the *running
-server* first, then the doc-truth that other decisions depend on, then the guards that stop the last two
-cuts' bug classes from recurring.
+The next few cuts, in the order they should happen. **All of them are code** — the doc-truth and process
+half of this list closed at **1.6.6** (ADR 0023 written and 0007 amended, the Closeout Pass grown three
+allocator/deferral gates, `CYRIUS_DCE=1` in CI, 12 → 0 untracked deferrals tree-wide, ~20 stale comments
+retired, the unreachable agnos serial-accept branch deleted). What is left is work that changes the
+running server.
 
 ### N1 — Clean shutdown (SIGINT / SIGTERM) · medium
 
@@ -80,34 +82,11 @@ only be killed: the poll model never drains its 64 slots, the fork model never r
 the mechanism (`signal_ignore` for SIGPIPE) and retired ADR 0007's stated objection to `sigaction`, so
 the blocker is gone.
 
-These are also the two deferrals `cyrius lint` reports on `main.cyr`, and this item appears in **no**
-other doc — it was genuinely untracked until this sweep.
+This appeared in **no** document until the 2026-07-26 sweep found it. As of 1.6.6 the two source comments
+that hinted at it cross-reference this entry, so the deferral gate is satisfied — but the work itself is
+untouched. Line numbers shifted at 1.6.6 (the dead agnos branch was removed); find the loops by content.
 
-### N2 — The missing 1.6.0 ADR, and ADR 0007's premise · medium
-
-The largest architecture change since [ADR 0007](../adr/0007-fork-per-accept-concurrency.md) — one
-process for all 64 sessions, `AGORA_SERVE={fork,poll}`, the session pool, `sess_load`/`sess_save`, agnos
-always polling — **has no ADR**. The index jumps 0020 (1.4.6) → 0021 (1.6.2), and both 0021 and 0022 open
-by retroactively narrating 1.6.0 because there was nothing to cite.
-
-Worse, ADR 0007 is still `Accepted` with no superseding note while its § Alternatives **rejects** "(E)
-single-thread epoll event loop" — precisely what 1.6.0 built — and its § Positive still claims audit
-findings M1/M2 closed "via address-space isolation", which ADR 0021 measured as regressed under poll and
-had to re-close with an arena.
-
-**The load-bearing part**: 0007 § Negative ("cannot implement an in-memory who's-online list without
-IPC") is cited *verbatim* by ADRs [0010](../adr/0010-persistent-universe.md):12,
-[0011](../adr/0011-chat-area.md):12, [0012](../adr/0012-chatbot-framework.md):26 and
-[0014](../adr/0014-async-shared-world-strategy.md):14, and echoed in `src/chat.cyr:8-13` and
-`src/ashes.cyr:33`, as the reason a feature was deferred. Under `serve_poll` that premise is false — and
-on agnos it is *always* false. Nothing is broken; disk+flock remains correct and is still required for
-the fork path. But **four deferrals cannot be honestly re-evaluated until this is re-derived** (`/who`,
-the room bot, the Ashes daemon, and cross-session presence generally).
-
-Deliverable: ADR 0023 for the dual serve model (incl. the 1.5.0 agnos serial-accept decision, also
-unrecorded), plus an amendment note on 0007 and a one-line correction in each of the four citing ADRs.
-
-### N3 — Crash-safe durable writes · small
+### N2 — Crash-safe durable writes · small
 
 Three writes still use `file_write_all`, whose `O_TRUNC` empties the target at open: `src/door.cyr:277`
 (door save), `src/door.cyr:592` (`world_write`, the shared-world snapshot), `src/chat.cyr:378` (chat
@@ -118,7 +97,7 @@ closed because its sibling ask (`file_create_exclusive`) landed at 1.6.4; it is 
 CLAUDE.md's *"posts are durable artifacts"* principle actually depends on, and no source comment marks
 it, so lint cannot see it.
 
-### N4 — The two poll-mode holes · small + medium
+### N3 — The two poll-mode holes · small + medium
 
 Both were recorded as "papercuts" at 1.6.5. One is worse than that label:
 
@@ -133,72 +112,13 @@ Both were recorded as "papercuts" at 1.6.5. One is worse than that label:
   drain acts on it. An over-cap session loses bytes and stays open holding one of 64 slots, which is the
   failure mode the same file's comment describes in its own words.
 
-### N5 — Guards for the last two cuts' bug classes · small ×3
-
-Cheap, mechanical, and each one is a mitigation an **Accepted ADR already relies on** while existing only
-as a sentence inside that ADR:
-
-- **No bare `alloc()` reachable from `process_rx`** — the gate that would have caught both halves of the
-  1.6.2 arena miss. It immediately finds **six live sites in `src/descent.cyr`** (`:273, :278, :360,
-  :362, :369, :370`) reachable per `descent` invocation.
-- **The mixed-allocator scan** ([ADR 0022](../adr/0022-door-state-free-hook.md):91-95 calls it "part of
-  the release check" — it is in no checklist). An `alloc()` pointer reaching `fl_free` is heap corruption.
-- **Arena instrumentation** — `cmd_alloc` falls back to `alloc()` silently on exhaustion
-  (`src/arena.cyr:60`) with no high-water mark. 1.6.5 found the 256 KB sizing wrong only because someone
-  measured by hand.
-
-Land all three in CLAUDE.md's Closeout Pass so they are actually run.
-
-### N6 — Make the deferral gate tell the truth · small
-
-`cyrius lint` reports **2** untracked deferrals; a tree-wide sweep reports **12 across 6 files**
-(`telnet.cyr` 5, `main.cyr` 2, `test.cyr` 2, `account.cyr` / `ashes.cyr` / `board.cyr` 1 each). The gap is
-that `lint` takes one file and only `main.cyr` is ever linted by habit, while `cyrius audit` walks the
-tree. Two consequences worth fixing on agora's side regardless of upstream: **run the deferral check
-tree-wide in the Closeout Pass**, and know that the checker treats *any* line mentioning `docs/` or
-`roadmap` as tracked — **citing a doc is not the same as being tracked in one**, which is how several
-stale notes pass clean.
-
-### N7 — Fuzz the IAC parser · medium
+### N4 — Fuzz the IAC parser · medium
 
 CLAUDE.md § Key Principles states *"Fuzz every parser path — IAC sequences are adversarial-by-default"*
 as a hard rule. There is no `tests/` directory, no `.fcyr` harness anywhere, and no fuzz step in CI. The
 2026-07-26 audit says it plainly under *What this audit did not cover*: no dynamic analysis at all. The
 deferral dates to [0.2.0] ("fuzz earns its spot at M2+"); the input surface has widened four times since.
 **This is the largest gap between what CLAUDE.md asserts and what the repo does.**
-
-### N8 — `CYRIUS_DCE=1` in CI and release · small
-
-CLAUDE.md § CI/Release states *"every `cyrius build` in CI and release runs with `CYRIUS_DCE=1`"*. It
-appears in **neither** workflow. Binary size is a tracked release metric, so CI is currently measuring a
-different artifact than the one the docs describe.
-
-### N9 — Retire ~25 stale notes · small
-
-The sweep found **~25 comments and doc lines describing work that already shipped**. They are not
-harmless: several actively mislead, and three are `cyrius lint` **false positives** that should be marked
-`#skip-lint` so the gate means something. The worst offenders:
-
-- `src/main.cyr:2975-2984` — the agnos serial-accept arm is now **unreachable dead code**
-  (`serve_mode_from_env` returns `SERVE_POLL` on every agnos path, including the literal `"fork"`), and
-  its "epoll is the follow-up" comment is one of the two lint flags. Delete the branch or guard-comment it.
-- `src/main.cyr:8-16` "M1 ← active" — every milestone closed at 1.0.0.
-- `src/main.cyr:93-95`, `:266-270` "the accept loop single-tracks"; `:105-118` "pulled to per-conn locals
-  when concurrent-accept lands" — done via the `SESS_*` slots and `sess_load`/`sess_save`.
-- `src/chat.cyr:8-13` — reasons from fork's private address spaces (see N2).
-- `src/door.cyr:56-58` (`DOOR_UNIVERSE` "stubbed at 1.1.0" — wired since 1.2.0), `:283-285` ("shared world
-  state lands later" — the framework is 200 lines below in the same file).
-- `src/ashes.cyr:260-261` (victory condition "decided in a later bite" — `ash_is_over` does it),
-  `:22-25` ("later, queued orders + alliances" — both shipped in that same cut).
-- `src/olympiad.cyr:127` (purse "tier-scaled later" — scaled at `:539-541`).
-- **`docs/adr/README.md` lists 0013 and 0014 as Proposed**; both files and doc-health say Accepted. ADRs
-  0011 and 0014 also carry in-file "in progress" statuses.
-- Lint false positives needing `#skip-lint`: `src/telnet.cyr:619` ("follow-up subneg" means the subneg
-  that *follows* agreement, implemented at `:620-624`), and `src/test.cyr:4688` / `:4691` — the latter a
-  string literal inside a `test_fail(...)` call.
-
-*(One was fixed while writing this: `src/board.cyr`'s `input_byte_ok` header still claimed BEL/BS/DEL
-were passthrough, which 1.6.5 had made false 20 lines below.)*
 
 ---
 
@@ -263,15 +183,12 @@ or a deployment asks.
 | Item | Source | Effort |
 |---|---|---:|
 | ADR 0022's borrowed world-snapshot pointer is an **unenforced per-module invariant** — door #11 can silently leak or corrupt the session pool. | ADR 0022 | medium |
-| ADR 0021's `cmd_alloc` classification rule lives only in the ADR — a misclassified site is a use-after-reset with no compiler help. | ADR 0021 | small |
 | The chat-couch bot dispatch was deliberately left out of the descriptor registry; its shared-offset ABI (PY/EZ alias) is unenforced. | ADR 0020 | small |
 | ADR 0020 descriptor slots resolve at run time — every new slot carries an untracked smoke-coverage obligation. | ADR 0020 | small |
-| ADR 0014's alliance/diplomacy open question was partly answered by 1.3.7; the ADR text was never updated. | ADR 0014 | medium |
-| ADR 0013's wager audit trail (and the commit-reveal alternative) remain deferred; the per-game-vs-global edge question was to be revisited after 1.3.5 and never was. | ADR 0013 | medium |
+| ADR 0013's wager audit trail and the commit-reveal provable-fairness alternative remain deferred. (The per-game-vs-global edge question was closed in the ADR at 1.6.6 — 1.3.5's three different edges settled it.) | ADR 0013 | medium |
 | `PR_SET_PDEATHSIG` for orphan-on-parent-crash. | ADR 0007 § Out of scope | small |
 | Version literals are hand-bumped in three `main.cyr` places; the generated `version_str.cyr` was promised as a v1.0 close-out item. | CHANGELOG [0.2.0] | small |
 | Binary strip / DCE-aware emit — promised three times as a "v1.x close-out concern"; the problem changed shape when the 6.4.x stdlib added ~13 MB of BSS. | CHANGELOG | medium |
-| `state.md`'s orientation block is five releases stale though its header is current — the release post-hook is only half working. | `state.md:19-25` | small |
 
 ### Doors and content
 
@@ -354,10 +271,11 @@ because a sibling ask shipped — `file_write_atomic` is the clearest, and is no
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door/chatbot backlog.
-- [`docs/adr/`](../adr/) — **22 ADRs (0001–0022)**, all Accepted/Evergreen. 0001–0008 span M1–0.9.0; the
+- [`docs/adr/`](../adr/) — **23 ADRs (0001–0023)**, all Accepted/Evergreen. 0001–0008 span M1–0.9.0; the
   1.x arc adds 0009–0020 (doors, Universe, chat, chatbots, wager, war-game, Jabberwacky, Olympiad, Descent
   link, decode engine, decode-as-Handler-lever, door registry); 0021–0022 are the 1.6.x memory work
-  (per-command arena, door-state free hook). **A 1.6.0 serve-model ADR is missing — see N2.**
+  (per-command arena, door-state free hook) and **0023 records the dual serve model** (written at 1.6.6,
+  amending 0007).
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2, closed at 1.6.5).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

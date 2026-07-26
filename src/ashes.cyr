@@ -258,7 +258,7 @@ fn ashw_set_army(w, t, v): i64 {
 }
 
 # Count the provinces a given owner fp holds (the win-progress metric — the
-# whole map is the victory condition, decided in a later bite).
+# whole map is the victory condition — implemented by ash_is_over below).
 fn ashw_holdings(w, fp): i64 {
     var held = 0;
     var t = 0;

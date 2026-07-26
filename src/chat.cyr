@@ -8,9 +8,10 @@
 # Architecture (ADR 0011): a per-channel append-only `flock`'d RING
 # transcript that sessions poll-tail. The same on-disk-is-the-only-
 # shared-state discipline the 1.2.0 Universe world transaction
-# establishes (ADR 0010) — fork-per-accept (ADR 0007) gives each
-# session a private address space, so disk + flock is the only way two
-# chatters touch the same state.
+# establishes (ADR 0010). Under fork (ADR 0007) each session has a private
+# address space, so disk + flock is the only way two chatters share state;
+# under poll they share one process (ADR 0023), but disk + flock stays the
+# design — it is what survives a restart and what keeps both models identical.
 #
 # This module is the PURE + storage layer:
 #   - pure line transforms (format / parse-seq / render / sanitise /

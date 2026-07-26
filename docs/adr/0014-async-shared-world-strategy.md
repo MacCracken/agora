@@ -1,7 +1,12 @@
 # 0014 — War-game door — asynchronous shared-world strategy as the MUD on-ramp
 
-> **Status**: Accepted — **in progress 1.3.7** (the war-game door, "Ashes of Empire"), the last door before **1.4.0 Descent link**.
+> **Status**: Accepted — **shipped at 1.3.7** (2026-06-09) (the war-game door, "Ashes of Empire"), the last door before **1.4.0 Descent link**.
 > **Date**: 2026-06-08 (accepted 2026-06-09, bite 1: the shared-world snapshot foundation)
+
+> **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That
+> premise is conditional since the poll multiplex — see [ADR 0023](0023-dual-serve-model.md)
+> § Relationship to ADR 0007. The disk + `flock` design here remains correct and is still required for
+> the fork path; what changed is that the *deferred* alternatives deserve a re-read.
 
 ## Context
 
@@ -57,6 +62,14 @@ The sequencing is the decision. The wager module (1.3.4) and its integrations (1
 
 - **Shared-map snapshot size + coarse-vs-fine locking under contention.** A full map + per-player armies + alliance graph is the largest blob agora will hold under one `flock`. Does the coarse single-world lock ([ADR 0010](0010-persistent-universe.md)) hold up at fanout, or does the map force per-territory / per-front locking (and its lock-ordering hazards) sooner than PA's per-commodity stock did? Measure before refining.
 - **Resolution cadence + who triggers it.** Wall-clock tick (a fixed turn window, resolved lazily on the next entry past the boundary — the leading candidate, mirroring `qu_day_tick`) vs. on-Nth-action (resolve once N orders are queued) vs. operator-run (an admin verb advances the turn). The lazy on-entry trigger is favored *for the first cut* because it needs no daemon, but an idle world advancing only on the next visit is a real behavioral choice to nail down — and a **timer-driven daemon** is the open future option that would decouple cadence from traffic entirely (deferred, not foreclosed — see Alternatives), the same path agora would walk toward the MUD's real-time loop.
-- **The alliance / diplomacy model.** How alliances form, bind, and break in the snapshot; whether allied orders resolve cooperatively in the batch; how betrayal and pending offers are represented and adjudicated when colliding orders meet. This is the genuinely new game-design surface, and it is where the conflict-resolution rules of the batch transform get hard.
+- **The alliance / diplomacy model — ANSWERED at 1.3.7** (recorded 2026-07-26; the question outlived its
+  answer by four months). Alliances are a **pact edge-list** appended after the orders block (snapshot v2
+  → v3, `ASH_MAXPACT = 32` records of `[lo_fp, hi_fp, status]`, lo<hi canonical). **One verb forms them**:
+  `ash_pact_propose` records a directional OFFER and the reciprocal propose upgrades it to ALLIED.
+  Diplomacy mutates the graph **instantly**, not through the order queue, so the resolver reads alliance
+  state at the window boundary. Allied orders **do** resolve cooperatively: an arrival reinforces the
+  defender when they are allied, and remaining attackers merge into coalitions by union-find, each
+  contending as one force. **Betrayal needed no code at all** — break the pact and a queued march into
+  the former ally simply re-evaluates as an attack at resolution (t206 pins the with/without contrast).
 
 This is the last rehearsal before the MUD's harder real-time concurrency in 1.4.0. Every open question above is one we would rather answer on a door we fully control, on the proven `flock`'d framework, than discover live in the Descent link.

@@ -1,9 +1,9 @@
 # board.cyr — post storage primitives (M5-A).
 #
 # One file per post per ADR 0002: <store>/<id>.txt where <id> is a
-# monotonic integer. No headers in the file at M5-A — plaintext UTF-8
-# body bytes only. Headers earn their slot at M5-D once we know what
-# the wire-level post-creation flow surfaces.
+# monotonic integer. RFC-822-shaped headers (Subject / Date / Reply-To /
+# From) were added at M5-D and are parsed by post_body_offset below
+# (ADR 0003); a headerless M5-A/B/C post still reads correctly.
 #
 # Storage root is caller-provided (defaults wired in main.cyr via
 # --store <path>, default `./agora-data/`). The trust boundary is the

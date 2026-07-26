@@ -15,7 +15,9 @@
 # uses the naive-refuse pattern — every DO replies WONT, every WILL
 # replies DONT. That's enough for any standards-conformant telnet
 # client to connect, see a banner, and send keystrokes. Real LINEMODE
-# negotiation lands in a follow-up bite.
+# negotiation shipped at M1; what remains is that telnet_announce never sends
+# DO LINEMODE, so the machinery only engages if the client volunteers first —
+# roadmap § Backlog, The wire.
 
 # === RFC 854 § 11.2 command byte values ===
 
@@ -538,7 +540,7 @@ fn telnet_feed(ts, b): i64 {
         }
         # Single-byte commands (NOP, AYT, IP, AO, EC, EL, BRK, DM,
         # GA, SE-out-of-context) — consume and return to DATA. No
-        # response generated (AYT could but defer to follow-up bite).
+        # response generated. AYT should answer visibly per RFC 854 — roadmap § Backlog.
         store64(ts + TS_STATE, ST_DATA);
         return EV_NONE;
     }
@@ -616,7 +618,7 @@ fn ts_emit_linemode_request(ts): i64 {
 }
 
 # Hook for "him-state just entered Q_YES" — fires the option-specific
-# follow-up subneg request that RFC ergonomics expect right after the
+# follow-up subneg request that RFC ergonomics expect right after the   #skip-lint
 # agreement (TT name request, LINEMODE MODE establishment, etc.).
 fn ts_on_him_yes(ts, opt): i64 {
     if (opt == OPT_TERMINAL_TYPE) { ts_emit_tt_send(ts); }
@@ -674,7 +676,8 @@ fn telnet_handle_sb(ts): i64 {
     if (opt == OPT_LINEMODE) {
         # RFC 1184 § 1: payload starts with a LINEMODE sub-command
         # (MODE / FORWARDMASK / SLC), followed by sub-command-specific
-        # data. We only consume MODE for now — SLC is parsed-and-
+        # data. We consume MODE only; SLC is parsed-and-discarded and its described
+# validation was never written — roadmap § Backlog, The wire. SLC is
         # ignored (the peer's local-character table doesn't drive
         # any server behavior pre-LINEMODE-aware-input-handling).
         if (len < 2) { return 0; }
@@ -708,7 +711,7 @@ fn telnet_handle_sb(ts): i64 {
         return 0;
     }
 
-    # Other subnegs (STATUS IS, NEW_ENVIRON, etc.) — ignore for now.
+    # Other subnegs (STATUS IS, NEW_ENVIRON, etc.) are dropped — roadmap § Backlog.
     return 0;
 }
 

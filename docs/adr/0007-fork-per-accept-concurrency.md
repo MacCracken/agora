@@ -1,7 +1,16 @@
 # 0007 — Concurrent connections via fork-per-accept
 
-> **Status**: Accepted
+> **Status**: Accepted — **amended by [ADR 0023](0023-dual-serve-model.md) (2026-07-26)**
 > **Date**: 2026-05-23
+>
+> **Amendment note.** This model still ships and is still the Linux default. But 1.6.0 added a second
+> serve model (one process polling all 64 sessions, and the *only* model on agnos), which makes three
+> statements below conditional: the § Alternatives rejection of a single-thread event loop (1.6.0 did
+> that refactor), the § Positive claim that audit M1/M2 close "via address-space isolation" (M1
+> regressed under poll and was re-closed by ADRs 0021/0022; M2 is re-closed by the sess_load/sess_save
+> context swap), and — most importantly — the § Negative "no shared state across sessions", which four
+> later ADRs cite as a reason to defer features and which is **false under poll**. See ADR 0023
+> § Relationship to ADR 0007 before relying on any of them.
 
 ## Context
 
@@ -74,7 +83,11 @@ Per-connection state stays in globals (`g_session_fp` / `g_session_handle` / `g_
 ### Negative
 
 - **Per-connection fork cost.** ~1 ms on modern Linux for a 380 KB binary with CoW page tables. At v1.0 LAN scale (8-user fanout per the criteria) this is invisible; at 1000s of connections/sec it would matter. **Documented**: agora's v1.0 use is per-LAN small-N.
-- **No shared state across sessions.** Cannot, e.g., implement an in-memory "who's online" list without IPC. Acceptable for v1.0 (no such feature is on the roadmap); v2.x pillar 4 (federation) introduces IPC concerns regardless.
+- **No shared state across sessions.** Cannot, e.g., implement an in-memory "who's online" list without IPC.
+  **(Conditional since 1.6.0 — see the amendment note above.** Under `AGORA_SERVE=poll` all sessions share
+  one address space, and agnos always polls. Disk + `flock` remains required while fork is supported, so
+  no feature may *assume* shared memory — but "fork forbids it" is no longer a sufficient reason to defer
+  one.) Acceptable for v1.0 (no such feature is on the roadmap); v2.x pillar 4 (federation) introduces IPC concerns regardless.
 - **Process supervision becomes more relevant.** Operator should run `agora serve` under systemd / runit / supervisord so that the parent crash kills all children. Acceptable — the v1.0 deployment story already assumes a supervisor.
 - **CLI verbs (`post` / `list` / `read` / etc.) unchanged.** They run as a single process and don't benefit from concurrency. By design — they're operator scripts, not server paths.
 

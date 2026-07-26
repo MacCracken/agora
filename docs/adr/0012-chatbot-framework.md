@@ -3,6 +3,11 @@
 > **Status**: Accepted — Eliza shipped 1.3.0, PARRY shipped 1.3.1; Jabberwacky pinned 1.3.3 as a different engine kind. Reachable two ways each (a `play <bot>` door + a private `/<bot>` chat side-channel). Pure modules, no new deps, unit-testable without a socket (`src/eliza.cyr`, `src/parry.cyr`; couch wiring in `src/main.cyr`).
 > **Date**: 2026-06-08
 
+> **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That
+> premise is conditional since the poll multiplex — see [ADR 0023](0023-dual-serve-model.md)
+> § Relationship to ADR 0007. The disk + `flock` design here remains correct and is still required for
+> the fork path; what changed is that the *deferred* alternatives deserve a re-read.
+
 ## Context
 
 [ADR 0011](0011-chat-area.md) built the synchronous chat surface and introduced **Eliza** as "the room's anchor inhabitant" — but deliberately scoped her as "a separate concern in the same minor" and **deferred the framework decision**: it asserted only that the engine was "factored as a reusable decomposition/reassembly core with a swappable script so PARRY can drop in at 1.3.1 with no engine rework." The *concrete* shape of that "swappable script" — a data-driven descriptor — was never settled in the ADR; it was the `eliza.cyr` header that went further, footnoting that factoring `ez_respond` / `ez_resp_none` into a descriptor was a *recommended first step* for the 1.3.1 PARRY bite, not a committed design. Building PARRY forced the actual decision. This ADR records it.

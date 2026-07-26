@@ -124,7 +124,7 @@ enum OLEcon {
     OL_START_MONEY = 200;    # starting denarii
     OL_RACE_FIELD  = 4;      # entrants per race (you + 3 rivals; tier-scaled later)
     OL_RACE_COND   = 20;     # condition a hard race costs your team
-    OL_PURSE_WIN   = 100;    # 1st-place purse (tier-scaled later)
+    OL_PURSE_WIN   = 100;    # 1st-place purse BASE — `ol_run_race` scales it by tier
     OL_PURSE_2ND   = 40;
     OL_PURSE_3RD   = 20;
     OL_BET_MIN     = 5;      # minimum wager at the book

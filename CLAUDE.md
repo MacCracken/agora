@@ -120,10 +120,14 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 5. **Code review pass** — walk diffs end-to-end for missed guards, off-by-ones, silently-ignored errors
 6. **Cleanup sweep** — stale comments, dead `#ifdef` branches, unused includes, orphaned files
 7. **Security re-scan** — quick grep for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches
-8. **Downstream check** — none yet (agora has no consumers); will track at M5+ when other tools start scripting agora
-9. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`, `docs/doc-health.md`, CLAUDE.md (if durable content changed)
-10. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header, intended git tag all match
-11. **Full build from clean** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
+8. **Allocator gates** (added 1.6.6 — each is a mitigation an Accepted ADR relies on, and each existed only as a sentence inside that ADR until now):
+   - **No bare `alloc()` reachable from `process_rx`.** Per-line scratch belongs in the arena ([ADR 0021](docs/adr/0021-per-command-scratch-arena.md)); a bare `alloc()` on a dispatch path is an unbounded leak under `AGORA_SERVE=poll`. Both halves of the 1.6.2 arena miss — the unauthenticated `scores` path and the chat idle tick — would have been caught here.
+   - **Mixed-allocator scan.** No `alloc()` pointer may reach `fl_free`, and no `fl_alloc()` pointer may be left for the arena ([ADR 0022](docs/adr/0022-door-state-free-hook.md) § Consequences). Check every game module's state constructor against its `*_free`.
+   - **Deferral check, TREE-WIDE.** `cyrius lint` takes ONE file, so linting `main.cyr` alone under-reports: at 1.6.5 it said 2 while the tree had 12. Loop every `src/*.cyr`. Note the checker is per-line and treats any line mentioning `CHANGELOG` / `roadmap` / `docs/` / `issue` / `See ` as tracked — **citing a doc is not the same as being tracked in one**, so verify the cited entry actually exists.
+9. **Downstream check** — none yet (agora has no consumers); will track at M5+ when other tools start scripting agora
+10. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`, `docs/doc-health.md`, CLAUDE.md (if durable content changed)
+11. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header, intended git tag all match
+12. **Full build from clean** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
 
 ### Task Sizing
 

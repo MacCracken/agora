@@ -55,7 +55,7 @@ enum DoorCap {
 
 # Per-game play mode. Practice = ephemeral (anon-OK, no save); Solo =
 # login-gated persistent save; Universe = shared multiplayer world
-# (roadmapped — see roadmap-future.md, stubbed at 1.1.0).
+# (wired since 1.2.0, ADR 0010 — the stub this comment described is long gone).
 enum DoorMode {
     DOOR_PRACTICE = 0;
     DOOR_SOLO     = 1;
@@ -281,8 +281,8 @@ fn door_save_write(store, fp16, game, buf, len): i64 {
 
 # Read the save slot into out_buf (cap bytes). Returns bytes read, or
 # negative on missing file / invalid id. Single-owner file, so a plain
-# read (no flock) is correct — shared world state lands later with the
-# file_append_locked pattern (ADR 0009 § Multiplayer, roadmapped).
+# read (no flock) is correct. Shared world state is a different path and it
+# shipped at 1.2.0 — see the world-transaction helpers below (ADR 0010).
 fn door_save_read(store, fp16, game, out_buf, cap): i64 {
     if (fp16_valid(fp16) == 0)      { return 0 - 1; }
     if (game_name_valid(game) == 0) { return 0 - 1; }

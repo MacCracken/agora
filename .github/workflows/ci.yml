@@ -47,12 +47,16 @@ jobs:
         run: cyrius deps
 
       - name: Build
+        # 1.6.6 — CYRIUS_DCE=1 per CLAUDE.md § CI/Release. It was stated as
+        # current practice and was in neither workflow, so CI had been
+        # measuring a different artifact than the one the docs describe
+        # (binary size is a tracked release metric).
         # Binary name `agora` matches the repo name and cyrius.cyml
         # [build].output, so no naming-divergence handling needed
         # (cf. kii / bannermanor's CI which carry an explanatory comment).
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/agora
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
 
       - name: Version drift check
         # The version strings in src/main.cyr (print_banner, cmd_version,

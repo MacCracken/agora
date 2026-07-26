@@ -5,15 +5,9 @@
 # macOS / Windows / AGNOS follow as the stdlib gains backends — see
 # docs/adr/0001-cross-platform-listener-decoupled-from-agnos.md).
 #
-# Roadmap shape (docs/development/roadmap.md):
-#   M0 (0.1.0) ✅  argv dispatch + banner + stub verbs
-#   M1 ← active   telnet listener (RFC 854) + LINEMODE (RFC 1184)
-#   M2            ANSI BBS aesthetic (darshana + bannermanor)
-#   M3            inline-image post bodies (kii)
-#   M4            stored-file deltas (sankoch compression)
-#   M5            post persistence
-#   M6            user accounts + auth (sigil-backed)
-#   1.0.0         all six milestones green, multi-user telnet BBS
+# Milestones M0-M6 all closed at 1.0.0 (2026-05-23); M3 (inline-image posts via
+# kii) and M4 (stored-file deltas via sankoch) are the two that shipped as gates
+# rather than features and remain unbuilt. Current plan: docs/development/roadmap.md.
 
 include "lib/darshana.cyr"
 include "src/arena.cyr"
@@ -90,9 +84,9 @@ enum ChatRuntime {
 # Operator-supplied MOTD, loaded once in cmd_serve before the
 # listener opens. Null (0) means "use the default render_motd"; a
 # non-null pointer with g_motd_len > 0 means "send these bytes
-# verbatim to every connection". Globals (vs. threading through
-# handle_client) since they're set-once-at-startup state and the
-# accept loop currently single-tracks anyway.
+# verbatim to every connection". Globals (vs. threading through handle_client)
+# because they are set-once-at-startup state — true under every serve model, and
+# unlike the per-session globals below they are never swapped.
 var g_motd_buf = 0;
 var g_motd_len = 0;
 
@@ -102,11 +96,11 @@ var g_motd_len = 0;
 # handle_client reads this without threading through args.
 var g_store_buf = "./agora-data";
 
-# M5-F: per-session reply state. `reply <id>` writes these and
-# handle_client reads them when finalizing the post. NB: at v0.5.0
-# the accept loop single-tracks, so these are effectively
-# per-session even though they're global slots. A future
-# concurrent-accept refactor pulls them into per-session locals.
+# M5-F: per-session reply state. `reply <id>` writes these and handle_client
+# reads them when finalizing the post. These ARE global slots, and since 1.6.0
+# that is only safe because sess_load/sess_save swap them in and out of the
+# session pool around every dispatch (ADR 0023) — under fork they were private
+# by address space, under poll they are private by the context swap.
 var g_reply_to          = 0;           # 0 = regular post, >0 = parent id
 var g_reply_subject     = 0;           # alloc'd lazily on first use
 var g_reply_subject_len = 0;
@@ -186,7 +180,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.5 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.6 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -265,10 +259,10 @@ fn motd_emit_cstr(buf, pos, s): i64 {
 
 # === M5-B session helpers ===
 #
-# The session state for one telnet client is kept in `handle_client`'s
-# locals (a heap-allocated struct buys nothing while the accept loop
-# single-tracks). These free-standing helpers take the explicit args
-# they need and operate on the per-connection buffers.
+# Session state for one telnet client lives in the pooled slot (the SESS_*
+# struct, 1.6.0) and is swapped into these globals per dispatch. These
+# free-standing helpers take the explicit args they need and operate on the
+# per-connection buffers.
 
 # 1.6.4 (audit M2) — send STORED / USER-DERIVED text with IAC doubled.
 #
@@ -1908,7 +1902,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.5 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.6 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2876,9 +2870,11 @@ fn handle_client(cfd): i64 {
     return 0;
 }
 
-# Spin up the listener and run the accept loop. Returns 0 if the
-# loop exits cleanly (signal — not yet wired), 1 on bind/listen
-# failure.
+# Spin up the listener and run the accept loop. Returns 0 if the loop exits
+# cleanly — which it currently never does: no SIGINT/SIGTERM disposition is
+# installed and neither loop's `stop` flag is ever assigned, so the server can
+# only be killed. Tracked as roadmap § Now N1 (clean shutdown). Returns 1 on
+# bind/listen failure.
 fn cmd_serve_on(port): i64 {
     println("agora serve: opening telnet listener");
 
@@ -2965,23 +2961,19 @@ fn cmd_serve_on(port): i64 {
 
         var ar = sock_accept(sfd);
         if (is_ok(ar) == 0) {
-            # Transient accept errors should not kill the loop;
-            # bail only on signal handling which we don't have yet.
+            # Transient accept errors should not kill the loop; the only exit
+            # would be signal handling — see roadmap § Now N1.
             continue;
         }
         var cfd = result_unwrap(ar);
 
-        #ifdef CYRIUS_TARGET_AGNOS
-        # agnos has NO fork — its process model is spawn#3 (from an in-memory
-        # ELF, which can't inherit the accepted socket fd) + a blocking per-pid
-        # waitpid#4. So serve SERIALLY: handle this connection to completion in
-        # THIS process, then loop for the next. Session globals are reused
-        # across connections (handle_client re-inits per-conn state on entry).
-        # Concurrency (a single-process epoll event loop — descent's model)
-        # is the follow-up; this makes agora run under mirshi / on agnos today.
-        handle_client(cfd);
-        sock_close(cfd);
-        #endif
+        # 1.6.6 — the agnos serial-accept arm that stood here is DELETED. It was
+        # unreachable: `serve_mode_from_env` (:2213) returns SERVE_POLL on every
+        # agnos path — the default, an explicit "poll", AND an explicit "fork" —
+        # so `cmd_serve_on` dispatches to serve_poll and returns long before this
+        # loop. It had been dead since 1.6.0, and its comment still announced the
+        # poll multiplex as pending work that the very same cut had shipped. The
+        # agnos serial model is recorded where it belongs, in docs/adr/0023.
         #ifndef CYRIUS_TARGET_AGNOS
         # ADR 0007: fork-per-accept. Each connection becomes its own
         # process; the kernel handles per-conn memory cleanup at child
@@ -3691,7 +3683,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.5");
+    println("agora 1.6.6");
     return 0;
 }
 

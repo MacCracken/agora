@@ -272,7 +272,7 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 #
 # O(n) in the number of registered users — same scan-on-read shape
 # as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
-# future bite may add a `<store>/.users/.by-handle/<handle> → <fp>`
+# `<store>/.users/.by-handle/<handle> → <fp>` index would fix it — roadmap
 # symlink index if a real deployment hits the scale.
 # === From-header parsing (M6-E, ADR 0006) ===
 #

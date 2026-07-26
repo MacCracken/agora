@@ -3,6 +3,11 @@
 > **Status**: Accepted — **fully implemented in 1.2.0 (cut 2026-06-08)**. All six bites shipped: (1) world-transaction framework, (2) PA shared galaxy (depletable stock + exclusive planet ownership), (3) PA async-PvP garrisons, (4) Smuggler shared district heat + Handler shared city alerts, (5) cross-game leaderboards, (6) closeout. 141/141 tests; smokes `08`/`09`/`10`. The array-in-loop codegen bug that reverted the first bite-2 attempt is cleared on cyrius 6.1.5 (t129 probes it on the real code).
 > **Date**: 2026-06-07 (bites 2-6: 2026-06-08)
 
+> **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That
+> premise is conditional since the poll multiplex — see [ADR 0023](0023-dual-serve-model.md)
+> § Relationship to ADR 0007. The disk + `flock` design here remains correct and is still required for
+> the fork path; what changed is that the *deferred* alternatives deserve a re-read.
+
 ## Context
 
 The 1.1.0 door subsystem ([ADR 0009](0009-door-games-subsystem.md)) shipped two play modes for all three games — **Practice** (ephemeral, anonymous) and **Solo** (login-gated per-player save). The third mode, **Universe** (shared-world multiplayer), is stubbed: `play <game> universe` prints a roadmap notice. 1.2.0 takes it up.

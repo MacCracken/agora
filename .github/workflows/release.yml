@@ -40,10 +40,14 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Build
+        # 1.6.6 — CYRIUS_DCE=1 per CLAUDE.md § CI/Release. It was stated as
+        # current practice and was in neither workflow, so CI had been
+        # measuring a different artifact than the one the docs describe
+        # (binary size is a tracked release metric).
         run: |
           cyrius deps
           mkdir -p build
-          cyrius build src/main.cyr build/agora
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
 
       - name: Create release
         uses: softprops/action-gh-release@v2
