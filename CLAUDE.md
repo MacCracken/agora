@@ -144,7 +144,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 - Heap allocation via `fl_alloc()` / `fl_free()` (freelist) for data with individual lifetimes
 - Bump allocation via `alloc()` for long-lived data (vec, str internals)
 - Enum values for constants — don't consume `gvar_toks` slots (4,096 initialized globals limit)
-- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
+- Counting rule (**widened by cyrius 6.4.74**): a top-level `var NAME = ...;` consumes an initialized-globals slot only when its initializer needs *runtime* evaluation — a call, or an identifier reference. Anything the constant folder can prove constant takes the static-init fast path and costs nothing: bare integer literals (`var x = 42;`), enum members, and — since 6.4.74's `_CF_TRY` folder — **foldable integer expressions** (`var x = 512 * 2;`, `var y = 1 << 4;`, `var z = (0 - 61);`). The folder is conservative and fail-safe: anything it cannot prove falls back to a deferred runtime store. Its precedence is **not C's** — `& | ^` sit in the `+ -` tier, left-associative, so `1 | 2 + 1` is `(1|2)+1`. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - Heap-allocate large buffers — `var buf[256000]` bloats the binary by 256KB
 - `break` in while loops with `var` declarations is unreliable — use flag + `continue`
 - No negative literals — write `(0 - N)` not `-N`

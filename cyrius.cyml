@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.32"
+cyrius = "6.4.78"
 
 [build]
 entry = "src/main.cyr"
@@ -25,15 +25,20 @@ stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "
 # into a caller-provided buffer instead of writing to fd 1, so the
 # rendered bytes go out over the telnet socket via send_buf.
 #
-# Pinned at 0.7.0 (current tip) — pre-1.0 by version label but the
-# functional surface we need is stable. 0.7.0 is darshana's pre-freeze
-# hardening sweep: it carries breaking renames (tty_cooked/tty_itoa/
-# tty_clear_to_end/tty_apply_raw_flags) that agora is unaffected by —
-# agora only consumes the `_buf` SGR composers (tty_sgr_buf /
-# tty_sgr_reset_buf), whose signatures are unchanged across 0.5.3→0.7.0.
+# Pinned at 0.9.0 (current tip) — pre-1.0 by version label but the
+# functional surface we need is stable: agora only consumes the `_buf`
+# SGR composers (tty_sgr_buf / tty_sgr_reset_buf), whose signatures are
+# unchanged across 0.5.3→0.9.0. Everything since 0.7.0 has been AGNOS
+# parity work on the termios/signalfd surface agora does not touch —
+# 0.8.0 tty_winsize, 0.8.2 tty_isatty/tty_raw/tty_cooked, 0.9.0
+# tty_open_signalfd/tty_close_signalfd + TTY_SIGMASK_* — all additive
+# `#ifdef CYRIUS_TARGET_AGNOS` peers with no Linux-path or API change.
+# (0.7.0 was the pre-freeze hardening sweep and carried breaking renames
+# — tty_cooked/tty_itoa/tty_clear_to_end/tty_apply_raw_flags — that
+# agora was likewise unaffected by.)
 # Both will re-pin at darshana 1.0 when the API surface freezes.
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.8.2"
+tag = "0.9.0"
 modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:

@@ -4,6 +4,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-07-25 (toolchain 6.4.78 + darshana 0.9.0 — the poll loop stops leaking)
+
+**A dependency cut, and the one that repairs a live leak in the 1.6.0 serve loop.** No new features and
+no agora logic change — the pin moves **cyrius 6.4.32 → 6.4.78** (46 releases) and the one git dep
+**darshana 0.8.2 → 0.9.0**, and the only source edits are the three inlined version literals. The reason
+it matters is one stdlib fix: **cyrius 6.4.61 stopped `sock_accept` allocating a fresh `Err(EAGAIN)`
+`Result` on every call** — and the 1.6.0 poll multiplex calls it in an accept-drain loop on a
+non-blocking listener every ~20 ms sweep, where it almost always returns EAGAIN. That was a bump-heap
+arena leak proportional to *uptime*, on the model agnos always runs; the upstream fix names agora as an
+affected consumer. This cut also re-vendors `lib/` correctly for the first time in two bumps: six stdlib
+files had been silently skipped by `cyrius lib sync` (**four of them stale since the 1.6.0 cut** — see
+new architecture note **[002](docs/architecture/002-lib-sync-same-size-skip.md)**). 221/221 tests
+unchanged, no source change required to compile; both targets build; 11 wire smokes green — with the
+Ed25519-login and 3-way-concurrency smokes re-run under **both** `AGORA_SERVE` models. 14,118,456 → **14,567,408 B** (+448,952 B — the wider 6.4.78 stdlib surface, not
+agora code). First re-bench since the 1.0 closeout: the four telnet-parser paths are within ±2 ns of the
+0.9.2 baseline, `announce_salvo` **134 → 124 ns (−7%)**.
+
+### Changed
+
+- **Toolchain pin 6.4.32 → 6.4.78** (`cyrius.cyml [package].cyrius`) — closes the wrapper/manifest drift
+  (the installed `cycc` had advanced to 6.4.78, so every build carried a pin-drift warning). Verified
+  non-breaking against agora's actual consumption surface: zero public functions removed or renamed and
+  zero arities changed across all 25 declared stdlib modules; 15 of them are byte-identical. The bulk of
+  the 46-release span cannot reach agora — the `lib/async.cyr` epoll-reactor arc (6.4.33–6.4.45, agora
+  does not declare `async`), the Windows/IOCP and cx-bytecode/SIMD slots, and the scalar-float language
+  work. Every release in 6.4.59–6.4.68 verifies x86-64 Linux self-host byte-identity, so the codegen
+  agora emits is unchanged there; the one codegen-affecting change in range is 6.4.56's SESTYPE
+  normalization, which touches ordinary call expressions (agora is call-heavy and table-dispatch-heavy —
+  this is part of the binary delta above, and is why the delta is not zero).
+- **`sock_accept` no longer leaks per poll** (cyrius **6.4.61**, `lib/net.cyr` — the only change in that
+  file across the whole bump) — two fixes in one: the WOULD_BLOCK path now returns a lazily-boxed shared
+  `_net_eagain()` singleton instead of a freshly-allocated `Err(_NET_EAGAIN)` `Result`, and the POSIX
+  path calls `accept(NULL, NULL)`, dropping a 20 B/call peer-address allocation that was written but
+  never read. Measured upstream at **40 B/poll → 0**. agora's two accept sites are `serve_poll`'s inner
+  drain loop (`src/main.cyr:2167`, which spins until EAGAIN on *every* ~20 ms sweep) and the fork-model
+  accept (`:2676`); both only `is_ok()` / `result_unwrap()` the Result and never write through it, so the
+  shared-singleton contract holds. agora never reads the peer address, so `accept(NULL, NULL)` is
+  transparent — but note that if it ever wants the client IP (per-IP throttling, audit logging),
+  `sock_accept` no longer produces a `sockaddr` on any path and the new `sys_getpeername` (6.4.64) is the
+  supported route. No agora edit — the fix arrives with the pin.
+- **sigil folded 3.10.1 → 3.12.1** (bundled in the toolchain snapshot) — agora's consumed crypto surface
+  (`sha256`, `ed25519_keypair`, `ed25519_sign`, `ed25519_verify`) is signature- and behavior-identical;
+  3.12.1 routes its hash bank through the runtime `thread_local_alloc()` added in cyrius 6.4.65 instead
+  of a hardcoded slot. **Co-vendoring constraint**: `lib/sigil.cyr` and `lib/thread_local.cyr` must be
+  re-vendored together — a new `sigil.cyr` against a stale `thread_local.cyr` dies on an undefined
+  symbol. Verified live end-to-end, not just linked: `keygen` → `register` → fingerprint round-trip
+  (`02`/`03`) and the wire Ed25519 challenge/response login (`05`) bind `qix` on **both** serve models.
+- **darshana 0.8.2 → 0.9.0** (`cyrius.cyml [deps.darshana]`) — additive AGNOS parity work on the
+  termios/signalfd surface (`tty_open_signalfd` / `tty_close_signalfd` + `TTY_SIGMASK_*` agnos peers).
+  agora consumes only `tty_sgr_buf` / `tty_sgr_reset_buf` (`src/main.cyr:1785,1791,1798,1800`), whose
+  signatures are unchanged across 0.5.3 → 0.9.0. The stale manifest comment (which still described the
+  0.7.0 pin) is rewritten to match.
+- **Version literals → 1.6.1** — `VERSION`, plus the three inlined strings in `src/main.cyr`
+  (`print_banner` :188, the connection MOTD :1799, `cmd_version` :3368). The five other `1.6.0` mentions
+  in `src/` are historical provenance comments and are deliberately left alone.
+
+### Fixed
+
+- **Six vendored stdlib files were stale — four of them since the 1.6.0 cut** (`lib/niyama.cyr`,
+  `yantra.cyr`, `pam.cyr`, `regression.cyr`, `shadow.cyr`, `ws.cyr`). `cyrius lib sync --full` reports
+  the whole snapshot as copied, but `_dep_copy_file` short-circuits whenever source and destination have
+  the **same byte size** — and a regenerated dist module routinely changes without changing length (the
+  `# Version: 1.0.5` → `1.0.6` stamp is the canonical case). So `pam` / `regression` / `shadow` / `ws`
+  were still serving **6.2.8-era** content under a 6.4.32 pin, invisibly, because `lib/` is
+  `.gitignore`d. Force-refreshed against the pinned snapshot and verified byte-for-byte with a `cmp`
+  sweep over all 99 files. cycc ≥ 6.4.7x's new per-lib shadow warning caught two of the six (the two
+  carrying a parseable `# Version:` line) — the `cmp` sweep is the authoritative check, and is now the
+  documented post-bump step.
+
+### Added
+
+- **Architecture note [002](docs/architecture/002-lib-sync-same-size-skip.md)** — the same-size-skip trap
+  above, its detection (`cmp` sweep + the partial compiler warning), the mandatory five-step post-bump
+  procedure, and why a second `lib sync` can never fix it.
+- **Benchmark row for 1.6.1** in [`BENCHMARKS.md`](BENCHMARKS.md) — the first re-bench since the 0.9.2
+  closeout (the 1.1.x–1.6.0 cycles were all off-hot-path; the parser is untouched since M1). Two
+  dedicated runs on 6.4.78; `announce_salvo` is the one real move at −7%, reproduced across three runs.
+
+### Deferred (found during the bump, not changed here — each earns its own cut)
+
+- **SIGPIPE is unhandled and the poll model widened the blast radius** (`src/main.cyr` `send_buf` /
+  `session_drain`). agora has no SIGPIPE disposition anywhere in `src/`, and `sock_send` is still a
+  flagsless `sys_write`, so a peer that vanishes mid-write raises SIGPIPE — whose default disposition
+  terminates the process. Under fork that killed one child; **under the 1.6.0 poll model it kills the
+  whole 64-session server**, unauthenticated and trivially remote. cyrius **6.4.51** added the
+  `signal_ignore(signum)` primitive (`lib/syscalls.cyr:98`) that fixes this — it did **not** exist at the
+  6.4.32 pin, so this bump is what makes the fix available. Deferred only because it is a runtime-behavior
+  change that deserves its own verification, not because it can wait.
+- **Raw `syscall(N, …)` sites collide with agnos syscall numbers** — `syscall(60, exit_code)`
+  (`src/main.cyr:3401`, agnos 60 = `SYS_WINSIZE`), `syscall(7, pfds, …)` in the Descent proxy
+  (`src/descent.cyr:181`, agnos 7 = `SYS_OPEN`), and `enum BoardSys { SYS_MKDIR = 83 }`
+  (`src/board.cyr:21`, used unguarded at `:242`). All are Linux-shaped numbers in files with no
+  `#ifdef CYRIUS_TARGET_AGNOS` guard; Linux is unaffected. The `SYS_MKDIR` one also collides *by name*
+  with the stdlib's agnos `SYS_MKDIR = 9`, which is why the `--agnos` build has long warned
+  `duplicate symbol 'SYS_MKDIR' redefined with conflicting value (last definition wins)` (the diagnostic
+  itself dates to cyrius 6.2.11). **This bump raises its severity**: the 6.4.32 agnos table had *no*
+  `SYS_GPU*` entries at all, the 6.4.78 table has 22 — including `SYS_GPU_DISPATCH_F64 = 83` (its own
+  comment reads "MKDIR on Linux"). So on agnos, `store_ensure` no longer dispatches a harmless unknown,
+  it dispatches a GPU matmul with a path pointer. (agnos's real `mkdir` is number 9 *and* a different
+  arity — `mkdir(path, pathlen)`, not `(path, mode)` — so this path never worked on agnos; it merely
+  used to fail harmlessly.) `src/board.cyr`, `src/account.cyr` and `src/descent.cyr` carry zero
+  `#ifdef CYRIUS_TARGET_AGNOS` guards between them, while `src/main.cyr` carries 13 — the fix is to bring
+  the first three under the same discipline, or route through the stdlib wrappers. Pre-existing; the
+  agnos target still builds clean.
+- **agora's own arena still grows without bound under `AGORA_SERVE=poll`** — the 6.4.61 fix removes the
+  *stdlib's* 40 B/poll share of the leak, not agora's. `src/` calls `alloc()` at **267 sites outside
+  `test.cyr`** and calls `free` / `fl_free` **zero** times. Under fork that is sound — each connection is
+  its own process and the arena dies at child exit — but the 1.6.0 poll model serves every connection
+  from one long-lived process, so per-command allocations (e.g. the 512 B `PATH_MAX_BYTES` scratch in the
+  board/world/chat path helpers) accumulate for the life of the server, and that is the **only** model on
+  agnos. agora already declares the `freelist` module CLAUDE.md prescribes for exactly this and calls
+  neither of its functions. Compounding it slightly, cyrius 6.4.51 raised `ALLOC_MAX` 256 MiB → 2 GiB,
+  which lifts the single-allocation cap and weakens an accidental backstop on any path where an
+  attacker-influenced length reaches `alloc()`.
+- **Durable writes are not crash-safe, and the fix is now in the stdlib** — cyrius **6.4.57** added
+  `file_write_atomic` (unique sibling temp → write-all → `xfsync` → atomic rename, original left intact
+  on any failure) alongside `file_create_exclusive` / `file_rename` / `xfsync`; neither existed at the
+  6.4.32 pin. agora's three durable-state writes still use `file_write_all`, whose `O_TRUNC` empties the
+  target at open — `src/door.cyr:277` (door save), `src/door.cyr:592` (`world_write`, the shared-world
+  snapshot for Ashes/Universe) and `src/chat.cyr:378` (chat transcript). A crash or short write mid-save
+  truncates a player's save or a channel's log, which sits badly with CLAUDE.md's "posts are durable
+  artifacts" principle. `file_create_exclusive` is also the portable replacement for the hand-rolled
+  `BO_EXCL` at `src/board.cyr:686` / `src/account.cyr:417`, and would retire the now-false comment at
+  `src/board.cyr:26` ("lib/io.cyr exposes O_CREAT but not O_EXCL").
+
 ## [1.6.0] — 2026-07-09 (single-process poll multiplex — concurrent players on agnos)
 
 **agora now serves many connections at once.** The 1.5.0 agnos path was *serial* (one telnet user at

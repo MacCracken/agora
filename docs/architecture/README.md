@@ -15,3 +15,4 @@ Per [first-party-documentation § Architecture Notes](https://github.com/MacCrac
 | # | Title | Affects |
 |---|---|---|
 | [001](001-cyrius-callptr-constraints.md) | Cyrius `callptr` / indirect-call constraints | door descriptor registry (ADR 0020); any fn-pointer dispatch |
+| [002](002-lib-sync-same-size-skip.md) | `cyrius lib sync` silently skips same-size stdlib files | every toolchain-pin bump (`cyrius.cyml` + `lib/` re-vendor) |

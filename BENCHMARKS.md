@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-05-23 (0.9.2 closeout re-run — within noise of M1-close baseline) | **Host**: Linux x86_64 (workstation; Cyrius 6.0.1) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-07-25 (1.6.1 toolchain re-run on cyrius 6.4.78 — parser paths within noise of the 0.9.2 baseline, `announce_salvo` ~7% faster) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -26,6 +26,9 @@ Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 | 0.5.0 (M5 close) | 11 ns | 63 ns | 73 ns | 107 ns | 132 ns |
 | 0.6.0 (M6 close) | 10 ns | 64 ns | 74 ns | 99 ns | 132 ns |
 | **0.9.2 (1.0 closeout)** | **10 ns** | **64 ns** | **75 ns** | **99 ns** | **134 ns** |
+| **1.6.1 (toolchain 6.4.78)** | **9–11 ns** | **63 ns** | **72–75 ns** | **100–101 ns** | **124 ns** |
+
+(**1.6.1** is the first re-bench since the 1.0 closeout — the 1.1.x–1.6.0 cycles were all off-hot-path [door games, chat, world transactions, the poll serve model] and the parser itself is untouched since M1. Two dedicated runs on cyrius **6.4.78** [after the 6.2.8 → 6.4.32 → 6.4.78 pin moves]: `plain_byte` 9/11 ns, `iac_untracked` 63/63 ns, `iac_tracked_agree` 72/75 ns, `subneg_naws` 100/101 ns, `announce_salvo` 125/124 ns. The four parser paths are within ±2 ns of the 0.9.2 baseline — i.e. unchanged. `announce_salvo` is the one real move: **134 → ~124 ns (−7%)**, reproduced across three runs including one under `cyrius audit` [123 ns], and attributable to 6.4.x codegen since the function is byte-for-byte the same source. Both runs on the same workstation class as the baseline.)
 
 (0.3.0 / 0.4.0 weren't benched separately — M2 / M5-partial cycles didn't touch the parser. 0.7.0–0.9.1 likewise — every release between M6 and 0.9.2 added off-hot-path code (CLI input validation, fork-per-accept in `cmd_serve_on`, keyfile fstat, sigil-version diff, board-create gate, PostHeaders struct, doc-pass) — confirmed by the 0.9.2 re-run landing within ±2 ns of the M6 baseline. The first 0.9.2 run showed `announce_salvo` at 163 ns avg with min=131 ns — re-run stabilized at 134 ns; the elevated avg was system noise.)
 
