@@ -186,7 +186,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.4 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -269,6 +269,48 @@ fn motd_emit_cstr(buf, pos, s): i64 {
 # locals (a heap-allocated struct buys nothing while the accept loop
 # single-tracks). These free-standing helpers take the explicit args
 # they need and operate on the per-connection buffers.
+
+# 1.6.4 (audit M2) — send STORED / USER-DERIVED text with IAC doubled.
+#
+# RFC 854: 0xFF is IAC on the wire, and a data byte of that value MUST be sent
+# as `IAC IAC` or the receiver reads it as the start of a command. agora never
+# did this on any egress path, so a 0xFF sitting in a post body, a subject, a
+# handle or a chat line reached every reader's client as a live telnet command —
+# a stored, replayable wedge with no removal path. CLAUDE.md is unambiguous
+# about which side of that is correct: "the wire is the contract ... any
+# deviation is a bug, not a feature".
+#
+# This is deliberately NOT folded into `send_buf`. That is the funnel for every
+# byte agora sends, including the telnet layer's OWN command sequences (the
+# announce salvo, option replies drained from telnet_tx_buf) — doubling those
+# would corrupt the protocol. The split is by intent: protocol bytes go out via
+# send_buf, content bytes via send_text.
+#
+# Escaping is done in bounded chunks into a small stack buffer rather than by
+# allocating a 2x copy: a post body is up to 64 KB and this runs per read.
+# `cap` is deliberately even so a doubled byte can never straddle a flush.
+fn send_text(cfd, buf, len): i64 {
+    var out[512];
+    var op = 0;
+    var i = 0;
+    var rc = 0;
+    var done = 0;
+    while (done == 0) {
+        if (i >= len) { done = 1; continue; }
+        var b = load8(buf + i) & 0xFF;
+        store8(&out + op, b); op = op + 1;
+        if (b == 0xFF) { store8(&out + op, 0xFF); op = op + 1; }   # IAC IAC
+        if (op >= 510) {
+            if (send_buf(cfd, &out, op) != 0) { rc = 1; done = 1; }
+            op = 0;
+        }
+        i = i + 1;
+    }
+    if (rc == 0) {
+        if (op > 0) { rc = send_buf(cfd, &out, op); }
+    }
+    return rc;
+}
 
 # Send a NUL-terminated cstring over the socket. Convenience wrapper
 # for the in-session prompts / replies.
@@ -508,7 +550,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 send_str(cfd, "[");
                 if (flen > 0) {
                     if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
-                        send_buf(cfd, hbuf, strlen(hbuf));
+                        send_text(cfd, hbuf, strlen(hbuf));
                     } else {
                         send_str(cfd, "anon");
                     }
@@ -519,7 +561,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 if (flen > 0) {
                     var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
                     if (slen > 0) {
-                        send_buf(cfd, sbuf, slen);
+                        send_text(cfd, sbuf, slen);
                     }
                 }
                 send_str(cfd, "\r\n");
@@ -551,9 +593,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         var fpbuf = cmd_alloc(ACCOUNT_FP_BUF_BYTES);
         send_str(cfd, "From: ");
         if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
-            send_buf(cfd, hbuf, strlen(hbuf));
+            send_text(cfd, hbuf, strlen(hbuf));
             send_str(cfd, " ");
-            send_buf(cfd, fpbuf, strlen(fpbuf));
+            send_text(cfd, fpbuf, strlen(fpbuf));
             send_str(cfd, "\r\n");
         } else {
             send_str(cfd, "anonymous\r\n");
@@ -562,7 +604,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
         if (slen > 0) {
             send_str(cfd, "Subject: ");
-            send_buf(cfd, sbuf, slen);
+            send_text(cfd, sbuf, slen);
             send_str(cfd, "\r\n");
         }
         send_str(cfd, "\r\n");
@@ -570,7 +612,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         var body_off = post_body_offset(fbuf, flen);
         var body_len = flen - body_off;
         if (body_len > 0) {
-            send_buf(cfd, fbuf + body_off, body_len);
+            send_text(cfd, fbuf + body_off, body_len);
             if ((load8(fbuf + body_off + body_len - 1) & 0xFF) != 10) {
                 send_str(cfd, "\r\n");
             }
@@ -655,7 +697,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         store8(g_reply_subject + dlen, 0);
         g_reply_subject_len = dlen;
         send_str(cfd, "Subject: ");
-        send_buf(cfd, derived, dlen);
+        send_text(cfd, derived, dlen);
         send_str(cfd, "\r\n");
         send_str(cfd, "Compose reply. End with '.' on a line by itself.\r\n");
         return MODE_POSTING;
@@ -996,7 +1038,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (ln > 0) {
             var ob = cmd_alloc(CHAT_TAIL_CAP);
             var ol = chat_emit_tail_k(lbuf, ln, CHAT_SCROLLBACK_LINES, ob, CHAT_TAIL_CAP, seenp);
-            if (ol > 0) { send_buf(cfd, ob, ol); }
+            if (ol > 0) { send_text(cfd, ob, ol); }
         }
         g_chat_seen = load64(seenp);
         g_chat_idle = 0;
@@ -1283,7 +1325,7 @@ fn chat_flush_tail(cfd): i64 {
     var seenp = g_chat_tail_seenp;
     store64(seenp, g_chat_seen);
     var olen = chat_emit_since(buf, n, g_chat_seen, out, CHAT_TAIL_CAP, seenp);
-    if (olen > 0) { send_buf(cfd, out, olen); }
+    if (olen > 0) { send_text(cfd, out, olen); }
     g_chat_seen = load64(seenp);
     return 0;
 }
@@ -1866,7 +1908,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.3 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.4 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2327,7 +2369,17 @@ fn serve_poll(sfd): i64 {
                 var close_it = 0;
                 var n = sess_recv_nonblock(s);
                 if (n > 0) {
-                    store64(s + SESS_LAST_MS, now);
+                    # 1.6.4 (audit M3) — the idle timer is NOT refreshed here.
+                    #
+                    # It used to be, on ANY bytes arriving, which made the 64-slot
+                    # pool trivially pinnable: `IAC NOP` (2 bytes) is consumed by
+                    # the state machine with no response and no data byte, so 64
+                    # connections sending one every 50 s held every slot forever
+                    # at ~2 bytes/minute each — invisibly, since nothing was ever
+                    # typed. Protocol chatter is not activity. `process_rx` now
+                    # refreshes the timer only when a byte actually reaches the
+                    # session as DATA, so a keepalive-only connection ages out
+                    # like a silent one.
                     g_chat_idle = 0;
                     if (process_rx(s, n) == 1) { close_it = 1; }
                 }
@@ -2480,6 +2532,13 @@ fn process_rx(s, n): i64 {
         }
 
         if (ev == EV_DATA) {
+            # 1.6.4 (audit M3) — THIS is what counts as activity: a byte that
+            # survived the telnet layer and is destined for the session. Moved
+            # here from the poll sweep so protocol-only traffic (IAC NOP, option
+            # negotiation, an unterminated subnegotiation) cannot hold a slot.
+            # Harmless in fork mode, where the recv timeout bounds idling and
+            # SESS_LAST_MS is not consulted.
+            store64(s + SESS_LAST_MS, clock_now_ms());
             var db = telnet_data_byte(ts) & 0xFF;
             # M5-H input filter: drop NUL + ESC silently before
             # they reach the line buffer or get echoed back to
@@ -3201,6 +3260,20 @@ fn cmd_post(): i64 {
         from_handle = as_handle;
         from_fp     = fp_buf;
     }
+    # M5-E: validate the board name unless it's the default "main".
+    #
+    # 1.6.4 (audit M5) — this MOVED above the policy check below. `board_can_post`
+    # assembles `<store>/<board>/.policy` and `.admins` and reads them, so with
+    # the old ordering `--board ../../../../etc` reached the filesystem before
+    # anything checked the name: the 0.7.0 audit fixed exactly this ordering for
+    # `list` and `read`, and `post` had quietly re-opened it. Nothing between the
+    # two depends on the policy result, so validating first is a pure reorder.
+    if (streq(board, "main") == 0) {
+        if (board_name_valid(board) == 0) {
+            println("agora post: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
+            return 2;
+        }
+    }
     # M6-F: per-board policy check. Anonymous CLI posts (no --as)
     # still need to pass policy — `open` admits them, `known` and
     # `admin` reject. (Anonymous CLI posts at the open default are
@@ -3213,13 +3286,6 @@ fn cmd_post(): i64 {
             println("agora post: board policy denies this post (admin-only or unregistered)");
         }
         return 1;
-    }
-    # M5-E: validate the board name unless it's the default "main".
-    if (streq(board, "main") == 0) {
-        if (board_name_valid(board) == 0) {
-            println("agora post: invalid --board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes, not 'main')");
-            return 2;
-        }
     }
     # M5-F: if --reply-to was given without --subject, auto-derive
     # `Re: <parent-subject>` so the CLI matches the wire-side reply
@@ -3546,7 +3612,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.3");
+    println("agora 1.6.4");
     return 0;
 }
 

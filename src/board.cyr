@@ -25,12 +25,10 @@
 # handed a path pointer to a GPU matmul. `store_ensure` now calls the stdlib
 # `sys_mkdir` wrapper, which is per-target — see the note there about its arity.
 
-# O_EXCL — fail if the file already exists. Used by post_new for
-# atomic "claim the next ID" semantics (per ADR 0002 § Positive
-# consequences). lib/io.cyr exposes O_CREAT but not O_EXCL.
-enum BoardOpen {
-    BO_EXCL = 128;
-}
+# 1.6.4 — the local `enum BoardOpen { BO_EXCL = 128; }` is GONE. It hardcoded
+# the Linux O_EXCL bit, which agnos silently ignores; both call sites now use
+# the stdlib's `file_create_exclusive` (lib/io.cyr), which is per-target. The
+# comment it carried is also no longer true: lib/io.cyr DOES expose O_EXCL now.
 
 # Filesystem permission constants (octal 0755 for directories,
 # 0644 for files). Encoded as i64 because cyrius enums require
@@ -173,6 +171,21 @@ fn board_path(store, board, out_buf): i64 {
 fn input_byte_ok(b): i64 {
     if (b == 0)    { return 0; }
     if (b == 0x1B) { return 0; }
+    # 1.6.4 (audit M2) — drop IAC (0xFF) at ingress.
+    #
+    # A byte that reaches here has already passed the telnet state machine, so a
+    # literal 0xFF at this point came from a client that sent `IAC IAC` — the
+    # escape for "I mean a data 0xFF". Storing it verbatim let a registered user
+    # put raw telnet COMMANDS into a post: `FF FA 18` is `IAC SB TERMINAL-TYPE`
+    # with no `IAC SE`, which wedges a conforming client — and every later reader
+    # of that post gets it, with no removal path short of the operator editing
+    # the file. It is the ESC problem above with a worse blast radius.
+    #
+    # 0xFF is never valid in well-formed UTF-8, so nothing legitimate is lost.
+    # This is the ingress half; `send_text` (main.cyr) is the egress half that
+    # RFC 854 § "the IAC" actually requires, and which also protects content
+    # stored before this filter existed.
+    if (b == 0xFF) { return 0; }
     return 1;
 }
 
@@ -702,7 +715,16 @@ fn post_new(store, board, ph, body, body_len): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_post_path(store, board, id, path_buf);
 
-    var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
+    # 1.6.4 (audit M4) — `file_create_exclusive`, not a hand-rolled O_EXCL. The
+    # local BO_EXCL bit is a LINUX value: agnos has no exclusive-create flag, so
+    # `file_open` dropped it silently and this degraded to a plain create —
+    # `post_new` could clobber an existing post file (reachable whenever
+    # post_max_id under-reports, e.g. a restored store with a gap; the flock
+    # serializes writers but does not make the claim exclusive). The stdlib
+    # primitive (cyrius 6.4.57, new since the 1.6.1 pin) is genuinely exclusive
+    # on Linux/macOS and does a best-effort existence check on agnos — not
+    # atomic there, but a refusal instead of silent data loss.
+    var fd = file_create_exclusive(path_buf, PERM_FILE);
     if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
     var n = file_write(fd, fbuf, flen);
     file_close(fd);

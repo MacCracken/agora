@@ -422,7 +422,11 @@ fn keyfile_generate(path): i64 {
     var seed[32];
     if (nonce_random_into(&seed, ACCOUNT_SEED_BYTES) != 0) { return 0 - 1; }
     # O_WRONLY | O_CREAT | O_EXCL with mode 0o600 = PERM_KEYFILE
-    var fd = file_open(path, O_WRONLY | O_CREAT | BO_EXCL, ACCOUNT_PERM_KEYFILE);
+    # 1.6.4 (audit M4) — see board.cyr: the hand-rolled BO_EXCL was dropped on
+    # agnos, so `keygen` would OVERWRITE an existing identity seed there —
+    # silent, unrecoverable loss of a user's key. `file_create_exclusive` is the
+    # portable primitive.
+    var fd = file_create_exclusive(path, ACCOUNT_PERM_KEYFILE);
     if (fd < 0) { return 0 - 1; }
     var n = file_write(fd, &seed, ACCOUNT_SEED_BYTES);
     file_close(fd);

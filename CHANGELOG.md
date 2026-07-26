@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-07-26 (the audit's MEDIUMs: the wire contract, admission, and two ordering bugs)
+
+**Closes the four MEDIUM findings the 1.6.3 audit recorded rather than fixed.** No new features. The
+theme is that three of the four were *ordering or accounting* mistakes — the right check existed but ran
+too late, or the wrong bytes counted as activity — and the fourth was a wire-contract violation agora had
+carried since M1. 221/221 tests unchanged; both targets build; all 19 sequential smokes plus the
+both-model set green; **new smoke [`26-iac-and-idle.py`](docs/examples/26-iac-and-idle.py)**.
+14,571,552 → **14,571,568 B**.
+
+### Security
+
+- **IAC (0xFF) is now handled per RFC 854 in both directions** (**MEDIUM**, long-standing since M1).
+  0xFF is IAC on the wire, and a *data* byte of that value must be sent as `IAC IAC` or the receiver reads
+  it as the start of a command. agora did this on **no** egress path, and `input_byte_ok` admitted 0xFF at
+  ingress — so a registered user could put raw telnet commands into a post (`FF FA 18` is `IAC SB
+  TERMINAL-TYPE` with no `IAC SE`, which wedges a conforming client) and **every later reader** got them,
+  with no removal path short of the operator editing the file. CLAUDE.md settles which side is correct:
+  *"the wire is the contract — RFC 854 ... any deviation is a bug, not a feature."* Both halves:
+  - **Egress** — new `send_text` doubles 0xFF and now carries the nine stored-content sites (post body,
+    subject, From handle + fingerprint, derived reply subject, chat scrollback and live tail). It is
+    deliberately **not** folded into `send_buf`: that is the funnel for every byte agora sends *including
+    the telnet layer's own command sequences*, which must not be doubled. The split is by intent —
+    protocol bytes via `send_buf`, content bytes via `send_text`.
+  - **Ingress** — `input_byte_ok` drops 0xFF, so nothing new can be stored. 0xFF is never valid in
+    well-formed UTF-8, so no legitimate text is affected.
+  Verified end to end: a planted post containing `before FF FA 18 after` renders on the wire as
+  `before FF FF FA 18 after` — the 0xFF doubled, the following bytes inert — with no bare IAC anywhere;
+  and a client sending `IAC IAC` gets nothing stored or echoed.
+- **`keygen` can no longer overwrite an existing identity on agnos** (`src/account.cyr`, `src/board.cyr`,
+  **MEDIUM**, long-standing, agnos-only). The local `enum BoardOpen { BO_EXCL = 128; }` hardcoded the
+  **Linux** O_EXCL bit; agnos has no exclusive-create flag, so `file_open` dropped it silently and both
+  callers degraded to a plain create — `keygen` would overwrite a user's Ed25519 seed (silent,
+  unrecoverable) and `post_new` could clobber an existing post file. Both sites now use the stdlib's
+  `file_create_exclusive` (cyrius 6.4.57, new since the 1.6.1 pin), which is genuinely exclusive on
+  Linux/macOS and does a best-effort existence check on agnos — not atomic there, but a refusal instead of
+  data loss. The local enum is deleted, the same shape as 1.6.2's `SYS_MKDIR` removal. Verified: a second
+  `keygen` against an existing keyfile now refuses and leaves the key byte-identical.
+- **`cmd_post` validates `--board` before touching the filesystem** (`src/main.cyr`, **MEDIUM**,
+  long-standing). `board_can_post` assembles `<store>/<board>/.policy` and `.admins` and reads them, and it
+  ran **nine lines before** the name was validated — so `--board ../../../../etc` reached the filesystem
+  first. The 0.7.0 audit fixed exactly this ordering for `list` and `read`; `post` had quietly re-opened
+  it. Nothing between the two depends on the policy result, so this is a pure reorder. Verified: the
+  traversal is refused with the invalid-name message and nothing is created outside the store.
+
+### Changed
+
+- **Protocol chatter no longer counts as activity** (`src/main.cyr`, **MEDIUM**, the poll pool's admission
+  gap). `IAC NOP` is two bytes, consumed by the state machine with no response and no data byte — and it
+  refreshed the session's idle timer, so 64 connections sending one every 50 s pinned every slot in the
+  pool **invisibly**, at ~2 bytes/minute each, with nothing ever typed. The idle refresh moves out of the
+  poll sweep (which fired on *any* bytes arriving) and into `process_rx`'s `EV_DATA` arm, so only a byte
+  that actually reaches the session as data counts. A keepalive-only connection now ages out exactly like
+  a silent one. Verified: an `IAC NOP` keepalive is reaped at 60.0 s (`SESS_IDLE_MS`) while a session
+  sending real input is still alive at 80 s.
+  **Scope, deliberately**: this fixes the cheap attack, not every attack. A client that sends a real data
+  byte every 50 s still holds a slot, which is indistinguishable from a very slow typist without a
+  session-lifetime or per-source cap. Both were considered and **not** taken: a lifetime cap also
+  disconnects legitimate long sessions (a QUEST run, an idle chat), and a per-source cap needs
+  `sys_getpeername`, which **agnos does not have** — it would protect Linux and leave the target that
+  *only* runs poll unprotected, while also mis-firing on a NAT'd LAN. `MAX_SESS` remains the operator's
+  bound.
+
+### Added
+
+- **New smoke [`26-iac-and-idle.py`](docs/examples/26-iac-and-idle.py)** — pins both fixes, because both
+  concern bytes a normal session never produces: it plants a post containing a raw `IAC SB` and asserts the
+  wire copy is doubled with no bare IAC surviving, asserts a client-sent 0xFF is never echoed, and races an
+  `IAC NOP` keepalive against a real-input session to assert only the first is reaped. (~80 s for the idle
+  half; `--fast` runs the IAC half alone.)
+
 ## [1.6.3] — 2026-07-26 (the door states learn to die: DD_FREE, and what the audit found)
 
 **agora's memory is now bounded.** 1.6.2 fixed the per-line leak and named what it could not reach: the
