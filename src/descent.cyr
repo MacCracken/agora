@@ -50,6 +50,27 @@ enum DescentConst {
     DESCENT_WRITE_MS      = 10000;
 }
 
+# 1.6.5 (audit L4) — the pipelined-input tail.
+#
+# `process_rx` dispatches every complete line sitting in one recv buffer, so a
+# client that sends `descent\r\nnorth\r\n` in a single segment (a script, a
+# paste, any client that coalesces) had `north` handled as a BBS command AFTER
+# the MUD session ended — the MUD never saw it, and the BBS ran it. The proxy
+# needs those bytes, and it is the only consumer, so `process_rx` publishes the
+# remainder of the buffer here before each dispatch and `descent_run` claims it.
+#
+# Declared HERE rather than in main.cyr because src/test.cyr links this module
+# WITHOUT main.cyr — the same constraint that put DESCENT_EAGAIN above. It also
+# reads better next to its only consumer: main.cyr writes, descent.cyr claims.
+#
+# Safe as a global because exactly one line is dispatched at a time per process
+# (the poll sweep runs a session to completion before the next; the fork worker
+# is single-threaded), and it is republished at every dispatch, so a stale tail
+# can never be claimed by a later `descent`.
+var g_pipe_tail = 0;      # ptr into the session rxbuf, or 0
+var g_pipe_len  = 0;      # bytes remaining after the dispatched line
+var g_pipe_taken = 0;     # set by descent_run once it has forwarded them
+
 # Parse a non-negative decimal in buf[s, e). Returns the value, or (0-1)
 # on an empty span, a non-digit, or overflow past DESCENT_DEC_MAX. Pure.
 fn descent_dec(buf, s, e): i64 {
@@ -373,6 +394,21 @@ fn descent_run(cfd, store, sess_handle): i64 {
         send_str(cfd, " on agora; the Descent runs its own login — identity hand-off is a future link)\r\n");
     }
     send_str(cfd, "\r\n");
+
+    # 1.6.5 (audit L4) — forward anything the client pipelined behind the
+    # `descent` line before the shuttle starts. `process_rx` publishes it (see
+    # g_pipe_* in main.cyr) because only it can see the recv buffer; claiming it
+    # here tells process_rx not to also execute those bytes as BBS commands once
+    # the proxy exits. A client that sends `descent\r\nnorth\r\n` in one
+    # segment now has `north` reach the MUD, which is what it meant.
+    if (g_pipe_len > 0) {
+        if (g_pipe_tail != 0) {
+            descent_write_all(mfd, g_pipe_tail, g_pipe_len);
+            g_pipe_taken = 1;
+        }
+    }
+    g_pipe_tail = 0;
+    g_pipe_len = 0;
 
     descent_proxy(cfd, mfd);
 

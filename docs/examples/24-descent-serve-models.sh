@@ -101,8 +101,12 @@ PY
     sleep 0.5
     timeout 1 cat <&3 >/dev/null 2>&1
 
-    printf 'descent\r\n' >&3
-    sleep 1.2
+    # Two things at once: the ordinary case (descent, then type), and the
+    # PIPELINED case added at 1.6.5 (audit L4) — `descent` and a follow-on
+    # command in ONE segment. Before 1.6.5 the follow-on was lost to the MUD and
+    # then executed as a BBS command once the proxy exited; now it is forwarded.
+    printf 'descent\r\nPIPELINED-FROM-CLIENT\r\n' >&3
+    sleep 1.5
     printf 'PING-FROM-CLIENT\r\n' >&3
     sleep 1.5
     exec 3<&-
@@ -112,8 +116,12 @@ PY
     wait "$SRV" "$MUDPID" 2>/dev/null
 
     if grep -q "PING-FROM-CLIENT" "$MUDLOG" 2>/dev/null; then
-        echo "  FORWARDED-OK ($MODE): the MUD received the client's bytes"
-        return 0
+        if grep -q "PIPELINED-FROM-CLIENT" "$MUDLOG" 2>/dev/null; then
+            echo "  FORWARDED-OK ($MODE): the MUD received both typed and pipelined bytes"
+            return 0
+        fi
+        echo "  BROKEN ($MODE): typed bytes arrived but the PIPELINED tail was lost"
+        return 1
     fi
     echo "  BROKEN ($MODE): client->MUD bytes NEVER reached the MUD"
     echo "  (fake MUD log: $(wc -c < "$MUDLOG") bytes)"

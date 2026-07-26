@@ -186,7 +186,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.4 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.5 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -1908,7 +1908,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.4 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.5 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -2306,6 +2306,12 @@ fn sess_recv_nonblock(s): i64 {
     #endif
 }
 
+# 1.6.5 (audit L1) — the largest `--store` we accept, leaving headroom inside
+# PATH_MAX_BYTES (512) for every suffix a path builder appends.
+enum StoreLimit {
+    STORE_PATH_MAX = 448;
+}
+
 enum PollRuntime {
     POLL_MS      = 20;         # sweep cadence
     SESS_IDLE_MS = 60000;      # general idle reap (mirrors RECV_TIMEOUT_SECS)
@@ -2569,6 +2575,12 @@ fn process_rx(s, n): i64 {
 
             if (eol != 0) {
                 send_str(cfd, "\r\n");
+                # 1.6.5 (audit L4) — publish whatever else arrived in this recv
+                # so a `descent` on this line can forward it to the MUD instead
+                # of leaving it to be run as BBS commands afterwards.
+                g_pipe_tail  = rxbuf + i + 1;
+                g_pipe_len   = n - i - 1;
+                g_pipe_taken = 0;
                 # 1.6.2 — reclaim the per-command scratch arena. This is the one
                 # point that dominates EVERY line dispatch below (command, door,
                 # chat, login, posting) in BOTH serve models, since the fork
@@ -2578,6 +2590,14 @@ fn process_rx(s, n): i64 {
                 if (mode == MODE_COMMAND) {
                     mode = session_execute(cfd, line, line_pos, current_board, quit);
                     line_pos = 0;
+                    # 1.6.5 — if the proxy forwarded the rest of the buffer to
+                    # the MUD, those bytes are spoken for: do not also run them
+                    # here as BBS commands.
+                    if (g_pipe_taken != 0) {
+                        g_pipe_taken = 0;
+                        i = n;
+                        continue;
+                    }
                     if (mode == MODE_COMMAND) {
                         if (load64(quit) == 0) { send_prompt(cfd, current_board); }
                     }
@@ -2733,6 +2753,24 @@ fn process_rx(s, n): i64 {
                 else { if (mode == MODE_POSTING_SUBJECT) {
                     # M5-D: capture the typed Subject line, then
                     # transition into MODE_POSTING for the body.
+                    # 1.6.5 (audit L2) — the wire Subject gets the same filter
+                    # the CLI has always applied (`header_text_buf_ok`).
+                    #
+                    # Belt AND braces, deliberately: the real work is done one
+                    # layer up by `input_byte_ok`, which now drops C0 and DEL
+                    # before a byte ever reaches this line buffer — verified, a
+                    # `sub<BEL>ject` arrives here already as `subject`, so this
+                    # branch does not fire today. It stays because it states the
+                    # header contract at the point the header is captured: if
+                    # the ingress filter is ever loosened (an opt-in raw-post
+                    # mode is a live idea in `input_byte_ok`'s own comment), the
+                    # Subject must not loosen with it. Refuses and stays in
+                    # MODE_POSTING_SUBJECT so the user can simply retype.
+                    if (header_text_buf_ok(line, line_pos) == 0) {
+                        send_str(cfd, "subject contains control bytes — retype it\r\n");
+                        line_pos = 0;
+                        i = i + 1; continue;
+                    }
                     subject_len = line_pos;
                     if (subject_len > SUBJECT_MAX_BYTES) {
                         subject_len = SUBJECT_MAX_BYTES;
@@ -2776,7 +2814,19 @@ fn process_rx(s, n): i64 {
                     # 1.6.3 (audit) — same as the IAC drain above: the echo is
                     # the other per-byte write, so a discarded failure here has
                     # the same unbounded shape.
-                    if (echo_byte(cfd, db) != 0) { store64(quit, 1); i = n; continue; }
+                    #
+                    # 1.6.5 (audit L3) — and only echo if the client has not
+                    # REVOKED it. agora announces WILL ECHO at connect; a client
+                    # that answers `IAC DONT ECHO` gets a correct `WONT ECHO`
+                    # back and then, until now, kept being echoed at anyway —
+                    # double characters for anyone doing their own local echo.
+                    # The test is `!= Q_NO`, deliberately NOT `== Q_YES`: a peer
+                    # that never answers our WILL sits in Q_WANTYES forever, and
+                    # gating on Q_YES would kill echo for netcat, raw sockets and
+                    # every scripted client — including agora's own smokes.
+                    if (opt_us(ts, OPT_ECHO) != Q_NO) {
+                        if (echo_byte(cfd, db) != 0) { store64(quit, 1); i = n; continue; }
+                    }
                 }
             }
         }
@@ -3014,7 +3064,22 @@ fn cmd_serve(): i64 {
                 go = 0;
                 continue;
             }
-            g_store_buf = argv(i + 1);
+            # 1.6.5 (audit L1) — bound the store path ONCE, here, rather than
+            # at each of the ~30 path builders. `board_path` memcpy's this
+            # straight into a PATH_MAX_BYTES (512) buffer with no check, and
+            # every storage path is built on top of it, so an over-long
+            # `--store` overflowed. Operator error rather than an attack — but
+            # since 1.6.2 the overflow lands inside the shared command arena
+            # instead of an isolated bump allocation, so it can now corrupt
+            # another buffer in the same command. The headroom covers the
+            # longest suffix any builder appends: "/<board>" (33) + "/<id>.txt"
+            # (~16), or "/.users/<fp16>/games/<name>.sav" (~45).
+            var store_arg = argv(i + 1);
+            if (strlen(store_arg) > STORE_PATH_MAX) {
+                println("agora: --store path too long (max 448 bytes)");
+                return 2;
+            }
+            g_store_buf = store_arg;
             i = i + 2;
             continue;
         }
@@ -3041,7 +3106,21 @@ fn parse_store(default_store): i64 {
     while (i < n) {
         var arg = argv(i);
         if (streq(arg, "--store") != 0) {
-            if (i + 1 < n) { return argv(i + 1); }
+            if (i + 1 < n) {
+                # 1.6.5 (audit L1) — same bound as the serve path. This helper
+                # is the single --store parse for EVERY CLI verb (post / list /
+                # read / keygen / register / whoami / worldread), so one check
+                # here covers all of them; `cmd_serve` has its own because it
+                # assigns g_store_buf directly. Over-long refuses rather than
+                # truncating: a silently shortened store root would point at a
+                # DIFFERENT directory, which is worse than an error.
+                var sp = argv(i + 1);
+                if (strlen(sp) > STORE_PATH_MAX) {
+                    println("agora: --store path too long (max 448 bytes)");
+                    sys_exit(2);
+                }
+                return sp;
+            }
             return default_store;
         }
         i = i + 1;
@@ -3612,7 +3691,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.4");
+    println("agora 1.6.5");
     return 0;
 }
 

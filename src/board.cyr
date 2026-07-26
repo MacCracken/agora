@@ -186,6 +186,25 @@ fn input_byte_ok(b): i64 {
     # RFC 854 § "the IAC" actually requires, and which also protects content
     # stored before this filter existed.
     if (b == 0xFF) { return 0; }
+    # 1.6.5 (audit L2) — drop the remaining C0 controls and DEL, so the wire
+    # body matches what the CLI already refuses. TAB (9), CR (13) and LF (10)
+    # stay: CR/LF are load-bearing here, because this filter runs BEFORE the
+    # EOL detection in process_rx — dropping them would break line dispatch
+    # entirely. What goes is BEL (7), BS (8), VT/FF (11/12), the rest of C0,
+    # and DEL (127).
+    #
+    # BS deserves a word: it used to land in the post body as a literal 0x08,
+    # which renders as garbage for every later reader. Dropping it does not give
+    # char-mode clients line editing — that is still the open INFO item in the
+    # 2026-07-26 audit — but "nothing happens" beats "invisible byte stored in
+    # everyone's copy of the post".
+    if (b == 127) { return 0; }
+    if (b < 32) {
+        if (b == 9)  { return 1; }
+        if (b == 10) { return 1; }
+        if (b == 13) { return 1; }
+        return 0;
+    }
     return 1;
 }
 

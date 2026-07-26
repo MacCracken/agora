@@ -808,9 +808,22 @@ fn t32_input_byte_ok_filters_nul_esc(): i64 {
     if (input_byte_ok(32)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "space should pass"); return 1; }
     if (input_byte_ok(65)   != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "'A' should pass");   return 1; }
     if (input_byte_ok(126)  != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "'~' should pass");   return 1; }
-    if (input_byte_ok(127)  != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "DEL should pass (BS handling is M5-B+ polish)"); return 1; }
     if (input_byte_ok(0xC3) != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "UTF-8 lead byte should pass"); return 1; }
     if (input_byte_ok(0xA9) != 1) { test_fail("t32_input_byte_ok_filters_nul_esc", "UTF-8 cont byte should pass"); return 1; }
+    # 1.6.5 (audit L2 + M2) — the contract WIDENED, and this test moved with it.
+    # It used to assert `DEL should pass (BS handling is M5-B+ polish)`, which
+    # conflated two things: whether BS/DEL should *edit the line* (still open —
+    # the audit's INFO item) and whether they should be *stored in a post*. The
+    # answer to the second is no: a literal 0x08 or 0x7F in a body renders as
+    # garbage for every later reader. Dropping them does not give char-mode
+    # clients line editing; it stops the byte reaching everyone's copy.
+    if (input_byte_ok(127)  != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "DEL should drop"); return 1; }
+    if (input_byte_ok(8)    != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "BS should drop"); return 1; }
+    if (input_byte_ok(7)    != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "BEL should drop"); return 1; }
+    if (input_byte_ok(12)   != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "FF should drop"); return 1; }
+    # 1.6.4 (audit M2) — IAC never enters storage; a client meaning a literal
+    # 0xFF sends IAC IAC, and the telnet layer hands us the single byte here.
+    if (input_byte_ok(0xFF) != 0) { test_fail("t32_input_byte_ok_filters_nul_esc", "IAC should drop"); return 1; }
     test_pass("t32_input_byte_ok_filters_nul_esc");
     return 0;
 }

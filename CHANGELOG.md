@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.5] — 2026-07-26 (the audit's LOWs — and the audit ledger closes)
+
+**Closes the last four findings from the 2026-07-26 audit.** With this cut **every HIGH, MEDIUM and LOW
+is fixed**; only the one INFO item remains, and it is deliberate. No new features. 221/221 tests (one
+updated — see below); both targets build; all 19 sequential smokes plus the both-model set green; **new
+smoke [`27-audit-lows.py`](docs/examples/27-audit-lows.py)** and `24-descent-serve-models.sh` extended.
+14,571,568 → **14,571,688 B**.
+
+### Security
+
+- **The operator's `--store` is bounded** (`src/main.cyr`, **L1**, long-standing). `board_path` memcpy's
+  it into a 512-byte buffer with no check and every storage path builds on that, so an over-long
+  `--store` overflowed. Operator error rather than an attack — but since the 1.6.2 arena the overflow
+  lands in a **shared** buffer, so it can corrupt another allocation in the same command rather than an
+  isolated one. Bounded once at each of the two parse points (`cmd_serve`'s own, and `parse_store`, which
+  is the single `--store` parse for *every* CLI verb) rather than at ~30 builders. Over-long **refuses**
+  rather than truncating: a silently shortened store root would point at a *different* directory, which
+  is worse than an error. Verified: exit 2 with a clear message; normal paths unaffected.
+- **Wire-side posts get the control-byte filter the CLI always had** (`src/board.cyr`, **L2**,
+  long-standing). BEL, BS, FF and DEL persisted into stored posts from the wire — the CLI refused them,
+  telnet did not — and every later reader got them. `input_byte_ok` now drops the C0 set and DEL. **TAB,
+  CR and LF stay**, and CR/LF are load-bearing: this filter runs *before* EOL detection in `process_rx`,
+  so dropping them would break line dispatch entirely. Verified: `a<BEL>b<BS>c<DEL>d` is stored as
+  `abcd`.
+
+### Fixed
+
+- **Echo stops when a client actually revokes it** (`src/main.cyr`, **L3**, long-standing). agora
+  announces `WILL ECHO` at connect; a client answering `IAC DONT ECHO` got a correct `WONT ECHO` back and
+  then **kept being echoed at** — double characters for anyone doing local echo. The gate is
+  `opt_us(ts, OPT_ECHO) != Q_NO`, deliberately **not** `== Q_YES`: a client that never answers our WILL
+  sits in `Q_WANTYES` forever, so gating on `Q_YES` would kill echo for netcat, raw sockets and every
+  scripted client — including agora's own smokes. Both directions are asserted in the new smoke for
+  exactly that reason: echo survives for a non-negotiating client, and stops after a real revoke.
+- **Bytes pipelined behind `descent` now reach the MUD** (`src/descent.cyr`, `src/main.cyr`, **L4**,
+  long-standing). `process_rx` dispatches every complete line in one recv buffer, so a client sending
+  `descent\r\nnorth\r\n` in a single segment (a script, a paste, any client that coalesces) had `north`
+  **lost to the MUD and then executed as a BBS command** once the proxy exited. `process_rx` now publishes
+  the remainder of the buffer before each dispatch and `descent_run` claims it, forwarding it to the MUD
+  before the shuttle starts; a claimed tail is not re-executed. The publish/claim pair lives in
+  `descent.cyr` beside its only consumer (and because `test.cyr` links that module without `main.cyr`).
+  Verified with a fake MUD that logs what it receives: the pre-1.6.5 binary loses `north`, this one
+  delivers it — under **both** serve models.
+
+### Changed
+
+- **`t32_input_byte_ok_filters_nul_esc` updated to the widened contract.** It asserted *"DEL should pass
+  (BS handling is M5-B+ polish)"*, which conflated two separate questions: whether BS/DEL should **edit
+  the line** (still open — the audit's INFO item) and whether they should be **stored in a post**. The
+  answer to the second is no. The audit predicted this test would move; it now asserts BEL/BS/FF/DEL and
+  IAC are all dropped, and TAB/CR/LF still pass.
+
+### Added
+
+- **New smoke [`27-audit-lows.py`](docs/examples/27-audit-lows.py)** — L1 (over-long `--store` refused,
+  normal one still works), L2 (BEL/BS/DEL dropped from a stored post, printable text intact) and L3 (echo
+  kept for non-negotiating clients, suppressed after `IAC DONT ECHO`).
+- **`24-descent-serve-models.sh` extended for L4** — it already had the fake-MUD harness, so it now sends
+  `descent` and a follow-on command in one segment and asserts the MUD received **both** the typed and
+  the pipelined bytes.
+
+### Notes
+
+- **The audit ledger is closed except for one deliberate INFO item**: BS/DEL are still not *edited out*
+  for clients that never negotiate LINEMODE. 1.6.5 stops them being **stored**; making them **edit** is
+  roadmap polish that would change a passing test, and the audit recorded it as deliberate.
+
 ## [1.6.4] — 2026-07-26 (the audit's MEDIUMs: the wire contract, admission, and two ordering bugs)
 
 **Closes the four MEDIUM findings the 1.6.3 audit recorded rather than fixed.** No new features. The
