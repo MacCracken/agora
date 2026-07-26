@@ -1,0 +1,72 @@
+# src/arena.cyr — the per-command scratch arena (1.6.2).
+#
+# Its own module because BOTH entry points need it: src/main.cyr (the server)
+# and src/test.cyr (the unit harness, which links board.cyr / account.cyr
+# WITHOUT main.cyr). A facility used by the storage layer cannot live in
+# main.cyr, or the test build fails on an undefined `cmd_alloc`.
+#
+# Include it FIRST, before any module that calls cmd_alloc.
+
+# === 1.6.2: the per-command scratch arena ===================================
+#
+# The problem it solves. cyrius `alloc()` is a bump allocator with no free, and
+# agora never called `fl_free` anywhere. Under SERVE_FORK that was sound — each
+# connection is its own process and the whole arena dies at child exit, which is
+# exactly what ADR 0007 buys. The 1.6.0 poll multiplex broke that assumption:
+# one process now serves every connection for the life of the server, so every
+# per-command buffer accumulated forever. Measured before this change:
+# **~7.5 KB leaked per command**, dead linear (400 commands → 2,988 KB;
+# 1,600 commands → 11,676 KB). A busy board leaks a megabyte every couple of
+# minutes and eventually NULL-faults, and poll is the ONLY model on agnos.
+#
+# Why an arena rather than fl_alloc/fl_free at ~250 call sites. Every one of
+# these buffers has the SAME lifetime — one dispatched line — so pairing each
+# with an explicit free would add 250 chances to get it wrong (a missed free
+# leaks as before, an early free is a use-after-free) for no expressive gain.
+# One reset at the single point that dominates every dispatch is both smaller
+# and harder to get wrong. `process_rx` calls `cmd_scratch_reset()` once per
+# EOL, before the mode dispatch, and both serve models funnel through it.
+#
+# Why it is safe. Exactly one line is dispatched at a time per process: the poll
+# sweep runs `process_rx` to completion for one session before moving to the
+# next (swapping deep session globals around it), and the fork worker is
+# single-threaded by construction. So a buffer handed out by `cmd_alloc` cannot
+# outlive its command or be seen by another session.
+#
+# What must NOT use it: anything that outlives the line. Those are the globals —
+# `g_reply_subject`, `g_uni_world`, `g_door_registry`, `g_door_state`, the
+# session pool, and the per-session telnet buffers. Every one of them is already
+# allocated once behind an `== 0` guard and stays on `alloc()`.
+#
+# Oversize requests fall back to `alloc()` rather than failing: correctness
+# first: a caller that needs more than the arena still gets valid memory, it
+# just leaks that one allocation the way it did before. `CMD_ARENA_BYTES` is
+# sized above the largest single command's total (the `read` path is the peak,
+# at ~100 KB of post + id-list + header buffers), so the fallback is not
+# expected to fire in practice.
+enum CmdArena {
+    CMD_ARENA_BYTES = 262144;    # 256 KB, allocated once, reused every line
+}
+
+var g_cmd_arena = 0;         # arena base (lazily allocated on first use)
+var g_cmd_arena_off = 0;     # bump offset within the arena, reset per line
+
+# Hand out `n` bytes of command-lifetime scratch, 8-byte aligned (every agora
+# struct field is an i64, so unaligned starts would be a correctness bug, not
+# just a slowdown). Falls back to alloc() when the arena is exhausted.
+fn cmd_alloc(n): i64 {
+    if (g_cmd_arena == 0) { g_cmd_arena = alloc(CMD_ARENA_BYTES); }
+    var need = n;
+    var rem = need & 7;
+    if (rem != 0) { need = need + (8 - rem); }
+    if (g_cmd_arena_off + need > CMD_ARENA_BYTES) { return alloc(n); }
+    var p = g_cmd_arena + g_cmd_arena_off;
+    g_cmd_arena_off = g_cmd_arena_off + need;
+    return p;
+}
+
+# Reclaim the whole arena. Called once per dispatched line from process_rx.
+fn cmd_scratch_reset(): i64 {
+    g_cmd_arena_off = 0;
+    return 0;
+}

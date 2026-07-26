@@ -16,6 +16,7 @@
 #   1.0.0         all six milestones green, multi-user telnet BBS
 
 include "lib/darshana.cyr"
+include "src/arena.cyr"
 include "src/telnet.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
@@ -185,7 +186,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.1 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.2 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -382,7 +383,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 
     # M5-E: `boards` — list main + all named subdirectory boards.
     if (line_has_prefix(line, len, "boards") != 0) {
-        var idsmain = alloc(DIRENT_ID_MAX * 8);
+        var idsmain = cmd_alloc(DIRENT_ID_MAX * 8);
         var maincount = post_list(g_store_buf, "main", idsmain, DIRENT_ID_MAX);
         # Always list main
         send_str(cfd, "  main      ");
@@ -391,7 +392,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_buf(cfd, &ibuf, ilen);
         send_str(cfd, " posts\r\n");
 
-        var names = alloc(BOARD_LIST_MAX * 8);
+        var names = cmd_alloc(BOARD_LIST_MAX * 8);
         var bcount = boards_list(g_store_buf, names, BOARD_LIST_MAX);
         var i = 0;
         while (i < bcount) {
@@ -437,7 +438,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "board name too long (max 32 bytes)\r\n");
             return MODE_COMMAND;
         }
-        var name_buf = alloc(BOARD_NAME_MAX + 1);
+        var name_buf = cmd_alloc(BOARD_NAME_MAX + 1);
         memcpy(name_buf, line + i, name_len);
         store8(name_buf + name_len, 0);
 
@@ -482,7 +483,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "list") != 0) {
-        var ids = alloc(DIRENT_ID_MAX * 8);
+        var ids = cmd_alloc(DIRENT_ID_MAX * 8);
         var count = post_list(g_store_buf, current_board, ids, DIRENT_ID_MAX);
         if (count == 0) {
             send_str(cfd, "(no posts)\r\n");
@@ -491,10 +492,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             # whole post file (read once to extract Subject), and a
             # subject-extract buffer. Subject lookup is O(file)
             # which is negligible at the v1.0 BBS scale.
-            var fbuf = alloc(POST_MAX_BYTES + 1024);
-            var sbuf = alloc(SUBJECT_MAX_BYTES);
-            var hbuf = alloc(ACCOUNT_HANDLE_BUF);
-            var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
+            var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
+            var sbuf = cmd_alloc(SUBJECT_MAX_BYTES);
+            var hbuf = cmd_alloc(ACCOUNT_HANDLE_BUF);
+            var fpbuf = cmd_alloc(ACCOUNT_FP_BUF_BYTES);
             var idx = 0;
             while (idx < count) {
                 var id = load64(ids + idx * 8);
@@ -534,7 +535,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "usage: read <id>\r\n");
             return MODE_COMMAND;
         }
-        var fbuf = alloc(POST_MAX_BYTES + 1024);
+        var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
         var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
         if (flen <= 0) {
             send_str(cfd, "post not found\r\n");
@@ -546,8 +547,8 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # this — body_off == 0 and post_subject returns 0 length.
         # M6-E: From line above subject (or "From: anonymous" for
         # missing-header posts).
-        var hbuf = alloc(ACCOUNT_HANDLE_BUF);
-        var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
+        var hbuf = cmd_alloc(ACCOUNT_HANDLE_BUF);
+        var fpbuf = cmd_alloc(ACCOUNT_FP_BUF_BYTES);
         send_str(cfd, "From: ");
         if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
             send_buf(cfd, hbuf, strlen(hbuf));
@@ -557,7 +558,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         } else {
             send_str(cfd, "anonymous\r\n");
         }
-        var sbuf = alloc(SUBJECT_MAX_BYTES);
+        var sbuf = cmd_alloc(SUBJECT_MAX_BYTES);
         var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
         if (slen > 0) {
             send_str(cfd, "Subject: ");
@@ -577,7 +578,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 
         # M5-F: list child reply IDs (one-deep). Enumerated by
         # scanning the board for posts with Reply-To: <id>.
-        var rbuf = alloc(DIRENT_ID_MAX * 8);
+        var rbuf = cmd_alloc(DIRENT_ID_MAX * 8);
         var rcount = replies_to(g_store_buf, current_board, id, rbuf, DIRENT_ID_MAX);
         if (rcount > 0) {
             send_str(cfd, "\r\nReplies: ");
@@ -632,7 +633,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "usage: reply <id>\r\n");
             return MODE_COMMAND;
         }
-        var fbuf = alloc(POST_MAX_BYTES + 1024);
+        var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
         var flen = post_read(g_store_buf, current_board, parent_id, fbuf, POST_MAX_BYTES + 1024);
         if (flen <= 0) {
             send_str(cfd, "reply: parent post not found\r\n");
@@ -641,17 +642,15 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # Build derived Re: subject — copy into the session's subject
         # buffer via the `current_board` trick: we expose the slot
         # through globals (set_reply_state below).
-        var parent_sub = alloc(SUBJECT_MAX_BYTES);
+        var parent_sub = cmd_alloc(SUBJECT_MAX_BYTES);
         var ps_len = post_subject(fbuf, flen, parent_sub, SUBJECT_MAX_BYTES);
-        var derived = alloc(SUBJECT_MAX_BYTES + 8);
+        var derived = cmd_alloc(SUBJECT_MAX_BYTES + 8);
         subject_reply_prefix(parent_sub, ps_len, derived, SUBJECT_MAX_BYTES + 8);
         # Park the derived subject + parent_id in globals — they're
         # picked up by handle_client at the next MODE_POSTING '.' commit.
         g_reply_to = parent_id;
         var dlen = strlen(derived);
-        if (g_reply_subject == 0) {
-            g_reply_subject = alloc(SUBJECT_MAX_BYTES + 8);
-        }
+        # (1.6.2: g_reply_subject is owned by the session slot — always non-0.)
         memcpy(g_reply_subject, derived, dlen);
         store8(g_reply_subject + dlen, 0);
         g_reply_subject_len = dlen;
@@ -684,7 +683,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "handle too long (max 32 bytes)\r\n");
             return MODE_COMMAND;
         }
-        var hname_buf = alloc(ACCOUNT_HANDLE_BUF);
+        var hname_buf = cmd_alloc(ACCOUNT_HANDLE_BUF);
         memcpy(hname_buf, line + li, hname_len);
         store8(hname_buf + hname_len, 0);
 
@@ -748,7 +747,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
-        var gbuf = alloc(16);
+        var gbuf = cmd_alloc(16);
         memcpy(gbuf, line + gstart, glen);
         store8(gbuf + glen, 0);
         var sk2 = 1;
@@ -764,7 +763,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var mlen = p - mstart;
         if (mlen > 15) { mlen = 15; }
-        var mbuf = alloc(16);
+        var mbuf = cmd_alloc(16);
         if (mlen > 0) { memcpy(mbuf, line + mstart, mlen); }
         store8(mbuf + mlen, 0);
 
@@ -810,11 +809,11 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             g_door_game = game;
             g_door_mode = DOOR_UNIVERSE;
-            if (g_uni_world == 0) { g_uni_world = alloc(DOOR_WORLD_CAP); }
+            # (1.6.2: g_uni_world is owned by the session slot — always non-0.)
             var uslot = door_universe_slot(game);
             var uloaded = 0;
             if (door_save_exists(g_store_buf, g_session_fp, uslot) == 1) {
-                var ulbuf = alloc(DOOR_SAVE_CAP);
+                var ulbuf = cmd_alloc(DOOR_SAVE_CAP);
                 var uln = door_save_read(g_store_buf, g_session_fp, uslot, ulbuf, DOOR_SAVE_CAP);
                 if (uln > 0) {
                     var uld = door_desc_for(game);
@@ -878,7 +877,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (dmode == DOOR_SOLO) {
             var nm = door_game_name(game);
             if (door_save_exists(g_store_buf, g_session_fp, nm) == 1) {
-                var lbuf = alloc(DOOR_SAVE_CAP);
+                var lbuf = cmd_alloc(DOOR_SAVE_CAP);
                 var ln = door_save_read(g_store_buf, g_session_fp, nm, lbuf, DOOR_SAVE_CAP);
                 if (ln > 0) {
                     var sld = door_desc_for(game);
@@ -926,7 +925,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             return MODE_COMMAND;
         }
         if (scgl > 15) { scgl = 15; }
-        var scgb = alloc(16);
+        var scgb = cmd_alloc(16);
         memcpy(scgb, line + scgs, scgl);
         store8(scgb + scgl, 0);
         var scgame = GAME_NONE;
@@ -959,7 +958,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (ci >= len) { csk = 0; }
             else { if ((load8(line + ci) & 0xFF) != 32) { csk = 0; } else { ci = ci + 1; } }
         }
-        var chan = alloc(CHAT_CHANNEL_MAX + 1);
+        var chan = cmd_alloc(CHAT_CHANNEL_MAX + 1);
         if (ci >= len) {
             memcpy(chan, "lobby", 5); store8(chan + 5, 0);
         } else {
@@ -984,12 +983,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_str(cfd, "\r\n-- chat: #");
         send_str(cfd, g_chat_channel);
         send_str(cfd, " --  (type a line to talk; /help for commands, /leave to exit)\r\n");
-        var lbuf = alloc(CHAT_LOG_BUF);
+        var lbuf = cmd_alloc(CHAT_LOG_BUF);
         var ln = chat_log_read(g_store_buf, g_chat_channel, lbuf, CHAT_LOG_CAP);
-        var seenp = alloc(8);
+        var seenp = cmd_alloc(8);
         store64(seenp, 0);
         if (ln > 0) {
-            var ob = alloc(CHAT_TAIL_CAP);
+            var ob = cmd_alloc(CHAT_TAIL_CAP);
             var ol = chat_emit_tail_k(lbuf, ln, CHAT_SCROLLBACK_LINES, ob, CHAT_TAIL_CAP, seenp);
             if (ol > 0) { send_buf(cfd, ob, ol); }
         }
@@ -1485,7 +1484,7 @@ fn door_universe_save(): i64 {
     if (d == 0) { return 0; }
     var fp = load64(d + DD_SAVE_FMT);
     if (fp == 0) { return 0; }
-    var buf = alloc(DOOR_SAVE_CAP);
+    var buf = cmd_alloc(DOOR_SAVE_CAP);
     var n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
     if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_universe_slot(g_door_game), buf, n); }
     return 0;
@@ -1499,7 +1498,7 @@ fn door_send_frame(cfd): i64 {
     # the send is clamped to the cap below — so a frame that outgrows 8192
     # truncates cleanly instead of overrunning the heap. No frame does today;
     # this enforces the invariant against future row-count growth.
-    var buf = alloc(DOOR_FRAME_CAP + DOOR_FRAME_GUARD);
+    var buf = cmd_alloc(DOOR_FRAME_CAP + DOOR_FRAME_GUARD);
     g_door_emit_cap = DOOR_FRAME_CAP;
     var n = 0;
     var d = door_desc_for(g_door_game);
@@ -1687,7 +1686,7 @@ fn door_save_on_exit(cfd): i64 {
                 if (d != 0) {
                     var fp = load64(d + DD_SAVE_FMT);
                     if (fp != 0) {
-                        var buf = alloc(DOOR_SAVE_CAP);
+                        var buf = cmd_alloc(DOOR_SAVE_CAP);
                         n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
                         if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
                     }
@@ -1796,7 +1795,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.1 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.2 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1915,6 +1914,15 @@ fn session_alloc(): i64 {
     store64(s + SESS_CHAT_CHANNEL,   alloc(CHAT_CHANNEL_MAX + 1));
     store64(s + SESS_QUIT,           alloc(8));
     store64(s + SESS_TX,             alloc(SESS_TX_CAP));
+    # 1.6.2 — pooled, not per-session. Both used to be allocated lazily from a
+    # process global (`if (g_uni_world == 0) { g_uni_world = alloc(...) }`).
+    # sess_load/sess_save swap those globals per session, so a fresh session
+    # always saw 0 and allocated again: an 8 KB + 264 B leak for every session
+    # that entered a Universe door or replied to a post — bounded by sessions
+    # SERVED, i.e. unbounded over a server's life. Owning them in the slot makes
+    # it 64 allocations total, ever (+541 KB once against a ~13 MB image).
+    store64(s + SESS_UNI_WORLD,      alloc(DOOR_WORLD_CAP));
+    store64(s + SESS_REPLY_SUBJECT,  alloc(SUBJECT_MAX_BYTES + 8));
     store64(s + SESS_FD, 0 - 1);
     return s;
 }
@@ -1957,7 +1965,7 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_DOOR_GAME, GAME_NONE);
     store64(s + SESS_DOOR_STATE, 0);
     store64(s + SESS_DOOR_MODE, DOOR_PRACTICE);
-    store64(s + SESS_UNI_WORLD, 0);
+    memset(load64(s + SESS_UNI_WORLD), 0, DOOR_WORLD_CAP);
     store8(load64(s + SESS_CHAT_CHANNEL), 0);
     store64(s + SESS_CHAT_SEEN, 0);
     store64(s + SESS_CHAT_IDLE, 0);
@@ -1966,7 +1974,7 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_PARRY, 0);
     store64(s + SESS_JABBER, 0);
     store64(s + SESS_REPLY_TO, 0);
-    store64(s + SESS_REPLY_SUBJECT, 0);
+    store8(load64(s + SESS_REPLY_SUBJECT), 0);
     store64(s + SESS_REPLY_SUBJECT_LEN, 0);
     return 0;
 }
@@ -2173,7 +2181,16 @@ fn serve_poll(sfd): i64 {
                 #endif
                 var s = session_acquire(cfd);
                 if (s == 0) {
-                    sys_write(cfd, "server full — try again shortly\r\n", 33);
+                    # 1.6.2 — was 33, which is the byte count for an ASCII
+                    # hyphen. The dash here is an em dash (U+2014, THREE bytes
+                    # in UTF-8), so the literal is 35 bytes and the short count
+                    # cut off exactly the trailing CRLF: the one message a
+                    # client gets when the 64-slot pool is full arrived
+                    # unterminated, and its next output ran on from there.
+                    # This is also the only socket write in agora that does not
+                    # go through send_buf — there is no session to enqueue into
+                    # yet — so a send_buf-based audit misses it.
+                    sys_write(cfd, "server full — try again shortly\r\n", 35);
                     sock_close(cfd);
                 } else {
                     sess_load(s);
@@ -2365,6 +2382,11 @@ fn process_rx(s, n): i64 {
 
             if (eol != 0) {
                 send_str(cfd, "\r\n");
+                # 1.6.2 — reclaim the per-command scratch arena. This is the one
+                # point that dominates EVERY line dispatch below (command, door,
+                # chat, login, posting) in BOTH serve models, since the fork
+                # worker drives process_rx too. See cmd_alloc's header.
+                cmd_scratch_reset();
                 # Mode-aware line dispatch.
                 if (mode == MODE_COMMAND) {
                     mode = session_execute(cfd, line, line_pos, current_board, quit);
@@ -2619,6 +2641,34 @@ fn handle_client(cfd): i64 {
 # failure.
 fn cmd_serve_on(port): i64 {
     println("agora serve: opening telnet listener");
+
+    # 1.6.2 — ignore SIGPIPE before a single byte can be written.
+    #
+    # Every byte agora sends leaves through a flagsless `sys_write` (send_buf's
+    # fork branch at :244, session_drain's poll branch at :2103, and the Descent
+    # proxy). A peer that closes mid-write makes the kernel raise SIGPIPE, whose
+    # DEFAULT disposition terminates the process — no error return, no cleanup.
+    # Under fork that cost one child; under the 1.6.0 poll multiplex it costs the
+    # whole 64-session server, and poll is the ONLY model on agnos (no fork). That
+    # is an unauthenticated remote kill from a client that just disconnects rudely.
+    #
+    # SIG_IGN converts it into an EPIPE (-32) return, which BOTH write paths
+    # already treat correctly as "close this connection": send_buf returns 1 on
+    # any `n <= 0` (the 1.4.4 T1 fix) and session_drain returns the negative errno,
+    # which its callers test with `< 0` (:2224). EWOULDBLOCK keeps its own arm, so
+    # a slow reader still just retries next sweep.
+    #
+    # Placed here — before the model dispatch — so it dominates every serve path:
+    # poll, the fork parent (and its children, which inherit the disposition
+    # across fork), and the agnos serial loop. ADR 0007 rejected `sigaction`
+    # because of the rt_sigaction `sa_restorer` trampoline; cyrius 6.4.51's
+    # `signal_ignore` builds the 32-byte SIG_IGN act itself and needs no
+    # trampoline, so that objection no longer applies. It is a no-op on agnos
+    # (ring-3 has no signal delivery) and on Windows, so the call is portable.
+    # The return is deliberately unchecked: a failure leaves the default
+    # disposition, i.e. exactly today's behavior, and there is nothing better to
+    # do about it than serve anyway.
+    signal_ignore(SIGPIPE);
 
     var sr = tcp_socket();
     if (is_ok(sr) == 0) {
@@ -3365,7 +3415,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.1");
+    println("agora 1.6.2");
     return 0;
 }
 
@@ -3398,4 +3448,10 @@ fn main(): i64 {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+# 1.6.2 — `sys_exit`, not a raw `syscall(60, ...)`. 60 is exit only on Linux
+# x86_64; on agnos exit is 0 and 60 is `SYS_WINSIZE` (nullary, returns the
+# framebuffer console grid), so the raw form made an agnos build query the
+# console, discard the answer, and fall off the end of the program instead of
+# terminating. `sys_exit` picks the right number per target and is what the
+# fork child at :2708 already used — these two top-level exits were the outlier.
+sys_exit(exit_code);

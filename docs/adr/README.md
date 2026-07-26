@@ -29,3 +29,10 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0012 | [Chatbot framework (Eliza, PARRY, and the fixed-script family)](0012-chatbot-framework.md) | Accepted (2026-06-08) — 1.3.0/1.3.1 |
 | 0013 | [Shared wager module + the wager-RNG fairness decision](0013-wagering-module-rng-fairness.md) | Proposed (2026-06-08) — 1.3.4 |
 | 0014 | [War-game door: async shared-world strategy as the MUD on-ramp](0014-async-shared-world-strategy.md) | Proposed (2026-06-08) — 1.3.7 |
+| 0015 | [Jabberwacky: the corpus-learning chatbot engine](0015-jabberwacky-corpus-learning.md) | Accepted (2026-06-08) — 1.3.3 |
+| 0016 | [The Olympiad: a competition primitive on a games-owner frame](0016-olympiad-competition-primitive.md) | Accepted (2026-06-09) — 1.3.6 |
+| 0017 | [Descent link: a transparent-proxy gateway to the MUD](0017-descent-link-gateway.md) | Accepted (2026-06-10) — 1.4.0 |
+| 0018 | [Decode: the classify primitive and one engine for two variants](0018-decode-engine.md) | Accepted (2026-06-14) — 1.4.1/1.4.2 |
+| 0019 | [Decode as a Handler gameplay lever (cross-game mechanic reuse)](0019-decode-handler-lever.md) | Accepted (2026-06-14) — 1.4.3 |
+| 0020 | [Door descriptor registry (table-driven door dispatch)](0020-door-descriptor-registry.md) | Accepted (2026-06-15) — 1.4.6 |
+| 0021 | [The per-command scratch arena](0021-per-command-scratch-arena.md) | Accepted (2026-07-25) — 1.6.2 |

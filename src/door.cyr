@@ -249,7 +249,7 @@ fn door_save_path(store, fp16, game, out_buf): i64 {
 fn door_dir_ensure(store, fp16): i64 {
     var rc = account_dir_ensure(store, fp16);          # store, .users, <fp16>
     if (rc != 0) { return rc; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_games_dir(store, fp16, path);
     return store_ensure(path);
 }
@@ -259,7 +259,7 @@ fn door_dir_ensure(store, fp16): i64 {
 fn door_save_exists(store, fp16, game): i64 {
     if (fp16_valid(fp16) == 0)      { return 0; }
     if (game_name_valid(game) == 0) { return 0; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
     return file_exists(path);
 }
@@ -272,7 +272,7 @@ fn door_save_write(store, fp16, game, buf, len): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     var rc = door_dir_ensure(store, fp16);
     if (rc != 0) { return rc; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
     var n = file_write_all(path, buf, len);
     if (n != len) { return 0 - 1; }
@@ -286,7 +286,7 @@ fn door_save_write(store, fp16, game, buf, len): i64 {
 fn door_save_read(store, fp16, game, out_buf, cap): i64 {
     if (fp16_valid(fp16) == 0)      { return 0 - 1; }
     if (game_name_valid(game) == 0) { return 0 - 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
     return file_read_all(path, out_buf, cap);
 }
@@ -537,7 +537,7 @@ fn world_dir_ensure(store, game): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     world_games_root(store, path);
     rc = store_ensure(path);
     if (rc != 0) { return rc; }
@@ -555,7 +555,7 @@ fn world_dir_ensure(store, game): i64 {
 fn world_lock_acquire(store, game): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, ".lock", path);
     var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
@@ -574,7 +574,7 @@ fn world_lock_release(fd): i64 {
 # game → 0.
 fn world_read(store, game, out_buf, cap): i64 {
     if (game_name_valid(game) == 0) { return 0; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, "snapshot", path);
     var n = file_read_all(path, out_buf, cap);
     if (n < 0) { return 0; }
@@ -587,7 +587,7 @@ fn world_read(store, game, out_buf, cap): i64 {
 fn world_write(store, game, buf, len): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, "snapshot", path);
     var n = file_write_all(path, buf, len);
     if (n != len) { return 0 - 1; }
@@ -605,7 +605,7 @@ fn world_write(store, game, buf, len): i64 {
 fn world_txn_add(store, game, delta): i64 {
     var fd = world_lock_acquire(store, game);
     if (fd < 0) { return 0 - 1; }
-    var buf = alloc(8);
+    var buf = cmd_alloc(8);
     var cur = 0;
     var n = world_read(store, game, buf, 8);
     if (n == 8) { cur = load64(buf); }

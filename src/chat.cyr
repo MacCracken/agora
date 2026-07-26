@@ -328,7 +328,7 @@ fn chat_dir_ensure(store, channel): i64 {
     if (chat_channel_valid(channel) == 0) { return 0 - 1; }
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     chat_root(store, path);
     rc = store_ensure(path);
     if (rc != 0) { return rc; }
@@ -344,7 +344,7 @@ fn chat_dir_ensure(store, channel): i64 {
 fn chat_lock_acquire(store, channel): i64 {
     if (chat_channel_valid(channel) == 0) { return 0 - 1; }
     if (chat_dir_ensure(store, channel) != 0) { return 0 - 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     chat_lock_path(store, channel, path);
     var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
@@ -362,7 +362,7 @@ fn chat_lock_release(fd): i64 {
 # read, or 0 for a fresh/empty/invalid channel.
 fn chat_log_read(store, channel, out, cap): i64 {
     if (chat_channel_valid(channel) == 0) { return 0; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     chat_log_path(store, channel, path);
     var n = file_read_all(path, out, cap);
     if (n < 0) { return 0; }
@@ -373,7 +373,7 @@ fn chat_log_read(store, channel, out, cap): i64 {
 # on success, negative on error.
 fn chat_log_write(store, channel, buf, len): i64 {
     if (chat_channel_valid(channel) == 0) { return 0 - 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     chat_log_path(store, channel, path);
     var n = file_write_all(path, buf, len);
     if (n != len) { return 0 - 1; }
@@ -390,7 +390,7 @@ fn chat_say(store, channel, handle, textbuf, textlen): i64 {
     if (chat_channel_valid(channel) == 0) { return 0 - 1; }
     var fd = chat_lock_acquire(store, channel);
     if (fd < 0) { return 0 - 1; }
-    var buf = alloc(CHAT_LOG_BUF);
+    var buf = cmd_alloc(CHAT_LOG_BUF);
     var n = chat_log_read(store, channel, buf, CHAT_LOG_CAP);
     var seq = chat_last_seq(buf, n) + 1;
     var added = chat_format_line(seq, handle, textbuf, textlen, buf + n);

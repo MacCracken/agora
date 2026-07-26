@@ -154,7 +154,7 @@ fn account_dir_ensure(store, fp16): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
 
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_users_dir(store, path_buf);
     rc = store_ensure(path_buf);
     if (rc != 0) { return rc; }
@@ -181,7 +181,7 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
     var rc = account_dir_ensure(store, fp_out);
     if (rc != 0) { return rc; }
 
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
 
     # public_key.bin — 32 raw bytes
     build_user_file(store, fp_out, "public_key.bin", path_buf);
@@ -220,7 +220,7 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 # Read the 32-byte public key for (store, fp16) into pk_out.
 # Returns 0 on success, negative on file-not-found / read error.
 fn account_lookup_pubkey(store, fp16, pk_out): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_user_file(store, fp16, "public_key.bin", path_buf);
     var n = file_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);
     if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
@@ -232,7 +232,7 @@ fn account_lookup_pubkey(store, fp16, pk_out): i64 {
 # -1 on file-not-found / read error. out_buf must be ≥
 # ACCOUNT_HANDLE_BUF.
 fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_user_file(store, fp16, "handle", path_buf);
     var raw[34];
     memset(&raw, 0, 34);
@@ -278,7 +278,7 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 # ACCOUNT_FP_BUF_BYTES). Returns 1 on success, 0 if no From header
 # or malformed (no space separator).
 fn post_from(buf, len, handle_out, h_max, fp_out, fp_max): i64 {
-    var raw_buf = alloc(h_max + fp_max + 8);
+    var raw_buf = cmd_alloc(h_max + fp_max + 8);
     var raw_len = header_get(buf, len, "From", raw_buf, h_max + fp_max + 4);
     if (raw_len <= 0) {
         store8(handle_out, 0);
@@ -518,7 +518,7 @@ fn parse_auth_sig(line, line_len, sig_out): i64 {
 }
 
 fn account_resolve_handle(store, handle, fp_out): i64 {
-    var users_path = alloc(PATH_MAX_BYTES);
+    var users_path = cmd_alloc(PATH_MAX_BYTES);
     build_users_dir(store, users_path);
 
     var entries = dir_list(str_from(users_path));
@@ -526,7 +526,7 @@ fn account_resolve_handle(store, handle, fp_out): i64 {
     var n = vec_len(entries);
     if (n > ACCOUNT_SCAN_MAX) { n = ACCOUNT_SCAN_MAX; }
 
-    var handle_buf = alloc(ACCOUNT_HANDLE_BUF);
+    var handle_buf = cmd_alloc(ACCOUNT_HANDLE_BUF);
     var i = 0;
     var found = 0;
     while (i < n) {

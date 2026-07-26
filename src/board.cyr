@@ -15,11 +15,15 @@
 # target among many — same source builds on every platform the
 # cyrius stdlib reaches.
 
-# === Linux x86_64 syscall constants not yet exposed in lib/io.cyr ===
-
-enum BoardSys {
-    SYS_MKDIR = 83;
-}
+# 1.6.2 — the local `enum BoardSys { SYS_MKDIR = 83; }` is GONE. 83 is mkdir
+# only on Linux x86_64; the constant collided by NAME with the stdlib's agnos
+# `SYS_MKDIR = 9`, so an `--agnos` build warned `duplicate symbol 'SYS_MKDIR'
+# redefined with conflicting value (last definition wins)` and one of the two
+# callers got the wrong number. That went from latent to dangerous when the
+# cyrius 6.4.6x GPU syscall band landed: agnos 83 is now `SYS_GPU_DISPATCH_F64`
+# (its own table comment reads "MKDIR on Linux"), so `store_ensure` would have
+# handed a path pointer to a GPU matmul. `store_ensure` now calls the stdlib
+# `sys_mkdir` wrapper, which is per-target — see the note there about its arity.
 
 # O_EXCL — fail if the file already exists. Used by post_new for
 # atomic "claim the next ID" semantics (per ADR 0002 § Positive
@@ -238,8 +242,23 @@ fn fp16_valid(fp): i64 {
 # Create a directory if it doesn't exist. Treats EEXIST (-17 on
 # Linux) as success. Returns 0 on success or already-exists;
 # negative errno otherwise.
+#
+# 1.6.2 — routed through the stdlib `sys_mkdir` instead of a raw syscall, per
+# CLAUDE.md's "use lib primitives, not raw syscalls". The branch is unavoidable:
+# `sys_mkdir` is NOT arity-compatible across targets — Linux/macOS take
+# `(path, mode)` (lib/syscalls_x86_64_linux.cyr:350) while agnos takes
+# `(path, pathlen)` (lib/syscalls_x86_64_agnos.cyr:452), because the agnos
+# kernel has no permission model to pass a mode to. Passing PERM_DIR as a length
+# would ask agnos to read 493 bytes of path. agnos's mkdir reports success
+# unconditionally, so the EEXIST arm below is a Linux/macOS concern only and
+# costs nothing there.
 fn store_ensure(path): i64 {
-    var rc = syscall(SYS_MKDIR, path, PERM_DIR);
+    #ifdef CYRIUS_TARGET_AGNOS
+    var rc = sys_mkdir(path, strlen(path));
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var rc = sys_mkdir(path, PERM_DIR);
+    #endif
     if (rc == 0) { return 0; }
     if (rc == (0 - 17)) { return 0; }
     return rc;
@@ -258,7 +277,7 @@ fn store_ensure(path): i64 {
 # Returns 1 if the board exists (or is "main"), 0 otherwise.
 fn board_exists(store, board): i64 {
     if (streq(board, "main") != 0) { return 1; }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path);
     return is_dir(str_from(path));
 }
@@ -271,7 +290,7 @@ fn board_ensure(store, board): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
     if (streq(board, "main") != 0) { return 0; }
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
     return store_ensure(path_buf);
 }
@@ -345,7 +364,7 @@ fn parse_post_id(name): i64 {
 # if the board is empty / non-existent. Per ADR 0004 each board has
 # its own monotonic counter — listing scans only that board's dir.
 fn post_max_id(store, board): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
     var entries = dir_list(str_from(path_buf));
     var n = vec_len(entries);
@@ -381,7 +400,7 @@ fn post_max_id(store, board): i64 {
 # Returns lockfile fd on success (caller must `store_lock_release`
 # to release + close), or -1 on failure.
 fn store_lock_acquire(store, board): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     var blen = board_path(store, board, path_buf);
     store8(path_buf + blen, 47);              # '/'
     store8(path_buf + blen + 1, 46);          # '.'
@@ -405,7 +424,7 @@ fn store_lock_release(fd): i64 {
 # Read a post by (board, id) into the caller-allocated buffer.
 # Returns the number of bytes read, or negative on error.
 fn post_read(store, board, id, out_buf, out_cap): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_post_path(store, board, id, path_buf);
     return file_read_all(path_buf, out_buf, out_cap);
 }
@@ -563,7 +582,7 @@ enum PH {
 # Allocate a fresh zero-initialized PostHeaders block. All fields
 # default to 0 (= empty Subject, no Reply-To, anonymous From).
 fn post_headers_new(): i64 {
-    var ph = alloc(PH_SIZE);
+    var ph = cmd_alloc(PH_SIZE);
     memset(ph, 0, PH_SIZE);
     return ph;
 }
@@ -672,7 +691,7 @@ fn post_new(store, board, ph, body, body_len): i64 {
     if (rc != 0) { return 0 - 1; }
 
     var fcap = POST_MAX_BYTES + 1024;
-    var fbuf = alloc(fcap);
+    var fbuf = cmd_alloc(fcap);
     var flen = post_format(ph, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
@@ -680,7 +699,7 @@ fn post_new(store, board, ph, body, body_len): i64 {
     if (lock_fd < 0) { return 0 - 1; }
 
     var id = post_max_id(store, board) + 1;
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_post_path(store, board, id, path_buf);
 
     var fd = file_open(path_buf, O_WRONLY | O_CREAT | BO_EXCL, PERM_FILE);
@@ -725,9 +744,9 @@ fn post_reply_to(buf, len): i64 {
 # `parent_id`. Writes child IDs (sorted ascending) into out_ids;
 # returns count. O(n) in the board's post count per ADR 0005.
 fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
-    var ids = alloc(DIRENT_ID_MAX * 8);
+    var ids = cmd_alloc(DIRENT_ID_MAX * 8);
     var count = post_list(store, board, ids, DIRENT_ID_MAX);
-    var fbuf = alloc(POST_MAX_BYTES + 1024);
+    var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
     var out_count = 0;
     var i = 0;
     while (i < count) {
@@ -834,7 +853,7 @@ fn sort_i64_asc(arr, count): i64 {
 # IDs are returned in **ascending order** (M5-C); the underlying
 # dir_list returns directory-iteration order which we then sort.
 fn post_list(store, board, out_ids, max_ids): i64 {
-    var path_buf = alloc(PATH_MAX_BYTES);
+    var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
     var entries = dir_list(str_from(path_buf));
     var n = vec_len(entries);
@@ -872,6 +891,12 @@ fn boards_list(store, out_names, max_boards): i64 {
     var n = vec_len(entries);
     var count = 0;
     var i = 0;
+    # 1.6.2 — hoisted out of the loop below. It used to allocate a fresh
+    # PATH_MAX_BYTES buffer per directory entry, so listing a store with many
+    # boards burned 512 B × entries every time anyone typed `boards`. It is pure
+    # scratch (only `entry` is stored into out_names), so one buffer reused
+    # across iterations is equivalent and allocates once per call.
+    var full = cmd_alloc(PATH_MAX_BYTES);
     while (i < n) {
         if (count >= max_boards) { return count; }
         var entry = vec_get(entries, i);
@@ -884,8 +909,7 @@ fn boards_list(store, out_names, max_boards): i64 {
         if ((load8(name_cstr) & 0xFF) == 46) { keep = 0; }
         if (keep != 0) {
             # We need to verify it's a directory. Build full path,
-            # call is_dir.
-            var full = alloc(PATH_MAX_BYTES);
+            # call is_dir. (`full` is hoisted above the loop — 1.6.2.)
             var slen = strlen(store);
             memcpy(full, store, slen);
             store8(full + slen, 47);     # '/'
@@ -926,7 +950,7 @@ fn board_admins_path(store, board, out_buf): i64 {
 # return the corresponding POLICY_* enum value. Missing file or
 # unparseable contents → POLICY_OPEN (the default per ADR 0006).
 fn board_policy_get(store, board): i64 {
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     board_policy_path(store, board, path);
     var buf[32];
     var n = file_read_all(path, &buf, 32);
@@ -954,9 +978,9 @@ fn board_policy_get(store, board): i64 {
 # ignored, trailing CR/LF/whitespace trimmed per line. Returns 1 if
 # present, 0 otherwise (including missing / unreadable file).
 fn board_admin_check(store, board, handle): i64 {
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     board_admins_path(store, board, path);
-    var buf = alloc(BOARD_ADMINS_MAX_BYTES);
+    var buf = cmd_alloc(BOARD_ADMINS_MAX_BYTES);
     var n = file_read_all(path, buf, BOARD_ADMINS_MAX_BYTES);
     if (n <= 0) { return 0; }
 

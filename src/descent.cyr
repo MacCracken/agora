@@ -38,6 +38,10 @@ enum DescentConst {
     # the shuttle; POLLHUP|POLLERR (16|8 = 24) means the peer is gone.
     DESCENT_POLLIN     = 1;
     DESCENT_POLLDEAD   = 24;
+    # EAGAIN. Named locally rather than reusing main.cyr's EWOULDBLOCK_ERR
+    # because src/test.cyr links descent.cyr WITHOUT main.cyr — a cross-file
+    # constant reference builds in the binary and breaks the test harness.
+    DESCENT_EAGAIN     = 11;
 }
 
 # Parse a non-negative decimal in buf[s, e). Returns the value, or (0-1)
@@ -160,30 +164,85 @@ fn descent_cfg_path(store, out): i64 {
     return sl + 9;
 }
 
-# The transparent shuttle. poll(2) both the client fd (cfd) and the MUD
-# fd (mfd) for POLLIN; forward whatever arrives to the other side via the
-# full-write send_buf. Returns when either side closes, errors, or the
-# session sits silent past DESCENT_IDLE_MS (slowloris bound — a live MUD
-# pushes ticks, so genuine play resets the idle counter constantly).
+# 1.6.2 — the proxy's own full-write. Returns 0 on success, 1 on a dead peer.
 #
-# pollfd layout (matches net_connect_nb): { i32 fd; i16 events; i16 revents }
-# = 8 bytes; two entries = 16 bytes. poll = syscall 7 on x86_64 Linux
-# (same convention the existing net_connect_nb uses).
+# The shuttle must NOT use `send_buf` for either direction. In SERVE_POLL mode
+# `send_buf` ignores its fd argument entirely and enqueues to the ACTIVE
+# SESSION's tx queue (src/main.cyr:239) — which is right for ordinary BBS
+# output and wrong for a proxy in both directions at once:
+#   - client → MUD went to the client's own tx queue, so the MUD received
+#     nothing at all. The gateway was silently broken under `AGORA_SERVE=poll`
+#     from 1.6.0 until this fix (verified with a fake MUD: under fork the bytes
+#     arrive, under poll the MUD log stays empty).
+#   - MUD → client landed in that queue correctly, but the queue is drained by
+#     `session_drain` from the sweep loop — which cannot run while this function
+#     is looping — so MUD output would sit there until it overflowed SESS_TX_CAP.
+# Both fds here are plain sockets we own for the life of the proxy, so we write
+# to them directly and keep the shuttle byte-transparent (ADR 0017).
+#
+# EAGAIN is a retry, not an error: in poll mode the client fd is O_NONBLOCK
+# (set at accept), so a full tx buffer must be waited out rather than treated as
+# a dead peer. The caller's poll tick bounds how long we spin.
+fn descent_write_all(fd, buf, len): i64 {
+    var off = 0;
+    var rc = 0;
+    var done = 0;
+    while (done == 0) {
+        if (off >= len) { done = 1; continue; }
+        var n = sys_write(fd, buf + off, len - off);
+        if (n > 0) { off = off + n; continue; }
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (n == (0 - DESCENT_EAGAIN)) { continue; }
+        #endif
+        rc = 1; done = 1;
+    }
+    return rc;
+}
+
+# The transparent shuttle: forward whatever arrives on either fd to the other,
+# until one side closes, errors, or the session sits silent past
+# DESCENT_IDLE_MS (slowloris bound — a live MUD pushes ticks, so genuine play
+# resets the idle counter constantly).
+#
+# Two platform branches, because readiness notification is where the targets
+# genuinely differ:
+#
+#   Linux/macOS — poll(2) on both fds for POLLIN. pollfd layout (matching
+#   net_connect_nb): { i32 fd; i16 events; i16 revents } = 8 bytes; two entries
+#   = 16 bytes. The call stays a raw `syscall(7, ...)` because the cyrius stdlib
+#   exposes no poll wrapper (only epoll) — this is the same thing lib/net.cyr's
+#   own `net_connect_sa_nb` does, and on Mach-O the backend's SYSXLAT translates
+#   the number. What 1.6.2 fixes is that it was UNGUARDED: 7 is poll only on
+#   Linux/macOS — on agnos 7 is `SYS_OPEN`, so an agnos build asked the kernel
+#   to open the pollfd array as a path. It now lives under the target guard.
+#
+#   agnos — has no poll at all. Sweep both sockets with the non-blocking
+#   `sys_sock_recv`(#49) and pace with `sys_sleep_ms`, exactly the pattern
+#   `serve_poll` / `sess_recv_nonblock` already use on that target
+#   (src/main.cyr:2128). agnos's recv sense is inverted from Linux's: 0 means
+#   "nothing pending", negative means EOF/error.
+#
+# NOTE (unchanged from 1.6.0, documented not fixed): under SERVE_POLL this
+# function still blocks the sweep loop for as long as the player is in the MUD,
+# so other sessions stall meanwhile. Making Descent a state in the poll loop
+# rather than a blocking call is a larger change than this cut takes on.
 fn descent_proxy(cfd, mfd): i64 {
     var buf  = alloc(DESCENT_PROXY_BUF);
-    var pfds = alloc(16);
     var idle = 0;
     var done = 0;
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    var pfds = alloc(16);
     while (done == 0) {
         # (re)arm both pollfds — kernel overwrites revents each call.
         store32(pfds + 0, cfd);  store16(pfds + 4,  DESCENT_POLLIN); store16(pfds + 6,  0);
         store32(pfds + 8, mfd);  store16(pfds + 12, DESCENT_POLLIN); store16(pfds + 14, 0);
-        var pr = syscall(7, pfds, 2, DESCENT_POLL_MS);
+        var pr = syscall(7, pfds, 2, DESCENT_POLL_MS);   # poll(2) — Linux/macOS only, hence the guard
         if (pr < 0) { done = 1; }
         else { if (pr == 0) {
             idle = idle + DESCENT_POLL_MS;
             if (idle >= DESCENT_IDLE_MS) {
-                send_str(cfd, "\r\n(idle — leaving the Descent)\r\n");
+                descent_write_all(cfd, "\r\n(idle — leaving the Descent)\r\n", 32);
                 done = 1;
             }
         } else {
@@ -194,14 +253,14 @@ fn descent_proxy(cfd, mfd): i64 {
             if ((cre & DESCENT_POLLIN) != 0) {
                 var cn = sys_read(cfd, buf, DESCENT_PROXY_BUF);
                 if (cn <= 0) { done = 1; }
-                else { if (send_buf(mfd, buf, cn) != 0) { done = 1; } }
+                else { if (descent_write_all(mfd, buf, cn) != 0) { done = 1; } }
             }
             # MUD → client
             if (done == 0) {
                 if ((mre & DESCENT_POLLIN) != 0) {
                     var mn = sys_read(mfd, buf, DESCENT_PROXY_BUF);
                     if (mn <= 0) { done = 1; }
-                    else { if (send_buf(cfd, buf, mn) != 0) { done = 1; } }
+                    else { if (descent_write_all(cfd, buf, mn) != 0) { done = 1; } }
                 }
             }
             # hangup / error on either side
@@ -211,6 +270,42 @@ fn descent_proxy(cfd, mfd): i64 {
             }
         } }
     }
+    #endif
+
+    #ifdef CYRIUS_TARGET_AGNOS
+    while (done == 0) {
+        var moved = 0;
+        # client → MUD
+        var cn = sys_sock_recv(_agnos_fd_conn(cfd), buf, DESCENT_PROXY_BUF);
+        if (cn < 0) { done = 1; }
+        else { if (cn > 0) {
+            moved = 1;
+            if (descent_write_all(mfd, buf, cn) != 0) { done = 1; }
+        } }
+        # MUD → client
+        if (done == 0) {
+            var mn = sys_sock_recv(_agnos_fd_conn(mfd), buf, DESCENT_PROXY_BUF);
+            if (mn < 0) { done = 1; }
+            else { if (mn > 0) {
+                moved = 1;
+                if (descent_write_all(cfd, buf, mn) != 0) { done = 1; }
+            } }
+        }
+        # idle accounting + pacing (only when neither side moved bytes)
+        if (done == 0) {
+            if (moved == 1) { idle = 0; }
+            else {
+                idle = idle + DESCENT_POLL_MS;
+                if (idle >= DESCENT_IDLE_MS) {
+                    descent_write_all(cfd, "\r\n(idle — leaving the Descent)\r\n", 32);
+                    done = 1;
+                }
+                sys_sleep_ms(DESCENT_POLL_MS);
+            }
+        }
+    }
+    #endif
+
     return 0;
 }
 

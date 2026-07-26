@@ -27,6 +27,8 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 13 | [`13-parry.sh`](13-parry.sh) | 1.3.1 PARRY: the `play parry` door is calm then a Mafia "flare" launches the delusion; private `/parry` off the transcript — ADR 0012 | `./bbs/`, `./keys/qix` |
 | 14 | [`14-quest.sh`](14-quest.sh) | 1.3.2 QUEST: the `play quest` practice flow — town hub render, Bank screen, forest hunt, a fight resolves — ADR 0009 | none |
 | 15 | [`15-jabberwacky.sh`](15-jabberwacky.sh) | 1.3.3 Jabberwacky: the door learns a pair mid-session and replays it; `/jabberwacky` answers privately; a `solo` pair survives a disconnect (per-user persistence) — ADR 0015 | `./bbs/`, `./keys/qix` |
+| 23 | [`23-sigpipe-survival.py`](23-sigpipe-survival.py) | 1.6.2: SIGPIPE — rude disconnects close one session, not the server (has teeth only under `AGORA_SERVE=poll`; kills an unpatched server at exit 141) | none |
+| 24 | [`24-descent-serve-models.sh`](24-descent-serve-models.sh) | 1.6.2: the Descent byte-proxy forwards client→MUD under BOTH serve models, asserted against a fake MUD that logs what it receives | `./bbs/`, `./keys/qix` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

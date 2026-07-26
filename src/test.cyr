@@ -7,6 +7,7 @@
 # Run with: cyrius test src/test.cyr
 # CI gate: exit 0 on full pass; non-zero on first failure.
 
+include "src/arena.cyr"
 include "src/telnet.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
@@ -5427,4 +5428,5 @@ fn main(): i64 {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+# 1.6.2 — portable exit (agnos exit is 0, not 60; see src/main.cyr's tail).
+sys_exit(exit_code);

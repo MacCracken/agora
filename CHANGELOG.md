@@ -4,6 +4,137 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-07-25 (the poll model pays its debts: SIGPIPE, the arena, and the agnos syscalls)
+
+**1.6.1 listed three deferred items; this cut closes all three, and two more the work uncovered.**
+Every one of them is the same story: 1.6.0 moved agora from a process per connection to *one process for
+all 64 sessions*, and three assumptions that were true under fork quietly stopped being true under poll.
+An unhandled SIGPIPE went from killing one child to killing the server. A bump allocator with no free
+went from "the arena dies at child exit" to "the arena grows until it faults". And two Linux syscall
+numbers that agnos assigns to other calls became reachable on a target that only runs the poll model.
+Along the way the Descent gateway turned out to be **silently broken under `AGORA_SERVE=poll`** since
+1.6.0, and the pool-exhaustion message had been going out truncated. 221/221 tests unchanged, both
+targets build, all 21 runnable example smokes green (the Descent one now against a real MUD *and* a fake
+one, per serve model). 14,567,408 → **14,567,424 B**.
+
+### Security
+
+- **SIGPIPE is ignored before the listener opens** (`src/main.cyr` `cmd_serve_on`). agora had no signal
+  disposition anywhere in `src/`, and every byte it sends leaves through a flagsless `sys_write`
+  (`send_buf`'s fork branch, `session_drain`'s poll branch, the Descent proxy, and the pool-full reply).
+  A peer that closes mid-write raises SIGPIPE, whose default disposition **terminates the process** — no
+  error return, no cleanup. Under fork that cost one connection's child. Under the 1.6.0 poll multiplex
+  it costs **the whole 64-session server**, unauthenticated, from a client that merely disconnects
+  rudely — and poll is the only model on agnos. `signal_ignore(SIGPIPE)` (cyrius **6.4.51**, which did
+  not exist at the 6.4.32 pin 1.6.1 moved off) converts it to an EPIPE return, which both write paths
+  already handle correctly: `send_buf` returns 1 on any `n <= 0` (the 1.4.4 T1 fix) and `session_drain`
+  returns the negative errno, which its callers test with `< 0` — EWOULDBLOCK keeps its own arm, so a
+  slow reader still just retries next sweep. Placed before the model dispatch so it dominates poll, the
+  fork parent, its children (dispositions survive `fork`, and agora never `exec`s), and the agnos serial
+  loop; deliberately **not** in `main()`, so CLI verbs keep the default disposition and `agora list |
+  head` still terminates like a Unix filter. [ADR 0007](docs/adr/0007-fork-per-accept-concurrency.md)
+  rejected `sigaction` over the `rt_sigaction` `sa_restorer` trampoline; `signal_ignore` builds the
+  32-byte SIG_IGN act itself and needs no trampoline, so that objection is retired. **Regression-pinned
+  by the new smoke [`23-sigpipe-survival.py`](docs/examples/23-sigpipe-survival.py)**, which had to earn
+  its teeth: an immediate RST is *not* enough (the next write fails with ECONNRESET, an ordinary error),
+  so the smoke pipelines a large request, closes cleanly with output still pending, and never reads —
+  the server's next write lands, the peer's stack answers RST, and the write after that raises SIGPIPE.
+  Against a build without the fix it kills the poll server on the 4th client (**exit 141 = 128 + 13**);
+  against this build both serve models survive 12 rounds and keep serving.
+
+### Fixed
+
+- **The Descent gateway was broken under `AGORA_SERVE=poll`** (`src/descent.cyr` `descent_proxy`) — a
+  1.6.0 regression, silent until now. In poll mode `send_buf` **ignores its fd argument** and enqueues to
+  the active session's tx queue, which is right for BBS output and wrong for a proxy: the client→MUD
+  direction (`send_buf(mfd, ...)`) put the player's keystrokes on the player's *own* outbound queue, so
+  **the MUD received nothing at all**. The gateway looked alive — the MUD's banner still reached the
+  client — but no input ever arrived. The MUD→client direction was wrong for a second reason: it queued
+  bytes that only `session_drain` can flush, and `session_drain` cannot run while the proxy loop is
+  running, so MUD output would sit there until it overflowed `SESS_TX_CAP`. The shuttle now uses its own
+  direct full-write (`descent_write_all`) on both fds, treating EAGAIN as a retry since the client fd is
+  `O_NONBLOCK` in poll mode. Verified with a fake MUD that logs what it receives: before, the log stays
+  empty under poll and fills under fork; after, both fill. **New smoke
+  [`24-descent-serve-models.sh`](docs/examples/24-descent-serve-models.sh)**; `20-descent.sh` against the
+  real Yeoman's Descent still passes.
+- **The pool-exhaustion message was truncated on the wire** (`src/main.cyr` `serve_poll`). The write said
+  33 bytes; the literal `"server full — try again shortly\r\n"` is **35** — the dash is an em dash
+  (U+2014, three bytes in UTF-8) — so the short count cut off exactly the trailing CRLF and the one
+  message a client gets when all 64 slots are full arrived unterminated. Verified by filling the pool:
+  before, 33 bytes and no CRLF; after, 35 and terminated. This is also the only socket write in agora
+  that does not go through `send_buf`, so a `send_buf`-based audit misses it.
+- **`store_ensure` no longer dispatches a GPU matmul on agnos** (`src/board.cyr`). agora declared its own
+  `enum BoardSys { SYS_MKDIR = 83; }` — mkdir's number on Linux x86_64 — which collided *by name* with
+  the stdlib's agnos `SYS_MKDIR = 9`, so an `--agnos` build warned `duplicate symbol 'SYS_MKDIR'
+  redefined with conflicting value (last definition wins)` and one of the two callers got the wrong
+  number. 1.6.1 flagged that the cyrius 6.4.6x GPU syscall band had made agnos 83
+  `SYS_GPU_DISPATCH_F64` (its own table comment reads "MKDIR on Linux"). The local enum is deleted and
+  `store_ensure` routes through the stdlib `sys_mkdir`, with an `#ifdef` for the one genuine
+  incompatibility: Linux/macOS take `(path, mode)`, agnos takes `(path, pathlen)` — passing `PERM_DIR`
+  as a length would ask agnos to read 493 bytes of path. The duplicate-symbol warning is gone from the
+  `--agnos` build.
+- **The top-level exits are portable** (`src/main.cyr`, `src/test.cyr`) — `syscall(60, exit_code)` →
+  `sys_exit(exit_code)`. 60 is exit only on Linux x86_64; on agnos exit is **0** and 60 is `SYS_WINSIZE`
+  (nullary), so an agnos build queried the console grid, discarded the answer, and fell off the end of
+  the program instead of terminating. The fork child already used the portable `sys_exit` — these two
+  were the outliers. Exit codes verified unchanged on Linux (2 for an unknown command, 0 for success).
+- **The Descent proxy's `poll(2)` is guarded and has an agnos peer** (`src/descent.cyr`). The raw
+  `syscall(7, pfds, 2, ...)` was unguarded; 7 is poll only on Linux/macOS — on agnos it is `SYS_OPEN`, so
+  the pollfd array was being opened as a path. The Linux/macOS branch keeps the raw call (the cyrius
+  stdlib exposes no poll wrapper, only epoll — `lib/net.cyr`'s own `net_connect_sa_nb` does exactly the
+  same thing) but now lives under the target guard, and agnos gets a real peer rather than a stub:
+  non-blocking `sys_sock_recv` on both sockets paced by `sys_sleep_ms`, the same pattern `serve_poll` /
+  `sess_recv_nonblock` already use there.
+
+### Changed
+
+- **Per-command allocations go through a scratch arena** (`src/arena.cyr`, new;
+  [ADR 0021](docs/adr/0021-per-command-scratch-arena.md)). agora has 252 `alloc()` sites outside
+  `test.cyr` and called `free`/`fl_free` **zero** times — correct under [ADR
+  0007](docs/adr/0007-fork-per-accept-concurrency.md), where process exit *was* the free list, and a leak
+  under 1.6.0's one-process-for-everyone poll model. Measured on 1.6.1: **7,473 B leaked per command**,
+  dead linear (400 commands → 2,988 KB; 1,600 → 11,676 KB). `cmd_alloc` hands out 8-byte-aligned scratch
+  from a 256 KB region and `cmd_scratch_reset` reclaims all of it, called once per dispatched line from
+  `process_rx` — the single point that dominates command, door, chat, login and posting lines in **both**
+  serve models. 60 call sites converted; anything that outlives the line (the session pool, the door
+  registry, the telnet buffers, the CLI verbs) deliberately stays on `alloc()`. Oversize requests fall
+  back to `alloc()` rather than failing. Same store, back-to-back:
+
+  | Workload | Before | After |
+  |---|---:|---:|
+  | `help` / `whoami` (no filesystem) | 34 B/cmd | 27 B/cmd |
+  | door play (`quest` — a frame render per line) | 3,434 B/cmd | 389 B/cmd |
+  | Eliza door (per-line render + bot state) | 4,035 B/cmd | 1,229 B/cmd |
+  | `boards` / `list` (30-post store) | 13,343 B/cmd | 4,838 B/cmd |
+
+- **`g_uni_world` and `g_reply_subject` are owned by the session slot** (`src/main.cyr` `session_alloc` /
+  `session_reset`). Both were lazily allocated behind an `== 0` guard on a *process* global — but
+  `sess_load`/`sess_save` swap those globals per session, so every new session saw 0 and allocated again:
+  an 8 KB + 264 B leak for each session that entered a Universe door or replied to a post, bounded by
+  sessions **served**. They now allocate once per pooled slot (64 total, ever, +541 KB one-time) and
+  `session_reset` clears their contents instead of nulling the pointer.
+- **`boards_list`'s path buffer is hoisted out of its loop** (`src/board.cyr`) — it allocated a fresh
+  512-byte buffer per directory entry, so listing a store burned 512 B × entries every time anyone typed
+  `boards`. It is pure scratch, so one buffer reused across iterations is equivalent.
+
+### Deferred
+
+- **The ten door-game state objects and three chat-bot states** (`handler.cyr`, `quest.cyr`,
+  `port_authority.cyr`, `smuggler.cyr`, `olympiad.cyr`, `ashes.cyr`, `jabberwacky.cyr`, …). These live
+  across many lines, so the arena cannot own them; freeing them needs a `DD_FREE` hook on the door
+  descriptor plus a `*_free` per game — ten modules and an ABI change, which does not belong in the same
+  cut as a signal fix and a syscall sweep. What remains is a per-`play` residue bounded by how fast a
+  human re-enters doors, not by traffic (it is the whole difference between the Eliza row's 1,229 B/cmd
+  and the door row's 389 B/cmd above). Scheduled as the 1.6.3 headline.
+- **`dir_list`'s per-call allocation is upstream, not agora's** (`lib/fs.cyr:153`). It allocates a 4 KB
+  `getdents` buffer, a vec, and one `Str` per directory entry on every call, from the vendored stdlib
+  where agora cannot redirect it — that is the entire 4,838 B/cmd residue on filesystem commands, and it
+  scales with directory size. The fix is a cyrius-side variant writing into a caller-supplied buffer,
+  the same shape as the 1.4.5 `sock_set_send_timeout` ask.
+- **The Descent proxy still blocks the poll sweep** for as long as a player is in the MUD, stalling other
+  sessions. Making Descent a state in the poll loop rather than a blocking call is a larger change than
+  this cut takes on; the byte-routing bug above is fixed independently of it.
+
 ## [1.6.1] — 2026-07-25 (toolchain 6.4.78 + darshana 0.9.0 — the poll loop stops leaking)
 
 **A dependency cut, and the one that repairs a live leak in the 1.6.0 serve loop.** No new features and
