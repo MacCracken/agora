@@ -1,10 +1,19 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-07-25
+> **Last Updated**: 2026-07-26 (rebuilt from a full deferred-work sweep — see *Provenance* at the end)
 >
-> Versioned milestones through v1.0. Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment), this file lists what's shipped, what's next, what's deferred, and the v1.0 criteria. Per-tag chronology lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state in [`state.md`](state.md).
+> **What this file is**: what shipped, what is pinned next, what is real-but-unscheduled, and what is
+> deliberately not being done. **What it is not**: a second changelog. Per-tag narrative lives in
+> [`CHANGELOG.md`](../../CHANGELOG.md); the live snapshot and the current cut's detail live in
+> [`state.md`](state.md). Per [first-party-documentation § Development Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment).
 
-agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / public-assembly). The project is **cross-platform from M1**: built on cyrius `lib/net.cyr` socket primitives + `lib/io.cyr` / `lib/fs.cyr` storage, Linux today, AGNOS becomes one target among many as the stdlib gains backends ([ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
+agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / public-assembly). **Cross-platform
+from M1**: built on cyrius `lib/net.cyr` socket primitives + `lib/io.cyr` / `lib/fs.cyr` storage. Linux and
+AGNOS ship today; macOS and Windows follow as the stdlib gains backends
+([ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
+
+**Every open item below cites its source** — a `file:line`, an ADR, an audit finding, or a CHANGELOG
+entry. If an item has no citation it does not belong here.
 
 ---
 
@@ -55,121 +64,302 @@ agora is the BBS userland for AGNOS — Greek ἀγορά (civic-marketplace / p
 
 ---
 
-## In progress
+---
 
-**1.4.x hardening line complete (1.4.4 P(-1) → 1.4.5 deferred items → 1.4.6 R7). The next pinned item is the deferred sigil identity hand-off.** Carry the agora sigil identity across the Descent link ([ADR 0017](../adr/0017-descent-link-gateway.md)) so the MUD can bind the same citizen without a re-login — a two-repo, MUD-side-protocol bite. Everything else (deeper Universe / later door content / further chatbots / v2.x pillars) stays unpinned ([`roadmap-future.md`](roadmap-future.md)).
+## Now — pinned
 
-**Prior — 1.4.6 R7 door-dispatch refactor shipped 2026-06-15 — table-driven dispatch, no behavior change ([ADR 0020](../adr/0020-door-descriptor-registry.md)).** The ~130 per-game `if (game == GAME_X)` branch sites smeared across ~16 dispatch functions in `src/main.cyr` (`door_game_name`, `door_world_bytes`/`_valid`/`_fresh_into`/`_set_world`, `door_universe_slot`, `door_world_begin`, `door_universe_feed`/`_save`, `door_send_frame`, `door_feed_line`, `door_is_over`, `door_post_score`, `door_save_on_exit`, and the `play` launcher's new/load/start clusters) collapsed into one per-game descriptor record keyed by `GAME_*` id (`enum DoorDesc` + `door_registry_init`, built once per worker, guarded in `handle_client`), dispatched via `callptr` through function-address slots; a `0` slot means a capability is absent (chatbots have no save / no `is_over`; Olympiad no `start`). Adding the eleventh door is now one self-contained registry block, not eighteen edits. The per-game game logic is untouched — only how `main.cyr` selects it changed. Done in seven verified bites (one dispatch cluster at a time, full build+test+smoke after each); surfaced two undocumented Cyrius constraints recorded in architecture note [001](../architecture/001-cyrius-callptr-constraints.md) (bare `callptr` statements don't parse; `0` is a valid struct offset so optional offsets are `+1`-biased — the `AE_FP`-at-offset-0 bug). 221 tests (pure refactor); 1,374,240 → **1,375,360 B**; verified by all 13 door/universe/chat example smokes.
+The next few cuts, in the order they should happen. Ordering rationale: correctness of the *running
+server* first, then the doc-truth that other decisions depend on, then the guards that stop the last two
+cuts' bug classes from recurring.
 
-**Prior — 1.4.5 hardening follow-up shipped 2026-06-15 — closes the three items 1.4.4 deferred, no new features.** **T2** (MED) the send-side socket timeout: a slowloris-READ peer that never drains its receive window could park a forked worker in a blocking `write()` (the recv timeout never fires — the worker is in `write`, not `read`); `handle_client` now sets `SO_SNDTIMEO` (60 s) alongside `SO_RCVTIMEO`, and an `SO_SNDTIMEO` fire returns ≤0 from `write` which `send_buf` already treats as a short-write → close (composing with the 1.4.4 T1 fix). The timeout lives in the cyrius stdlib `lib/net.cyr` as the additive `sock_set_send_timeout` (per CLAUDE.md the listener uses net.cyr primitives, not raw syscalls), bridged into the pinned 6.2.7 snapshot. **T3** (LOW) the `TERMINAL_TYPE` buffer is NUL-terminated (widened to `TERM_TYPE_CAP+1`) so it's cstring-safe (the boundary was already non-overflowing — CVE-2020-10188 parity holds). **D3** (LOW) door render frames are bounds-enforced: the shared `emit_*` helpers refuse to write past `g_door_emit_cap` (set to `DOOR_FRAME_CAP` by `door_send_frame`, which renders into a guard-banded alloc and clamps the send), so a frame outgrowing 8192 truncates instead of overrunning the heap (t221). 220 → **221 tests**; 1,373,424 → **1,374,240 B**.
+### N1 — Clean shutdown (SIGINT / SIGTERM) · medium
 
-**Prior — 1.4.4 P(-1) hardening shipped 2026-06-15 — a security/refactor/optimization pass, no new features.** Realigned the toolchain (6.2.2 → 6.2.7) and the darshana git dep (0.5.3 → 0.7.0, signature-compatible), then ran the full P(-1) audit ([`docs/audit/2026-06-15-audit.md`](../audit/2026-06-15-audit.md)): four parallel line-by-line reads against the Security Hardening checklist + CVE-2020-10188 / CVE-2011-4862 parity. **Six findings fixed** — **T1** (HIGH) a remote CPU-peg DoS where `send_buf` spun forever on a partial-write error; **S1/R4** (HIGH) a heap overflow in `th_load_parse` from an unclamped file-supplied cable count; **D1/D2** (MEDIUM) unbounded integer accumulation in the shared door parsers letting a long all-digit quantity wrap i64 and slip an economy guard, now pinned at `DOOR_INT_MAX`; **R6** (LOW) a dropped `world_write` return; **R3** removed 7 dead functions. **No remote-compromise path found.** Three findings recorded as deferred: T2 (send-timeout — a `lib/net.cyr` stdlib task), T3/D3 (defense-in-depth), R7 (the door-dispatch refactor). 218 → **220 tests** (t219 handler clamp, t220 parser cap); 1,371,808 → **1,373,424 B**. **Next** (unpinned): the deferred sigil identity hand-off.
+**Neither serve loop can exit cleanly.** Both declare `var stop = 0;` and loop `while (stop == 0)` —
+`src/main.cyr:2333` (poll) and `:2950` (fork) — and **nothing anywhere assigns `stop`**. The server can
+only be killed: the poll model never drains its 64 slots, the fork model never reaps. 1.6.2 established
+the mechanism (`signal_ignore` for SIGPIPE) and retired ADR 0007's stated objection to `sigaction`, so
+the blocker is gone.
 
-**Prior — 1.4.3 Handler decrypt lever shipped 2026-06-14 — the 1.4.x decode arc is complete.** The decode engine ([ADR 0018](../adr/0018-decode-engine.md)) embedded inside The Handler as a desk-bound cryptanalysis lever ([ADR 0019](../adr/0019-decode-handler-lever.md)) — agora's **first cross-game mechanic reuse**. Reading a cable, the section chief spends one dispatch point to **break its cipher**: a decode round (a Numbers relay code for paperwork, a Words codename for an intercept) whose secret is derived *deterministically from the cable itself*. A crack reveals `CB_ANOM` — the hidden planted-anomaly ground truth — telling you whether the cable's discrepancy is a **deliberate plant** (the mole's forged routing) or mere **clerical noise** (an honest false positive), cutting the false-positive fog that *is* the mole hunt. The point cost prevents brute-forcing; the reward is purely additive, so the deduction math and the **save format** are untouched (the lever's state is runtime-only). Clean composition because decode is a pure state machine (a new `HSCR_DECRYPT` screen forwards lines to `decode_feed`, resolves on `decode_is_over`). 216 → **218 tests** (t217 derivation determinism, t218 the full win/quit flow); 1,367,728 → **1,371,808 B**; smoke `22-handler-decrypt.sh`. **Next** (unpinned): the deferred sigil identity hand-off.
+These are also the two deferrals `cyrius lint` reports on `main.cyr`, and this item appears in **no**
+other doc — it was genuinely untracked until this sweep.
 
-**Prior — 1.4.2 Decode / Words shipped 2026-06-14.** The Words (Wordle) variant added to the *same* `play decode` door on the *same* `decode_classify` engine ([ADR 0018](../adr/0018-decode-engine.md)) — a second skin, not a new game. `play decode` opens on a `[n]/[w]` select screen; Words cracks a hidden 5-letter word in six guesses, feedback rendered per-letter (green = right spot, yellow = in the word, gray = absent) from the exact-same scorer as Numbers' pegs. The dictionary is a curated **532-word** 5-letter table in its own data module (`src/decode_words.cyr`, a 5-byte-stride blob doubling as answer pool + valid-guess set — compile-time, pure, unit-testable, no runtime I/O). A Words crack carries a +200 difficulty bonus; quit is a lone-`q` test so QUEEN/QUICK/QUIET/QUITE aren't misread. 213 → **216 tests** (t214-t216); 1,358,848 → **1,367,728 B**; smoke `21-decode.sh` extended to both variants. **Next**: 1.4.3 Handler decrypt lever ([ADR 0019](../adr/0019-decode-handler-lever.md)).
+### N2 — The missing 1.6.0 ADR, and ADR 0007's premise · medium
 
-**Prior — 1.4.1 Decode / Numbers shipped 2026-06-14.** A single `play decode` door (`src/decode.cyr`, [ADR 0018](../adr/0018-decode-engine.md)) — classic Mastermind. The pure heart `decode_classify` is the symbol-agnostic, **duplicate-correct** per-position exact/present scorer (Mastermind black/white pegs and Wordle green/yellow/gray are the same computation), the injected unit-pinned seam (t209) in the `wager_pick`/`ol_pick_weighted` lineage — agora's one-engine/many-variants pattern a **fourth** time (door PRNG → wager → `compete()` → DECODE). 1.4.1 ships the **Numbers** variant (4-long code, colors 1..6, 10 guesses, exact/present counts); **Words/Wordle is 1.4.2** on the same engine, the **Handler decrypt lever is 1.4.3**. Solo/practice only; the secret is minted once from the seeded PRNG and persisted (marks recomputed on load); `scores decode`. This release also **migrated the toolchain 6.1.23 → 6.2.2** (the active compiler had drifted ahead of the pin; 6.2.2 reorganized the stdlib — `bigint` dropped, `bayan`/`thread_local`/`keccak`/`hashmap`/`thread` added to keep sigil's crypto path linked; a cycc 6.2.2 identifier-interning bug — a param named `secret` vs certain fn names — was worked around by renaming). 208 → **213 tests** (t209-t213); 880,288 → **1,358,848 B** (the jump is the broader 6.2.2 stdlib surface, not Decode); wire smoke `21-decode.sh`. **Next**: 1.4.2 Words, then 1.4.3 Handler decrypt lever.
+The largest architecture change since [ADR 0007](../adr/0007-fork-per-accept-concurrency.md) — one
+process for all 64 sessions, `AGORA_SERVE={fork,poll}`, the session pool, `sess_load`/`sess_save`, agnos
+always polling — **has no ADR**. The index jumps 0020 (1.4.6) → 0021 (1.6.2), and both 0021 and 0022 open
+by retroactively narrating 1.6.0 because there was nothing to cite.
 
-**Prior — 1.4.0 Descent link shipped 2026-06-10.** The gateway door (`src/descent.cyr`, [ADR 0017](../adr/0017-descent-link-gateway.md)) bridges a logged-in agora citizen into the sibling **Yeoman's Descent** MUD (`../cyrius-yeomans-descent`) over the shared telnet substrate — the BBS is now the front door to the MUD. A transparent TCP byte-proxy: the `descent` verb (login-gated) reads an operator endpoint from `<store>/.descent`, dials it (`net_connect_nb`), and shuttles bytes both ways via a `poll`-multiplexed loop until either side closes; the MUD's own telnet negotiation + login flow through verbatim. **Sigil identity hand-off is deferred** — the MUD has no external-identity path, so a true hand-off is a two-repo follow-on bite (ADR 0017 § Decision); for now the citizen re-authenticates inside the MUD. Toolchain pin 6.1.17 → **6.1.23**. 206 → **208 tests** (t207/t208 endpoint parsing); 874,168 → **880,256 B**; wire smoke `20-descent.sh`. **Next**: the deferred identity hand-off, the Olympiad's later events (gladiators/athletics/boat crews), and deeper-Universe work — all unpinned.
+Worse, ADR 0007 is still `Accepted` with no superseding note while its § Alternatives **rejects** "(E)
+single-thread epoll event loop" — precisely what 1.6.0 built — and its § Positive still claims audit
+findings M1/M2 closed "via address-space isolation", which ADR 0021 measured as regressed under poll and
+had to re-close with an arena.
 
-**Prior — 1.3.7 Ashes of Empire shipped 2026-06-09.** The war-game (`src/ashes.cyr`, [ADR 0014](../adr/0014-async-shared-world-strategy.md)) — an asynchronous shared-world strategy door, agora's deliberate rehearsal of shared-state mutation between concurrent callers before the MUD. Twelve provinces on a ring; found an empire, `march <src> <dst> <n>` (one order, three intents) queued to a shared snapshot, `ally`/`break` diplomacy (allied armies reinforce / coalition together; betrayal falls out of re-checking alliance at resolution). Turn-batch combat resolves **lazily on the next caller's entry** (mirroring `qu_day_tick`, no daemon); the batch transform is a pure, order-independent function — the most complex in the door tree. Built across five bites; login-gated, inherently universe-mode. 197 → **206 tests** (t198-t206); 841,824 → **874,168 B**; pin 6.1.15 → **6.1.17**; wire smokes `18-ashes.sh` + `19-ashes-concurrency.sh` (N concurrent foundings, all distinct under the `flock`).
+**The load-bearing part**: 0007 § Negative ("cannot implement an in-memory who's-online list without
+IPC") is cited *verbatim* by ADRs [0010](../adr/0010-persistent-universe.md):12,
+[0011](../adr/0011-chat-area.md):12, [0012](../adr/0012-chatbot-framework.md):26 and
+[0014](../adr/0014-async-shared-world-strategy.md):14, and echoed in `src/chat.cyr:8-13` and
+`src/ashes.cyr:33`, as the reason a feature was deferred. Under `serve_poll` that premise is false — and
+on agnos it is *always* false. Nothing is broken; disk+flock remains correct and is still required for
+the fork path. But **four deferrals cannot be honestly re-evaluated until this is re-derived** (`/who`,
+the room bot, the Ashes daemon, and cross-session presence generally).
 
-**Prior — 1.3.6 Olympiad shipped 2026-06-09.** A Greco-Roman games-**owner** sim (`src/olympiad.cyr`, [ADR 0016](../adr/0016-olympiad-competition-primitive.md)) — agora's biggest door and the wager module's flagship. You own a chariot stable, **train or rest** it across a daily-action economy, and climb a 12-meet ladder (Veii → the Circus Maximus) to the **tethrippon crown**, wagering on every race. The keystone is the event-agnostic **`compete()` primitive**: a form-weighted **kernel-CSPRNG draw resolves the race AND the same weights price the book** (`wager.cyr`'s new `wager_payout` fractional helper settles the pari-mutuel bet — a favourite pays < 1×). The fairness split moves up a level: the rival field is seeded/replayable, the winner is CSPRNG/non-replayable. Built across five bites; solo-saveable + `scores olympiad`. Later events (gladiators, athletics, boat crews) are thin descriptors on the primitive. 188 → **197 tests** (t189-t197); 812,528 → **841,824 B**; smoke `17-olympiad.sh`.
+Deliverable: ADR 0023 for the dual serve model (incl. the 1.5.0 agnos serial-accept decision, also
+unrecorded), plus an amendment note on 0007 and a one-line correction in each of the four citing ADRs.
 
-**Prior — 1.3.5 Casino integrations shipped 2026-06-08.** The shipped 1.3.4 wager module (`src/wager.cyr`) embedded across the three existing doors — the **first user-reachable wager surface**: a cantina **Dabo Wheel** in Port Authority (`PSCR_GAMBLE`, weighted 3-light 1×/2×/5×, 3% edge), back-alley **Bones** in Smuggler's Ledger (`SCR_DICE`, even-money, 6% edge), a tavern **Card Table** in QUEST (`QSCR_CARDS`, 4-suit 3:1, 4% edge). Three distinct table shapes, one shared module; each bets the game's existing gold field within a single feed call, so no save-format change. Shared `door_parse_2int` + `wager_reason`; per-game table builders unit-pinned (t186-t188). The three integrations chose *different* edges for tone, validating ADR 0013's per-game-edge decision. 185 → **188 tests**; 801,288 → **812,528 B** (wager now reachable, not NOPed); pin 6.1.14 → **6.1.15**; smoke `16-casino.sh`.
+### N3 — Crash-safe durable writes · small
 
-**Prior — 1.3.4 Wager shipped 2026-06-08.** The shared casino/wagering primitive (`src/wager.cyr`, [ADR 0013](../adr/0013-wagering-module-rng-fairness.md) → Accepted): bet validation + per-game payout tables + an explicit per-table basis-point house edge + the kernel-CSPRNG entropy draw (the one deliberately non-replayable point, distinct from the games' seeded PRNG) + pure resolve/settle with a structural no-negative-balance invariant. Built **ahead of its consumers** (DCE-NOPed until 1.3.5 wires it), the same way the 1.2.0 world-transaction framework preceded its games. A pre-cut multi-agent adversarial review (11 confirmed / 1 refuted, no critical/high) hardened the gold-accounting edges (edge-haircut overflow → staged divide-before-multiply; `wager_resolve` seam guards; negative-edge clamp; settle overflow guard; the `wager_pick` zero-total-vs-residual contract). 178 → **184 tests** (t179–t184); 797,640 → **801,288 B**; pin 6.1.12 → **6.1.14**.
+Three writes still use `file_write_all`, whose `O_TRUNC` empties the target at open: `src/door.cyr:277`
+(door save), `src/door.cyr:592` (`world_write`, the shared-world snapshot), `src/chat.cyr:378` (chat
+transcript). A crash or short write loses a player's save, the shared world, or a channel's history.
 
-**Prior — 1.3.3 Jabberwacky shipped 2026-06-08.** agora's first corpus-learning / persistent-state bot (`src/jabberwacky.cyr`, [ADR 0015](../adr/0015-jabberwacky-corpus-learning.md)): word-overlap retrieval over a `(stimulus, response)` corpus + a learn-the-transition rule (previous line → current line). A baked-in seed personality (shared) + a per-user **learned layer** that persists across sessions via `play jabberwacky solo` (`.users/<fp16>/games/jabberwacky.sav`) — no global corpus, so no cross-user poisoning/privacy surface (the risk [ADR 0012](../adr/0012-chatbot-framework.md) flagged). Also `play jabberwacky` (ephemeral practice) + `/jabberwacky` couch. A pre-cut multi-agent adversarial review (11 confirmed / 10 refuted, no critical/high) fixed an overlap double-count, two save/load robustness gaps, a mid-word truncation, a couch-reentry bridge, and a pronoun tie-break. 166 → **178 tests** (t167-t178); 782,064 → **797,640 B**; pin 6.1.10 → **6.1.12**; smoke `15-jabberwacky.sh`.
+`file_write_atomic` is already available at **`lib/io.cyr:355`** — no pin bump needed. This reads as
+closed because its sibling ask (`file_create_exclusive`) landed at 1.6.4; it is not. It is the item
+CLAUDE.md's *"posts are durable artifacts"* principle actually depends on, and no source comment marks
+it, so lint cannot see it.
 
-**Prior — 1.3.2 QUEST shipped 2026-06-08.** The LORD-homage door (`src/quest.cyr`, `play quest`): town hub + daily-rationed forest grind + the twelve Great-Work masters + the Emerald-fragment spine + the Sovereign ascension; solo-saveable + `scores quest`. Single-player climb (async-PvP/Universe deferred). A pre-cut adversarial review caught + fixed a critical `play quest universe` worker-crash, a monotonic-clock daily-reset soft-lock, and an unmapped `scores quest`. 160 → **166 tests** (t161-t166); 752,240 → **782,064 B**; pin 6.1.9 → **6.1.10**; smoke `14-quest.sh`.
+### N4 — The two poll-mode holes · small + medium
 
-**Prior — 1.3.1 PARRY shipped 2026-06-08.** Colby's 1972 paranoid chatbot as a sibling to Eliza (`src/parry.cyr`): reuses the 1.3.0 ELIZA text primitives but adds an **affect engine** (fear/anger/mistrust state, per-turn input classification, mood-gated dispatch, the Mafia/bookie delusion story arc) — reachable as `play parry` + a private `/parry` side-channel (the chat couch generalized to host both bots). A pre-cut adversarial review verified the affect model faithful and fixed one rotation defect. 155 → **160 tests** (t156-t160); 730,792 → **752,240 B**; smoke `13-parry.sh`.
+Both were recorded as "papercuts" at 1.6.5. One is worse than that label:
 
-**Prior — 1.3.0 Chat area + Eliza shipped 2026-06-08.** All three bites landed ([ADR 0011](../adr/0011-chat-area.md)): (1) the chat surface — per-channel `flock`'d **ring transcript** under `<store>/.chat/<channel>/`, a new `MODE_CHAT` with **live-tail by sequence number** on the `CHAT_POLL_SECS` recv-timeout tick (a `-EAGAIN` read in chat flushes new lines instead of disconnecting), `chat [channel]` / `/leave` / `/help`, login-gated; (2) **Eliza** (`src/eliza.cyr`) — the Weizenbaum 1966 DOCTOR as a pure decomposition/reassembly engine, reachable as a `play eliza` door + a private `/eliza` side-channel (replies only to the asker, never the room); (3) closeout. A pre-cut multi-agent adversarial review caught + fixed three real defects (Eliza `you`→`me` / `you are`→`I am` reflection grammar; a chat live-tail watermark drop under burst). 141 → **155 tests** (t142-t155); 678,776 → **730,792 B** (on cyrius 6.1.5 → **6.1.9**); cross-session + live-tail proven by `11-chat.sh`, both Eliza surfaces + privacy by `12-eliza.sh`. Detail: [ADR 0011](../adr/0011-chat-area.md) + CHANGELOG [1.3.0] + [`state.md`](state.md).
+- **`session_drain` has no agnos arm and its doc comment is wrong** (`src/main.cyr:2252-2283`). The
+  comment claims `sys_write` is non-blocking on both platforms; the syscall table says otherwise —
+  `lib/syscalls_x86_64_agnos.cyr:179`: `SYS_SOCK_SEND = 48; # … BLOCKS`, and `sys_write` routes tagged
+  socket fds straight to it. So on agnos — **the only target that always polls** — a slow reader blocks
+  the shared sweep and stalls all 64 sessions, and the `EWOULDBLOCK` check at `:2270` is dead code there.
+  `sess_recv_nonblock` (`:2290`) is the in-repo pattern to copy.
+- **`sess_tx_enqueue` drops content silently** (`src/main.cyr:2237-2244`). The over-cap arm returns 1
+  *without copying*, and **158 of 159 send call sites discard that return** — only the 1.6.3 telnet-tx
+  drain acts on it. An over-cap session loses bytes and stays open holding one of 64 slots, which is the
+  failure mode the same file's comment describes in its own words.
 
-**Next planned (see *Planned* below):** **1.4.0 Descent link** (BBS → MUD gateway) — the whole 1.3.x door arc (Chat+Eliza → PARRY → QUEST → Jabberwacky → Wager → casino integrations → Olympiad → Ashes of Empire) has shipped, with the 1.3.7 war-game deliberately retiring the shared-state-mutation-between-callers concurrency risk on the way. Deeper Universe (PA alliances/mines, Handler intercepts/sabotage, Smuggler aggregate price pressure), the Olympiad's later events (gladiators/athletics/boat crews), and further chatbot personalities (ALICE/Racter on the script engine; MegaHAL Markov generation as a sibling to Jabberwacky's retrieval) stay unpinned until pulled ([`roadmap-future.md`](roadmap-future.md)).
+### N5 — Guards for the last two cuts' bug classes · small ×3
 
-**Deferred (pull when a deployment asks):**
+Cheap, mechanical, and each one is a mitigation an **Accepted ADR already relies on** while existing only
+as a sentence inside that ADR:
 
-- `agora policy set <board> <mode>` + `agora admins {add,rm,list}` CLI verbs (operators currently edit `.policy` / `.admins` files directly).
-- Door directions still unpinned beyond 1.2.0 (Handler world-event track + legacy ranks, PA citadels/mining deep endgame, the 2400-baud teletype effect) live in [`roadmap-future.md`](roadmap-future.md) § Door games.
+- **No bare `alloc()` reachable from `process_rx`** — the gate that would have caught both halves of the
+  1.6.2 arena miss. It immediately finds **six live sites in `src/descent.cyr`** (`:273, :278, :360,
+  :362, :369, :370`) reachable per `descent` invocation.
+- **The mixed-allocator scan** ([ADR 0022](../adr/0022-door-state-free-hook.md):91-95 calls it "part of
+  the release check" — it is in no checklist). An `alloc()` pointer reaching `fl_free` is heap corruption.
+- **Arena instrumentation** — `cmd_alloc` falls back to `alloc()` silently on exhaustion
+  (`src/arena.cyr:60`) with no high-water mark. 1.6.5 found the 256 KB sizing wrong only because someone
+  measured by hand.
+
+Land all three in CLAUDE.md's Closeout Pass so they are actually run.
+
+### N6 — Make the deferral gate tell the truth · small
+
+`cyrius lint` reports **2** untracked deferrals; a tree-wide sweep reports **12 across 6 files**
+(`telnet.cyr` 5, `main.cyr` 2, `test.cyr` 2, `account.cyr` / `ashes.cyr` / `board.cyr` 1 each). The gap is
+that `lint` takes one file and only `main.cyr` is ever linted by habit, while `cyrius audit` walks the
+tree. Two consequences worth fixing on agora's side regardless of upstream: **run the deferral check
+tree-wide in the Closeout Pass**, and know that the checker treats *any* line mentioning `docs/` or
+`roadmap` as tracked — **citing a doc is not the same as being tracked in one**, which is how several
+stale notes pass clean.
+
+### N7 — Fuzz the IAC parser · medium
+
+CLAUDE.md § Key Principles states *"Fuzz every parser path — IAC sequences are adversarial-by-default"*
+as a hard rule. There is no `tests/` directory, no `.fcyr` harness anywhere, and no fuzz step in CI. The
+2026-07-26 audit says it plainly under *What this audit did not cover*: no dynamic analysis at all. The
+deferral dates to [0.2.0] ("fuzz earns its spot at M2+"); the input surface has widened four times since.
+**This is the largest gap between what CLAUDE.md asserts and what the repo does.**
+
+### N8 — `CYRIUS_DCE=1` in CI and release · small
+
+CLAUDE.md § CI/Release states *"every `cyrius build` in CI and release runs with `CYRIUS_DCE=1`"*. It
+appears in **neither** workflow. Binary size is a tracked release metric, so CI is currently measuring a
+different artifact than the one the docs describe.
+
+### N9 — Retire ~25 stale notes · small
+
+The sweep found **~25 comments and doc lines describing work that already shipped**. They are not
+harmless: several actively mislead, and three are `cyrius lint` **false positives** that should be marked
+`#skip-lint` so the gate means something. The worst offenders:
+
+- `src/main.cyr:2975-2984` — the agnos serial-accept arm is now **unreachable dead code**
+  (`serve_mode_from_env` returns `SERVE_POLL` on every agnos path, including the literal `"fork"`), and
+  its "epoll is the follow-up" comment is one of the two lint flags. Delete the branch or guard-comment it.
+- `src/main.cyr:8-16` "M1 ← active" — every milestone closed at 1.0.0.
+- `src/main.cyr:93-95`, `:266-270` "the accept loop single-tracks"; `:105-118` "pulled to per-conn locals
+  when concurrent-accept lands" — done via the `SESS_*` slots and `sess_load`/`sess_save`.
+- `src/chat.cyr:8-13` — reasons from fork's private address spaces (see N2).
+- `src/door.cyr:56-58` (`DOOR_UNIVERSE` "stubbed at 1.1.0" — wired since 1.2.0), `:283-285` ("shared world
+  state lands later" — the framework is 200 lines below in the same file).
+- `src/ashes.cyr:260-261` (victory condition "decided in a later bite" — `ash_is_over` does it),
+  `:22-25` ("later, queued orders + alliances" — both shipped in that same cut).
+- `src/olympiad.cyr:127` (purse "tier-scaled later" — scaled at `:539-541`).
+- **`docs/adr/README.md` lists 0013 and 0014 as Proposed**; both files and doc-health say Accepted. ADRs
+  0011 and 0014 also carry in-file "in progress" statuses.
+- Lint false positives needing `#skip-lint`: `src/telnet.cyr:619` ("follow-up subneg" means the subneg
+  that *follows* agreement, implemented at `:620-624`), and `src/test.cyr:4688` / `:4691` — the latter a
+  string literal inside a `test_fail(...)` call.
+
+*(One was fixed while writing this: `src/board.cyr`'s `input_byte_ok` header still claimed BEL/BS/DEL
+were passthrough, which 1.6.5 had made false 20 lines below.)*
 
 ---
 
-## Planned
+## Cross-repo — blocked on someone else
 
-> The 1.3.x door arc — Chat+Eliza ([ADR 0011](../adr/0011-chat-area.md)), PARRY, QUEST, Jabberwacky ([ADR 0015](../adr/0015-jabberwacky-corpus-learning.md)), Wager ([ADR 0013](../adr/0013-wagering-module-rng-fairness.md)), casino integrations, Olympiad ([ADR 0016](../adr/0016-olympiad-competition-primitive.md)), and Ashes of Empire ([ADR 0014](../adr/0014-async-shared-world-strategy.md)) — has all shipped (see the release table + *In progress* above; full rationale in each ADR + [`CHANGELOG.md`](../../CHANGELOG.md)). The only pinned item remaining is the Descent link.
-
-### 1.4.0 — Descent link (BBS → MUD gateway)
-
-agora and **Yeoman's Descent** ([`../cyrius-yeomans-descent`](https://github.com/MacCracken/cyrius-yeomans-descent) — a Cyrius-native, gritty techno-feudal MUD with its own TCP server) are the two halves of the AGNOS public-assembly surface: same telnet substrate, different application semantics (async boards/games vs. a real-time room/object world). 1.4.0 makes the BBS the **front door to the MUD** — a logged-in agora citizen can step through a portal into the Descent without dialing a second address.
-
-**Shape (for its ADR when it pulls forward):**
-
-- **A `descent` (or `mud`) door/portal** in the agora session: rather than a pure-module game, this door **bridges the socket** to the running Yeoman's Descent server (the MUD owns its own world loop; agora does not re-implement it). Likely a transparent TCP proxy — agora dials the MUD's listener and shuttles bytes both ways until the player exits back to the BBS.
-- **Identity hand-off** — carry the agora **sigil identity** (`g_session_fp` / handle) across the link so the MUD can bind the same citizen (a shared-identity story, adjacent to v2.x Pillar 1 *identity continuity*), instead of a second login. Mechanism TBD: a signed hand-off token vs. a trusted local socket.
-- **Operator config** — the MUD endpoint (host:port or local socket) is operator-set, like `.policy`; absent config → the door reports "no Descent linked."
-- **Boundary discipline** — agora stays the BBS; it does not absorb MUD semantics. The link is a *gateway*, so the two projects keep independent release cycles and the wire-proxy is the only coupling.
-
-**Open questions:** proxy vs. launch-a-client model under fork-per-accept; the identity-token format + trust model; whether the MUD runs co-located (same host) or remote; graceful teardown when either side drops. Earns a dedicated ADR (and possibly a small shared-protocol note in the genesis repo) when the link is cut.
+| Item | Where it is blocked | Effort |
+|---|---|---:|
+| **Sigil identity hand-off across the Descent link** — carry `g_session_fp`/handle into the MUD so a citizen does not re-authenticate. The project's long-standing named "next". | Yeoman's Descent has **no external-identity path** (name+passphrase only, no pre-authenticated session), so this needs MUD-side protocol work first. Open questions unchanged from [ADR 0017](../adr/0017-descent-link-gateway.md) § Decision: token format, trust model, co-located vs remote. | large |
+| **`dir_list` per-call allocation** — 4 KB `getdents` buffer + a vec + one `Str` per entry, every call. The entire remaining per-command residue (~15 KB/command on a 150-post board). | **Filed upstream** 2026-07-26: `cyrius/docs/development/issues/2026-07-26-agora-fs-dir-list-per-call-alloc.md`. Awaiting the language agent. | medium |
+| **macOS / Windows ports** | Gated on `lib/net.cyr` backends upstream. The gate has moved since the 1.0.0 note — re-check what actually remains. | large |
+| **Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions (`src/descent.cyr:268-271`, documented not fixed). | Not blocked externally, but the real fix is making Descent a *state* in the poll loop rather than a blocking call — a structural change large enough to want the N2 ADR written first. | large |
 
 ---
 
-## Backlog (gates met, no current consumer)
+## Backlog — real, unscheduled
 
-- **M3** — Inline-image post bodies via kii 1.0.0 (ASCII-art conversion). Pulls when a consumer asks for it.
-- **M4** — Stored-file deltas via sankoch 2.2.6 (compressed diff-based post-edit storage). Pulls when post-edit becomes a feature.
+Everything here is verified open with a citation. Grouped by kind, not priority; pull when a cut has room
+or a deployment asks.
 
-Both are gates-met but ship-deferred. Lots of value but no v1.0 dependency. Slated for v1.x bites if real BBS use surfaces the need.
+### Verification and tooling
+
+| Item | Source | Effort |
+|---|---|---:|
+| Accept-loop rate and per-session memory have **never** been benchmarked — and there are now two serve models to compare. CLAUDE.md P(-1) step 2 requires this baseline. | CLAUDE.md § P(-1); BENCHMARKS.md (parser only) | medium |
+| No `tests/` split and no multi-process harness — concurrency is proven only by smokes **CI never runs**. | `.github/workflows/ci.yml` | medium |
+| No regression pin for the 1.6.3 slow-reader close path — a HIGH-severity fix resting on inspection alone. | CHANGELOG [1.6.3] § Security | medium |
+| Four separate ADR "measure before refining" gates can never open because the benchmarks were never written (world-lock contention is the clearest). | ADRs 0010, 0014 | medium |
+| aarch64 is claimed as a supported target and nothing verifies it. | CLAUDE.md § Goal | medium |
+| The ~25 sigil "undefined function" build warnings — a standing "don't re-investigate" note whose premises have changed. | build output | unknown |
+
+### The wire — RFC conformance and telnet surface
+
+`telnet.cyr` holds the largest cluster of untracked deferrals (5 of the 12).
+
+| Item | Source | Effort |
+|---|---|---:|
+| Negotiated terminal state (NAWS cols/rows, TERMINAL_TYPE, LINEMODE mask) has **zero consumers** outside `telnet.cyr` — parsed and stored, never used to size or adapt output. | M2-D deferral | medium |
+| AYT (Are You There) generates no response; RFC 854 expects visible evidence. No test pins either behaviour. | `src/telnet.cyr` | small |
+| `telnet_announce` never sends DO LINEMODE — the Q-method machinery only engages if the client volunteers first. | `src/telnet.cyr` | small |
+| LINEMODE SLC arm describes a validation that was never written. | `src/telnet.cyr` | small |
+| Unrecognised subnegotiations (STATUS, NEW_ENVIRON, …) are silently dropped "for now". | `src/telnet.cyr:677, :711` | medium |
+| LINEMODE FORWARDMASK / SOFT_TAB / LIT_ECHO — parsed or enumerated, then deferred. | `src/telnet.cyr` | medium |
+| BS/DEL do not **edit** the line for clients that never negotiate LINEMODE. 1.6.5 stopped them being *stored*; editing is still open. | 2026-07-26 audit § INFO | small |
+
+### Storage, scale and policy
+
+| Item | Source | Effort |
+|---|---|---:|
+| Reply enumeration is scan-on-read O(n) per read — [ADR 0005](../adr/0005-threading-via-reply-to.md) named a scale trigger that has arguably fired. | ADR 0005 | large |
+| `sort_i64_asc` is an O(n²) insertion sort, run on every `list` and every reply scan. | `src/board.cyr` | small |
+| `account_resolve_handle` is an O(n) directory scan with no early exit; its doc comment is orphaned 265 lines away. | `src/account.cyr` | medium |
+| `boards_list` renders filesystem directory names verbatim — the one content-ish string still reaching the wire without `send_text` (1.6.4's IAC doubling). | `src/board.cyr` | small |
+| The promised `anon-allowed` per-board policy ADR was never written; `open` and `known` are currently **functionally identical** — a documented no-op an operator can set and observe nothing from. | ADR 0006 | medium |
+| `.admins` capped at 4 KB (~120 handles) with no continuation. | `src/board.cyr` | small |
+| No operator CLI — `agora policy set <board> <mode>`, `agora admins {add,rm,list}`. Operators edit files directly. | roadmap (long-standing) | medium |
+| Session-slot exhaustion by a slow-but-real typist is a knowingly-accepted risk with **no recorded acceptance**. | 1.6.4 § Changed | medium |
+| Accept-loop rate limiting — the never-taken half of audit M4's fix, blocked on a syscall agnos does not have. | 0.7.0 audit M4 | large |
+| cyrius 6.4.51 raised `ALLOC_MAX` 256 MiB → 2 GiB, weakening an accidental backstop on attacker-influenced lengths. Never examined. | CHANGELOG [1.6.2] | medium |
+
+### Architecture debt
+
+| Item | Source | Effort |
+|---|---|---:|
+| ADR 0022's borrowed world-snapshot pointer is an **unenforced per-module invariant** — door #11 can silently leak or corrupt the session pool. | ADR 0022 | medium |
+| ADR 0021's `cmd_alloc` classification rule lives only in the ADR — a misclassified site is a use-after-reset with no compiler help. | ADR 0021 | small |
+| The chat-couch bot dispatch was deliberately left out of the descriptor registry; its shared-offset ABI (PY/EZ alias) is unenforced. | ADR 0020 | small |
+| ADR 0020 descriptor slots resolve at run time — every new slot carries an untracked smoke-coverage obligation. | ADR 0020 | small |
+| ADR 0014's alliance/diplomacy open question was partly answered by 1.3.7; the ADR text was never updated. | ADR 0014 | medium |
+| ADR 0013's wager audit trail (and the commit-reveal alternative) remain deferred; the per-game-vs-global edge question was to be revisited after 1.3.5 and never was. | ADR 0013 | medium |
+| `PR_SET_PDEATHSIG` for orphan-on-parent-crash. | ADR 0007 § Out of scope | small |
+| Version literals are hand-bumped in three `main.cyr` places; the generated `version_str.cyr` was promised as a v1.0 close-out item. | CHANGELOG [0.2.0] | small |
+| Binary strip / DCE-aware emit — promised three times as a "v1.x close-out concern"; the problem changed shape when the 6.4.x stdlib added ~13 MB of BSS. | CHANGELOG | medium |
+| `state.md`'s orientation block is five releases stale though its header is current — the release post-hook is only half working. | `state.md:19-25` | small |
+
+### Doors and content
+
+| Item | Source | Effort |
+|---|---|---:|
+| **Olympiad's later events** (gladiators / athletics / boat crews) — thin descriptors on the `compete()` primitive, which was the whole point of building it. **Not in any roadmap until now.** | ADR 0016 | medium |
+| Olympiad race field is not tier-scaled — a flat 4 entrants at every meet. | `src/olympiad.cyr` | small |
+| Decode/Words rejects most real English words — the 532-entry list is both answer pool *and* guess dictionary. | ADR 0018 | small |
+| `AGORA_SERVE=epoll` is accepted and silently aliased to poll; a real epoll loop is "a later optimization". | `src/main.cyr` | medium |
 
 ---
 
-## Closed milestones
+## Later — v2.x and speculative
 
-Detail per release lives in [`CHANGELOG.md`](../../CHANGELOG.md); per-bite narrative in `state.md`'s "Recent shipped". Brief table here for the roadmap-skim case:
+Detail in [`roadmap-future.md`](roadmap-future.md). Unpinned by design: these pull forward when consumer
+pressure or operator demand surfaces, not on a calendar.
 
-- **M0** (0.1.0) — argv dispatch, six stub verbs, 43 KB scaffold binary.
-- **M1** (0.2.0) — five-bite telnet listener: IAC parser, Q-method negotiation, NAWS + TT subneg, LINEMODE, bench harness. 10 ns/byte hot path.
-- **M2** (0.3.0) — three-bite ANSI aesthetic: bannermanor MOTD, darshana SGR colors, `--motd` operator override. Bannermanor patched 1.0.1 same-day for ecosystem alignment on darshana 0.5.3.
-- **M5** (0.4.0 + 0.5.0) — eight-bite post persistence. Single-board (0.4.0): storage primitives, in-session command interpreter, sorted listing, RFC-822 headers, per-store flock, ingress filter. Multi-board threaded (0.5.0): boards, Reply-To threading. Four ADRs total (0002, 0003, 0004, 0005).
-- **M6** (0.6.0) — six-bite sigil-backed auth + per-board policy. ADR 0006 (identity model) + `src/account.cyr` primitives (M6-B) + telnet `login` challenge/response (M6-C) + `keygen`/`register`/`whoami` CLI + telnet `whoami` (M6-D) + `From:` post header (M6-E) + per-board `.policy` / `.admins` (M6-F). Adds sigil + freelist + bigint + ct to stdlib deps; 49 → 70 tests; 140 → 375 KB binary.
-- **0.7.0 security sweep** (0.7.0) — first dedicated audit cycle. Full report at [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md). Zero CRITICAL. 5 fixes landed: H1 CLI subject CRLF injection (`cmd_post`), H2 cmd_list/cmd_read --board path-traversal, H3 `post_from` re-validates handle + fp on read (defense vs. tampered user files), M3 `parse_post_id` 18-digit overflow guard, M6 30s explicit deadline on parked login challenge (deferred from M6-C). 4 items queued for 0.8 (concurrent-accept + per-conn memory arenas; anonymous board-create gate; keyfile mode warn-on-load; sigil 3.1.1 → 3.4.3 diff). 70 → 78 tests; 375 → 377 KB binary (+0.6%); no new stdlib deps.
-- **0.8.0 concurrent-accept** (0.8.0) — fork-per-connection accept loop via [ADR 0007](../adr/0007-fork-per-accept-concurrency.md). Audit M1 (bump-allocator memory growth) + M2 (login-challenge slot collision) both close via process isolation — kernel reclaims per-child memory at `sys_exit`; globals are per-process post-fork. Loop: `sys_waitpid(-1, NULL, WNOHANG)` reaper → `sock_accept` → `sys_fork` → child runs handle_client + `sys_exit(0)` / parent loops. Audit M4 (anonymous board-create) carried forward to 0.8-B — independent of concurrency model. 78 tests unchanged (E is in the accept loop, not unit-testable code); 377 → 378 KB binary (+0.09%); no new stdlib deps.
-- **1.0.0 v1 cut** (2026-05-23) — all six v1.0 criteria met, iron-validated on archaemenid (single-session telnet round-trip #3 + 8-user fanout #4). Closes the 0.x line (0.8.x audit followups + 0.9.0 ABI freeze [ADR 0008] + 0.9.1 doc-pass + 0.9.2 closeout). 80 tests; 378,456 B.
-- **1.1.0 door / games** (2026-06-07) — door subsystem ([ADR 0009](../adr/0009-door-games-subsystem.md)): three pure-module text games (Smuggler's Ledger, Port Authority, The Handler) + `play` verb + `MODE_DOOR`; Practice + Solo modes; Handler standings (first shared-disk feature). The solvable-mole deduction (t114) is the novel core. 80 → 121 tests; 378,456 → 484,184 B. Universe mode stubbed → **taken up by 1.2.0** (this is the work now in progress above).
-
----
-
-## v1.0 criteria — ✅ all met (2026-05-23)
-
-A release qualifies for 1.0 when:
-
-1. **M0–M6 + security sweep + hardening have all shipped at least once.** ✅ — shipped across 0.1.0 → 0.9.2 (eighteen tags).
-2. **`cyrius audit` passes from a clean build (lint / test / bench / doc).** ✅ — 80/80 tests; 5 benches within noise of M1-close baseline; clean DCE build at 378,456 B.
-3. **Telnet validation on archaemenid LAN — iron NUC running AGNOS serves telnet to a second box; end-to-end exercise: connect → log in → list boards → read a thread → post a reply → log off.** ✅ — `docs/examples/05-telnet-login.sh 2323` ran on archaemenid 2026-05-23: `login qix` → openssl-signed `auth:` → server `welcome, qix` → `whoami` reports `qix 878873ab607321a5`.
-4. **Multi-user concurrency: simulated 8-user fanout, no message loss, no state corruption.** ✅ — `docs/examples/04-concurrent-smoke.py 2323 8` ran on archaemenid 2026-05-23: 8/8 sessions OK (each got banner + IAC + boards reply with no cross-talk; ADR 0007 fork-per-accept process isolation confirmed at fanout).
-5. **Security audit (0.7.0) findings all closed in 0.8.0 hardening.** ✅ — H1/H2/H3 + M3 + M6 at 0.7.0; M1+M2 at 0.8.0; L1 at 0.8.1; M4 at 0.8.3. All discharged; sigil 3.1.1 → 3.4.3 diff at 0.8.2 found no upgrade-warranted findings.
-6. **RFC conformance: `src/test.cyr` covers the canonical sequences from RFCs 854 / 1143 / 1073 / 1091 / 1184.** ✅ — t01–t24 (IAC parser + Q-method + NAWS + TT + LINEMODE conformance suite); 56 additional tests for storage + auth + policy + audit regressions.
-
----
-
-## Post-v1.0 directions
-
-Six pillars for the v2.x sovereignty layer — identity continuity (sigil-portable Ed25519), content-addressed storage, threat-level node policy (SecureYeoman vocabulary), federation by interest (topics, not platforms), self-distribution baked into the protocol, and offline-tolerant store-and-forward. Detail in [`roadmap-future.md`](roadmap-future.md). Items are **unpinned** — they pull forward into a numbered minor when consumer pressure or operator demand surfaces, not on a calendar.
+- **The six v2.x sovereignty pillars** — identity continuity, content-addressed storage, threat-level node
+  policy, federation by interest, self-distribution, offline store-and-forward. These are the blocking
+  dependency for work already half-promised elsewhere: federated `Origin:` / content-addressed
+  `Content-Hash:` post headers are the *stated justification* for the 0.9.0 ABI freeze
+  ([ADR 0008](../adr/0008-post-headers-struct.md)) and remain unrealized.
+- **Door depth** — QUEST async-PvP (the largest missing piece of the LORD homage; tracked at
+  roadmap-future.md:23), The Handler v2 community layer (intercepted rival traffic, inter-section
+  sabotage — recorded **only** in a source comment), Port Authority's deep TradeWars endgame (multiple
+  planets, alliances).
+- **Ashes turn resolution has no daemon**, and its stated premise ("under fork-per-accept with no
+  background process") is now half-false — see N2.
+- **Chatbot personalities** — ALICE / Racter on the script engine; MegaHAL as a Markov sibling to
+  Jabberwacky's retrieval.
+- **Protocol reach** — cross-board replies (Reply-To is same-board only); operator opt-in for raw-mode
+  ESC/ANSI-art posts; 16→32 hex fingerprint widening (recorded only in a source comment); wire encryption
+  (ADR 0006 § Negative points at a pillar that does not exist in roadmap-future).
+- **M3** inline-image post bodies via kii, **M4** stored-file deltas via sankoch — gates met, no consumer.
+  Note CLAUDE.md asserts post-edit semantics that do not exist yet.
+- **$HOME keyfile resolution** depends on `/proc/self/environ` — blocked on the same stdlib work as the
+  macOS/Windows ports.
 
 ---
 
-## Companion project
+## Deliberately not doing
 
-**MUD userland** — separate repo, shares the telnet listener primitive but adds a real-time room/object model. Same wire-protocol substrate, different application semantics.
+Recorded so nobody re-opens them by accident:
+
+- **Per-source-address session caps** — needs `sys_getpeername`, which **agnos does not have**, so it
+  would protect Linux and leave the only always-poll target unprotected; it also mis-fires on a NAT'd
+  LAN. Declined at 1.6.4; `MAX_SESS` remains the operator's bound.
+- **Absolute session lifetime caps** — would disconnect legitimate long sessions (a QUEST run, an idle
+  chat). Declined at 1.6.4.
+- **`board_name_valid`'s reserved `_*` prefix** for an internal namespace that will never exist — the
+  comment should just go.
+
+---
+
+## Closed
+
+- **v1.0** — all six criteria met and iron-validated on archaemenid, 2026-05-23 (single-session telnet
+  round-trip + 8-user fanout). Criteria and evidence: [CHANGELOG](../../CHANGELOG.md) `[1.0.0]`.
+- **Milestones M0–M6**, the 0.7.0–0.9.2 hardening line, the 1.1.x–1.4.x door arc, 1.5.0 agnos target,
+  1.6.0 poll multiplex and the 1.6.1–1.6.5 hardening line: see the release table above and
+  [`CHANGELOG.md`](../../CHANGELOG.md). *This file deliberately no longer restates them.*
+- **The 2026-07-26 audit ledger is closed** — 3 HIGH + 5 MEDIUM + 4 LOW all fixed across 1.6.3–1.6.5;
+  one INFO item deliberately open (listed in the backlog). [Report](../audit/2026-07-26-audit.md).
+
+---
+
+## Provenance
+
+Rebuilt 2026-07-26 from an exhaustive deferred-work sweep across seven surfaces — all 21 source files,
+CHANGELOG `[0.1.0]`–`[1.6.5]`, all 22 ADRs, both audit documents, the state/doc-health ledgers,
+tests/examples/CI, and cross-repo commitments — with every "still open" claim verified against the tree
+at `88a2387`. **68 items surfaced; ~25 stale notes were found describing work that had already shipped**
+and are being retired separately rather than carried here.
+
+Two corrections the sweep produced, worth remembering: the Olympiad's later events were believed to be in
+`roadmap-future.md` and are not (they are now in the backlog above), and several items *read* as closed
+because a sibling ask shipped — `file_write_atomic` is the clearest, and is now N3.
 
 ## Cross-references
 
-- [`docs/development/state.md`](state.md) — live state snapshot (current version, binary size, in-flight slot, **next-session boot guide**).
-- [`docs/development/roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars (post-v1.0, unpinned).
-- [`docs/adr/`](../adr/) — **sixteen ADRs (0001–0016)**, all Accepted/Evergreen. 0001-0008 land across M1–0.9.0 (cross-platform listener / one-file-per-post / RFC-822 headers / board layout / Reply-To threading / identity model / fork-per-accept concurrency / PostHeaders struct ABI); the 1.x door arc adds 0009 (door subsystem), 0010 (Persistent Universe), 0011 (chat area), 0012 (chatbot framework), 0013 (wager/RNG fairness), 0014 (async shared-world war-game — Accepted at 1.3.7), 0015 (Jabberwacky corpus-learning), 0016 (Olympiad competition primitive).
-- [`docs/audit/`](../audit/) — security audit ledger; first entry 2026-05-23 (0.7.0 sweep).
-- [`docs/doc-health.md`](../doc-health.md) — fresh/stale ledger across the whole doc tree.
+- [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
+- [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door/chatbot backlog.
+- [`docs/adr/`](../adr/) — **22 ADRs (0001–0022)**, all Accepted/Evergreen. 0001–0008 span M1–0.9.0; the
+  1.x arc adds 0009–0020 (doors, Universe, chat, chatbots, wager, war-game, Jabberwacky, Olympiad, Descent
+  link, decode engine, decode-as-Handler-lever, door registry); 0021–0022 are the 1.6.x memory work
+  (per-command arena, door-state free hook). **A 1.6.0 serve-model ADR is missing — see N2.**
+- [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2, closed at 1.6.5).
+- [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
+- **Companion project**: [Yeoman's Descent](https://github.com/MacCracken/cyrius-yeomans-descent) — the MUD
+  userland. Same telnet substrate, different application semantics; linked by the 1.4.0 gateway.

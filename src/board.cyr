@@ -163,11 +163,12 @@ fn board_path(store, board, out_buf): i64 {
 #     attack. We strip at ingress; future operator config may add
 #     an opt-in flag for raw-mode posts.
 #
-# Everything else is passthrough — TAB, CR, LF, all printable ASCII,
-# UTF-8 high bytes (128-255), BEL, BS, DEL. M5-B+ may grow backspace
-# handling (`db == 0x08` → line_pos -= 1, echo "\b \b"); for now BS
-# lands in the post body as a literal control byte (uncommon in
-# practice over telnet).
+# Passthrough is TAB, CR, LF, printable ASCII and UTF-8 high bytes
+# (128-255). Everything else in C0, plus DEL and IAC, is dropped — see
+# the per-byte reasoning in the body below. (This header said the
+# opposite until 1.6.5 corrected the body and left the summary behind;
+# BS/DEL no longer reach a post. Making BS *edit* the line for
+# non-LINEMODE clients is still open — roadmap § Backlog, The wire.)
 fn input_byte_ok(b): i64 {
     if (b == 0)    { return 0; }
     if (b == 0x1B) { return 0; }
