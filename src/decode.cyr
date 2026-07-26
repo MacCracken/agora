@@ -107,7 +107,7 @@ enum DG {
 # present to each remaining guess position only while the tally for that
 # symbol lasts. Pure; len must be <= DECODE_CODE_MAX. Unit-pinned.
 fn decode_classify(code, guess, len, out_marks): i64 {
-    var tally = alloc(256);
+    var tally = cmd_alloc(256);
     memset(tally, 0, 256);
     var i = 0;
     while (i < len) {
@@ -337,20 +337,32 @@ fn decode_msg(st, s): i64 {
 # realloc. (1.4.1 opened straight into Numbers; the select screen generalizes
 # it without changing the door contract.)
 fn decode_new(seed, mode): i64 {
-    var st = alloc(DG_SIZE);
+    var st = fl_alloc(DG_SIZE);
     memset(st, 0, DG_SIZE);
     store64(st + DG_SEED, seed);
     rng_seed(st + DG_RNG, seed);
     store64(st + DG_MODE, mode);
     store64(st + DG_VARIANT, DV_NONE);
     store64(st + DG_WORDID, 0);
-    store64(st + DG_SECRET,  alloc(DECODE_CODE_MAX));
-    store64(st + DG_GUESSES, alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
-    store64(st + DG_MARKS,   alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
-    store64(st + DG_MSG, alloc(256));
+    store64(st + DG_SECRET,  fl_alloc(DECODE_CODE_MAX));
+    store64(st + DG_GUESSES, fl_alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
+    store64(st + DG_MARKS,   fl_alloc(DECODE_TRIES_MAX * DECODE_CODE_MAX));
+    store64(st + DG_MSG, fl_alloc(256));
     store8(load64(st + DG_MSG), 0);
     store64(st + DG_SCREEN, DSCR_SELECT);
     return st;
+}
+
+# 1.6.3 (ADR 0022) — release a Decode state and its four owned buffers. Decode
+# is solo-only, so there is no world pointer to protect.
+fn decode_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + DG_SECRET));
+    fl_free(load64(st + DG_GUESSES));
+    fl_free(load64(st + DG_MARKS));
+    fl_free(load64(st + DG_MSG));
+    fl_free(st);
+    return 0;
 }
 
 # Door-contract start hook: a fresh game sits on the select screen until the
@@ -606,7 +618,7 @@ fn decode_feed(st, line, len): i64 {
         return 0;
     }
 
-    var guessbuf = alloc(DECODE_CODE_MAX);
+    var guessbuf = cmd_alloc(DECODE_CODE_MAX);
     if (load64(st + DG_VARIANT) == DV_WORDS) {
         var rcw = decode_parse_words(line, len, guessbuf);
         if (rcw == DEC_BADLEN)  { decode_msg(st, "Enter a 5-letter word."); return 0; }
@@ -682,7 +694,7 @@ fn decode_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "DECO1\n", 6) == 0) { return 0; }
     var st = decode_new(0, DOOR_SOLO);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + DG_VARIANT,  save_get_i64(buf, len, cur));
     store64(st + DG_LEN,      save_get_i64(buf, len, cur));

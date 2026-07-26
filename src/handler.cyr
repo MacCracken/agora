@@ -150,7 +150,7 @@ fn th_registry_count(st): i64 {
 # === Construction ===
 
 fn th_new(seed, mode, max_days): i64 {
-    var st = alloc(TH_SIZE);
+    var st = fl_alloc(TH_SIZE);
     memset(st, 0, TH_SIZE);
     store64(st + TH_SEED, seed);
     rng_seed(st + TH_RNG, seed);
@@ -163,8 +163,8 @@ fn th_new(seed, mode, max_days): i64 {
     store64(st + TH_MODE, mode);
     store64(st + TH_OVER, 0);
     store64(st + TH_REGCOUNT, 0);
-    store64(st + TH_AGENTS_P, alloc(TH_AGENTS * AG_SIZE));
-    store64(st + TH_REG_P, alloc(TH_REG_MAX * CB_SIZE));
+    store64(st + TH_AGENTS_P, fl_alloc(TH_AGENTS * AG_SIZE));
+    store64(st + TH_REG_P, fl_alloc(TH_REG_MAX * CB_SIZE));
 
     var rng = st + TH_RNG;
     var i = 0;
@@ -637,11 +637,11 @@ fn th_save_format(st, buf, cap): i64 {
 fn th_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "THDG1\n", 6) == 0) { return 0; }
-    var st = alloc(TH_SIZE);
+    var st = fl_alloc(TH_SIZE);
     memset(st, 0, TH_SIZE);
-    store64(st + TH_AGENTS_P, alloc(TH_AGENTS * AG_SIZE));
-    store64(st + TH_REG_P, alloc(TH_REG_MAX * CB_SIZE));
-    var cur = alloc(8);
+    store64(st + TH_AGENTS_P, fl_alloc(TH_AGENTS * AG_SIZE));
+    store64(st + TH_REG_P, fl_alloc(TH_REG_MAX * CB_SIZE));
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + TH_SEED,    save_get_i64(buf, len, cur));
     store64(st + TH_RNG,     save_get_i64(buf, len, cur));
@@ -700,7 +700,7 @@ fn th_load_parse(buf, len): i64 {
 fn th_start(st): i64 {
     store64(st + TH_PEND, 0);
     store64(st + TH_CURSOR, 0);
-    store64(st + TH_MSG, alloc(256));
+    store64(st + TH_MSG, fl_alloc(256));
     store8(load64(st + TH_MSG), 0);
     store64(st + TH_SCREEN, HSCR_MAIN);
     # 1.4.3: the decrypt lever's runtime scratch. The cracked bitset is
@@ -708,10 +708,25 @@ fn th_start(st): i64 {
     # ciphers, but the verdict is re-derivable by cracking again.
     store64(st + TH_DECODE, 0);
     store64(st + TH_DECRI, 0 - 1);
-    store64(st + TH_CRACKED, alloc(TH_REG_MAX));
+    store64(st + TH_CRACKED, fl_alloc(TH_REG_MAX));
     memset(load64(st + TH_CRACKED), 0, TH_REG_MAX);
     if (load64(st + TH_REGCOUNT) == 0) { th_gen_day(st); }
     if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); }
+    return 0;
+}
+
+# 1.6.3 (ADR 0022) — release a Handler state and its four owned buffers.
+# TH_AGENTS_P / TH_REG_P are allocated by BOTH th_new and th_load_parse (the
+# cable register is the biggest state buffer in the tree at TH_REG_MAX*CB_SIZE);
+# TH_MSG and TH_CRACKED come from th_start, which runs after either. TH_WORLD is
+# NOT freed — the shared city-alert snapshot belongs to the session slot.
+fn th_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + TH_AGENTS_P));
+    fl_free(load64(st + TH_REG_P));
+    fl_free(load64(st + TH_MSG));
+    fl_free(load64(st + TH_CRACKED));
+    fl_free(st);
     return 0;
 }
 
@@ -864,7 +879,7 @@ fn th_cracked_set(st, ri): i64 {
 fn th_cipher_for_cable(cb, out_secret): i64 {
     var mix = load64(cb + CB_NR) * 131 + load64(cb + CB_AGENT) * 17
             + load64(cb + CB_DAY) * 7 + load64(cb + CB_KIND) + 1;
-    var cell = alloc(8);
+    var cell = cmd_alloc(8);
     rng_seed(cell, mix);
     if (load64(cb + CB_KIND) == 2) {                     # intercept -> Words
         var id = rng_below(cell, decode_word_count());
@@ -883,7 +898,7 @@ fn th_cipher_for_cable(cb, out_secret): i64 {
 # decrypt screen. Caller has already charged the dispatch point.
 fn th_begin_decrypt(st, ri): i64 {
     var cb = th_cable_at(st, ri);
-    var sec = alloc(DECODE_CODE_MAX);
+    var sec = cmd_alloc(DECODE_CODE_MAX);
     var variant = th_cipher_for_cable(cb, sec);
     var dg = decode_new(clock_now_ns(), DOOR_PRACTICE);
     if (variant == DV_WORDS) { decode_set_words(dg); }
@@ -1263,7 +1278,7 @@ fn thw_byte_size(): i64  { return thw_word_count() * 8; }
 
 fn thw_new(): i64 {
     var n = thw_word_count();
-    var w = alloc(n * 8);
+    var w = cmd_alloc(n * 8);
     memset(w, 0, n * 8);
     store64(w + THW_OFF_VERSION * 8, THW_VERSION);
     return w;

@@ -39,13 +39,25 @@
 # allocated once behind an `== 0` guard and stays on `alloc()`.
 #
 # Oversize requests fall back to `alloc()` rather than failing: correctness
-# first: a caller that needs more than the arena still gets valid memory, it
-# just leaks that one allocation the way it did before. `CMD_ARENA_BYTES` is
-# sized above the largest single command's total (the `read` path is the peak,
-# at ~100 KB of post + id-list + header buffers), so the fallback is not
-# expected to fire in practice.
+# first — a caller that needs more than the arena still gets valid memory, it
+# just leaks that one allocation the way it did before.
+#
+# 1.6.3 (audit): the 1.6.2 sizing note claimed the `read` path peaked at ~100 KB
+# and that the fallback would not fire in practice. **That was wrong**, and it
+# was measurable: `read` allocates its own id list + post buffer + header
+# buffers (~166 KB) and then calls `replies_to`, which allocates a SECOND id
+# list and post buffer (~98 KB) to scan the board for children — ~264 KB, just
+# over the old 256 KB. On a 150-post board that pushed ~15 KB per `read` into
+# the fallback, i.e. straight back into the unreclaimed bump heap. Raised to
+# 512 KB, which covers the real worst case with room to spare; it is one
+# allocation for the life of the process, against a ~14 MB image.
+#
+# The lesson for future call sites: the arena's guarantee is only as good as
+# this number, and a nested call can double a command's footprint without any
+# single function looking expensive. When adding a command that reads posts,
+# check the total, not the local.
 enum CmdArena {
-    CMD_ARENA_BYTES = 262144;    # 256 KB, allocated once, reused every line
+    CMD_ARENA_BYTES = 524288;    # 512 KB, allocated once, reused every line
 }
 
 var g_cmd_arena = 0;         # arena base (lazily allocated on first use)

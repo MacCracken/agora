@@ -29,6 +29,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 15 | [`15-jabberwacky.sh`](15-jabberwacky.sh) | 1.3.3 Jabberwacky: the door learns a pair mid-session and replays it; `/jabberwacky` answers privately; a `solo` pair survives a disconnect (per-user persistence) — ADR 0015 | `./bbs/`, `./keys/qix` |
 | 23 | [`23-sigpipe-survival.py`](23-sigpipe-survival.py) | 1.6.2: SIGPIPE — rude disconnects close one session, not the server (has teeth only under `AGORA_SERVE=poll`; kills an unpatched server at exit 141) | none |
 | 24 | [`24-descent-serve-models.sh`](24-descent-serve-models.sh) | 1.6.2: the Descent byte-proxy forwards client→MUD under BOTH serve models, asserted against a fake MUD that logs what it receives | `./bbs/`, `./keys/qix` |
+| 25 | [`25-door-state-churn.py`](25-door-state-churn.py) | 1.6.3: the DD_FREE release paths under churn — enter/quit across all nine practice doors, quit-then-enter alternation (freed blocks recycled straight into the next game), and repeated disconnect-mid-game so `session_release` frees a live slot | none |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

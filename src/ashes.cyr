@@ -161,7 +161,7 @@ fn ashw_byte_size(): i64   { return ashw_word_count() * 8; }
 # bits live in the snapshot. We borrow door.cyr's seeded xorshift on a scratch
 # cell so the derivation is pure (no global PRNG state) and reproducible.
 fn ash_terrain(seed, t): i64 {
-    var cell = alloc(8);
+    var cell = cmd_alloc(8);
     rng_seed(cell, seed + t * 2654435761 + 1);
     return rng_below(cell, 4);
 }
@@ -202,7 +202,7 @@ fn ash_terr_name(t): i64 {
 # A fresh province's neutral garrison — small, terrain-scaled so the fortress
 # provinces cost more to take than the plains. Pure (scratch RNG on seed,t).
 fn ash_neutral_army(seed, t): i64 {
-    var cell = alloc(8);
+    var cell = cmd_alloc(8);
     rng_seed(cell, seed + t * 40503 + 7);
     var terr = ash_terrain(seed, t);
     return ASH_NEUT_BASE + ash_terrain_defense(terr) + rng_below(cell, 4);
@@ -215,7 +215,7 @@ fn ash_neutral_army(seed, t): i64 {
 # buffer (ashw_byte_size() bytes), built with alloc like paw_new.
 fn ashw_new(seed): i64 {
     var n = ashw_word_count();
-    var w = alloc(n * 8);
+    var w = cmd_alloc(n * 8);
     memset(w, 0, n * 8);
     store64(w + ASHW_OFF_VERSION * 8, ASHW_VERSION);
     store64(w + ASHW_OFF_SEED * 8, seed);
@@ -478,7 +478,7 @@ fn ash_uf_find(parent, i): i64 {
 # (ties to the lower fp). Writes co_fp[] / co_army[]; returns the coalition
 # count. Pure (alliance state read from w).
 fn ash_coalitions(w, att_fp, att_army, natt, co_fp, co_army): i64 {
-    var parent = alloc(natt * 8);
+    var parent = cmd_alloc(natt * 8);
     var i = 0;
     while (i < natt) { store64(parent + i * 8, i); i = i + 1; }
     i = 0;
@@ -573,9 +573,9 @@ fn ash_better(a_fp, a_pow, b_fp, b_pow): i64 {
 # Writes [new_fp, new_army] into out (out+0, out+8). Pure.
 fn ash_contest(def_fp, def_army, def_terr, att_fp, att_army, natt, out): i64 {
     var nc = natt + 1;
-    var c_fp  = alloc(nc * 8);
-    var c_arm = alloc(nc * 8);
-    var c_pow = alloc(nc * 8);
+    var c_fp  = cmd_alloc(nc * 8);
+    var c_arm = cmd_alloc(nc * 8);
+    var c_pow = cmd_alloc(nc * 8);
     # slot 0 = incumbent defender (terrain-boosted power)
     store64(c_fp, def_fp);
     store64(c_arm, def_army);
@@ -635,9 +635,9 @@ fn ash_resolve_combat(w): i64 {
     var n = ASH_TERR;
     var no = ashw_norders(w);
     # snapshot the window-START map (departures + defense read from this)
-    var s_owner = alloc(n * 8);
-    var s_army  = alloc(n * 8);
-    var remain  = alloc(n * 8);
+    var s_owner = cmd_alloc(n * 8);
+    var s_army  = cmd_alloc(n * 8);
+    var remain  = cmd_alloc(n * 8);
     var t = 0;
     while (t < n) {
         store64(s_owner + t * 8, ashw_owner(w, t));
@@ -646,9 +646,9 @@ fn ash_resolve_combat(w): i64 {
         t = t + 1;
     }
     # arrivals as a flat list of (dst, owner, army), capped at ASH_MAXORD
-    var a_dst  = alloc(ASH_MAXORD * 8);
-    var a_fp   = alloc(ASH_MAXORD * 8);
-    var a_army = alloc(ASH_MAXORD * 8);
+    var a_dst  = cmd_alloc(ASH_MAXORD * 8);
+    var a_fp   = cmd_alloc(ASH_MAXORD * 8);
+    var a_army = cmd_alloc(ASH_MAXORD * 8);
     var na = 0;
     # DEPARTURE — per source province, in queue order, capped at its garrison
     var s = 0;
@@ -687,11 +687,11 @@ fn ash_resolve_combat(w): i64 {
         s = s + 1;
     }
     # ARRIVAL / COMBAT — per destination, gather forces and contest
-    var att_fp  = alloc(n * 8);
-    var att_arm = alloc(n * 8);
-    var co_fp   = alloc(n * 8);
-    var co_arm  = alloc(n * 8);
-    var out = alloc(16);
+    var att_fp  = cmd_alloc(n * 8);
+    var att_arm = cmd_alloc(n * 8);
+    var co_fp   = cmd_alloc(n * 8);
+    var co_arm  = cmd_alloc(n * 8);
+    var out = cmd_alloc(16);
     t = 0;
     while (t < n) {
         var def_fp = load64(s_owner + t * 8);
@@ -833,13 +833,22 @@ fn ash_msg_clear(st): i64 {
 }
 
 fn ash_new(seed, mode): i64 {
-    var st = alloc(AE_BYTES);
+    var st = fl_alloc(AE_BYTES);
     memset(st, 0, AE_BYTES);
     store64(st + AE_MODE, mode);
-    store64(st + AE_MSG, alloc(256));
+    store64(st + AE_MSG, fl_alloc(256));
     ash_msg_clear(st);
     store64(st + AE_SCREEN, ASCR_MAP);
     return st;
+}
+
+# 1.6.3 (ADR 0022) — release an Ashes state. AE_WORLD is NOT freed: it points
+# at the session slot's shared snapshot, set under the lock by main.cyr.
+fn ash_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + AE_MSG));
+    fl_free(st);
+    return 0;
 }
 
 fn ash_start(st): i64 {
@@ -1129,7 +1138,7 @@ fn ash_feed(st, line, len): i64 {
     if (ash_cmd_is(line, len, "m") == 1)     { is_march = 1; }
     if (is_march == 1) {
         var after = ash_after_word(line, len);
-        var nums = alloc(24);
+        var nums = cmd_alloc(24);
         var cnt = ash_scan_ints(line, len, after, nums, 3);
         if (cnt < 3) { ash_msg(st, "usage: march <src> <dst> <count>"); return 0; }
         var src = load64(nums);
@@ -1159,7 +1168,7 @@ fn ash_feed(st, line, len): i64 {
 
     if (ash_cmd_is(line, len, "ally") == 1) {
         var after = ash_after_word(line, len);
-        var nums = alloc(8);
+        var nums = cmd_alloc(8);
         var cnt = ash_scan_ints(line, len, after, nums, 1);
         if (cnt < 1) { ash_msg(st, "usage: ally <a province your target holds>"); return 0; }
         var prov = load64(nums);
@@ -1177,7 +1186,7 @@ fn ash_feed(st, line, len): i64 {
 
     if (ash_cmd_is(line, len, "break") == 1) {
         var after = ash_after_word(line, len);
-        var nums = alloc(8);
+        var nums = cmd_alloc(8);
         var cnt = ash_scan_ints(line, len, after, nums, 1);
         if (cnt < 1) { ash_msg(st, "usage: break <a province the ally holds>"); return 0; }
         var prov = load64(nums);
@@ -1233,7 +1242,7 @@ fn ash_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "ASHES\n", 6) == 0) { return 0; }
     var st = ash_new(0, DOOR_UNIVERSE);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + AE_SEENTURN, save_get_i64(buf, len, cur));
     store64(st + AE_SEENHELD, save_get_i64(buf, len, cur));

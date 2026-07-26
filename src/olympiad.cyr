@@ -241,7 +241,7 @@ fn ol_compete_winner(forms, n): i64 {
 # repeat. Writes 0-based entrant indices into out_order[0..n) (1st first).
 # Returns 0, or (0-1) on a CSPRNG fault. Uses a working `taken` mask.
 fn ol_compete_order(forms, n, out_order): i64 {
-    var taken = alloc(n);
+    var taken = cmd_alloc(n);
     var z = 0;
     while (z < n) { store8(taken + z, 0); z = z + 1; }
     var place = 0;
@@ -337,7 +337,7 @@ fn ol_msg(st, s): i64 {
 # Build a new owner with a founding chariot team. Practice = ephemeral
 # coin; Solo = a persistent stable (save lands in bite 3/4).
 fn ol_new(seed, mode): i64 {
-    var st = alloc(OL_SIZE);
+    var st = fl_alloc(OL_SIZE);
     memset(st, 0, OL_SIZE);
     store64(st + OL_SEED, seed);
     rng_seed(st + OL_RNG, seed);
@@ -350,14 +350,14 @@ fn ol_new(seed, mode): i64 {
     store64(st + OL_CROWNS, 0);
     store64(st + OL_LASTDAY, 0);
     # runtime scratch
-    store64(st + OL_STABLE, alloc(OL_STABLE_MAX * CMP_SIZE));
+    store64(st + OL_STABLE, fl_alloc(OL_STABLE_MAX * CMP_SIZE));
     store64(st + OL_SCREEN, OSCR_STABLE);
     store64(st + OL_SEL, 0);
-    store64(st + OL_MSG, alloc(256));
+    store64(st + OL_MSG, fl_alloc(256));
     store8(load64(st + OL_MSG), 0);
-    store64(st + OL_FIELD, alloc(OL_FIELD_MAX * 8));
-    store64(st + OL_ORDER, alloc(OL_FIELD_MAX * 8));
-    store64(st + OL_FCOMP, alloc(OL_FIELD_MAX * CMP_SIZE));
+    store64(st + OL_FIELD, fl_alloc(OL_FIELD_MAX * 8));
+    store64(st + OL_ORDER, fl_alloc(OL_FIELD_MAX * 8));
+    store64(st + OL_FCOMP, fl_alloc(OL_FIELD_MAX * CMP_SIZE));
     store64(st + OL_FIELDN, 0);
     store64(st + OL_PLACE, 0);
     store64(st + OL_PURSE, 0);
@@ -371,6 +371,20 @@ fn ol_new(seed, mode): i64 {
         OL_STAT_START, OL_STAT_START, OL_STAT_START, OL_STAT_START,
         100, FAC_BLUE, 0);
     return st;
+}
+
+# 1.6.3 (ADR 0022) — release an Olympiad state and its five owned buffers.
+# ol_new is the only state constructor (ol_load_parse builds on it), so every
+# fl_alloc above is paired here exactly once. Olympiad is solo-only — no world.
+fn ol_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + OL_STABLE));
+    fl_free(load64(st + OL_MSG));
+    fl_free(load64(st + OL_FIELD));
+    fl_free(load64(st + OL_ORDER));
+    fl_free(load64(st + OL_FCOMP));
+    fl_free(st);
+    return 0;
 }
 
 # === Flavour name tables ===
@@ -642,7 +656,7 @@ fn ol_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "OLYM1\n", 6) == 0) { return 0; }
     var st = ol_new(0, DOOR_SOLO);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + OL_SEED,    save_get_i64(buf, len, cur));
     store64(st + OL_RNG,     save_get_i64(buf, len, cur));
@@ -944,7 +958,7 @@ fn ol_feed(st, line, len): i64 {
     if (screen == OSCR_RACE) {
         if (k == 120) { ol_clear_bet(st); store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
         if (k == 0)   { return ol_run_race(st); }                          # blank Enter — race
-        var sp = alloc(8);
+        var sp = cmd_alloc(8);
         var lane = door_parse_2int(line, len, sp);
         var stake = load64(sp);
         if (lane < 0)  { ol_msg(st, "Wager '<lane> <stake>', Enter to race, x to scratch."); return 0; }

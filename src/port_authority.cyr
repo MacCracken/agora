@@ -82,12 +82,16 @@ fn pa_port_stride(): i64 {
 # buys, with sell-prices low in the band and buy-prices high (the spread
 # you arbitrage). Returns the galaxy object pointer.
 fn pa_galaxy_new(seed): i64 {
-    var gx = alloc(GX_SIZE);
-    var warps = alloc(PA_SECTORS * PA_MAX_WARPS * 8);
-    var ports = alloc(PA_SECTORS * pa_port_stride() * 8);
+    # 1.6.3 (ADR 0022) — freelist-allocated so pa_free can release it. The
+    # galaxy is owned by the STATE (PA_GX, regenerated from the seed on load),
+    # not by the shared world at PA_WORLD — which is owned by the session slot
+    # and must never be freed here.
+    var gx = fl_alloc(GX_SIZE);
+    var warps = fl_alloc(PA_SECTORS * PA_MAX_WARPS * 8);
+    var ports = fl_alloc(PA_SECTORS * pa_port_stride() * 8);
     store64(gx + GX_WARPS, warps);
     store64(gx + GX_PORTS, ports);
-    var rng = alloc(8);
+    var rng = cmd_alloc(8);
     rng_seed(rng, seed);
 
     var s = 0;
@@ -208,7 +212,7 @@ enum PA {
 }
 
 fn pa_new(seed, mode, max_days): i64 {
-    var st = alloc(PA_SIZE);
+    var st = fl_alloc(PA_SIZE);
     memset(st, 0, PA_SIZE);
     store64(st + PA_SEED, seed);
     rng_seed(st + PA_RNG, seed);
@@ -381,10 +385,26 @@ fn pa_nth_warp(gx, sector, n): i64 {
 fn pa_start(st): i64 {
     store64(st + PA_GX, pa_galaxy_new(load64(st + PA_SEED)));
     store64(st + PA_PEND, 0);
-    store64(st + PA_MSG, alloc(256));
+    store64(st + PA_MSG, fl_alloc(256));
     store8(load64(st + PA_MSG), 0);
     store64(st + PA_SCREEN, PSCR_MAIN);
     if (load64(st + PA_OVER) != 0) { store64(st + PA_SCREEN, PSCR_OVER); }
+    return 0;
+}
+
+# 1.6.3 — release a Port Authority state, its galaxy, and the galaxy's two
+# tables. PA_WORLD is deliberately NOT freed: it points at the session slot's
+# shared-world buffer (main.cyr door_set_world), which outlives every state.
+fn pa_free(st): i64 {
+    if (st == 0) { return 0; }
+    var gx = load64(st + PA_GX);
+    if (gx != 0) {
+        fl_free(load64(gx + GX_WARPS));
+        fl_free(load64(gx + GX_PORTS));
+        fl_free(gx);
+    }
+    fl_free(load64(st + PA_MSG));
+    fl_free(st);
     return 0;
 }
 
@@ -585,9 +605,9 @@ fn pa_save_format(st, buf, cap): i64 {
 fn pa_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "PADG1\n", 6) == 0) { return 0; }
-    var st = alloc(PA_SIZE);
+    var st = fl_alloc(PA_SIZE);
     memset(st, 0, PA_SIZE);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + PA_SEED,      save_get_i64(buf, len, cur));
     store64(st + PA_RNG,       save_get_i64(buf, len, cur));
@@ -1126,8 +1146,8 @@ fn pa_dabo_name(i): i64 {
 # handler so the tuning is unit-testable (t186). The weights/mults arrays
 # are bump-allocated so they outlive the borrowed table.
 fn pa_dabo_table(tbl): i64 {
-    var w = alloc(3 * 8); store64(w, 3); store64(w + 8, 2); store64(w + 16, 1);
-    var m = alloc(3 * 8); store64(m, 1); store64(m + 8, 2); store64(m + 16, 5);
+    var w = cmd_alloc(3 * 8); store64(w, 3); store64(w + 8, 2); store64(w + 16, 1);
+    var m = cmd_alloc(3 * 8); store64(m, 1); store64(m + 8, 2); store64(m + 16, 5);
     return wager_table_init(tbl, PA_DABO_MIN, 0, PA_DABO_EDGE, 3, w, m);
 }
 
@@ -1141,12 +1161,12 @@ fn pa_dabo_table(tbl): i64 {
 fn pa_feed_gamble(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }   # x — leave
-    var pick = alloc(8);
+    var pick = cmd_alloc(8);
     var stake = door_parse_2int(line, len, pick);
     var sym = load64(pick);
     if (stake < 0) { pa_msg(st, "Bet like '50 3' -- stake, then 1-3.  x to leave."); return 0; }
     if (sym < 1)   { pa_msg(st, "Pick a light: 1 Green, 2 Amber, 3 Red.  x to leave."); return 0; }
-    var tbl = alloc(WT_SIZE);
+    var tbl = cmd_alloc(WT_SIZE);
     pa_dabo_table(tbl);
     var choice = sym - 1;                       # player 1-3 → outcome 0-2
     var bal = load64(st + PA_CREDITS);
@@ -1255,7 +1275,7 @@ fn paw_byte_size(): i64  { return paw_word_count() * 8; }
 # sector unclaimed. Returns the flat buffer (paw_byte_size() bytes).
 fn paw_new(seed): i64 {
     var n = paw_word_count();
-    var w = alloc(n * 8);
+    var w = cmd_alloc(n * 8);
     memset(w, 0, n * 8);
     store64(w + PAW_OFF_VERSION * 8, PAW_VERSION);
     store64(w + PAW_OFF_SEED * 8, seed);

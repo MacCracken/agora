@@ -456,7 +456,7 @@ fn ez_i_generic(idx, rb, rl, out): i64 {
 
 # KW_I: inspect the word after "i" (or treat "i'm"/"im" as "i am").
 fn ez_resp_i(st, idx, norm, nlen, kwpos, kwlen, out): i64 {
-    var rb = alloc(EZ_REFL_CAP);
+    var rb = cmd_alloc(EZ_REFL_CAP);
     var rl = 0;
     var kw = norm + kwpos;
     var amlike = 0;
@@ -727,11 +727,11 @@ fn ez_resp_none(st, out): i64 {
 # out (must be >= EZ_RESP_CAP). Returns the reply length. `st` carries
 # the per-keyword cycle counters + memory ring across the conversation.
 fn ez_respond(st, line, len, out): i64 {
-    var norm = alloc(EZ_IN_MAX + 1);
+    var norm = cmd_alloc(EZ_IN_MAX + 1);
     var nlen = ez_normalize(line, len, norm, EZ_IN_MAX);
     if (nlen <= 0) { return ez_resp_none(st, out); }
-    var posp = alloc(8);
-    var lenp = alloc(8);
+    var posp = cmd_alloc(8);
+    var lenp = cmd_alloc(8);
     var kwid = ez_scan(norm, nlen, posp, lenp);
     if (kwid == KW_NONE) { return ez_resp_none(st, out); }
     var kwpos = load64(posp);
@@ -739,7 +739,7 @@ fn ez_respond(st, line, len, out): i64 {
     var idx = ez_counter_next(st, kwid);
     if (kwid == KW_I) { return ez_resp_i(st, idx, norm, nlen, kwpos, kwlen, out); }
     var rstart = kwpos + kwlen;
-    var rb = alloc(EZ_REFL_CAP);
+    var rb = cmd_alloc(EZ_REFL_CAP);
     var rl = ez_reflect(norm + rstart, nlen - rstart, rb, EZ_REFL_CAP);
     if (kwid == KW_MY)       { return ez_resp_my(st, idx, norm, nlen, kwpos, kwlen, rb, rl, out); }
     if (kwid == KW_SORRY)    { return ez_resp_sorry(idx, out); }
@@ -771,7 +771,7 @@ fn ez_respond(st, line, len, out): i64 {
 # 1 if the first word of line is a goodbye token (a port convention —
 # the 1966 script had no quit word; the operator ended the session).
 fn ez_is_quit(line, len): i64 {
-    var w = alloc(16);
+    var w = cmd_alloc(16);
     var wl = ez_word_lower(line, len, w, 16);
     if (wl == 3) { if (memeq(w, "bye", 3) == 1) { return 1; } }
     if (wl == 7) { if (memeq(w, "goodbye", 7) == 1) { return 1; } }
@@ -786,19 +786,25 @@ fn ez_is_quit(line, len): i64 {
 # max_days are part of the door contract but unused (deterministic,
 # practice-only — a DOCTOR session has no save worth persisting).
 fn ez_new(seed, mode, max_days): i64 {
-    var st = alloc(EZ_SIZE);
+    # 1.6.3 (ADR 0022) — the state and everything it owns come from the
+    # FREELIST, not the bump allocator, so ez_free can hand them back. Under
+    # AGORA_SERVE=poll one process serves every session, so a state abandoned
+    # at `quit` or at disconnect used to be gone for the life of the server.
+    # Every fl_alloc here has exactly one matching fl_free in ez_free below;
+    # nothing else in this module allocates into the state.
+    var st = fl_alloc(EZ_SIZE);
     store64(st + EZ_OVER, 0);
-    var resp = alloc(EZ_RESP_CAP);
+    var resp = fl_alloc(EZ_RESP_CAP);
     store64(st + EZ_RESP, resp);
     store64(st + EZ_RESPLEN, 0);
-    var ctrs = alloc(KW_COUNT * 8);
+    var ctrs = fl_alloc(KW_COUNT * 8);
     var i = 0;
     while (i < KW_COUNT) { store64(ctrs + i * 8, 0); i = i + 1; }
     store64(st + EZ_CTRS, ctrs);
     store64(st + EZ_NONECTR, 0);
-    var mem = alloc(EZ_MEM_SLOTS * EZ_MEM_SLOT);
+    var mem = fl_alloc(EZ_MEM_SLOTS * EZ_MEM_SLOT);
     store64(st + EZ_MEM, mem);
-    var meml = alloc(EZ_MEM_SLOTS * 8);
+    var meml = fl_alloc(EZ_MEM_SLOTS * 8);
     var k = 0;
     while (k < EZ_MEM_SLOTS) { store64(meml + k * 8, 0); k = k + 1; }
     store64(st + EZ_MEMLEN, meml);
@@ -806,6 +812,22 @@ fn ez_new(seed, mode, max_days): i64 {
     store64(st + EZ_MEMCNT, 0);
     store64(st + EZ_MEMCTR, 0);
     return st;
+}
+
+# 1.6.3 — release a DOCTOR state and everything it owns. Mirrors ez_new field
+# for field; `st` itself goes last so the loads above are still valid. Safe on
+# 0 (fl_free ignores a null), and idempotent from the caller's side only if the
+# caller nulls its pointer — door_state_free in main.cyr does exactly that.
+# Note ELIZA has no save/load path (practice-only), so ez_new is the ONLY
+# constructor and this is the only free needed.
+fn ez_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + EZ_RESP));
+    fl_free(load64(st + EZ_CTRS));
+    fl_free(load64(st + EZ_MEM));
+    fl_free(load64(st + EZ_MEMLEN));
+    fl_free(st);
+    return 0;
 }
 
 # Seed the opening line.

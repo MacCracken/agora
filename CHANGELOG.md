@@ -4,6 +4,133 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-07-26 (the door states learn to die: DD_FREE, and what the audit found)
+
+**agora's memory is now bounded.** 1.6.2 fixed the per-line leak and named what it could not reach: the
+ten door-game state objects and the three chat-bot couch states, which live across many lines and so
+cannot belong to the per-command arena. This cut gives every game a **`DD_FREE` hook**
+([ADR 0022](docs/adr/0022-door-state-free-hook.md)) backed by the freelist — the module CLAUDE.md has
+prescribed since M6 and that agora had never once called. Running `play`/`quit` cycles through a poll-mode
+server, total RSS growth goes from **720 KB at 600 commands and 2,460 KB at 2,400** (linear, forever) to
+**208 KB and 203 KB** — flat, one-time setup, no per-command component.
+
+It also carries the fixes from a **full P(-1) audit** ([`docs/audit/2026-07-26-audit.md`](docs/audit/2026-07-26-audit.md)):
+eight dimensions swept in parallel, every finding put to an independent skeptic instructed to refute it.
+The headline is one the arena work had missed entirely — **`scores` is unauthenticated and leaked
+~5 KB per invocation**, so any client that can reach the port could exhaust the server's heap without
+logging in. 221/221 tests unchanged; both targets build; all 20 example smokes green plus a new churn
+smoke; 14,567,424 → **14,571,552 B**.
+
+### Security
+
+- **Unauthenticated heap exhaustion via `scores`** (`src/main.cyr` `door_render_leaderboard` /
+  `door_leaderboard_path` / `door_post_score`, **HIGH**). The 1.6.2 arena conversion covered
+  `session_execute`'s own arms but never reached the leaderboard helpers they call, and unlike `post` /
+  `reply` / `chat` / `play`, **`scores` needs no login**. Every invocation permanently burned a path
+  buffer, a 16 KB read buffer, three index arrays and a per-row buffer allocated *inside* the ranking
+  loop — measured at **5,140 B per command**, and the early-out for an absent leaderboard fires *after*
+  most of it. Under poll that is one process's heap, so a client pipelining `scores` in a loop walks the
+  server toward the point where `alloc()` returns 0 and the next store faults — taking all 64 sessions
+  with it. All nine sites now use `cmd_alloc`, and the per-row buffer is hoisted out of the loop:
+  **5,140 → 31 B per command**.
+- **The chat live-tail leaked on every idle tick** (`src/main.cyr` `chat_flush_tail`, **HIGH**). It
+  allocated `CHAT_LOG_BUF + CHAT_TAIL_CAP + 8` per call, and it is called on the **idle poll tick**, not
+  just after a typed line — so a session that merely *sits* in a channel leaked every `CHAT_TICK_MS`
+  with no input at all. Because the tick is not bracketed by the per-line arena reset, the fix is three
+  dedicated process-lifetime buffers rather than `cmd_alloc`: dispatch is single-threaded and neither
+  buffer outlives the call, so sharing them is safe where arena scratch would not be.
+- **No send return was checked anywhere in the tree** (`src/main.cyr` `process_rx`, **HIGH**,
+  long-standing). A tree-wide grep for a tested send return finds **zero hits across ~164 call sites** —
+  and two of them sit inside the per-byte ingress loop. Under fork, a client that stops reading makes every
+  `sys_write` park for the full 60 s `SEND_TIMEOUT_SECS` and return 1; the loop discarded that and moved to
+  the **next byte**, so one 4 KB recv could pin a forked child for hours while children are unbounded.
+  Under poll, `sess_tx_enqueue` refuses an over-cap write and returns 1 without copying, and nobody closed
+  the session — it stayed open but permanently mute, holding a slot: exactly the "slow-reader defense" its
+  own comment claims and never implemented. Worse, this silently disarmed the SO_SNDTIMEO mitigation the
+  2026-06-15 audit closed **T2** with — the timeout fired and the result was thrown away. Both sites now
+  set `quit` and leave the loop, which both serve models already turn into a close. *Fix verified by
+  inspection and no-regression; the trigger itself could not be staged end to end — a non-reading client's
+  kernel absorbs enough that the server never stalls.*
+- **`descent_write_all`'s EAGAIN retry was an unbounded busy-spin** (`src/descent.cyr`, **HIGH**, **a bug
+  1.6.2 introduced**). The client fd is `O_NONBLOCK` under poll, so a peer that stops reading returns
+  EAGAIN forever and the retry was a bare `continue` — no sleep, no deadline. That function runs inside the
+  process owning **all 64 sessions**, so one wedged Descent player pegged a core and froze every other
+  session permanently. Now paced at 20 ms (the sweep cadence) with a 10 s deadline, after which the peer is
+  treated as dead. Worth recording plainly: the 1.6.2 cut fixed a class of bug and introduced a fresh
+  instance of it one function away, which is the argument for auditing *after* a hardening cut.
+- **`account_register` wrote the user files without `O_TRUNC`** (`src/account.cyr`, **MEDIUM**,
+  long-standing). Re-registering the **same key** under a shorter handle left the tail of the previous
+  value behind. Reproduced end to end: `register --handle averylonghandle` then `register --handle qix`
+  left `handle` containing `qix\nylonghandle\n`, and `whoami` reported the wrong handle from then on.
+  Registration is idempotent by design, so overwriting in place is intended — it just has to overwrite the
+  whole file.
+- **The unauthenticated login path leaked per attempt** (`src/main.cyr` `process_rx`, **MEDIUM**) — the
+  signature, public-key and verify-message buffers on the `auth:` arm, plus the per-connection greet
+  buffer and the per-line chat sanitizer buffer. All are inside the per-line dispatch, so they move to
+  `cmd_alloc`. An attacker could previously drive them with `login x` / `auth: …` repeatedly.
+
+### Added
+
+- **`DD_FREE` (descriptor slot 208; `DD_SIZE` 208 → 216)** and ten `*_free` functions —
+  `sl_free`, `pa_free`, `th_free`, `ez_free`, `py_free`, `qu_free`, `jw_free`, `ol_free`, `ash_free`,
+  `decode_free` — each written directly beneath its game's constructor so the pairing stays honest. Every
+  game's state block **and the buffers it owns** now come from `fl_alloc`: Port Authority's galaxy and its
+  two tables, the Handler's agent roster and cable register, Jabberwacky's seven corpus buffers,
+  Olympiad's five, Decode's four, Eliza's four. The shared world snapshot is deliberately **not** freed —
+  `SL_WORLD` / `PA_WORLD` / `TH_WORLD` / `AE_WORLD` point at the session slot's buffer, not at state-owned
+  memory.
+- **Three release points**: `door_state_free()` on the `quit` path (after `door_save_on_exit`, which reads
+  the state); `session_door_free(s)` from `session_release` and defensively from `session_reset`, for a
+  player who **disconnects mid-game**; and the `play` launcher before installing a replacement. The
+  slot-based variant exists because under poll the `g_*` globals belong to whichever session was last
+  `sess_load`ed — freeing through them at release time would free **another player's game**.
+- **The three chat-couch bot states** (`SESS_ELIZA` / `SESS_PARRY` / `SESS_JABBER`) are freed on the same
+  paths; they are built by the same constructors and were leaking identically.
+- **New smoke [`25-door-state-churn.py`](docs/examples/25-door-state-churn.py)** — the regression pin for
+  the free paths, and deliberately hostile to them: enter/quit churn across all nine practice doors,
+  quit-then-immediately-enter alternation (so a freed state's blocks are handed straight back out to the
+  next game, which is where a bad free shows up), and repeated **disconnect-mid-game** so
+  `session_release` frees a live slot. Green on both serve models at 360 cycles.
+
+### Changed
+
+- **61 per-line scratch buffers inside the game modules move to `cmd_alloc`** (`ashes` 22, `smuggler` 7,
+  `port_authority` 7, `eliza` 6, `quest` 5, `handler` 4, `jabberwacky` 3, `olympiad` 3, `decode` 3,
+  `parry` 1). These are the per-feed working buffers — normalizers, weight tables, the Ashes combat
+  resolver's coalition arrays — with a one-line lifetime that ADR 0021's arena already covers. This is
+  what takes Jabberwacky from 8,998 to **478 B/command** and Eliza from 1,229 to **348**.
+- **`CMD_ARENA_BYTES` 256 KB → 512 KB, and the 1.6.2 sizing note corrected.** That note claimed the `read`
+  path peaked at ~100 KB and that the fallback "is not expected to fire in practice". Wrong, and
+  measurable: `read` allocates its own id list + post + header buffers (~166 KB) and then calls
+  `replies_to`, which allocates a **second** id list and post buffer (~98 KB) to scan for children —
+  ~264 KB against a 256 KB arena, so on a 150-post board every `read` pushed ~15 KB into the `alloc()`
+  fallback (**30,133 → 14,828 B/command**; the remainder is `dir_list`). The lesson is in the header now:
+  a nested call can double a command's footprint without any single function looking expensive.
+- **`boards_list`'s per-entry path buffer** and **the leaderboard's per-row buffer** are hoisted out of
+  their loops.
+
+### Fixed (tests)
+
+- **`16-casino.sh` was flaky, and had been for a long time** — measured **3/6 runs failing** on the 1.6.2
+  binary. Its QUEST section farmed gold with a *fixed* attack budget, but monster HP comes from the seeded
+  PRNG, so a tougher-than-average beast left the player mid-fight when the script pressed `c` and the card
+  table never rendered; the mugger check on returning to town could end the run outright too. The grind is
+  gone entirely — the assertion already accepts a funds-reject as proof of the wager wiring, so there was
+  never a reason to farm first. **8/8 runs pass.** Worth stating plainly because it cost real time: the
+  failure first looked exactly like a 1.6.3 regression, and only a pass-rate comparison against the 1.6.2
+  binary (6/6 vs 3/6) showed it was pre-existing.
+
+### Notes
+
+- **`dir_list` remains the one unfixed residue** and it is not agora's to fix: `lib/fs.cyr:153` allocates
+  a 4 KB `getdents` buffer, a vec, and one `Str` per directory entry on every call, from the vendored
+  stdlib. That is the whole of the ~6.9 KB/command that `boards` / `list` still show, and it scales with
+  directory size. The fix is a cyrius-side variant writing into a caller-supplied buffer — same shape as
+  the 1.4.5 `sock_set_send_timeout` ask, which shipped upstream and returned in a later pin.
+- **Where the audit's remaining findings went** — see the audit document for the full list with severities
+  and the refuted ones. Items not fixed here are recorded there with a disposition rather than silently
+  carried.
+
 ## [1.6.2] — 2026-07-25 (the poll model pays its debts: SIGPIPE, the arena, and the agnos syscalls)
 
 **1.6.1 listed three deferred items; this cut closes all three, and two more the work uncovered.**

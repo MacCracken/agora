@@ -186,7 +186,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.2 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.6.3 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -807,6 +807,8 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 send_str(cfd, "Universe play needs an identity — log in first ('login <handle>').\r\n");
                 return MODE_COMMAND;
             }
+            # 1.6.3 — a `play` while a state is already live would orphan it.
+            door_state_free();
             g_door_game = game;
             g_door_mode = DOOR_UNIVERSE;
             # (1.6.2: g_uni_world is owned by the session slot — always non-0.)
@@ -870,6 +872,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
         }
 
+        # 1.6.3 — same guard as the Universe branch above: never overwrite a
+        # live state pointer, or its buffers are orphaned for the life of the
+        # server under poll.
+        door_state_free();
         g_door_game = game;
         g_door_mode = dmode;
         var seed = clock_now_ns();
@@ -1079,7 +1085,13 @@ enum DoorDesc {
     DD_UNI_SEED    = 184;   # i64 game-state seed override for Universe new (0 = clock)
     DD_ON_ENTRY    = 192;   # fn(st) Universe on-entry hook (Ashes founding); 0 = none
     DD_MODE_POLICY = 200;   # DM_* mode coercion applied by the `play` launcher
-    DD_SIZE        = 208;
+    # 1.6.3 (ADR 0022) — fn(st) releasing a door state and everything it owns.
+    # 0 = this game's state is not freeable (none today: all ten register one).
+    # The state and its owned buffers come from the FREELIST (fl_alloc), not the
+    # bump allocator, so the pairing is real; a game's *_free lives next to its
+    # constructor in the same module, which is how the pairing stays honest.
+    DD_FREE        = 208;
+    DD_SIZE        = 216;
     DF_UNIVERSE    = 1;     # DD_FLAGS bit — shared-world game
     DM_NORMAL         = 0;  # practice / solo / universe all allowed
     DM_PRACTICE_ONLY  = 1;  # chatbots — force practice (no save, no world)
@@ -1116,7 +1128,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "smuggler");      store64(d + DD_USLOT, "smuggleru");
     store64(d + DD_RENDER, &sl_render);    store64(d + DD_FEED, &sl_feed);
     store64(d + DD_IS_OVER, &sl_is_over);  store64(d + DD_SAVE_FMT, &sl_save_format);
-    store64(d + DD_NEW, &sl_new);          store64(d + DD_LOAD, &sl_load_parse);
+    store64(d + DD_NEW, &sl_new);
+    store64(d + DD_FREE, &sl_free);          store64(d + DD_LOAD, &sl_load_parse);
     store64(d + DD_DEF_DAYS, SL_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
     store64(d + DD_WORLD_BYTES, &slw_byte_size); store64(d + DD_WORLD_VALID, &slw_valid);
     store64(d + DD_WORLD_NEW, &slw_new);   store64(d + DD_WORLD_SEED, 0);
@@ -1129,7 +1142,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "port");          store64(d + DD_USLOT, "portu");
     store64(d + DD_RENDER, &pa_render);    store64(d + DD_FEED, &pa_feed);
     store64(d + DD_IS_OVER, &pa_is_over);  store64(d + DD_SAVE_FMT, &pa_save_format);
-    store64(d + DD_NEW, &pa_new);          store64(d + DD_LOAD, &pa_load_parse);
+    store64(d + DD_NEW, &pa_new);
+    store64(d + DD_FREE, &pa_free);          store64(d + DD_LOAD, &pa_load_parse);
     store64(d + DD_DEF_DAYS, PA_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
     store64(d + DD_WORLD_BYTES, &paw_byte_size); store64(d + DD_WORLD_VALID, &paw_valid);
     store64(d + DD_WORLD_NEW, &paw_new);   store64(d + DD_WORLD_SEED, PA_UNIVERSE_SEED);
@@ -1143,7 +1157,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "handler");       store64(d + DD_USLOT, "handleru");
     store64(d + DD_RENDER, &th_render);    store64(d + DD_FEED, &th_feed);
     store64(d + DD_IS_OVER, &th_is_over);  store64(d + DD_SAVE_FMT, &th_save_format);
-    store64(d + DD_NEW, &th_new);          store64(d + DD_LOAD, &th_load_parse);
+    store64(d + DD_NEW, &th_new);
+    store64(d + DD_FREE, &th_free);          store64(d + DD_LOAD, &th_load_parse);
     store64(d + DD_DEF_DAYS, TH_DEF_DAYS); store64(d + DD_FLAGS, DF_UNIVERSE);
     store64(d + DD_WORLD_BYTES, &thw_byte_size); store64(d + DD_WORLD_VALID, &thw_valid);
     store64(d + DD_WORLD_NEW, &thw_new);   store64(d + DD_WORLD_SEED, 0);
@@ -1155,20 +1170,23 @@ fn door_registry_init(): i64 {
     d = dd_new_desc(GAME_ELIZA);
     store64(d + DD_NAME, "eliza");
     store64(d + DD_RENDER, &ez_render);    store64(d + DD_FEED, &ez_feed);
-    store64(d + DD_NEW, &ez_new);          store64(d + DD_DEF_DAYS, EZ_DEF_DAYS);
+    store64(d + DD_NEW, &ez_new);
+    store64(d + DD_FREE, &ez_free);          store64(d + DD_DEF_DAYS, EZ_DEF_DAYS);
     store64(d + DD_START, &ez_start);       store64(d + DD_MODE_POLICY, DM_PRACTICE_ONLY);
 
     d = dd_new_desc(GAME_PARRY);
     store64(d + DD_NAME, "parry");
     store64(d + DD_RENDER, &py_render);    store64(d + DD_FEED, &py_feed);
-    store64(d + DD_NEW, &py_new);          store64(d + DD_DEF_DAYS, PY_DEF_DAYS);
+    store64(d + DD_NEW, &py_new);
+    store64(d + DD_FREE, &py_free);          store64(d + DD_DEF_DAYS, PY_DEF_DAYS);
     store64(d + DD_START, &py_start);       store64(d + DD_MODE_POLICY, DM_PRACTICE_ONLY);
 
     d = dd_new_desc(GAME_QUEST);
     store64(d + DD_NAME, "quest");
     store64(d + DD_RENDER, &qu_render);    store64(d + DD_FEED, &qu_feed);
     store64(d + DD_IS_OVER, &qu_is_over);  store64(d + DD_SAVE_FMT, &qu_save_format);
-    store64(d + DD_NEW, &qu_new);          store64(d + DD_LOAD, &qu_load_parse);
+    store64(d + DD_NEW, &qu_new);
+    store64(d + DD_FREE, &qu_free);          store64(d + DD_LOAD, &qu_load_parse);
     store64(d + DD_DEF_DAYS, 0);
     store64(d + DD_SCORE, &qu_final_score); store64(d + DD_RANK, &qu_rank);
     store64(d + DD_START, &qu_start);       store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
@@ -1177,7 +1195,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "jabberwacky");
     store64(d + DD_RENDER, &jw_render);    store64(d + DD_FEED, &jw_feed);
     store64(d + DD_IS_OVER, &jw_is_over);  store64(d + DD_SAVE_FMT, &jw_save_format);
-    store64(d + DD_NEW, &jw_new);          store64(d + DD_LOAD, &jw_load_parse);
+    store64(d + DD_NEW, &jw_new);
+    store64(d + DD_FREE, &jw_free);          store64(d + DD_LOAD, &jw_load_parse);
     store64(d + DD_DEF_DAYS, JW_DEF_DAYS);
     store64(d + DD_START, &jw_start);       store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
 
@@ -1185,7 +1204,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "olympiad");
     store64(d + DD_RENDER, &ol_render);    store64(d + DD_FEED, &ol_feed);
     store64(d + DD_IS_OVER, &ol_is_over);  store64(d + DD_SAVE_FMT, &ol_save_format);
-    store64(d + DD_NEW, &ol_new);          store64(d + DD_LOAD, &ol_load_parse);
+    store64(d + DD_NEW, &ol_new);
+    store64(d + DD_FREE, &ol_free);          store64(d + DD_LOAD, &ol_load_parse);
     store64(d + DD_DEF_DAYS, 0);
     store64(d + DD_SCORE, &ol_final_score); store64(d + DD_RANK, &ol_rank);
     store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
@@ -1194,7 +1214,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "ashes");         store64(d + DD_USLOT, "ashesu");
     store64(d + DD_RENDER, &ash_render);   store64(d + DD_FEED, &ash_feed);
     store64(d + DD_IS_OVER, &ash_is_over); store64(d + DD_SAVE_FMT, &ash_save_format);
-    store64(d + DD_NEW, &ash_new);         store64(d + DD_LOAD, &ash_load_parse);
+    store64(d + DD_NEW, &ash_new);
+    store64(d + DD_FREE, &ash_free);         store64(d + DD_LOAD, &ash_load_parse);
     store64(d + DD_DEF_DAYS, 0);           store64(d + DD_FLAGS, DF_UNIVERSE);
     store64(d + DD_WORLD_BYTES, &ashw_byte_size); store64(d + DD_WORLD_VALID, &ashw_valid);
     store64(d + DD_WORLD_NEW, &ashw_new);  store64(d + DD_WORLD_SEED, ASH_WORLD_SEED);
@@ -1209,7 +1230,8 @@ fn door_registry_init(): i64 {
     store64(d + DD_NAME, "decode");
     store64(d + DD_RENDER, &decode_render);   store64(d + DD_FEED, &decode_feed);
     store64(d + DD_IS_OVER, &decode_is_over); store64(d + DD_SAVE_FMT, &decode_save_format);
-    store64(d + DD_NEW, &decode_new);         store64(d + DD_LOAD, &decode_load_parse);
+    store64(d + DD_NEW, &decode_new);
+    store64(d + DD_FREE, &decode_free);         store64(d + DD_LOAD, &decode_load_parse);
     store64(d + DD_DEF_DAYS, 0);
     store64(d + DD_SCORE, &decode_final_score); store64(d + DD_RANK, &decode_rank);
     store64(d + DD_START, &decode_start);   store64(d + DD_MODE_POLICY, DM_NO_UNIVERSE);
@@ -1234,12 +1256,31 @@ fn door_game_name(game): i64 {
 # send it, advancing g_chat_seen. Called on each idle poll tick and
 # right after the session says a line (so the speaker sees their own
 # line in canonical form). No-op when nothing is new.
+# 1.6.3 (audit) — these three were per-CALL bump allocations, and this function
+# runs on every idle chat tick (every CHAT_TICK_MS while a session sits in a
+# channel), not just after a typed line. That put it outside the per-line arena
+# reset in process_rx, so under poll a single idle chat session leaked
+# CHAT_LOG_BUF + CHAT_TAIL_CAP + 8 every couple of seconds, forever.
+#
+# Dedicated process-lifetime statics rather than cmd_alloc, precisely BECAUSE
+# the tick is not bracketed by a reset. They are safe to share: dispatch is
+# single-threaded (the poll sweep runs one session to completion before the
+# next), and neither buffer outlives the call — the bytes are handed to
+# send_buf before returning. Bare `= 0` initializers take the static-init fast
+# path, so they cost no gvar_toks slot (CLAUDE.md counting rule).
+var g_chat_tail_buf   = 0;
+var g_chat_tail_out   = 0;
+var g_chat_tail_seenp = 0;
+
 fn chat_flush_tail(cfd): i64 {
-    var buf = alloc(CHAT_LOG_BUF);
+    if (g_chat_tail_buf == 0)   { g_chat_tail_buf = alloc(CHAT_LOG_BUF); }
+    if (g_chat_tail_out == 0)   { g_chat_tail_out = alloc(CHAT_TAIL_CAP); }
+    if (g_chat_tail_seenp == 0) { g_chat_tail_seenp = alloc(8); }
+    var buf = g_chat_tail_buf;
     var n = chat_log_read(g_store_buf, g_chat_channel, buf, CHAT_LOG_CAP);
     if (n <= 0) { return 0; }
-    var out = alloc(CHAT_TAIL_CAP);
-    var seenp = alloc(8);
+    var out = g_chat_tail_out;
+    var seenp = g_chat_tail_seenp;
     store64(seenp, g_chat_seen);
     var olen = chat_emit_since(buf, n, g_chat_seen, out, CHAT_TAIL_CAP, seenp);
     if (olen > 0) { send_buf(cfd, out, olen); }
@@ -1542,7 +1583,7 @@ fn door_is_over(): i64 {
 # Build <store>/.games/<game>/leaderboard into out_buf, ensuring dirs.
 fn door_leaderboard_path(game, out_buf): i64 {
     var name = door_game_name(game);
-    var dir1 = alloc(PATH_MAX_BYTES);
+    var dir1 = cmd_alloc(PATH_MAX_BYTES);
     var slen = strlen(g_store_buf);
     memcpy(dir1, g_store_buf, slen);
     store8(dir1 + slen, 47);
@@ -1550,7 +1591,7 @@ fn door_leaderboard_path(game, out_buf): i64 {
     store8(dir1 + slen + 7, 0);
     store_ensure(dir1);
 
-    var dir2 = alloc(PATH_MAX_BYTES);
+    var dir2 = cmd_alloc(PATH_MAX_BYTES);
     var d1len = strlen(dir1);
     memcpy(dir2, dir1, d1len);
     store8(dir2 + d1len, 47);
@@ -1590,9 +1631,9 @@ fn door_post_score(game): i64 {
     var rfp = load64(d + DD_RANK);
     var rank = "";
     if (rfp != 0) { rank = callptr(rfp, score); }
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
-    var line = alloc(256);
+    var line = cmd_alloc(256);
     var n = door_format_score(g_session_handle, score, rank, line);
     file_append_locked(path, line, n);
     return 0;
@@ -1600,10 +1641,10 @@ fn door_post_score(game): i64 {
 
 # Send the top-10 (by score) of a game's leaderboard to the client.
 fn door_render_leaderboard(cfd, game): i64 {
-    var path = alloc(PATH_MAX_BYTES);
+    var path = cmd_alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
     var cap = 16384;
-    var buf = alloc(cap);
+    var buf = cmd_alloc(cap);
     var total = file_read_all(path, buf, cap);
     send_str(cfd, "== ");
     send_str(cfd, door_game_name(game));
@@ -1611,9 +1652,12 @@ fn door_render_leaderboard(cfd, game): i64 {
     if (total <= 0) { send_str(cfd, "No scores posted yet — finish a run to make the board.\r\n"); return 0; }
 
     var maxe = 256;
-    var starts = alloc(maxe * 8);
-    var ends   = alloc(maxe * 8);
-    var scores = alloc(maxe * 8);
+    # 1.6.3 — hoisted out of the ranking loop below (one buffer reused per row
+    # instead of one allocation per row).
+    var ln = cmd_alloc(320);
+    var starts = cmd_alloc(maxe * 8);
+    var ends   = cmd_alloc(maxe * 8);
+    var scores = cmd_alloc(maxe * 8);
     var count = 0;
     var i = 0;
     var ls = 0;
@@ -1649,7 +1693,6 @@ fn door_render_leaderboard(cfd, game): i64 {
         var te = load64(ends + k * 8);   store64(ends + k * 8,   load64(ends + best * 8));   store64(ends + best * 8, te);
         var tc = load64(scores + k * 8); store64(scores + k * 8, load64(scores + best * 8)); store64(scores + best * 8, tc);
 
-        var ln = alloc(320);
         var p = 0;
         p = emit_int(ln, p, k + 1);
         store8(ln + p, 41); p = p + 1;    # )
@@ -1668,6 +1711,34 @@ fn door_render_leaderboard(cfd, game): i64 {
         send_buf(cfd, ln, p);
         k = k + 1;
     }
+    return 0;
+}
+
+# 1.6.3 (ADR 0022) — release the active door state through its descriptor's
+# DD_FREE hook and null the global, so the caller cannot double-free and no
+# later render can touch dead memory.
+#
+# Why this exists: door states are the last allocations in agora with a lifetime
+# longer than one dispatched line, so the 1.6.2 per-command arena (ADR 0021)
+# cannot own them. Under AGORA_SERVE=poll one process serves every session for
+# the life of the server, so every state abandoned at `quit` or at disconnect
+# stayed allocated forever — the whole difference between the Eliza and QUEST
+# rows in the 1.6.2 leak table. Under fork this was invisible: the child exited.
+#
+# Called from exactly three places, which together cover every way a state is
+# dropped: the MODE_DOOR exit in process_rx (`quit`), session_reset (a slot
+# being handed to a NEW connection while a game was still open — i.e. the
+# player disconnected mid-game), and the `play` launcher before it installs a
+# replacement.
+fn door_state_free(): i64 {
+    if (g_door_state == 0) { g_door_game = GAME_NONE; return 0; }
+    var d = door_desc_for(g_door_game);
+    if (d != 0) {
+        var ffp = load64(d + DD_FREE);
+        if (ffp != 0) { var fr = callptr(ffp, g_door_state); }
+    }
+    g_door_state = 0;
+    g_door_game = GAME_NONE;
     return 0;
 }
 
@@ -1795,7 +1866,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.2 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.6.3 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1962,6 +2033,10 @@ fn session_reset(s, cfd): i64 {
     store8(load64(s + SESS_LOGIN_FP), 0);
     store8(load64(s + SESS_LOGIN_NONCE), 0);
     store64(s + SESS_LOGIN_STARTED_MS, 0);
+    # 1.6.3 — defensive: releasing normally goes through session_release, but a
+    # slot must never hand a stale state to its next occupant, and dropping the
+    # pointer here without freeing would leak it.
+    session_door_free(s);
     store64(s + SESS_DOOR_GAME, GAME_NONE);
     store64(s + SESS_DOOR_STATE, 0);
     store64(s + SESS_DOOR_MODE, DOOR_PRACTICE);
@@ -1995,7 +2070,47 @@ fn session_acquire(cfd): i64 {
 
 # Return a slot to the pool (buffers persist for reuse; transient game/bot allocs
 # on the slot are re-initialized by session_reset on the next claim).
+# 1.6.3 (ADR 0022) — release a door state held by a SLOT, not by the globals.
+# This exists separately from door_state_free() because of the poll model's
+# context swap: at release time the g_* globals belong to whichever session was
+# last sess_load'ed, which is NOT necessarily this one. Freeing through the
+# globals here would free the wrong session's game — so read the state and the
+# game id straight out of the slot.
+fn session_door_free(s): i64 {
+    var ds = load64(s + SESS_DOOR_STATE);
+    if (ds != 0) {
+        var d = door_desc_for(load64(s + SESS_DOOR_GAME));
+        if (d != 0) {
+            var ffp = load64(d + DD_FREE);
+            if (ffp != 0) { var fr = callptr(ffp, ds); }
+        }
+    }
+    store64(s + SESS_DOOR_STATE, 0);
+    store64(s + SESS_DOOR_GAME, GAME_NONE);
+    # 1.6.3 — the three chat-couch bot states leak the same way and have the
+    # same shape: lazily built by ez_new / py_new / jw_new on first `/eliza`,
+    # `/parry` or `/jabberwacky`, held for the session, and previously just
+    # nulled at reset. They are freelist-allocated now, so free them here too.
+    var ez = load64(s + SESS_ELIZA);
+    if (ez != 0) { ez_free(ez); store64(s + SESS_ELIZA, 0); }
+    var py = load64(s + SESS_PARRY);
+    if (py != 0) { py_free(py); store64(s + SESS_PARRY, 0); }
+    var jw = load64(s + SESS_JABBER);
+    if (jw != 0) { jw_free(jw); store64(s + SESS_JABBER, 0); }
+    if (g_eliza_state == ez)  { g_eliza_state = 0; }
+    if (g_parry_state == py)  { g_parry_state = 0; }
+    if (g_jabber_state == jw) { g_jabber_state = 0; }
+    # The globals may currently mirror THIS slot (the common case: the sweep
+    # sess_load'ed it, decided to close it, and is releasing it now). If so they
+    # would be left dangling at the freed state, so clear them too.
+    if (g_door_state == ds) { g_door_state = 0; g_door_game = GAME_NONE; }
+    return 0;
+}
+
 fn session_release(s): i64 {
+    # 1.6.3 — a player who disconnects mid-game leaves a live door state in the
+    # slot. Under fork the child's exit reclaimed it; under poll nothing did.
+    session_door_free(s);
     store64(s + SESS_ACTIVE, 0);
     store64(s + SESS_FD, 0 - 1);
     return 0;
@@ -2278,7 +2393,7 @@ fn session_greet(s): i64 {
     if (g_motd_buf != 0) {
         send_buf(cfd, g_motd_buf, g_motd_len);
     } else {
-        var motd = alloc(1024);
+        var motd = cmd_alloc(1024);
         var motd_len = render_motd(motd);
         send_buf(cfd, motd, motd_len);
     }
@@ -2341,10 +2456,23 @@ fn process_rx(s, n): i64 {
         # Drain any IAC responses queued by the state machine
         # before processing the data byte — keeps on-wire order
         # matching RFC 854.
+        # 1.6.3 (audit) — a failed send here is a DEAD PEER, and ignoring it was
+        # an unauthenticated resource-exhaustion path. Fork mode writes with a
+        # 60 s SO_SNDTIMEO (SEND_TIMEOUT_SECS): a client that stops reading fills
+        # the socket buffer, every `sys_write` parks for the full timeout, and
+        # because the return was discarded the loop simply moved to the NEXT
+        # byte and parked again — one 4096-byte recv could pin a forked child
+        # for hours at zero ongoing attacker cost, and children are unbounded.
+        # In poll mode `sess_tx_enqueue` refuses an over-cap write and returns 1
+        # WITHOUT copying, so the session went mute-but-open forever, holding a
+        # slot: exactly the "slow-reader defense" its own comment claims but did
+        # not implement. Setting quit and leaving the loop makes process_rx
+        # return 1, which both serve models already turn into a close.
         var tx_len = telnet_tx_len(ts);
         if (tx_len > 0) {
-            send_buf(cfd, telnet_tx_buf(ts), tx_len);
+            var txr = send_buf(cfd, telnet_tx_buf(ts), tx_len);
             telnet_tx_consume(ts);
+            if (txr != 0) { store64(quit, 1); i = n; continue; }
         }
 
         if (ev == EV_SB) {
@@ -2422,7 +2550,7 @@ fn process_rx(s, n): i64 {
                             i = i + 1; continue;
                         }
                     }
-                    var sig_raw = alloc(ACCOUNT_SIG_BYTES);
+                    var sig_raw = cmd_alloc(ACCOUNT_SIG_BYTES);
                     var sig_len = parse_auth_sig(line, line_pos, sig_raw);
                     line_pos = 0;
                     if (sig_len != ACCOUNT_SIG_BYTES) {
@@ -2433,7 +2561,7 @@ fn process_rx(s, n): i64 {
                         send_prompt(cfd, current_board);
                         i = i + 1; continue;
                     }
-                    var pk_buf = alloc(ACCOUNT_PK_BYTES);
+                    var pk_buf = cmd_alloc(ACCOUNT_PK_BYTES);
                     if (account_lookup_pubkey(g_store_buf, g_login_fp, pk_buf) != 0) {
                         send_str(cfd, "login failed (pubkey lookup)\r\n");
                         store8(g_login_fp, 0);
@@ -2443,7 +2571,7 @@ fn process_rx(s, n): i64 {
                         i = i + 1; continue;
                     }
                     # Build challenge message = "agora-login:" + nonce_hex.
-                    var verify_msg = alloc(LOGIN_MSG_LEN);
+                    var verify_msg = cmd_alloc(LOGIN_MSG_LEN);
                     format_challenge_msg(g_login_nonce, verify_msg);
                     var ok = ed25519_verify(pk_buf, verify_msg, LOGIN_MSG_LEN, sig_raw);
                     # Single-use nonce: clear regardless of pass / fail.
@@ -2477,8 +2605,8 @@ fn process_rx(s, n): i64 {
                     line_pos = 0;
                     if (dctrl == 1) {
                         door_save_on_exit(cfd);
-                        g_door_state = 0;
-                        g_door_game = GAME_NONE;
+                        # 1.6.3 — save FIRST (it reads the state), then release.
+                        door_state_free();
                         mode = MODE_COMMAND;
                         send_prompt(cfd, current_board);
                     } else {
@@ -2532,7 +2660,7 @@ fn process_rx(s, n): i64 {
                             # then flush so the speaker sees the canonical
                             # "<handle> text" line (and any interleaved ones).
                             if (clen > 0) {
-                                var tbuf = alloc(CHAT_MSG_MAX + 1);
+                                var tbuf = cmd_alloc(CHAT_MSG_MAX + 1);
                                 var tlen = chat_text_sanitize(line, clen, tbuf, CHAT_MSG_MAX);
                                 if (tlen > 0) {
                                     chat_say(g_store_buf, g_chat_channel, g_session_handle, tbuf, tlen);
@@ -2586,7 +2714,10 @@ fn process_rx(s, n): i64 {
                 if (line_pos < LINE_BUF_CAP - 1) {
                     store8(line + line_pos, db);
                     line_pos = line_pos + 1;
-                    echo_byte(cfd, db);
+                    # 1.6.3 (audit) — same as the IAC drain above: the echo is
+                    # the other per-byte write, so a discarded failure here has
+                    # the same unbounded shape.
+                    if (echo_byte(cfd, db) != 0) { store64(quit, 1); i = n; continue; }
                 }
             }
         }
@@ -3415,7 +3546,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.2");
+    println("agora 1.6.3");
     return 0;
 }
 

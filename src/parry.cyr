@@ -368,7 +368,7 @@ fn py_beat(idx, rot, out): i64 {
 # out (must be >= PY_RESP_CAP). Returns the reply length. Pipeline:
 # classify -> update affect -> (story-gated OR mood-gated) selection.
 fn py_respond(st, line, len, out): i64 {
-    var norm = alloc(PY_IN_MAX + 1);
+    var norm = cmd_alloc(PY_IN_MAX + 1);
     var nlen = ez_normalize(line, len, norm, PY_IN_MAX);
     var bits = py_scan_flags(norm, nlen);
     py_apply_affect(st, bits);
@@ -436,9 +436,11 @@ fn py_respond(st, line, len, out): i64 {
 # === Door contract (ADR 0009 shape) ===
 
 fn py_new(seed, mode, max_days): i64 {
-    var st = alloc(PY_SIZE);
+    # 1.6.3 (ADR 0022) — freelist, so py_free can give it back. PARRY is
+    # practice-only (no save/load), so this is the only constructor.
+    var st = fl_alloc(PY_SIZE);
     store64(st + PY_OVER, 0);
-    var resp = alloc(PY_RESP_CAP);
+    var resp = fl_alloc(PY_RESP_CAP);
     store64(st + PY_RESP, resp);
     store64(st + PY_RESPLEN, 0);
     store64(st + PY_FEAR,     PY_FEAR_BASE);
@@ -446,12 +448,21 @@ fn py_new(seed, mode, max_days): i64 {
     store64(st + PY_MISTRUST, PY_MISTRUST_BASE);
     store64(st + PY_STORYIDX, 0);
     store64(st + PY_STORYON,  0);
-    var ctrs = alloc(PY_NCTRS * 8);
+    var ctrs = fl_alloc(PY_NCTRS * 8);
     var i = 0;
     while (i < PY_NCTRS) { store64(ctrs + i * 8, 0); i = i + 1; }
     store64(st + PY_CTRS, ctrs);
     store64(st + PY_TURNS, 0);
     return st;
+}
+
+# 1.6.3 — release a PARRY state and its two owned buffers.
+fn py_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + PY_RESP));
+    fl_free(load64(st + PY_CTRS));
+    fl_free(st);
+    return 0;
 }
 
 fn py_start(st): i64 {

@@ -42,6 +42,12 @@ enum DescentConst {
     # because src/test.cyr links descent.cyr WITHOUT main.cyr — a cross-file
     # constant reference builds in the binary and breaks the test harness.
     DESCENT_EAGAIN     = 11;
+    # 1.6.3 — bound on the non-blocking write retry (see descent_write_all).
+    # 20 ms matches the poll sweep cadence; 10 s is far longer than any healthy
+    # client needs to drain a 4 KB shuttle buffer, and far shorter than the
+    # 30-minute idle bound, so a wedged writer is dropped promptly.
+    DESCENT_WRITE_TICK_MS = 20;
+    DESCENT_WRITE_MS      = 10000;
 }
 
 # Parse a non-negative decimal in buf[s, e). Returns the value, or (0-1)
@@ -187,12 +193,28 @@ fn descent_write_all(fd, buf, len): i64 {
     var off = 0;
     var rc = 0;
     var done = 0;
+    var waited = 0;
     while (done == 0) {
         if (off >= len) { done = 1; continue; }
         var n = sys_write(fd, buf + off, len - off);
-        if (n > 0) { off = off + n; continue; }
+        if (n > 0) { off = off + n; waited = 0; continue; }
         #ifndef CYRIUS_TARGET_AGNOS
-        if (n == (0 - DESCENT_EAGAIN)) { continue; }
+        if (n == (0 - DESCENT_EAGAIN)) {
+            # 1.6.3 (audit, HIGH — a bug introduced by this function at 1.6.2).
+            # The retry used to be a bare `continue`: a tight, sleepless spin on
+            # a socket that is not ready. In poll mode this function runs inside
+            # the single process that owns ALL 64 sessions, so a Descent player
+            # whose client stops reading pegged a core and froze every other
+            # session — permanently, since nothing else could run to time them
+            # out. Sleep between attempts and give up after DESCENT_WRITE_MS,
+            # treating a peer that will not accept bytes for that long as dead
+            # (the caller closes the proxy, which is what the idle bound already
+            # does for a peer that sends nothing).
+            sleep_ms(DESCENT_WRITE_TICK_MS);
+            waited = waited + DESCENT_WRITE_TICK_MS;
+            if (waited >= DESCENT_WRITE_MS) { rc = 1; done = 1; }
+            continue;
+        }
         #endif
         rc = 1; done = 1;
     }

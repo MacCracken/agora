@@ -213,8 +213,8 @@ fn jw_best_match(st, q, qlen): i64 {
 # seed pairs are never evicted. State is only mutated once both cleaned
 # strings are confirmed non-empty (no partial-eviction on a dropped add).
 fn jw_add_pair(st, stim, slen, resp, rlen): i64 {
-    var tmpS = alloc(JW_SLOT);
-    var tmpR = alloc(JW_SLOT);
+    var tmpS = cmd_alloc(JW_SLOT);
+    var tmpR = cmd_alloc(JW_SLOT);
     var sn = ez_normalize(stim, slen, tmpS, JW_SLOT);
     var rn = jw_sanitize(resp, rlen, tmpR, JW_SLOT);
     if (sn <= 0) { return 0; }
@@ -353,16 +353,34 @@ fn jw_seed_corpus(st): i64 {
 # Allocate the struct + every owned buffer, zero the counters. Shared by
 # jw_new and jw_load_parse so both start from an identical clean shell.
 fn jw_state_alloc(): i64 {
-    var st = alloc(JW_SIZE);
+    # 1.6.3 (ADR 0022) — freelist so jw_free can release it. This is the ONE
+    # shell constructor behind both jw_new and jw_load_parse, so the seven
+    # buffers below have exactly one pairing site: jw_free.
+    var st = fl_alloc(JW_SIZE);
     memset(st, 0, JW_SIZE);
-    store64(st + JW_RESP,  alloc(JW_RESP_CAP));
-    store64(st + JW_STIM,  alloc(JW_MAXPAIRS * JW_SLOT));
-    store64(st + JW_STIML, alloc(JW_MAXPAIRS * 8));
-    store64(st + JW_RTXT,  alloc(JW_MAXPAIRS * JW_SLOT));
-    store64(st + JW_RTXTL, alloc(JW_MAXPAIRS * 8));
-    store64(st + JW_PREV,  alloc(JW_SLOT));
-    store64(st + JW_NORM,  alloc(JW_IN_MAX + 1));
+    store64(st + JW_RESP,  fl_alloc(JW_RESP_CAP));
+    store64(st + JW_STIM,  fl_alloc(JW_MAXPAIRS * JW_SLOT));
+    store64(st + JW_STIML, fl_alloc(JW_MAXPAIRS * 8));
+    store64(st + JW_RTXT,  fl_alloc(JW_MAXPAIRS * JW_SLOT));
+    store64(st + JW_RTXTL, fl_alloc(JW_MAXPAIRS * 8));
+    store64(st + JW_PREV,  fl_alloc(JW_SLOT));
+    store64(st + JW_NORM,  fl_alloc(JW_IN_MAX + 1));
     return st;
+}
+
+# 1.6.3 — release a Jabberwacky state and its seven owned buffers (the learned
+# corpus is the bulk of it). Practice/solo only — no world pointer.
+fn jw_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + JW_RESP));
+    fl_free(load64(st + JW_STIM));
+    fl_free(load64(st + JW_STIML));
+    fl_free(load64(st + JW_RTXT));
+    fl_free(load64(st + JW_RTXTL));
+    fl_free(load64(st + JW_PREV));
+    fl_free(load64(st + JW_NORM));
+    fl_free(st);
+    return 0;
 }
 
 # === Save / load (per-user learned layer; header JBRW1) ===
@@ -424,7 +442,7 @@ fn jw_load_parse(buf, len): i64 {
     store64(st + JW_MODE, DOOR_SOLO);
     jw_seed_corpus(st);
     store64(st + JW_SEEDN, load64(st + JW_COUNT));
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     var learned = save_get_i64(buf, len, cur);
     # Cap iterations at the learned-ring capacity: nothing beyond it can

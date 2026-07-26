@@ -184,8 +184,16 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
 
     # public_key.bin — 32 raw bytes
+    #
+    # 1.6.3 (audit, MEDIUM) — all three writes below carry O_TRUNC. Without it,
+    # re-registering the SAME key under a shorter handle left the tail of the
+    # previous value in place: `handle` became "qix\nylonghandle\n" and the
+    # account reported the wrong handle from then on. Reproduced end to end
+    # before the fix. Registration is idempotent by design (same key, same
+    # fingerprint directory), so overwriting in place is the intended shape —
+    # it just has to overwrite the WHOLE file.
     build_user_file(store, fp_out, "public_key.bin", path_buf);
-    var fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    var fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
     var n = file_write(fd, pk_buf, ACCOUNT_PK_BYTES);
     file_close(fd);
@@ -193,7 +201,7 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 
     # handle — UTF-8 bytes + LF
     build_user_file(store, fp_out, "handle", path_buf);
-    fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
     var hlen = strlen(handle);
     if (file_write(fd, handle, hlen) != hlen) { file_close(fd); return 0 - 1; }
@@ -204,7 +212,7 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 
     # created.iso8601 — chrono now + LF
     build_user_file(store, fp_out, "created.iso8601", path_buf);
-    fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
+    fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
     if (fd < 0) { return 0 - 1; }
     var iso = iso8601_now();
     var ilen = strlen(iso);

@@ -341,9 +341,9 @@ fn qu_save_format(st, buf, cap): i64 {
 fn qu_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "QUST1\n", 6) == 0) { return 0; }
-    var st = alloc(QU_SIZE);
+    var st = fl_alloc(QU_SIZE);
     memset(st, 0, QU_SIZE);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + QU_SEED,    save_get_i64(buf, len, cur));
     store64(st + QU_RNG,     save_get_i64(buf, len, cur));
@@ -368,7 +368,7 @@ fn qu_load_parse(buf, len): i64 {
 # === Door contract: new / start ===
 
 fn qu_new(seed, mode, max_days): i64 {
-    var st = alloc(QU_SIZE);
+    var st = fl_alloc(QU_SIZE);
     memset(st, 0, QU_SIZE);
     store64(st + QU_SEED, seed);
     rng_seed(st + QU_RNG, seed);
@@ -386,7 +386,7 @@ fn qu_new(seed, mode, max_days): i64 {
 # Allocate runtime fields; refresh the daily ration from the wall clock;
 # open in town (or the over screen). Call once after new / load_parse.
 fn qu_start(st): i64 {
-    store64(st + QU_MSG, alloc(256));
+    store64(st + QU_MSG, fl_alloc(256));
     store8(load64(st + QU_MSG), 0);
     store64(st + QU_FOE_HP, 0);
     # REALTIME (epoch) day index, NOT the monotonic clock: epoch days
@@ -396,6 +396,16 @@ fn qu_start(st): i64 {
     qu_day_tick(st, clock_epoch_ns() / QU_NS_PER_DAY);
     store64(st + QU_SCREEN, QSCR_TOWN);
     if (load64(st + QU_OVER) != 0) { store64(st + QU_SCREEN, QSCR_OVER); }
+    return 0;
+}
+
+# 1.6.3 (ADR 0022) — release a QUEST state. QU_MSG is allocated by qu_start
+# (the DD_START hook), which runs after BOTH qu_new and qu_load_parse, so a
+# loaded state owns one too. QUEST is solo-only: there is no world pointer.
+fn qu_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + QU_MSG));
+    fl_free(st);
     return 0;
 }
 
@@ -781,8 +791,8 @@ fn qu_suit_name(i): i64 {
 # house haircut, QU_CARD_MIN floor, no ceiling. Extracted for unit-
 # testing the tuning (t188); the weights/mults arrays outlive the table.
 fn qu_cards_table(tbl): i64 {
-    var w = alloc(4 * 8); store64(w, 1); store64(w + 8, 1); store64(w + 16, 1); store64(w + 24, 1);
-    var m = alloc(4 * 8); store64(m, 3); store64(m + 8, 3); store64(m + 16, 3); store64(m + 24, 3);
+    var w = cmd_alloc(4 * 8); store64(w, 1); store64(w + 8, 1); store64(w + 16, 1); store64(w + 24, 1);
+    var m = cmd_alloc(4 * 8); store64(m, 3); store64(m + 8, 3); store64(m + 16, 3); store64(m + 24, 3);
     return wager_table_init(tbl, QU_CARD_MIN, 0, QU_CARD_EDGE, 4, w, m);
 }
 
@@ -812,12 +822,12 @@ fn qu_render_cards(st, buf, pos): i64 {
 fn qu_feed_cards(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + QU_SCREEN, QSCR_TOWN); return 0; }   # x — leave
-    var pick = alloc(8);
+    var pick = cmd_alloc(8);
     var stake = door_parse_2int(line, len, pick);
     var suit = load64(pick);
     if (stake < 0) { qu_msg(st, "Stake like '20 3' -- gold, then a suit 1-4.  x to leave."); return 0; }
     if (suit < 1)  { qu_msg(st, "Name a suit: 1 Hearts, 2 Diamonds, 3 Clubs, 4 Spades.  x to leave."); return 0; }
-    var tbl = alloc(WT_SIZE);
+    var tbl = cmd_alloc(WT_SIZE);
     qu_cards_table(tbl);
     var choice = suit - 1;                      # player 1-4 → outcome 0-3
     var bal = load64(st + QU_GOLD);

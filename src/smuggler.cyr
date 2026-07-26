@@ -62,7 +62,7 @@ enum SL {
 # === Construction ===
 
 fn sl_new(seed, mode, max_days): i64 {
-    var st = alloc(SL_SIZE);
+    var st = fl_alloc(SL_SIZE);
     memset(st, 0, SL_SIZE);
     store64(st + SL_SEED,    seed);
     store64(st + SL_DAY,     1);
@@ -263,7 +263,7 @@ fn sl_day_seed(seed, day): i64 {
 # (seed, day). The event good is always available so the spike/crash
 # is visible. Returns 0.
 fn sl_gen_prices(seed, day, prices_out, event_out): i64 {
-    var rng = alloc(8);
+    var rng = cmd_alloc(8);
     rng_seed(rng, sl_day_seed(seed, day));
 
     var ev_kind = 0;
@@ -388,13 +388,26 @@ fn sl_regen_prices(st): i64 {
 # sl_load_parse, before sl_render / sl_feed).
 fn sl_start(st): i64 {
     store64(st + SL_PEND, 0);
-    store64(st + SL_PRICES, alloc(SL_GOODS * 8));
-    store64(st + SL_EVENT,  alloc(16));
-    store64(st + SL_MSG,    alloc(256));
+    store64(st + SL_PRICES, fl_alloc(SL_GOODS * 8));
+    store64(st + SL_EVENT,  fl_alloc(16));
+    store64(st + SL_MSG,    fl_alloc(256));
     store8(load64(st + SL_MSG), 0);
     sl_regen_prices(st);
     store64(st + SL_SCREEN, SCR_MAIN);
     if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); }
+    return 0;
+}
+
+# 1.6.3 (ADR 0022) — release a Smuggler's Ledger state. The three owned buffers
+# are allocated by sl_start (the DD_START hook), which runs after both sl_new
+# and sl_load_parse. SL_WORLD is NOT freed — the shared district-heat snapshot
+# belongs to the session slot.
+fn sl_free(st): i64 {
+    if (st == 0) { return 0; }
+    fl_free(load64(st + SL_PRICES));
+    fl_free(load64(st + SL_EVENT));
+    fl_free(load64(st + SL_MSG));
+    fl_free(st);
     return 0;
 }
 
@@ -617,9 +630,9 @@ fn sl_save_format(st, buf, cap): i64 {
 fn sl_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "SLDG1\n", 6) == 0) { return 0; }
-    var st = alloc(SL_SIZE);
+    var st = fl_alloc(SL_SIZE);
     memset(st, 0, SL_SIZE);
-    var cur = alloc(8);
+    var cur = cmd_alloc(8);
     store64(cur, 6);
     store64(st + SL_SEED,    save_get_i64(buf, len, cur));
     store64(st + SL_RNG,     save_get_i64(buf, len, cur));
@@ -1088,8 +1101,8 @@ fn sl_dice_name(i): i64 {
 # haircut, SL_DICE_MIN floor, no ceiling. Extracted for unit-testing the
 # tuning (t187); the weights/mults arrays outlive the borrowed table.
 fn sl_dice_table(tbl): i64 {
-    var w = alloc(2 * 8); store64(w, 1); store64(w + 8, 1);
-    var m = alloc(2 * 8); store64(m, 1); store64(m + 8, 1);
+    var w = cmd_alloc(2 * 8); store64(w, 1); store64(w + 8, 1);
+    var m = cmd_alloc(2 * 8); store64(m, 1); store64(m + 8, 1);
     return wager_table_init(tbl, SL_DICE_MIN, 0, SL_DICE_EDGE, 2, w, m);
 }
 
@@ -1102,12 +1115,12 @@ fn sl_dice_table(tbl): i64 {
 fn sl_feed_dice(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }   # x — leave
-    var pick = alloc(8);
+    var pick = cmd_alloc(8);
     var stake = door_parse_2int(line, len, pick);
     var call = load64(pick);
     if (stake < 0) { sl_msg(st, "Call it like '50 1' -- stake, then 1 Low or 2 High.  x to leave."); return 0; }
     if (call < 1)  { sl_msg(st, "Call 1 for LOW (1-3) or 2 for HIGH (4-6).  x to leave."); return 0; }
-    var tbl = alloc(WT_SIZE);
+    var tbl = cmd_alloc(WT_SIZE);
     sl_dice_table(tbl);
     var choice = call - 1;                      # player 1-2 → outcome 0-1
     var bal = load64(st + SL_CASH);
@@ -1191,7 +1204,7 @@ fn slw_byte_size(): i64  { return slw_word_count() * 8; }
 
 fn slw_new(): i64 {
     var n = slw_word_count();
-    var w = alloc(n * 8);
+    var w = cmd_alloc(n * 8);
     memset(w, 0, n * 8);
     store64(w + SLW_OFF_VERSION * 8, SLW_VERSION);
     return w;

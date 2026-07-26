@@ -36,3 +36,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0019 | [Decode as a Handler gameplay lever (cross-game mechanic reuse)](0019-decode-handler-lever.md) | Accepted (2026-06-14) — 1.4.3 |
 | 0020 | [Door descriptor registry (table-driven door dispatch)](0020-door-descriptor-registry.md) | Accepted (2026-06-15) — 1.4.6 |
 | 0021 | [The per-command scratch arena](0021-per-command-scratch-arena.md) | Accepted (2026-07-25) — 1.6.2 |
+| 0022 | [The door-state free hook (`DD_FREE`)](0022-door-state-free-hook.md) | Accepted (2026-07-26) — 1.6.3 |
