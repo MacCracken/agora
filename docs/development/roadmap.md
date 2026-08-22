@@ -1,6 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-07-26 (rebuilt from a full deferred-work sweep — see *Provenance* at the end)
+> **Last Updated**: 2026-08-22 (1.6.7 toolchain cut — the `dir_list` cross-repo block is **discharged**
+> and re-filed in § Backlog rescoped to the half that survives; N2's `file_write_atomic` line corrected
+> `:355` → `:558`; N4 annotated with what `cyrius fuzz --poison` can and cannot reach. Prior: 2026-07-26,
+> rebuilt from a full deferred-work sweep — see *Provenance* at the end)
 >
 > **What this file is**: what shipped, what is pinned next, what is real-but-unscheduled, and what is
 > deliberately not being done. **What it is not**: a second changelog. Per-tag narrative lives in
@@ -61,6 +64,8 @@ entry. If an item has no citation it does not belong here.
 | **1.6.3** | **Door states learn to die + the P(-1) audit** — every game gets a **`DD_FREE`** hook ([ADR 0022](../adr/0022-door-state-free-hook.md)) backed by the freelist, the last allocation class with a lifetime longer than one dispatched line. Growth across `play`/`quit` cycles goes from linear (720 KB @ 600 commands → 2,460 KB @ 2,400) to **flat** (208 KB → 203 KB). Ships with the fixes from a full eight-dimension audit with adversarial verification — headline: **`scores` is unauthenticated and leaked ~5 KB per call**, an unauthenticated path to heap exhaustion under poll; also the chat live-tail leaking on every idle tick, and the login path leaking per attempt. 221/221 unchanged; new churn smoke; 20 examples green. | ✅ 2026-07-26 |
 | **1.6.4** | **The audit's MEDIUMs** (no new features) — **IAC (0xFF) handled per RFC 854 both ways**: doubled on egress via a new `send_text` across the nine stored-content sites, dropped at ingress, closing a path where a registered user could store raw telnet commands in a post that wedge every later reader's client. **Protocol chatter no longer counts as activity** — `IAC NOP` at ~2 bytes/minute had pinned the 64-slot pool invisibly; scoped to accounting by the user's call (a per-source cap needs `sys_getpeername`, which agnos lacks). **`BO_EXCL` → `file_create_exclusive`** (silently dropped on agnos, so `keygen` overwrote identity seeds). **`cmd_post` validates `--board` before reading `.policy`** — the 0.7.0 traversal ordering, re-opened. All HIGH + MEDIUM audit findings now closed; new smoke 26. | ✅ 2026-07-26 |
 | **1.6.5** | **The audit's LOWs — the ledger closes** (no new features). `--store` bounded at its two parse points (refuses rather than truncating, since a shortened store root points at a different directory); wire posts get the CLI's control-byte filter (C0 + DEL dropped; TAB/CR/LF kept, and CR/LF are load-bearing for line dispatch); echo suppressed only after a genuine revoke (`!= Q_NO`, deliberately not `== Q_YES` — that would break every client that never answers our WILL); bytes pipelined behind `descent` now reach the MUD instead of being lost and then executed as BBS commands. **Every HIGH/MEDIUM/LOW from the [2026-07-26 audit](../audit/2026-07-26-audit.md) is fixed**; one deliberate INFO item remains. `t32` updated — its old assertion conflated editing a line with storing a byte. New smoke 27; smoke 24 extended. | ✅ 2026-07-26 |
+| **1.6.6** | **Doc-truth and process** — the non-code half of the 2026-07-26 roadmap sweep, no behavior change. [ADR 0023](../adr/0023-dual-serve-model.md) written (the dual serve model had shipped at 1.6.0 with no ADR at all); **ADR 0007 amended** and the four ADRs citing its "no shared state" premise (0010/0011/0012/0014) corrected; **untracked deferrals 12 → 0 tree-wide** (`cyrius lint` is single-file, so `telnet.cyr`'s five were invisible); ~20 stale comments retired and the unreachable agnos serial-accept branch deleted; CLAUDE.md's Closeout Pass grew three allocator/deferral gates; `CYRIUS_DCE=1` added to CI + release. 221/221; 14,571,744 B. | ✅ 2026-07-26 |
+| **1.6.7** | **Toolchain + dependency cut** (no features, no logic change) — cyrius **6.4.78 → 6.5.33** (42 releases; zero removals/renames/arity changes across agora's 71-function stdlib surface), darshana held at **0.9.0** (verified current). Payload: **cyrius 6.5.11's `is_dir`/`dir_list` fix** — agora's own upstream filing, now archived — ends 4,104 B/call of never-reclaimed bump scratch on a path reachable **unauthenticated** via `enter`; measured A/B **24,467 → 3,495 B/command (−85.7%)** on `boards`/`list`. Separately the bundled **sigil** dropped 46 module-level banked arrays (1,587,782 → 11,358 declared units), collapsing the binary **14,571,744 → 2,010,320 B (−86.2%)** — the ~12.6 MB of unused RSA/bignum `.bss` inherited at the 1.6.0 pin move. Found en route: the local `6.5.33` toolchain snapshot was a **dirty working tree** (two libs + `cycc` off-tag), and `docs/examples/20-descent.sh` had been failing because the sibling MUD (now 1.7.22) needs its zone data. 221/221 unchanged; 27/27 smokes green. | ✅ 2026-08-22 |
 
 ---
 
@@ -92,7 +97,8 @@ Three writes still use `file_write_all`, whose `O_TRUNC` empties the target at o
 (door save), `src/door.cyr:592` (`world_write`, the shared-world snapshot), `src/chat.cyr:378` (chat
 transcript). A crash or short write loses a player's save, the shared world, or a channel's history.
 
-`file_write_atomic` is already available at **`lib/io.cyr:355`** — no pin bump needed. This reads as
+`file_write_atomic` is already available at **`lib/io.cyr:558`** — no pin bump needed (the line moved
+from `:355` in the 1.6.7 re-vendor; `:355` is now `xfsync`). This reads as
 closed because its sibling ask (`file_create_exclusive`) landed at 1.6.4; it is not. It is the item
 CLAUDE.md's *"posts are durable artifacts"* principle actually depends on, and no source comment marks
 it, so lint cannot see it.
@@ -120,6 +126,15 @@ as a hard rule. There is no `tests/` directory, no `.fcyr` harness anywhere, and
 deferral dates to [0.2.0] ("fuzz earns its spot at M2+"); the input surface has widened four times since.
 **This is the largest gap between what CLAUDE.md asserts and what the repo does.**
 
+**1.6.7 note — the 6.5.33 pin does not close this, and one new tool does not apply.** `cyrius fuzz`
+already walked `fuzz/*.fcyr` at 6.4.78, so N4 was never blocked upstream; the blocker is that nobody has
+written the harness. New in the span: `cyrius fuzz` now takes an explicit file/dir argument and walks
+`tests/` recursively (6.5.6/6.5.7), and `cyrius fuzz --poison` arms freelist redzones + quarantine
+(6.5.28/6.5.29). **`--poison` instruments only `fl_alloc`/`fl_free`** — and the IAC parser is entirely
+bump-allocated (`src/telnet.cyr`), so a `--poison` run against *the parser* reports
+`fl_poison_violations() == 0` no matter how far it overruns. It is the right tool for the **door-state**
+half (the ~102 `fl_alloc`/`fl_free` sites ADR 0022 introduced), not for this item.
+
 ---
 
 ## Cross-repo — blocked on someone else
@@ -127,7 +142,6 @@ deferral dates to [0.2.0] ("fuzz earns its spot at M2+"); the input surface has 
 | Item | Where it is blocked | Effort |
 |---|---|---:|
 | **Sigil identity hand-off across the Descent link** — carry `g_session_fp`/handle into the MUD so a citizen does not re-authenticate. The project's long-standing named "next". | Yeoman's Descent has **no external-identity path** (name+passphrase only, no pre-authenticated session), so this needs MUD-side protocol work first. Open questions unchanged from [ADR 0017](../adr/0017-descent-link-gateway.md) § Decision: token format, trust model, co-located vs remote. | large |
-| **`dir_list` per-call allocation** — 4 KB `getdents` buffer + a vec + one `Str` per entry, every call. The entire remaining per-command residue (~15 KB/command on a 150-post board). | **Filed upstream** 2026-07-26: `cyrius/docs/development/issues/2026-07-26-agora-fs-dir-list-per-call-alloc.md`. Awaiting the language agent. | medium |
 | **macOS / Windows ports** | Gated on `lib/net.cyr` backends upstream. The gate has moved since the 1.0.0 note — re-check what actually remains. | large |
 | **Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions (`src/descent.cyr:268-271`, documented not fixed). | Not blocked externally, but the real fix is making Descent a *state* in the poll loop rather than a blocking call — a structural change large enough to want the N2 ADR written first. | large |
 
@@ -148,6 +162,9 @@ or a deployment asks.
 | Four separate ADR "measure before refining" gates can never open because the benchmarks were never written (world-lock contention is the clearest). | ADRs 0010, 0014 | medium |
 | aarch64 is claimed as a supported target and nothing verifies it. | CLAUDE.md § Goal | medium |
 | The ~25 sigil "undefined function" build warnings — a standing "don't re-investigate" note whose premises have changed. | build output | unknown |
+| **The release post-hook that bumps `state.md` does not exist or does not run.** CLAUDE.md § CI/Release says *"the release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state."* **1.6.6 shipped and neither `state.md` nor this file recorded it** — `state.md`'s header, its Released row and the release table here all still read 1.6.5 until 1.6.7 backfilled them by hand, which is the exact failure mode that instruction exists to prevent. `release.yml` has no post-hook step at all. Either write it or retract the instruction; a rule nothing enforces is worse than no rule. | CLAUDE.md § CI/Release; `.github/workflows/release.yml`; CHANGELOG [1.6.7] | small |
+| **Local toolchain provenance is unverifiable.** Two independent defects, both found at 1.6.7: `install.sh --refresh-only` overwrites `~/.cyrius/versions/<ver>/` from whatever the cyrius *working tree* currently holds (this workstation's `6.5.33` snapshot carried an unreleased `bayan.cyr`, `patra.cyr` and `cycc`, inflating the measured binary by 215,520 B), and the versioned wrapper `~/.cyrius/versions/<ver>/bin/cyrius` **does not pin `cycc`** — it invokes whatever is on `PATH` and warns about the drift it just caused. CI is exempt (fresh runner, released tarball). agora's mitigation today is a manual `git show <tag>:lib/<m>.cyr | cmp -` sweep; it should be a scripted pre-cut gate. Upstream has the wrapper half filed at `cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`. | CHANGELOG [1.6.7] § Verification notes; architecture note [002](../architecture/002-lib-sync-same-size-skip.md) | small |
+| **`docs/examples/` has no runner, and its stated ordering contract does not hold.** The README says *"run them in order from a fresh checkout — later examples reuse identity files from earlier ones"*, but 09, 10, 18, 19 and 20 each `rm -rf ./bbs ./keys` on exit, so a strict in-order run leaves 24, 26 and 27 with no registered qix — and six scripts (04, 05, 23, 25, 26, 27) are client-only and need a server started externally with a specific `AGORA_SERVE` model that only their header comments record. 1.6.7 verified all 27 green using a throwaway harness; nothing in the repo reproduces that. This is why smoke 20's breakage went unnoticed. | `docs/examples/README.md`; CHANGELOG [1.6.7] | small |
 
 ### The wire — RFC conformance and telnet surface
 
@@ -177,6 +194,7 @@ or a deployment asks.
 | Session-slot exhaustion by a slow-but-real typist is a knowingly-accepted risk with **no recorded acceptance**. | 1.6.4 § Changed | medium |
 | Accept-loop rate limiting — the never-taken half of audit M4's fix, blocked on a syscall agnos does not have. | 0.7.0 audit M4 | large |
 | cyrius 6.4.51 raised `ALLOC_MAX` 256 MiB → 2 GiB, weakening an accidental backstop on attacker-influenced lengths. Never examined. | CHANGELOG [1.6.2] | medium |
+| **Migrate the four `dir_list` call sites onto `dir_list_into`** — the surviving half of agora's own upstream filing. cyrius **6.5.11** removed the fixed 4 KB `getdents` cost (shipped at the 1.6.7 pin, no agora change); **6.5.12** added the caller-owned `dir_list_into(path, scratch, scratch_len, names, names_cap, offs, max_entries)` at `lib/io`'s sibling `lib/fs.cyr:248`, which allocates **nothing** — that half needs agora-side work. Residue today ~75 B/entry (~11 KB per `list` on a 150-post board). **Not mechanical**: it returns entry count ≥ 0 or `-1` open-failed / `-2` scratch-too-small / `-3` names-full / `-4` offs-full, so truncation is a hard **error** where all three sites currently tolerate a partial listing via `max_ids`/`max_boards`/`ACCOUNT_SCAN_MAX`, and `account_resolve_handle` special-cases `entries == 0` — which becomes a live sign bug if swapped naively. Convert the three clean sites first (`src/board.cyr:402`, `:900`, `src/account.cyr:536` — each reads `str_data(entry)` and discards the `Str`, so scratch can come from `cmd_alloc` per ADR 0021). `boards_list` (`src/board.cyr:932`) goes **last**: it stores the `Str` pointer into `out_names` and `src/main.cyr:432-437` dereferences it after return, so it needs a buffer that outlives the per-command arena reset. | CHANGELOG [1.6.7]; upstream filing archived at `cyrius/docs/development/issues/archived/2026-07-26-agora-fs-dir-list-per-call-alloc.md` | medium |
 
 ### Architecture debt
 

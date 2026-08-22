@@ -4,6 +4,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.7] — 2026-08-22 (toolchain + dependency cut: the binary loses 86% of itself)
+
+**No features, no logic change, no agora source change beyond three version literals and one smoke
+script.** cyrius **6.4.78 → 6.5.33** (42 releases) and a full `lib/` re-vendor; darshana holds at
+**0.9.0** (verified current — latest tag, tip of main, and `VERSION`, with the lockfile commit matching
+`git rev-parse 0.9.0`). 221/221 tests unchanged, both targets build, 27/27 example smokes green.
+
+**14,571,744 → 2,010,320 B (−12,561,424 B, −86.2%)**; `--agnos` **1,994,240 B**.
+
+### The two payloads
+
+- **cyrius 6.5.11 fixed `is_dir` / `dir_list`** — agora's own upstream filing, now archived. `lib/fs.cyr`
+  was burning **4,104 B of never-reclaimed bump-heap scratch per call**, on both arms of both functions.
+  agora hits it once per directory entry inside `boards_list` ([src/board.cyr:961](src/board.cyr:961))
+  and on the **unauthenticated** `enter` path ([src/main.cyr:497](src/main.cyr:497) → `board_exists` →
+  `is_dir`). Bounded by the child's lifetime under the default `AGORA_SERVE=fork`; **process-lifetime
+  under `poll`, and on agnos, which always polls** — i.e. an anonymous client could force permanent
+  per-command heap growth that ADR 0021's arena never sees, because the allocation is inside a vendored
+  lib rather than agora's own source. This is the same shape as 1.6.1's `sock_accept` payload.
+  **Measured A/B on this workstation** (same compiler, libs varied; 3 boards × 50 posts, alternating
+  `boards` + `list general`, 600 commands after warmup, RSS-sampled):
+  **24,467 → 3,495 B/command (−85.7%)**. No agora code change.
+- **The size collapse is sigil, not the compiler.** Nothing in the 42 releases changes DCE or global
+  emission — `CYRIUS_DCE=1` still only NOP-fills code and *keeps* `.bss`, and cycc says so in its own
+  build hint. The drop is the bundled **sigil** deleting 46 module-level banked arrays: **59 → 13**
+  declarations, **1,587,782 → 11,358** declared array units (×8 B ≈ 12.6 MB, which is the whole delta).
+  agora had been carrying ~12.6 MB of zero-filled RSA/bignum `.bss` it never called, inherited at the
+  1.6.0 pin move and recorded then as "the 6.4.x stdlib's large static-BSS reservation".
+
+### Fixed
+
+- **`docs/examples/20-descent.sh` had been failing on the far side of the gateway.** The sibling
+  Yeoman's Descent MUD is now **1.7.22** (it was 1.0.1 when this smoke was written) and refuses to boot
+  without `data/zones/hub.rooms.cyml` relative to its CWD — *"world: FATAL — the room table was
+  rejected"*, because a roomless server never loads the object table and the next disconnect would write
+  an emptied inventory back. The smoke starts it in an empty `mktemp -d`, so the MUD was dead and step
+  (3) was asserting against agora's honest *"The Descent is not answering (operator may have it
+  offline)"*. The scratch dir is now seeded with the MUD's `data/`, which keeps the original isolation
+  intent (player saves land in the scratch dir, never in the MUD repo). **agora's gateway was never
+  broken** — this is the only source change in the cut outside the version literals.
+
+### Verification notes — the toolchain snapshot on this workstation was not the released 6.5.33
+
+Recorded because the numbers above are only meaningful against a known toolchain, and the first set
+measured here were wrong by 215,520 B.
+
+- `~/.cyrius/versions/6.5.33/` had been clobbered by an `install.sh --refresh-only` run out of the
+  **dirty cyrius working tree** (that tree's `VERSION` reads **6.5.34**). Two vendored libs did not match
+  the tag they were filed under — `bayan.cyr` (tag 215,533 B vs installed 641,083 B) and `patra.cyr`
+  (264,731 vs 265,603) — and `bin/cycc` was the 6.5.34 build. Restoring all three from `git show
+  6.5.33:…` makes the snapshot **101/101 byte-identical to its own tag**, and the binary drops
+  2,225,840 → **2,010,320 B**. The published tag is correct; only the local install was dirty.
+- **The binary is byte-identical whether compiled by 6.5.33 or 6.5.34**, verified directly, so
+  2,010,320 B is compiler-independent and safe as the release metric.
+- **The versioned wrapper does not pin `cycc`** — `~/.cyrius/versions/6.5.33/bin/cyrius build` still
+  invokes whatever `cycc` is on `PATH`, and says so in its own drift warning. CI is exempt (it installs
+  the released tarball into a fresh runner), but no local build is self-certifying. Upstream has this
+  filed as `cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`.
+
+### Inherited fixes (no agora change; recorded so the next reader knows they are in)
+
+- **`fmt_int` / `fmt_int_buf` / `print_num` emitted a bare `-` at `i64::MIN`** (6.5.8). `save_put_i64`
+  formats raw xorshift64 PRNG state, whose orbit includes `0x8000…0`, so this was a silent loss of save
+  PRNG continuity. All ten `fmt_int_buf` call sites already declare `var …[24]`, so the now-longer
+  output cannot overflow.
+- **`fl_alloc` / `fl_free` are documented thread-safe** behind a CAS spinlock gated on `_threads_active`
+  (6.5.19), after five races were found upstream. agora spawns no threads and takes the two-load fast
+  path — but ADR 0022's freelist no longer carries an undocumented thread-safety caveat.
+- **`cyrius fuzz --poison`** arms freelist redzones and quarantine (6.5.28/6.5.29). Noted against
+  roadmap **N4** with its limit: it instruments only `fl_alloc`/`fl_free`, and the IAC parser is entirely
+  bump-allocated, so a `--poison` run against the parser reports zero violations no matter how far it
+  overruns. It is useful for the door-state half, not the parser.
+- **Main-source diagnostics are line-accurate again** (6.5.3 / 6.5.19 / 6.5.24) — the known limitation
+  6.5.0 shipped with. Compile-error line numbers therefore move relative to 6.4.78; that is the fix
+  landing, not drift.
+- **`cyrius build` now reports every unresolved symbol** instead of dying on the first (6.5.23), and
+  **syntax errors in never-called functions are no longer skipped** (6.5.17).
+- **6.4.80 fixed a CRITICAL constant-fold bug** that was present in our 6.4.78 pin (`1 - 2 + 3` folding
+  to 5 in the PEXPR tier). Verified agora had **zero** instances of the affected shape.
+
+### Changed
+
+- **Toolchain pin `6.4.78` → `6.5.33`** (`cyrius.cyml [package].cyrius`). Verified non-breaking against
+  agora's real consumption surface — **71 stdlib functions across the 25 declared modules**: zero
+  removals, zero renames, zero arity changes. The `gvar_toks` counting rule, the constant folder and the
+  **4,096-slot limit are all untouched** across the span, so CLAUDE.md § Cyrius Conventions needs no
+  amendment (agora declares 41 top-level `var`s — three orders of magnitude of headroom).
+- **`lib/` re-vendored and verified byte-identical to tag 6.5.33.** A clean `rm -rf build lib && cyrius
+  deps` resolves **50 files + darshana**, and drops the orphaned `lib/agnosys.cyr` — no cyrius has
+  shipped it since 6.2.35 and agora declares it nowhere.
+- **cyrius 6.5.32 made bare negative literals legal in enums** (`enum E { X = -1; }`). Verified at
+  6.5.33 that the house `(0 - N)` form **still compiles**, so CLAUDE.md's "no negative literals"
+  convention stands as written and no conversion is forced.
+
+### Security
+
+- The `is_dir` / `dir_list` fix above closes an **unauthenticated** path to unbounded heap growth under
+  `AGORA_SERVE=poll` and on agnos. No CVE; found by agora and filed upstream at 1.6.6, fixed at cyrius
+  6.5.11. Recorded here because the reachability — anonymous `enter`, pre-auth — is the same class the
+  1.6.3 audit's `scores` finding was rated HIGH for.
+
 ## [1.6.6] — 2026-07-26 (doc-truth and process: the non-code half of the roadmap sweep)
 
 **No behavior change. This closes the paperwork the 1.6.x line ran up.** The 2026-07-26 deferred-work

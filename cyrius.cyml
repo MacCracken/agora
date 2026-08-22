@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.78"
+cyrius = "6.5.33"
 
 [build]
 entry = "src/main.cyr"
@@ -19,11 +19,13 @@ output = "agora"
 stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "result", "tagged", "vec", "fnptr", "bench", "str", "fs", "chrono", "random", "sigil", "freelist", "ct", "bayan", "thread_local", "keccak", "hashmap", "thread"]
 
 [deps.darshana]
-# SGR / cursor primitives for ANSI BBS aesthetic at M2-B. The
-# `_buf` variants (tty_sgr_buf / tty_sgr_reset_buf / tty_fg_rgb_buf
-# / tty_fg_256_buf) are what we need — they compose ANSI escapes
-# into a caller-provided buffer instead of writing to fd 1, so the
-# rendered bytes go out over the telnet socket via send_buf.
+# SGR primitives for the ANSI BBS aesthetic at M2-B. agora consumes
+# exactly two functions — `tty_sgr_buf` and `tty_sgr_reset_buf`, three
+# call sites each (verified 1.6.7 by grepping `tty_` across src/). Both
+# are `_buf` composers: they write the ANSI escape into a caller-provided
+# buffer instead of to fd 1, so the rendered bytes go out over the telnet
+# socket via send_buf. (`tty_fg_rgb_buf` / `tty_fg_256_buf` were listed
+# here as "what we need" through 1.6.6 and have never been called.)
 #
 # Pinned at 0.9.0 (current tip) — pre-1.0 by version label but the
 # functional surface we need is stable: agora only consumes the `_buf`
@@ -42,7 +44,11 @@ tag = "0.9.0"
 modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:
-#   - darshana (ANSI escapes — ANSI BBS aesthetic at M2+)
 #   - kii (image → ASCII for MOTD banners + post inline-images at M3+)
-#   - bannermanor (FIGlet ASCII banners at M2+)
 #   - sankoch (lossless compression for stored-file deltas at M4+)
+#
+# (darshana was listed here as "deferred" through 1.6.6 while being a live
+# [deps.darshana] git dep declared 20 lines above and called from
+# src/main.cyr — removed 1.6.7. bannermanor is likewise not deferred: its
+# banners were rendered offline at M2-A and the bytes are baked into the
+# MOTD, so agora consumes its OUTPUT, not the crate.)

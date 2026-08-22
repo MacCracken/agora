@@ -1,5 +1,32 @@
 # 002 — `cyrius lib sync` silently skips same-size stdlib files
 
+> ## ✅ FIXED UPSTREAM AT cyrius 6.5.7 — agora has been clear since the 1.6.7 pin (6.5.33)
+>
+> `_dep_copy_file` no longer returns early on equal size. Size is now a **negative fast path only**
+> (different size ⇒ definitely copy); equal size falls through to `_files_identical`, a byte compare —
+> deliberately a byte compare rather than `_sha256sum_file`, which would fork ~99 processes per sync and
+> make a core correctness predicate depend on an external binary. Verified two ways at the 1.6.7 cut:
+> bisected across every `6.5.*` tag (`_files_identical` first appears in `cbt/deps.cyr` at **6.5.7**,
+> absent at 6.5.6), and **mutation-tested on this repo** — flipping one byte in a comment of
+> `lib/net.cyr`, preserving its exact length, then running plain `cyrius lib sync` (not even `--full`)
+> repaired the file. Under 6.4.78 that mutation survived.
+>
+> **This note is kept, not retired.** Three reasons: a downgrade below 6.5.7 re-arms the trap; the
+> vintage table below is the record of what the 1.6.0 and 1.6.1 binaries were actually built against;
+> and § Detection's `cmp` sweep is now the cheap *verification* that the fix is working, which is how
+> 1.6.7 caught something else entirely — the local `6.5.33` snapshot was a **dirty working tree**, two
+> libs and `cycc` off-tag. **The sweep found real drift at this cut too; it was just upstream of the
+> tool rather than inside it.** § The procedure step 4 stays; only its rationale changes, from
+> "the copier lies" to "the snapshot may not be what it claims".
+>
+> **§ Blast radius is corrected**: CI was never exposed. `ci.yml` and `release.yml` run `cyrius deps`
+> into a fresh checkout where `lib/` is gitignored and therefore empty, and the skip required a
+> pre-existing same-size destination. The exposure was always local-workstation only.
+>
+> The *"`copied N files` is a lie of omission"* paragraph below **remains true** — `cbt/commands.cyr`
+> still increments its counter unconditionally, so the printed count is still files *considered*, not
+> files *written*.
+
 > **Affects**: every toolchain-pin bump in this repo (`cyrius.cyml [package].cyrius` + `cyrius lib sync --full`). Surfaced at the 1.6.1 cut (6.4.32 → 6.4.78), which found **six** vendored `lib/*.cyr` still carrying content from *earlier* pins — four of them stale since the 1.6.0 cut's 6.2.8 → 6.4.32 sync.
 
 ## The trap

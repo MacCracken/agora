@@ -52,9 +52,21 @@ mkdir -p "$KEYS"
 "$BIN" register --handle qix --key "$KEYS/qix" --store "$STORE" >/dev/null
 
 # Start the MUD (if built) on its own port, in a scratch data dir.
+#
+# 1.6.7: the scratch dir must be SEEDED with the MUD's zone data. When this
+# smoke was written the MUD was 1.0.1 and started anywhere; it now refuses to
+# boot without `data/zones/hub.rooms.cyml` relative to its CWD ("world: FATAL —
+# the room table was rejected"), because a roomless server never loads the
+# object table and the next disconnect would write an emptied inventory back.
+# An empty `mktemp -d` therefore left the MUD dead and step (3) asserting
+# against agora's honest "The Descent is not answering" — a smoke that failed
+# for a reason on the far side of the gateway. Copying `data/` in keeps the
+# original isolation intent (player saves land in the scratch dir, never in
+# the MUD repo) while giving the MUD what it needs to boot.
 MUD=""
 if [ -x "$MUD_BIN" ]; then
     MUDDATA="$(mktemp -d)"
+    [ -d "$MUD_REPO/data" ] && cp -r "$MUD_REPO/data" "$MUDDATA/"
     ( cd "$MUDDATA" && "$MUD_BIN" serve "$MUDPORT" ) >/tmp/yd-descent-20.log 2>&1 &
     MUD=$!
 fi
