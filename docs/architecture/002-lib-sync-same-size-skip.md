@@ -1,6 +1,6 @@
 # 002 — `cyrius lib sync` silently skips same-size stdlib files
 
-> ## ✅ FIXED UPSTREAM AT cyrius 6.5.7 — agora has been clear since the 1.6.7 pin (6.5.33)
+> ## ✅ FIXED UPSTREAM AT cyrius 6.5.7 — agora has been clear since the 1.6.7 pin (6.5.33; now 6.5.34)
 >
 > `_dep_copy_file` no longer returns early on equal size. Size is now a **negative fast path only**
 > (different size ⇒ definitely copy); equal size falls through to `_files_identical`, a byte compare —
@@ -76,7 +76,7 @@ modules it never noticed were 6.2.8-era.
 
 Two signals, neither sufficient alone:
 
-1. **The compiler warning (partial).** cycc ≥ 6.4.7x emits
+1. **The driver warning (partial).** The `cyrius` driver — not `cycc`; a raw `cycc` invocation never sees the manifest — emits, at ≥ 6.4.7x,
    `warning: ./lib/ shadows version-pinned ~/.cyrius/versions/<pin>/lib — N bundled lib(s) differ`
    and names them. It caught `niyama` and `yantra` here — but only because those
    two carry a parseable `# Version:` stamp. The other four (`pam`,
@@ -103,16 +103,20 @@ After **every** pin bump, in this order:
    `~/.cyrius/versions/<pin>/lib/` into `lib/`.
 5. Re-run the sweep — it must print nothing — then build.
 
-Step 4 is not optional and cannot be replaced by re-running step 2: a second
-`lib sync` makes exactly the same size comparison and skips exactly the same
-files.
+**For pins < 6.5.7**, step 4 was not optional and could not be replaced by
+re-running step 2: a second `lib sync` made exactly the same size comparison and
+skipped exactly the same files. **At ≥ 6.5.7 the copier is correct**, so step 4 is
+now a cheap *verification* rather than a repair — keep it anyway. It is what
+caught, at 1.6.7, that the local `6.5.33` snapshot was not the released tag at all
+(see the banner at the top): the copier was doing its job faithfully and copying
+the wrong bytes.
 
 ## Blast radius when it goes unnoticed
 
 At 1.6.1 the refresh was inert — the DCE binary was the same size before and
 after (14,567,408 B), and 221/221 tests plus the full example-smoke suite were
 green either way, because agora links none of the six modules on a hot path.
-That is luck, not a guarantee: `lib/` is `.gitignore`d (`lib/*.cyr`), so a stale
+That is luck, not a guarantee: `lib/` is `.gitignore`d in full, so a stale
 vendored module leaves **no trace in the repo** and no diff to review. The
 failure mode it sets up is a silent, unreproducible divergence between what CI
 builds (a clean `cyrius deps` into an empty `lib/` — always current) and what

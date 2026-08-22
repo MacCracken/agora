@@ -5,8 +5,9 @@
 # before any of the later examples touch the binary. If this script
 # fails, nothing downstream will work — fix the build before reading on.
 #
-# Success: build/agora exists; `agora version` matches VERSION; 80/80
-# tests pass; exit 0.
+# Success: build/agora exists; `agora version` matches VERSION; the unit
+# suite passes with 0 failures; exit 0. (No count here on purpose — this
+# literal drifted twice, 80 → 178 → 221; state.md owns the number.)
 
 set -euo pipefail
 

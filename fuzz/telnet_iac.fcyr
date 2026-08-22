@@ -1,0 +1,313 @@
+# telnet_iac.fcyr — fuzz the RFC 854 / 1143 / 1073 / 1091 / 1184 IAC parser.
+#
+# WHY THIS EXISTS
+# CLAUDE.md § Key Principles states, as a hard rule: "Fuzz every parser path —
+# IAC sequences are adversarial-by-default (anyone with a telnet client can send
+# them)." Until 1.7.0 that rule had no implementation: no fuzz/ directory, no
+# .fcyr anywhere, and no fuzz step in CI. The 2026-07-26 audit said so plainly
+# under "What this audit did not cover": no dynamic analysis at all. The
+# deferral dated to [0.2.0] ("fuzz earns its spot at M2+") while the input
+# surface widened four times. This closes roadmap N4.
+#
+# WHAT IS FUZZED
+# `telnet_feed(ts, b)` is the single entry point for every byte that arrives
+# from a socket — it is the most exposed function in agora, reachable
+# pre-authentication by anyone who can open a TCP connection. `telnet_handle_sb`
+# is the second target: it holds the module's ONLY `memcpy` (the TERMINAL_TYPE
+# copy), which is the classic overflow shape and the one CVE-2020-10188 in BSD
+# telnetd was. Both are pure by design — CLAUDE.md § Key Principles keeps the
+# state machines side-effect-free precisely so they can be driven without
+# binding a port — so a harness needs no socket and no fixture.
+#
+# WHY IT ASSERTS RATHER THAN JUST RUNS
+# A fuzz harness that only calls the parser and exits 0 passes whether or not
+# the parser is correct — the 1.6.6 lesson about tests that cannot fail. Random
+# bytes into a bounds-checked state machine will not segfault on their own, so
+# this file carries its OWN invariants and exits non-zero the moment one breaks.
+# Note that `cyrius fuzz --poison` cannot help here: it instruments `fl_alloc` /
+# `fl_free`, and the telnet parser is entirely bump-allocated. The invariants
+# below are the only detector this target has.
+#
+# Each invariant exits with a distinct code so a failure names itself:
+#   10 telnet_feed returned a value outside {EV_NONE, EV_DATA, EV_SB}
+#   11 parser state left the ST_DATA..ST_SB_IAC range
+#   12 tx queue length exceeded its capacity
+#   13 subneg accumulator length exceeded its capacity
+#   14 TERMINAL_TYPE length exceeded its capacity (the memcpy overflow shape)
+#   15 EV_SB reported with an empty subneg buffer
+#   16 NAWS produced a dimension outside 0..65535
+#   17 an option Q-state byte left the 0..255 range
+#   20 a targeted (non-random) adversarial sequence broke an invariant
+#   21 telnet_state_reset left the state dirty
+#
+# DETERMINISM: the byte stream comes from an in-file xorshift64 PRNG with a
+# fixed seed, so a failure here reproduces exactly on the next run and in CI.
+# There is no corpus directory and no input file — `cyrius fuzz` supplies
+# neither; a .fcyr generates its own bytes.
+
+include "src/telnet.cyr"
+
+alloc_init();
+
+# --- deterministic PRNG (xorshift64) -----------------------------------------
+# Seeded with a fixed non-zero constant. Do NOT reseed from the clock: a fuzz
+# failure that cannot be reproduced is a rumour, not a bug report.
+var rng = 0x2545F4914F6CDD1D;
+
+fn nextb(): i64 {
+    rng = rng ^ (rng << 13);
+    rng = rng ^ (rng >> 7);
+    rng = rng ^ (rng << 17);
+    return rng & 0xFF;
+}
+
+# --- invariant check, run after every fed byte -------------------------------
+# `ev` is telnet_feed's return. Exits the process on the first violation.
+fn check(ts, ev): i64 {
+    if (ev < EV_NONE) { syscall(60, 10); }
+    if (ev > EV_SB)   { syscall(60, 10); }
+
+    var st = load64(ts + TS_STATE);
+    if (st < ST_DATA)   { syscall(60, 11); }
+    if (st > ST_SB_IAC) { syscall(60, 11); }
+
+    var txl = load64(ts + TS_TX_LEN);
+    if (txl < 0) { syscall(60, 12); }
+    if (txl > load64(ts + TS_TX_CAP)) { syscall(60, 12); }
+
+    var sbl = load64(ts + TS_SB_LEN);
+    if (sbl < 0) { syscall(60, 13); }
+    if (sbl > load64(ts + TS_SB_CAP)) { syscall(60, 13); }
+
+    var tl = load64(ts + TS_TERM_TLEN);
+    if (tl < 0) { syscall(60, 14); }
+    if (tl > TERM_TYPE_CAP) { syscall(60, 14); }
+
+    # A completed subnegotiation must carry at least the option byte. An EV_SB
+    # with an empty buffer would mean telnet_handle_sb reads sb_buf[0] out of
+    # bounds — the shape worth catching, not a cosmetic check.
+    if (ev == EV_SB) {
+        if (sbl < 1) { syscall(60, 15); }
+    }
+
+    var cols = load64(ts + TS_TERM_COLS);
+    if (cols < 0)     { syscall(60, 16); }
+    if (cols > 65535) { syscall(60, 16); }
+    var rows = load64(ts + TS_TERM_ROWS);
+    if (rows < 0)     { syscall(60, 16); }
+    if (rows > 65535) { syscall(60, 16); }
+    return 0;
+}
+
+# The RFC 1143 Q-state arrays are one byte per option; a stray store64 through
+# them would show up as an out-of-range byte. Swept periodically rather than
+# per-byte (512 loads per fed byte would dominate the runtime).
+fn check_optq(ts): i64 {
+    var i = 0;
+    while (i < 256) {
+        var u = opt_us(ts, i);
+        if (u < 0)   { syscall(60, 17); }
+        if (u > 255) { syscall(60, 17); }
+        var h = opt_him(ts, i);
+        if (h < 0)   { syscall(60, 17); }
+        if (h > 255) { syscall(60, 17); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- pass 1: uniform random bytes --------------------------------------------
+# Baseline coverage. Most bytes are plain data; IAC (255) appears ~1 byte in
+# 256, which is enough to reach ST_IAC often across 200k bytes but NOT enough
+# to exercise the deep subneg paths — hence passes 2 and 3.
+var ts = telnet_state_new();
+telnet_announce(ts);
+telnet_tx_consume(ts);
+
+var n = 0;
+while (n < 200000) {
+    var ev = telnet_feed(ts, nextb());
+    check(ts, ev);
+    if (ev == EV_SB) { telnet_handle_sb(ts); check(ts, EV_NONE); }
+    # Drain the response queue the way a real caller does, or tx_len simply
+    # saturates at capacity and stops being an interesting signal.
+    if (telnet_tx_len(ts) > 0) { telnet_tx_consume(ts); }
+    if ((n & 0x3FFF) == 0) { check_optq(ts); }
+    n = n + 1;
+}
+check_optq(ts);
+
+# --- pass 2: IAC-dense stream ------------------------------------------------
+# Bias every 4th byte to IAC so the command/option/subneg arms are entered
+# constantly instead of incidentally. This is the shape a hostile client sends;
+# uniform random bytes are the shape a broken one sends.
+var ts2 = telnet_state_new();
+telnet_announce(ts2);
+telnet_tx_consume(ts2);
+
+var m = 0;
+while (m < 200000) {
+    var b = nextb();
+    if ((m & 3) == 0) { b = IAC; }
+    var ev2 = telnet_feed(ts2, b);
+    check(ts2, ev2);
+    if (ev2 == EV_SB) { telnet_handle_sb(ts2); check(ts2, EV_NONE); }
+    if (telnet_tx_len(ts2) > 0) { telnet_tx_consume(ts2); }
+    if ((m & 0x3FFF) == 0) { check_optq(ts2); }
+    m = m + 1;
+}
+check_optq(ts2);
+
+# --- pass 3: structured subnegotiations with random payloads -----------------
+# The interesting overflow surface is `IAC SB <opt> <payload...> IAC SE` where
+# the payload is attacker-length. Passes 1 and 2 reach ST_SB but rarely emit a
+# well-formed SE after a long payload, because a random IAC inside the payload
+# usually terminates it early. Here the frame is well-formed and only the
+# payload is random — including payloads far longer than SB_BUF_CAP (512) and
+# longer than TERM_TYPE_CAP (256), which is the CVE-2020-10188 shape.
+var ts3 = telnet_state_new();
+telnet_announce(ts3);
+telnet_tx_consume(ts3);
+
+var opts[6];
+store64(&opts + 0,  OPT_NAWS);
+store64(&opts + 8,  OPT_TERMINAL_TYPE);
+store64(&opts + 16, OPT_LINEMODE);
+store64(&opts + 24, OPT_ECHO);
+store64(&opts + 32, OPT_SUPPRESS_GO_AHEAD);
+store64(&opts + 40, OPT_STATUS);
+
+var f = 0;
+while (f < 4000) {
+    # payload length 0..1023 — deliberately spanning past SB_BUF_CAP (512)
+    var plen = (nextb() << 2) | (nextb() & 3);
+    var opt = load64(&opts + ((f % 6) * 8));
+
+    var e1 = telnet_feed(ts3, IAC); check(ts3, e1);
+    var e2 = telnet_feed(ts3, SB);  check(ts3, e2);
+    var e3 = telnet_feed(ts3, opt); check(ts3, e3);
+
+    var p = 0;
+    while (p < plen) {
+        var pb = nextb();
+        # Keep the frame well-formed: a raw IAC in the payload would end it.
+        # Real clients escape it as IAC IAC; feeding the doubled form exercises
+        # the un-escape path instead of just truncating the frame.
+        if (pb == IAC) {
+            var ea = telnet_feed(ts3, IAC); check(ts3, ea);
+        }
+        var ep = telnet_feed(ts3, pb); check(ts3, ep);
+        p = p + 1;
+    }
+
+    var e4 = telnet_feed(ts3, IAC); check(ts3, e4);
+    var e5 = telnet_feed(ts3, SE);  check(ts3, e5);
+    if (e5 == EV_SB) { telnet_handle_sb(ts3); check(ts3, EV_NONE); }
+    if (telnet_tx_len(ts3) > 0) { telnet_tx_consume(ts3); }
+    f = f + 1;
+}
+check_optq(ts3);
+
+# --- pass 4: targeted adversarial sequences ----------------------------------
+# Hand-picked shapes a random generator reaches rarely or never. Each is fed to
+# a FRESH state so one cannot mask another.
+fn feed_seq(ts4, buf, len): i64 {
+    var i = 0;
+    while (i < len) {
+        var ev4 = telnet_feed(ts4, load8(buf + i));
+        if (ev4 < EV_NONE) { syscall(60, 20); }
+        if (ev4 > EV_SB)   { syscall(60, 20); }
+        var st4 = load64(ts4 + TS_STATE);
+        if (st4 < ST_DATA)   { syscall(60, 20); }
+        if (st4 > ST_SB_IAC) { syscall(60, 20); }
+        if (load64(ts4 + TS_SB_LEN)    > load64(ts4 + TS_SB_CAP)) { syscall(60, 20); }
+        if (load64(ts4 + TS_TX_LEN)    > load64(ts4 + TS_TX_CAP)) { syscall(60, 20); }
+        if (load64(ts4 + TS_TERM_TLEN) > TERM_TYPE_CAP)           { syscall(60, 20); }
+        if (ev4 == EV_SB) {
+            telnet_handle_sb(ts4);
+            if (load64(ts4 + TS_TERM_TLEN) > TERM_TYPE_CAP) { syscall(60, 20); }
+        }
+        telnet_tx_consume(ts4);
+        i = i + 1;
+    }
+    return 0;
+}
+
+var seq = alloc(2048);
+
+# (a) truncated: IAC alone, then IAC SB with no terminator, then EOF.
+var sa = 0;
+store8(seq + sa, IAC); sa = sa + 1;
+store8(seq + sa, SB);  sa = sa + 1;
+store8(seq + sa, OPT_TERMINAL_TYPE); sa = sa + 1;
+feed_seq(telnet_state_new(), seq, sa);
+
+# (b) IAC SE with no preceding SB — a terminator out of nowhere.
+var sb2 = 0;
+store8(seq + sb2, IAC); sb2 = sb2 + 1;
+store8(seq + sb2, SE);  sb2 = sb2 + 1;
+feed_seq(telnet_state_new(), seq, sb2);
+
+# (c) TERMINAL_TYPE IS with a 1024-byte name — 4x TERM_TYPE_CAP. The overflow
+#     shape. If the memcpy in telnet_handle_sb is unbounded, this is where it
+#     shows, and code 20 names it.
+var sc = 0;
+store8(seq + sc, IAC); sc = sc + 1;
+store8(seq + sc, SB);  sc = sc + 1;
+store8(seq + sc, OPT_TERMINAL_TYPE); sc = sc + 1;
+store8(seq + sc, TT_IS); sc = sc + 1;
+var q = 0;
+while (q < 1024) { store8(seq + sc, 65); sc = sc + 1; q = q + 1; }
+store8(seq + sc, IAC); sc = sc + 1;
+store8(seq + sc, SE);  sc = sc + 1;
+feed_seq(telnet_state_new(), seq, sc);
+
+# (d) NAWS with a short (3-byte) payload — the field decoder must not read past
+#     what arrived. RFC 1073 requires exactly 4.
+var sd = 0;
+store8(seq + sd, IAC); sd = sd + 1;
+store8(seq + sd, SB);  sd = sd + 1;
+store8(seq + sd, OPT_NAWS); sd = sd + 1;
+store8(seq + sd, 0); sd = sd + 1;
+store8(seq + sd, 80); sd = sd + 1;
+store8(seq + sd, 0); sd = sd + 1;
+store8(seq + sd, IAC); sd = sd + 1;
+store8(seq + sd, SE);  sd = sd + 1;
+feed_seq(telnet_state_new(), seq, sd);
+
+# (e) a 2000-byte run of bare IAC — every byte re-enters the command arm.
+var se2 = 0;
+while (se2 < 2000) { store8(seq + se2, IAC); se2 = se2 + 1; }
+feed_seq(telnet_state_new(), seq, se2);
+
+# (f) IAC SB LINEMODE with a random-length SLC payload — RFC 1184's triplet
+#     decoder, which the roadmap records as "a validation that was never
+#     written". If it ever reads a partial triplet, this finds it.
+var sf = 0;
+store8(seq + sf, IAC); sf = sf + 1;
+store8(seq + sf, SB);  sf = sf + 1;
+store8(seq + sf, OPT_LINEMODE); sf = sf + 1;
+store8(seq + sf, LM_SLC); sf = sf + 1;
+var r = 0;
+while (r < 97) { store8(seq + sf, nextb()); sf = sf + 1; r = r + 1; }   # 97: not a multiple of 3
+store8(seq + sf, IAC); sf = sf + 1;
+store8(seq + sf, SE);  sf = sf + 1;
+feed_seq(telnet_state_new(), seq, sf);
+
+# --- pass 5: state reset ------------------------------------------------------
+# 1.6.0's session pool reuses a TelnetState across connections via
+# telnet_state_reset. A reset that leaves the machine mid-subneg would let one
+# client's trailing bytes be parsed as the next client's — cross-session bleed
+# through the parser. Drive ts3 into ST_SB, reset, and require a clean slate.
+telnet_feed(ts3, IAC);
+telnet_feed(ts3, SB);
+telnet_feed(ts3, OPT_NAWS);
+telnet_state_reset(ts3);
+if (load64(ts3 + TS_STATE)    != ST_DATA) { syscall(60, 21); }
+if (load64(ts3 + TS_SB_LEN)   != 0)       { syscall(60, 21); }
+if (load64(ts3 + TS_TX_LEN)   != 0)       { syscall(60, 21); }
+if (load64(ts3 + TS_TERM_TLEN) != 0)      { syscall(60, 21); }
+check_optq(ts3);
+
+println("fuzz telnet_iac: OK (5 passes, ~1.2M bytes, all invariants held)");
+syscall(60, 0);

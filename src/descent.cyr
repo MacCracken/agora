@@ -262,7 +262,7 @@ fn descent_write_all(fd, buf, len): i64 {
 #   agnos — has no poll at all. Sweep both sockets with the non-blocking
 #   `sys_sock_recv`(#49) and pace with `sys_sleep_ms`, exactly the pattern
 #   `serve_poll` / `sess_recv_nonblock` already use on that target
-#   (src/main.cyr:2128). agnos's recv sense is inverted from Linux's: 0 means
+#   agnos's recv sense is inverted from Linux's: 0 means
 #   "nothing pending", negative means EOF/error.
 #
 # NOTE (unchanged from 1.6.0, documented not fixed): under SERVE_POLL this

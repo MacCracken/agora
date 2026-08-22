@@ -5,7 +5,8 @@
 # but only in whatever serve model happens to be the default. 1.6.0 added the
 # poll multiplex, and with it a silent regression: in poll mode `send_buf`
 # ignores its fd argument and enqueues to the ACTIVE SESSION's tx queue
-# (src/main.cyr:239), which is correct for BBS output and wrong for a proxy.
+# (`send_buf`'s poll arm enqueues to g_active_sess), which is correct for BBS
+# output and wrong for a proxy.
 # So `send_buf(mfd, ...)` — the client→MUD direction — put the player's
 # keystrokes on the player's own outbound queue and the MUD received NOTHING.
 # The gateway looked alive (the MUD's banner still reached the client) but no

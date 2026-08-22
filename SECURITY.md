@@ -33,7 +33,9 @@ Out of scope:
 
 ## Security audit cadence
 
-Per [`CLAUDE.md` § Security Hardening](CLAUDE.md#security-hardening-before-every-release), every release runs a security pass. Audit findings file in `docs/audit/YYYY-MM-DD-audit.md`. First audit pins before the M6 ship (auth surface lands).
+Per [`CLAUDE.md` § Security Hardening](CLAUDE.md#security-hardening-before-every-release), every release runs a security pass. Audit findings file in `docs/audit/YYYY-MM-DD-audit.md`. Three audits are on file — [2026-05-23](docs/audit/2026-05-23-audit.md), [2026-06-15](docs/audit/2026-06-15-audit.md) and [2026-07-26](docs/audit/2026-07-26-audit.md) — with every HIGH, MEDIUM and LOW finding discharged as of 1.6.5.
+
+**Dynamic analysis** landed at **1.7.0**: `fuzz/telnet_iac.fcyr` drives the RFC 854 / 1143 / 1073 / 1091 / 1184 IAC parser — the most exposed surface agora has, reachable pre-authentication by anyone who can open a TCP connection — and asserts its own bounds invariants. It runs in CI on every push and again at release, and it is mutation-proven: removing the `TERMINAL_TYPE` clamp (the CVE-2020-10188 shape) or the subnegotiation accumulator bound each turns it red. Prior to 1.7.0 the 2026-07-26 audit recorded, correctly, that agora had **no dynamic analysis at all**.
 
 ## Known CVE-equivalent prior art we defend against
 

@@ -81,7 +81,7 @@ post_headers_set_from(ph, handle_cstr, fp_cstr)    # both nullable; null pair �
 
 - **One-time refactor across 8 call sites.** Bounded; landed in the same bite as the decision.
 - **Backwards-compat-shim removal is a Breaking change** per Keep a Changelog. The shims (`post_format_with_subject`, `post_new_with_subject`) are documented in CHANGELOG [0.9.0] § Breaking — though no external consumer exists today (agora is a binary, not a library), so the impact surface is limited to anyone who patched against the M5 surface and didn't update through M6.
-- **Slight allocation cost per post** — one extra `alloc(32)` per `post_headers_new` call. Per CLAUDE.md memory model (`alloc()` is bump-only), this is the same shape as every other per-call allocation in `handle_client`; ADR 0007's fork-per-conn reclaims it at child `sys_exit` so there's no long-running-process leak.
+- **Slight allocation cost per post** — one extra `alloc(32)` per `post_headers_new` call. Per CLAUDE.md memory model (`alloc()` is bump-only), this is the same shape as every other per-call allocation in `handle_client`; **since 1.6.2 it is `cmd_alloc` on the per-command arena** ([ADR 0021](0021-per-command-scratch-arena.md)), reclaimed at the end of each dispatched line. The original argument — that ADR 0007's fork-per-conn reclaims it at child `sys_exit` — stopped holding under the poll model, where one process serves for the life of the server and never exits so there's no long-running-process leak.
 
 ### Neutral
 

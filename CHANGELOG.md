@@ -4,6 +4,162 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-08-22 (roadmap § Now closes: the server can finally stop)
+
+**All four pinned roadmap items — N1, N2, N3, N4 — are done**, plus cyrius **6.5.33 → 6.5.34**.
+`docs/development/roadmap.md` § Now is empty for the first time since it was rebuilt. 221/221 tests,
+both targets build, **28/28** example smokes green (new: `28-clean-shutdown.py`), and the IAC parser
+now has a fuzz harness that is mutation-proven on two axes.
+
+**2,010,320 → 2,230,240 B**; `--agnos` **2,209,976 B**. **+219,920 B, and ~215,520 B of that is not
+agora**: 6.5.34 folds **bayan 1.4.2 → 1.5.2**, which carries two heap buffer overflows in `csv`
+(CWE-787), a one-byte remote crash in `base64`, an unchecked allocation in `yaml`, an out-of-bounds
+read in `cyml`, a remote memory-exhaustion DoS in `json`, dropped carries in `u256_mul`, and a
+`bayan_u64_mulmod` that took **SIGFPE on ordinary inputs**. agora reaches only `u256_from_hex` (via
+sigil's `ed25519_init`), but the growth is the price of a dependency that is now correct — and it is
+exactly the 215,520 B that 1.6.7 removed by pinning the *released* bayan instead of the unreleased one
+that had been sitting in the local snapshot. The remaining ~4.4 KB is N1–N4.
+
+### Added
+
+- **N1 — clean shutdown on SIGINT / SIGTERM, both serve models.** Until now **neither loop could
+  exit**: both declared `var stop = 0;` and looped `while (stop == 0)` with **nothing anywhere
+  assigning `stop`**. agora could only be killed — the poll model never drained its 64 slots, the fork
+  model never reaped. The mechanism is a **signalfd**, not a handler: a handler would need the
+  `rt_sigaction` `sa_restorer` trampoline that [ADR 0007](docs/adr/0007-fork-per-connection.md)
+  rejected, and would drag in async-signal-safety; an fd is the shape both loops already consume.
+  Poll tests it once per sweep; the fork parent, whose `accept` blocks, waits on `poll(2)` over
+  `{listener, signalfd}` — descent's established pollfd idiom, and safe unguarded here because fork
+  mode is Linux-only by construction. On shutdown poll notifies and drains every live session, and the
+  fork parent closes the listener then reaps children for a bounded 5 s grace before exiting anyway
+  (unbounded would let one player in a door game hold the operator's shutdown open forever).
+- **N4 — `fuzz/telnet_iac.fcyr`, and a fuzz step in both CI and release.** CLAUDE.md § Key Principles
+  has demanded *"fuzz every parser path — IAC sequences are adversarial-by-default"* since **0.2.0**
+  with no harness behind it; the 2026-07-26 audit said so under *"What this audit did not cover"*.
+  The harness drives ~1.2M bytes through `telnet_feed` / `telnet_handle_sb` across five passes —
+  uniform random, IAC-dense, well-formed subnegotiations with payloads spanning past `SB_BUF_CAP`,
+  hand-picked adversarial frames, and a state-reset check — asserting **its own invariants** with a
+  distinct exit code per violation. That matters: random bytes into a bounds-checked machine will not
+  crash on their own, and `cyrius fuzz --poison` cannot help because it instruments `fl_alloc`/`fl_free`
+  while the parser is entirely bump-allocated. **Mutation-proven on two independent axes**: deleting
+  the `TERM_TYPE_CAP` clamp (the CVE-2020-10188 shape) or the subneg accumulator bound each turns it
+  RED. The PRNG seed is fixed so a CI failure reproduces locally byte for byte.
+- **`docs/examples/28-clean-shutdown.py`** — 9 checks, self-contained, itself mutation-proven.
+
+### Fixed
+
+- **N2 — crash-safe durable writes.** Three sites moved off `file_write_all`, whose `O_TRUNC` empties
+  the target *at open*: `door_save_write` (a player's save), `world_write` (the shared world — the
+  highest-value of the three, since one crash loses it for every player at once) and `chat_log_write`
+  (rewritten on **every** `say`, so the most frequently executed). `file_write_atomic` writes a temp,
+  fsyncs, and renames.
+  - ⚠ **The return convention differs and does so silently** — `file_write_all` returns the byte
+    count, `file_write_atomic` returns **0**. All three guards were `n != len`; keeping them would
+    have treated every successful write as a failure.
+  - ⚠ **Safe only because the locks are on different files.** A rename replaces the inode, and flock
+    binds to an inode, not a path. Had the world lock been held on `snapshot` itself this would have
+    silently destroyed [ADR 0010](docs/adr/0010-persistent-universe.md)'s no-lost-updates guarantee
+    with nothing failing visibly. Verified: `world_lock_acquire` locks `<world>/.lock` and
+    `chat_lock_acquire` locks `<channel>/.lock`. **Proven, not assumed** — smoke 08 runs 8 concurrent
+    processes × 300 transactions and still lands exactly 2400.
+  - ⚠ **The obvious implementation reopened the leak class two previous cuts closed, so agora writes
+    its own.** Calling the stdlib's `file_write_atomic` directly would have been a one-word change —
+    and it builds its temp name with a bare `alloc()` (`_io_tmp_name`) that is never freed.
+    **Measured: 64 B of permanent bump heap per call** on a 14-byte path (`file_write_all` costs 0),
+    so ~96-112 B on agora's real store paths. Two of the three sites fire **per dispatched line** —
+    `chat_log_write` on every `say`, `world_write` on every universe-door line via
+    `door_world_commit` — and under `AGORA_SERVE=poll` one process serves for the life of the server,
+    so that is linear permanent growth on the hottest path in the chat subsystem: precisely what
+    [ADR 0021](docs/adr/0021-per-command-scratch-arena.md) and
+    [ADR 0022](docs/adr/0022-door-state-free-hook.md) each spent a whole cut eliminating. The arena
+    cannot reclaim it because the allocation is inside a vendored lib — which is also why CLAUDE.md's
+    *"no bare `alloc()` reachable from `process_rx`"* closeout gate cannot see it: that gate greps
+    agora's own source. **`store_write_atomic` (`src/arena.cyr`)** performs the identical I/O sequence
+    with the temp name taken from `cmd_alloc`. Re-measured after the change: **0 B per call.**
+
+    This was **not** caught by review. It was caught by the post-cut doc sweep reading the ADRs the
+    change was supposed to respect, which is an argument for running that sweep before calling a cut
+    done rather than after.
+- **N3 — both poll-mode holes.**
+  - **Hole B, the silent drop.** `sess_tx_enqueue`'s over-cap arm returned 1 *without copying*, and
+    **158 of 159 send sites discard that return** (the sole exception being the 1.6.3 telnet-tx
+    drain). So the "slow-reader defense" its own comment advertised did not exist: an over-cap session
+    lost bytes silently and stayed open holding one of 64 slots, mute forever. The refusal is now
+    recorded on the session and consumed by `session_drain`, whose negative return **both serve models
+    already close on** — so no call site changed, and no future send site can forget to check.
+    `send_buf` is the single choke point that makes this possible.
+  - **Hole A, the false doc comment.** `session_drain` claimed *"sys_write is non-blocking on both
+    platforms (agnos socket / Linux O_NONBLOCK)"*. Linux is true. **agnos is not**:
+    `sock_set_nonblocking` is a literal `return 0;` there, and `sys_write` on a tagged socket fd routes
+    to `SYS_SOCK_SEND = 48`, whose own table entry says `BLOCKS`. So on **the only target that always
+    polls**, one slow reader stalled the shared sweep for all 64 sessions, and the `EWOULDBLOCK` arm
+    was unreachable. There is **no non-blocking send on agnos to switch to** — no `MSG_DONTWAIT`, no
+    flags argument, no peer to `sock_recv`'s would-block return — so this **bounds** the exposure
+    rather than pretending to remove it: one send attempt per drain, remainder to the next sweep via
+    the partial path that already existed. A mitigation, recorded as one; the real fix is kernel-side.
+
+### Security
+
+- **Fork children were about to become unkillable, and the fix is in the same cut as the cause.**
+  `fork(2)` inherits the thread's signal mask, so arming N1 in the parent silently gave every
+  connection child a blocked SIGINT+SIGTERM with no signalfd being read. Measured during development:
+  a child's `/proc/<pid>/status` read `SigBlk: 0000000000004002` — exactly agora's mask — and it
+  survived SIGTERM. Children serve untrusted clients and are precisely the processes an operator most
+  needs to kill. `shutdown_signals_child_reset` unblocks and closes the inherited fd first thing in the
+  child branch; smoke 28 asserts both the mask and the kill, and is mutation-proven against it.
+- **A half-armed state could have made the whole server unkillable.** If `signalfd` failed *after*
+  `sigprocmask` succeeded, SIGINT and SIGTERM stayed blocked with nothing draining them — strictly
+  worse than the pre-1.7.0 behaviour the failure path is meant to degrade to. It now unblocks before
+  returning failure.
+- **The arming window: a signal arriving during startup still killed the server.** The first shape of
+  this patch armed inside each serve loop. But `cmd_serve_on` binds and listens *first*, so the port
+  was already accepting while `serve_poll` was still running `session_pool_init` +
+  `door_registry_init` — and a SIGTERM landing in that window met the default disposition and killed
+  the process. Arming now happens in `cmd_serve_on` beside `signal_ignore(SIGPIPE)`, **before the
+  socket is created**, for exactly the reason that call sits there.
+  **This is the one finding that came from the smoke rather than from review**: it reproduced on
+  roughly one run in three under the full suite while passing standalone every single time, which is
+  precisely the shape hand-testing does not catch. Now 0 failures in 10 consecutive runs.
+
+### Changed
+
+- **Toolchain pin `6.5.33` → `6.5.34`.** Verified: `lib/` is **101/101 byte-identical to tag 6.5.34**
+  and both `cycc` binaries match the tag — checked before trusting any number, per the 1.6.7 lesson.
+  The release's headline (three `CYRIUS_IR=3` miscompiles) cannot reach agora, which never sets
+  `CYRIUS_IR`; the live payload is the bayan fold above.
+- **The release workflow now runs the tests.** It built and *published* without running a single one —
+  CI ran them on push, but a tag can be cut from any commit, so nothing structurally prevented shipping
+  a red tree. The Closeout Pass's "full test suite" gate existed only as CLAUDE.md prose. `cyrius test`
+  and `cyrius fuzz` now gate the release.
+
+### Known limitations (recorded, not fixed)
+
+- **A player inside the Descent MUD delays poll shutdown.** `descent_proxy` blocks the sweep for as
+  long as the session is in the MUD (documented since 1.6.0 at `src/descent.cyr`), bounded only by
+  `DESCENT_IDLE_MS` = 30 minutes. The shutdown check is in that same sweep, so it does not run until
+  the proxy returns. Making Descent a *state* in the poll loop is the standing fix; it is
+  roadmap-tracked and larger than this cut.
+- **N1's agnos arm is unverified on hardware.** It is written to mirshi's documented semantics — and
+  those differ from Linux in a way that matters (below) — but agora's smokes run the Linux binary.
+- **`src/test.cyr` does not include `src/main.cyr`**, so none of N1's or N3's functions can be
+  unit-tested; they are covered by smoke 28 and by inspection. The `tests/` split that would fix this
+  is already in the backlog.
+
+### Notes for the next reader — two places the targets disagree
+
+Both were found by reading the other side's source, not by testing, and both fail **silently**:
+
+1. **Blocking a signal is required on Linux and wrong on agnos.** Linux needs the block or the default
+   terminate action runs before the fd can be read. mirshi computes `deliverable = pending AND NOT
+   blocked` (`mirshi/src/children.cyr:163`, consumed by the signalfd path in `dispatch.cyr`), so a
+   blocked signal is exactly the one agnos will never report — and blocking is unnecessary there
+   because `_do_kill` only ORs a pending bit and nothing terminates the guest. agora therefore blocks
+   **only** on Linux. One arm for both compiles cleanly and arms a shutdown that can never fire.
+2. **The sigset bit convention is off by one between targets.** Linux numbers bits from zero
+   (bit = signum − 1); agnos numbers them from one (bit = signum). SIGINT|SIGTERM is `0x4002` on Linux
+   and `0x8004` on agnos. darshana carries the identical split — `TTY_SIGMASK_EXIT` is `0x4003` /
+   `0x8006` — which is what agora's mask was derived from.
+
 ## [1.6.7] — 2026-08-22 (toolchain + dependency cut: the binary loses 86% of itself)
 
 **No features, no logic change, no agora source change beyond three version literals and one smoke

@@ -22,7 +22,7 @@ Own the **public-assembly surface** of an AGNOS deployment: a multi-user, telnet
 
 ## Current State
 
-> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) — current version, binary size, in-flight slot, recent releases, consumer status, gate state for downstream milestones. Refreshed every release (ideally bumped by the release post-hook).
+> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) — current version, binary size, in-flight slot, recent releases, consumer status, gate state for downstream milestones. Refreshed **by hand** every release — see § CI / Release; there is no post-hook yet.
 > Historical release narrative lives in [`CHANGELOG.md`](CHANGELOG.md) (per-tag chronology).
 > Doc-tree currency lives in [`docs/doc-health.md`](docs/doc-health.md) (fresh / stale / archive ledger).
 
@@ -39,7 +39,8 @@ cyrius build src/main.cyr build/agora        # build
 ./build/agora help                            # exercise dispatch
 ./build/agora version                         # version stamp
 cyrius test src/test.cyr                      # unit tests (parser, IAC sequences)
-./build/agora serve                           # start telnet listener (M1)
+cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also in CI + release)
+./build/agora serve                           # start telnet listener; Ctrl-C exits cleanly (1.7.0)
 ```
 
 ## Key Principles
@@ -47,7 +48,7 @@ cyrius test src/test.cyr                      # unit tests (parser, IAC sequence
 - **The wire is the contract** — RFC 854 and RFC 1184 are authoritative. Any deviation is a bug, not a feature. Cite section + line in code comments where behavior is subtle.
 - **Cross-platform from M1** — the listener uses `lib/net.cyr` socket primitives, not raw syscalls. New platform support is a `lib/net.cyr` task, not an agora task.
 - **Pure parsing is testable; socket I/O is wired** — keep the IAC/LINEMODE state machines side-effect-free so `src/test.cyr` can exercise them without binding a port.
-- **Posts are durable artifacts** — once written, a post is immutable from the protocol's perspective. Edits are new revisions (M4 delta-stored).
+- **Posts are durable artifacts** — once written, a post is immutable from the protocol's perspective; there is no edit path today, and if one is added, edits become new revisions rather than in-place rewrites. ⚠ Note the principle is not yet fully backed: 1.7.0 made door saves, the shared world and chat transcripts crash-safe, but **post writes are still plain `file_write`** (see [ADR 0002](docs/adr/0002-one-file-per-post-storage.md)).
 - **Admission control, not identity** — sigil gives us auth (M6); we are not a federated-identity system.
 - Test after EVERY change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
@@ -69,7 +70,6 @@ cyrius test src/test.cyr                      # unit tests (parser, IAC sequence
 - Do not add Cyrius stdlib includes in individual src files — the manifest resolves them
 - Do not hardcode toolchain versions in CI YAML — the `cyrius = "X.Y.Z"` pin in `cyrius.cyml` is the only source of truth
 - Do not inline the version number in CLAUDE.md or README — `VERSION` is the only source of truth
-- Do not let M5 (post persistence) gate M1–M4 — protocol code is reachable today, persistence is the last unlock
 
 ## Process
 
@@ -113,7 +113,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 
 ### Closeout Pass (before every minor/major bump)
 
-1. **Full test suite** — all `.tcyr` pass, zero failures
+1. **Full test suite** — `cyrius test src/test.cyr`, zero failures. There are **no `.tcyr` files and no `tests/` directory**; bare `cyrius test` searches `tests/*.tcyr`, finds nothing and exits 1, so the explicit path is the working form. Also run `cyrius fuzz fuzz/telnet_iac.fcyr` (both are CI + release gates since 1.7.0). The `tests/` split is a backlog item.
 2. **Benchmark baseline** — capture parser throughput + accept rate; compare against prior closeout
 3. **Dead code audit** — remove unused functions; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel codepaths accreted
@@ -121,7 +121,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 6. **Cleanup sweep** — stale comments, dead `#ifdef` branches, unused includes, orphaned files
 7. **Security re-scan** — quick grep for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches
 8. **Allocator gates** (added 1.6.6 — each is a mitigation an Accepted ADR relies on, and each existed only as a sentence inside that ADR until now):
-   - **No bare `alloc()` reachable from `process_rx`.** Per-line scratch belongs in the arena ([ADR 0021](docs/adr/0021-per-command-scratch-arena.md)); a bare `alloc()` on a dispatch path is an unbounded leak under `AGORA_SERVE=poll`. Both halves of the 1.6.2 arena miss — the unauthenticated `scores` path and the chat idle tick — would have been caught here.
+   - **No bare `alloc()` on a per-line path reachable from `process_rx`** — per-line scratch belongs in the arena ([ADR 0021](docs/adr/0021-per-command-scratch-arena.md)); a bare `alloc()` on a dispatch path is an unbounded leak under `AGORA_SERVE=poll`. **⚠ A `src/`-only grep cannot enforce this.** The allocation may sit inside a *vendored stdlib* function you call: `dir_list` cost 4 KB/call until cyrius 6.5.11, and at 1.7.0 the stdlib's `file_write_atomic` was measured at 64 B/call and would have leaked on every chat `say` had agora not written `store_write_atomic` against the arena instead. **Read the allocations of any stdlib function you put on a per-line path.** Known deliberate exceptions: once-per-serve setup allocations, and `descent_proxy`'s buffers (one per MUD session, not per line). Both halves of the 1.6.2 arena miss — the unauthenticated `scores` path and the chat idle tick — would have been caught here.
    - **Mixed-allocator scan.** No `alloc()` pointer may reach `fl_free`, and no `fl_alloc()` pointer may be left for the arena ([ADR 0022](docs/adr/0022-door-state-free-hook.md) § Consequences). Check every game module's state constructor against its `*_free`.
    - **Deferral check, TREE-WIDE.** `cyrius lint` takes ONE file, so linting `main.cyr` alone under-reports: at 1.6.5 it said 2 while the tree had 12. Loop every `src/*.cyr`. Note the checker is per-line and treats any line mentioning `CHANGELOG` / `roadmap` / `docs/` / `issue` / `See ` as tracked — **citing a doc is not the same as being tracked in one**, so verify the cited entry actually exists.
 9. **Downstream check** — none yet (agora has no consumers); will track at M5+ when other tools start scripting agora
@@ -163,7 +163,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 - **Dead code elimination**: every `cyrius build` in CI and release runs with `CYRIUS_DCE=1`. Binary size is a release metric — track it in `state.md`.
 - **Tag filter**: release workflow triggers on `tags: ['[0-9]*']` — semver-only.
 - **Version-verify gate**: release asserts `VERSION == cyrius.cyml version == git tag` before building.
-- **State sync**: release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state.
+- **State sync**: `docs/development/state.md` is refreshed **by hand** at every release. There is no post-hook — this line used to claim one, and **1.6.6 shipped without either `state.md` or `roadmap.md` recording it**, which is exactly the failure the claim was meant to prevent. Writing the hook is a roadmap item; until it exists, the refresh is a required manual step of the Closeout Pass, not an automated one.
 
 ## Docs
 

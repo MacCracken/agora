@@ -66,9 +66,10 @@ parser's name→id line) — not an edit to eighteen scattered functions.
   (`callptr`), not statically, so a mis-wired slot fails at run time, not compile
   time — mitigated by the full example-smoke suite (all 13 door/universe/chat
   scripts) exercising every slot end-to-end.
-- **Neutral** — the registry lives in heap built per forked child (a few hundred
-  bytes, freed on process exit); function addresses are valid across `fork` (same
-  binary image). Binary `+1,120 B` over 1.4.5 (the registry machinery net of the
+- **Neutral** — the registry lives in heap (a few hundred bytes), built once
+  per process — per forked child under fork, and **once for the whole server under
+  poll**, where nothing frees it because nothing exits ([ADR 0023](0023-dual-serve-model.md)).
+  Function addresses are valid across `fork` (same binary image). Binary `+1,120 B` over 1.4.5 (the registry machinery net of the
   removed if-chains). Test count unchanged at 221 — the registry is dispatch glue
   validated by the smoke suite, not unit-testable from `src/test.cyr` (which does
   not link `main.cyr`).

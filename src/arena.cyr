@@ -82,3 +82,74 @@ fn cmd_scratch_reset(): i64 {
     g_cmd_arena_off = 0;
     return 0;
 }
+
+# --- crash-safe write, arena-backed (roadmap N2 + ADR 0021) -------------------
+#
+# Same contract as the stdlib's `file_write_atomic`: write a temp, fsync it,
+# rename over `path`. Returns 0 on success, negative on any failure. `path` is
+# NUL-terminated.
+#
+# ⚠ WHY THIS EXISTS RATHER THAN CALLING `file_write_atomic` DIRECTLY.
+# The stdlib version builds its temp name with `_io_tmp_name` (lib/io.cyr),
+# which does a bare `alloc(plen + 48)` and never frees it. Measured: **64 bytes
+# of never-reclaimed bump heap per call** on a 14-byte path (`file_write_all`
+# costs 0), so ~96-112 B on agora's real store paths. That is fine for a CLI and
+# wrong for us: two of N2's three sites fire **per dispatched line** —
+# `chat_log_write` on every `say`, and `world_write` on every universe-door line
+# via `door_world_commit` — and under `AGORA_SERVE=poll` one process serves for
+# the life of the server. Calling the stdlib version would have reintroduced
+# exactly the linear, permanent growth that ADR 0021 (this arena) and ADR 0022
+# (DD_FREE) each spent a whole cut eliminating, on the hottest path in the chat
+# subsystem. The arena cannot reclaim it because the allocation happens inside a
+# vendored lib, which is also why CLAUDE.md's "no bare `alloc()` reachable from
+# `process_rx`" closeout gate cannot see it — the gate greps agora's own source.
+#
+# The only difference from the stdlib is where the temp NAME lives: `cmd_alloc`,
+# reclaimed by `cmd_scratch_reset` at the end of the line. The I/O sequence is
+# deliberately identical, including `xunlink`-on-failure so a crashed write
+# leaves no debris.
+#
+# The pid is part of the temp name because agora genuinely writes concurrently:
+# fork mode has a process per connection, and the ADR 0010 world-transaction
+# smoke runs 8 processes against one store. Two writers must never pick the same
+# temp path. `g_atomic_ctr` disambiguates repeat calls within one process.
+var g_atomic_ctr = 0;
+
+fn store_write_atomic(path, buf, len): i64 {
+    var plen = strlen(path);
+    var tmp = cmd_alloc(plen + 48);
+    memcpy(tmp, path, plen);
+    memcpy(tmp + plen, ".cyrtmp.", 8);
+    var pos = plen + 8;
+    pos = _io_append_dec(tmp, pos, _io_pid());
+    store8(tmp + pos, 46);            # '.'
+    pos = pos + 1;
+    g_atomic_ctr = g_atomic_ctr + 1;
+    pos = _io_append_dec(tmp, pos, g_atomic_ctr);
+    store8(tmp + pos, 0);
+
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var off = 0;
+    var rc = 0;
+    var done = 0;
+    while (done == 0) {
+        if (off >= len) { done = 1; continue; }
+        var w = file_write(fd, buf + off, len - off);
+        if (w <= 0) {
+            # No forward progress is an I/O error, not a retry condition.
+            rc = 0 - 5;
+            if (w < 0) { rc = w; }
+            done = 1;
+            continue;
+        }
+        off = off + w;
+    }
+    if (rc != 0) { file_close(fd); xunlink(tmp); return rc; }
+    xfsync(fd);
+    var cr = file_close(fd);
+    if (cr < 0) { xunlink(tmp); return cr; }
+    var rr = file_rename(tmp, path);
+    if (rr < 0) { xunlink(tmp); return rr; }
+    return 0;
+}

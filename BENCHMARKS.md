@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-08-22 (1.6.7 toolchain re-run on cyrius 6.5.33 — all four parser paths within noise of both the 0.9.2 and 1.6.1 baselines; `announce_salvo` gave back 1.6.1's −7%. Nothing on the hot path changed — the parser source is untouched since M1) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-08-22 (1.7.0 re-run on cyrius **6.5.34**; 1.6.7's 6.5.33 row kept for comparison. All four parser paths remain within noise of the 0.9.2 baseline — the parser source is untouched since M1 — and `subneg_naws` + `announce_salvo` each recovered a few ns against 1.6.7) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -28,10 +28,13 @@ Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 | **0.9.2 (1.0 closeout)** | **10 ns** | **64 ns** | **75 ns** | **99 ns** | **134 ns** |
 | **1.6.1 (toolchain 6.4.78)** | **9–11 ns** | **63 ns** | **72–75 ns** | **100–101 ns** | **124 ns** |
 | **1.6.7 (toolchain 6.5.33)** † | **8–9 ns** | **61–69 ns** | **71–75 ns** | **98–111 ns** | **122–132 ns** |
+| **1.7.0 (toolchain 6.5.34)** † | **9–10 ns** | **58–68 ns** | **68–76 ns** | **95–100 ns** | **121–128 ns** |
 
 † **1.6.7 rows are net of a measured clock floor; every earlier row is gross.** cyrius **6.5.19** taught `lib/bench.cyr` to subtract the timer's own overhead. At this suite's `batch_size = 10,000` the correction is **under 1 ns** — inside the ±2 ns these columns have always carried — so the columns remain comparable, but **do not read a 1–2 ns drop across this row as a win**.
 
 (**1.6.7** re-benched on cyrius 6.5.33 over **eight runs**, reported as the observed range with the median in parentheses: `plain_byte` 8–9 (9), `iac_untracked` 61–69 (63), `iac_tracked_agree` 71–75 (73), `subneg_naws` 98–111 (100), `announce_salvo` 122–132 (129). **The four parser paths are within noise of both the 0.9.2 and the 1.6.1 baselines — i.e. unchanged**, which is the expected result: the parser source has not moved since M1. The one real change is `announce_salvo` giving back 1.6.1's −7%: 134 (0.9.2) → 124 (1.6.1) → **~129 (1.6.7)**, roughly back to the pre-6.4.x codegen. Not investigated — it is one-time-per-connection work, ~5 ns on a path that runs once per `accept()`.
+
+(**1.7.0** re-benched on cyrius 6.5.34 over **six runs**, range with median in parentheses: `plain_byte` 9–10 (9), `iac_untracked` 58–68 (62), `iac_tracked_agree` 68–76 (71), `subneg_naws` 95–100 (96), `announce_salvo` 121–128 (122). Two paths moved slightly in agora's favour against 1.6.7 — `subneg_naws` 100 → 96 median and `announce_salvo` 129 → 122 — and the other three are indistinguishable. **This is codegen, not agora**: 1.7.0 added clean shutdown, atomic writes and a tx-overflow flag, none of which the parser touches, and `src/telnet.cyr` is unchanged in this cut. Both moved figures sit inside the range the 1.6.7 row already spans, so the honest reading is "no regression, possibly a small win" rather than a claimed improvement. N4's `fuzz/telnet_iac.fcyr` drives the same functions but is not a benchmark and is not timed here.)
 
 **Recorded because it nearly went in wrong**: the first two runs of this cut read 8/61/71/98/122 and would have published as "every path at or below 1.6.1, best numbers ever". Six further runs showed that pair was the low tail, not the centre. Two runs is not a sample. The same correction retires a second claim this cut briefly held: an earlier pass measured 104 / 131 ns under a compiler built from a *dirty* cyrius working tree, and restoring the snapshot appeared to move those to 98 / 122. **With eight runs in hand, 104 and 131 both sit inside the ordinary range, so that was noise, not the dirty toolchain.** The dirty snapshot was real and mattered for **binary size** — 2,225,840 vs 2,010,320 B, a difference no amount of re-running changes — but there is **no measured evidence it affected speed**, and this file should not imply otherwise. See CHANGELOG [1.6.7] § Verification notes.)
 
@@ -52,9 +55,9 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
 
 ## Notes on what's NOT in this baseline
 
-- **Accept-loop rate** — `cmd_serve` opens `sock_accept` in a blocking loop. Benching it requires a paired client process and is deferred to its own dedicated bench file (`benches/bench_accept.bcyr` or a shell harness). Plausible target: > 10k accepts/sec on this host based on raw socket cost.
+- **Accept-loop rate** — not benched for either serve model. Since 1.7.0 `AGORA_SERVE=fork` (the Linux default) waits in `poll(2)` over {listener, signalfd} on a non-blocking listener rather than blocking in `accept`; `AGORA_SERVE=poll` drains accepts non-blocking once per ~20 ms sweep. Benching it requires a paired client process and is deferred to its own dedicated bench file (`benches/bench_accept.bcyr` or a shell harness). Plausible target: > 10k accepts/sec on this host based on raw socket cost.
 - **End-to-end echo latency** — wall-clock from client send to client receive over `127.0.0.1`. Requires a paired process; meaningful target is < 1 ms p99.
-- **Memory pressure** — every connection allocates ~1.4 KB of `TelnetState` plus its buffers (256 + 512 + 256 + 256 + 256 + 256 B). 1,000 concurrent connections = ~1.4 MB. Not exercised here.
+- **Memory pressure** — each telnet parser draws ~1.7 KB of heap (a 128 B `TelnetState` plus tx 256 + sb 512 + opt_us 256 + opt_him 256 + term_type 257). Under fork that is per child; under poll it is **per slot, allocated once for all 64 and reused** ([ADR 0023](docs/adr/0023-dual-serve-model.md)), so the poll model's parser memory is bounded at ~107 KB regardless of churn. Not exercised here — per-session memory has never been benchmarked, which is a roadmap item.
 - **DCE-built variants** — all numbers above are `cyrius bench` defaults (non-DCE). The release path is `CYRIUS_DCE=1 cyrius build` which should shave the parser code path slightly via dead-call elimination but not change the hot paths measured.
 
 ## Regeneration

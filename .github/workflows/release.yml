@@ -49,6 +49,19 @@ jobs:
           mkdir -p build
           CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
 
+      - name: Test
+        # 1.7.0 — the release workflow built and PUBLISHED without running a
+        # single test. CI ran them on push, but a tag could be cut from any
+        # commit, so nothing structurally prevented shipping a red tree; the
+        # Closeout Pass's "full test suite" gate lived only in CLAUDE.md prose.
+        run: cyrius test src/test.cyr
+
+      - name: Fuzz the IAC parser
+        # 1.7.0 (roadmap N4) — same gate as ci.yml. See that file for why this
+        # harness has teeth (mutation-proven on two axes) and how to reproduce
+        # a failure locally.
+        run: cyrius fuzz fuzz/telnet_iac.fcyr
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

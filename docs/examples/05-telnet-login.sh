@@ -15,7 +15,7 @@
 #
 # Run server first:
 #   ./build/agora serve 2323 --store ./bbs
-#   (qix must already be registered — run 03-authenticated-post.sh first)
+#   (qix must already be registered — run 02-register-and-post.sh first)
 #
 # Success: final response from server is "qix <fp16>" — i.e. whoami
 # reports the bound identity rather than `anonymous`. Exit 0.
@@ -30,7 +30,7 @@ HOST=127.0.0.1
 PORT=${1:-2323}
 
 if [ ! -f "$KEY" ]; then
-    echo "error: $KEY not found — run 03-authenticated-post.sh first" >&2
+    echo "error: $KEY not found — run 02-register-and-post.sh first" >&2
     exit 1
 fi
 

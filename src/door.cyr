@@ -264,9 +264,22 @@ fn door_save_exists(store, fp16, game): i64 {
     return file_exists(path);
 }
 
-# Write `len` bytes from buf to the save slot (O_TRUNC overwrite).
+# Write `len` bytes from buf to the save slot, CRASH-SAFELY (roadmap N2).
 # Validates fp16 + game (traversal guard), ensures the dir ladder,
 # then writes. Returns 0 on success, negative on any error.
+#
+# 1.7.0: `file_write_all` → `file_write_atomic`. The old call opened with
+# O_TRUNC, which empties the target AT OPEN — so a crash or short write between
+# the open and the last byte left the player's save truncated or zero-length,
+# with the previous good copy already gone. `file_write_atomic` writes a temp
+# file, fsyncs it, and renames over the target, so the save is either the old
+# one or the new one and never a half of either.
+#
+# ⚠ THE RETURN CONVENTION IS DIFFERENT, and silently so — this is the whole
+# hazard of the swap. `file_write_all` returns the BYTE COUNT (`len` on
+# success); `file_write_atomic` returns **0** on success and a negative errno on
+# failure. The old guard was `n != len`; keeping it would have treated every
+# successful atomic write as a failure.
 fn door_save_write(store, fp16, game, buf, len): i64 {
     if (fp16_valid(fp16) == 0)      { return 0 - 1; }
     if (game_name_valid(game) == 0) { return 0 - 1; }
@@ -274,8 +287,8 @@ fn door_save_write(store, fp16, game, buf, len): i64 {
     if (rc != 0) { return rc; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
-    var n = file_write_all(path, buf, len);
-    if (n != len) { return 0 - 1; }
+    var n = store_write_atomic(path, buf, len);
+    if (n != 0) { return 0 - 1; }
     return 0;
 }
 
@@ -581,16 +594,35 @@ fn world_read(store, game, out_buf, cap): i64 {
     return n;
 }
 
-# Overwrite the world snapshot. Caller holds the world lock across the
-# read→compute→write, so a plain O_TRUNC write is correct against
-# cooperating processes. Returns 0 on success, negative on error.
+# Overwrite the world snapshot, CRASH-SAFELY (roadmap N2). Caller holds the
+# world lock across the read→compute→write. Returns 0 on success, negative on
+# error.
+#
+# 1.7.0: `file_write_all` → `file_write_atomic`. The old comment argued a plain
+# O_TRUNC write was "correct against cooperating processes" — which was true and
+# beside the point: the danger was never a competing writer, it was a crash
+# BETWEEN the O_TRUNC and the final byte, which loses the SHARED world for every
+# player at once. This is the highest-value of the three N2 sites for exactly
+# that reason.
+#
+# ⚠ SAFE ONLY BECAUSE THE LOCK IS ON A DIFFERENT FILE. `file_write_atomic`
+# renames a temp over the target, which REPLACES THE INODE — and flock is bound
+# to an inode, not a path. Had the world lock been held on `snapshot` itself,
+# this change would have silently destroyed mutual exclusion: every later writer
+# would have flock'd the *new* inode while an in-flight reader still held the
+# old one, and ADR 0010's whole no-lost-updates guarantee would evaporate with
+# nothing failing visibly. It is safe because `world_lock_acquire` locks
+# `<world>/.lock` (see `world_lock_acquire`) and only `<world>/snapshot` is
+# renamed here.
+# The same reasoning was checked for `chat_log_write`, which locks `.lock` too.
+# **Anyone moving the lock onto the data file must revert this call.**
 fn world_write(store, game, buf, len): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, "snapshot", path);
-    var n = file_write_all(path, buf, len);
-    if (n != len) { return 0 - 1; }
+    var n = store_write_atomic(path, buf, len);
+    if (n != 0) { return 0 - 1; }
     return 0;
 }
 

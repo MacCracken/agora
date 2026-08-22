@@ -26,7 +26,11 @@ replaced it with a single-process multiplex.
 
 **Two serve models, selected at runtime, sharing one dispatch core.**
 
-- **`AGORA_SERVE=fork`** — ADR 0007's model, unchanged. The Linux default.
+- **`AGORA_SERVE=fork`** — ADR 0007's concurrency and memory model, unchanged: one process per
+  connection, kernel reclaim at child exit, non-blocking `waitpid` reaper. The Linux default. **Its
+  accept path did change at 1.7.0**: the parent now waits in `poll(2)` over {listener, signalfd} on a
+  non-blocking listener so SIGINT/SIGTERM can reach it, and each child restores the default signal
+  disposition before serving (see § Clean shutdown).
 - **`AGORA_SERVE=poll`** — one process serves every connection. Linux opt-in; **the only model on
   agnos**, which selects it regardless of what the variable says (`serve_mode_from_env`, `src/main.cyr`).
 
@@ -39,7 +43,11 @@ The poll model is built from four pieces:
   **completely untouched**: they are pure state machines per [ADR 0009](0009-door-games-subsystem.md), so
   they neither know nor care which model is running.
 - A **sweep** — each ~20 ms tick drains pending accepts (non-blocking), then services every active slot:
-  non-blocking recv → `process_rx` → non-blocking tx drain.
+  non-blocking recv → `process_rx` → tx drain. ⚠ **The drain is genuinely non-blocking only on Linux.**
+  `session_drain`'s comment claimed both platforms until 1.7.0; on agnos `sock_set_nonblocking` is a
+  no-op and `sys_write` on a socket fd routes to `SYS_SOCK_SEND`, which blocks — so on the one target
+  that *always* polls, a slow reader stalled the whole sweep. agnos has no non-blocking send to switch
+  to, so 1.7.0 (roadmap N3) **bounds** it to one send attempt per drain rather than removing it.
 - **`send_buf` is model-aware** — under poll it enqueues to the active session's tx queue; under fork it
   writes. Every `send_str` call site is unchanged.
 
@@ -59,9 +67,38 @@ to line dispatch, or to the arena reset, or to a send-failure path, applies to b
      dead linear. Re-closed by [ADR 0021](0021-per-command-scratch-arena.md) (per-line arena) and
      [ADR 0022](0022-door-state-free-hook.md) (door-state free hook).
   2. **A child's death bounded a bad connection.** A slow reader parked one worker; under poll it parks
-     *everyone*. Fixed across 1.6.2–1.6.5 (SIGPIPE ignored, send returns checked, the Descent write
-     bounded).
+     *everyone*. **Mitigated**, not fixed, across 1.6.2–1.7.0: SIGPIPE ignored, send returns checked,
+     the Descent write bounded (1.6.2–1.6.5); an over-cap tx queue now closes the session instead of
+     going mute-but-open, and the agnos drain yields after one send (1.7.0, roadmap N3). Two stalls
+     remain by construction — the agnos blocking send has no non-blocking peer, and `descent_proxy`
+     holds the sweep for a player's whole MUD session.
   3. **A crash cost one connection.** Under poll it costs all 64.
+### Clean shutdown (added 1.7.0)
+
+Neither model could exit. Both loops declared `var stop = 0;` and looped `while (stop == 0)` with
+nothing anywhere assigning `stop`, so the only way to stop agora was to kill it — the poll model never
+drained its 64 slots and the fork model never reaped. That is a third thing fork was silently providing
+that nobody had written down: under fork the operator's `kill` at least ended one process cleanly per
+connection, and under poll it ends everything at once, mid-write.
+
+Both models now route SIGINT/SIGTERM to a **signalfd**, armed once in `cmd_serve_on` *before the
+listener exists* — the same placement, and for the same reason, as `signal_ignore(SIGPIPE)`. A handler
+was rejected: it would need the `rt_sigaction` `sa_restorer` trampoline [ADR 0007](0007-fork-per-accept-concurrency.md)
+already refused, and would import async-signal-safety constraints an fd does not.
+
+- **poll** tests the fd once per sweep, then notifies and drains every live session before closing the
+  listener.
+- **fork** waits on `poll(2)` over {listener, signalfd}; on shutdown it closes the listener first so no
+  new client can connect, then reaps children for a bounded grace window before exiting anyway. Bounded
+  because a player parked in a door game would otherwise hold the operator's shutdown open forever.
+
+Two things this cost, both worth recording because neither is obvious:
+1. **`fork(2)` inherits the blocked signal mask.** Arming in the parent made every connection child
+   unkillable (`SigBlk` carrying agora's mask, surviving SIGTERM) until the child branch learned to
+   unblock and close the inherited fd.
+2. **Blocking the signals is required on Linux and wrong on agnos** — mirshi delivers
+   `pending AND NOT blocked`, so a blocked signal is the one it will never report.
+
   The pattern is worth stating plainly for the next structural change: **ask what the old model was
   silently providing, not just what the new code does.**
 - **Negative** — the Descent proxy still blocks the sweep for as long as a player is in the MUD, stalling

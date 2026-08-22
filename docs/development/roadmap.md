@@ -1,9 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-08-22 (1.6.7 toolchain cut — the `dir_list` cross-repo block is **discharged**
-> and re-filed in § Backlog rescoped to the half that survives; N2's `file_write_atomic` line corrected
-> `:355` → `:558`; N4 annotated with what `cyrius fuzz --poison` can and cannot reach. Prior: 2026-07-26,
-> rebuilt from a full deferred-work sweep — see *Provenance* at the end)
+> **Last Updated**: 2026-08-22 (**1.7.0 — § Now is EMPTY**: N1/N2/N3/N4 all shipped, and the section
+> now records what each turned out to be rather than what it asked for, because the findings outlived
+> the items. Also earlier the same day: 1.6.7's toolchain cut discharged the `dir_list` cross-repo
+> block and re-filed it in § Backlog rescoped to the `dir_list_into` half that survives. Prior:
+> 2026-07-26, rebuilt from a full deferred-work sweep — see *Provenance* at the end)
 >
 > **What this file is**: what shipped, what is pinned next, what is real-but-unscheduled, and what is
 > deliberately not being done. **What it is not**: a second changelog. Per-tag narrative lives in
@@ -66,6 +67,7 @@ entry. If an item has no citation it does not belong here.
 | **1.6.5** | **The audit's LOWs — the ledger closes** (no new features). `--store` bounded at its two parse points (refuses rather than truncating, since a shortened store root points at a different directory); wire posts get the CLI's control-byte filter (C0 + DEL dropped; TAB/CR/LF kept, and CR/LF are load-bearing for line dispatch); echo suppressed only after a genuine revoke (`!= Q_NO`, deliberately not `== Q_YES` — that would break every client that never answers our WILL); bytes pipelined behind `descent` now reach the MUD instead of being lost and then executed as BBS commands. **Every HIGH/MEDIUM/LOW from the [2026-07-26 audit](../audit/2026-07-26-audit.md) is fixed**; one deliberate INFO item remains. `t32` updated — its old assertion conflated editing a line with storing a byte. New smoke 27; smoke 24 extended. | ✅ 2026-07-26 |
 | **1.6.6** | **Doc-truth and process** — the non-code half of the 2026-07-26 roadmap sweep, no behavior change. [ADR 0023](../adr/0023-dual-serve-model.md) written (the dual serve model had shipped at 1.6.0 with no ADR at all); **ADR 0007 amended** and the four ADRs citing its "no shared state" premise (0010/0011/0012/0014) corrected; **untracked deferrals 12 → 0 tree-wide** (`cyrius lint` is single-file, so `telnet.cyr`'s five were invisible); ~20 stale comments retired and the unreachable agnos serial-accept branch deleted; CLAUDE.md's Closeout Pass grew three allocator/deferral gates; `CYRIUS_DCE=1` added to CI + release. 221/221; 14,571,744 B. | ✅ 2026-07-26 |
 | **1.6.7** | **Toolchain + dependency cut** (no features, no logic change) — cyrius **6.4.78 → 6.5.33** (42 releases; zero removals/renames/arity changes across agora's 71-function stdlib surface), darshana held at **0.9.0** (verified current). Payload: **cyrius 6.5.11's `is_dir`/`dir_list` fix** — agora's own upstream filing, now archived — ends 4,104 B/call of never-reclaimed bump scratch on a path reachable **unauthenticated** via `enter`; measured A/B **24,467 → 3,495 B/command (−85.7%)** on `boards`/`list`. Separately the bundled **sigil** dropped 46 module-level banked arrays (1,587,782 → 11,358 declared units), collapsing the binary **14,571,744 → 2,010,320 B (−86.2%)** — the ~12.6 MB of unused RSA/bignum `.bss` inherited at the 1.6.0 pin move. Found en route: the local `6.5.33` toolchain snapshot was a **dirty working tree** (two libs + `cycc` off-tag), and `docs/examples/20-descent.sh` had been failing because the sibling MUD (now 1.7.22) needs its zone data. 221/221 unchanged; 27/27 smokes green. | ✅ 2026-08-22 |
+| **1.7.0** | **roadmap § Now closes** — all four pinned items plus cyrius **6.5.33 → 6.5.34**. **N1** clean shutdown on SIGINT/SIGTERM for both serve models via signalfd (neither loop could exit: both declared `stop` and nothing ever assigned it); **N2** the three `file_write_all` sites onto `file_write_atomic` (safe only because every lock is on a separate `.lock` — a rename replaces the inode); **N3** both poll holes (the silent tx-queue drop, fixed at the single `send_buf` choke point; and `session_drain`'s false "non-blocking on both platforms" comment, now **bounded** on agnos since no non-blocking send exists there); **N4** `fuzz/telnet_iac.fcyr` + a CI *and* release fuzz step, mutation-proven on two axes. Found and fixed inside the cut: arming N1 in the fork parent made every connection **child unkillable**. 221/221; **28/28** smokes (new `28-clean-shutdown.py`); 2,010,320 → **2,230,240 B** (+219,920, of which ~215,520 is 6.5.34's bayan 1.4.2 → 1.5.2 security fold). | ✅ 2026-08-22 |
 
 ---
 
@@ -73,69 +75,23 @@ entry. If an item has no citation it does not belong here.
 
 ## Now — pinned
 
-The next few cuts, in the order they should happen. **All of them are code** — the doc-truth and process
-half of this list closed at **1.6.6** (ADR 0023 written and 0007 amended, the Closeout Pass grown three
-allocator/deferral gates, `CYRIUS_DCE=1` in CI, 12 → 0 untracked deferrals tree-wide, ~20 stale comments
-retired, the unreachable agnos serial-accept branch deleted). What is left is work that changes the
-running server.
+**Empty for the first time since this file was rebuilt.** N1, N2, N3 and N4 all shipped at
+**[1.7.0]** (2026-08-22) — see the release table above and `CHANGELOG.md` for the detail. What each
+turned out to be, briefly, because the *findings* outlived the items:
 
-### N1 — Clean shutdown (SIGINT / SIGTERM) · medium
+| Was | Outcome |
+|---|---|
+| **N1** clean shutdown | Shipped via **signalfd**, both serve models. Two silent cross-target traps found on the way: blocking a signal is **required on Linux and wrong on agnos** (mirshi delivers `pending AND NOT blocked`), and the sigset **bit convention is off by one** between the targets. A third bug was created and fixed inside the same cut — arming in the fork parent made every connection **child unkillable** (`SigBlk: 0000000000004002`, survived SIGTERM). Smoke 28 pins all of it, mutation-proven. |
+| **N2** durable writes | Shipped. The load-bearing question was **flock vs rename**: a temp+rename replaces the inode, so had the world lock been on `snapshot` rather than `.lock` this would have silently destroyed ADR 0010's guarantee. It is on `.lock`; smoke 08's 8×300 concurrent transactions still land exactly 2400. |
+| **N3** poll holes | Both shipped. Hole B's fix needed **no call-site changes** — `send_buf` is the single choke point, and `session_drain`'s negative return is a close path both models already had. Hole A is a **bound, not a cure**: agnos has no non-blocking send to switch to, so the drain now yields after one send per sweep. |
+| **N4** IAC fuzz | Shipped as `fuzz/telnet_iac.fcyr` + a CI *and* release step. `--poison` turned out to be **inapplicable** — it instruments `fl_alloc`/`fl_free` and the parser is entirely bump-allocated — so the harness carries its own invariants and is mutation-proven on two axes. |
 
-**Neither serve loop can exit cleanly.** Both declare `var stop = 0;` and loop `while (stop == 0)` —
-`src/main.cyr:2333` (poll) and `:2950` (fork) — and **nothing anywhere assigns `stop`**. The server can
-only be killed: the poll model never drains its 64 slots, the fork model never reaps. 1.6.2 established
-the mechanism (`signal_ignore` for SIGPIPE) and retired ADR 0007's stated objection to `sigaction`, so
-the blocker is gone.
-
-This appeared in **no** document until the 2026-07-26 sweep found it. As of 1.6.6 the two source comments
-that hinted at it cross-reference this entry, so the deferral gate is satisfied — but the work itself is
-untouched. Line numbers shifted at 1.6.6 (the dead agnos branch was removed); find the loops by content.
-
-### N2 — Crash-safe durable writes · small
-
-Three writes still use `file_write_all`, whose `O_TRUNC` empties the target at open: `src/door.cyr:277`
-(door save), `src/door.cyr:592` (`world_write`, the shared-world snapshot), `src/chat.cyr:378` (chat
-transcript). A crash or short write loses a player's save, the shared world, or a channel's history.
-
-`file_write_atomic` is already available at **`lib/io.cyr:558`** — no pin bump needed (the line moved
-from `:355` in the 1.6.7 re-vendor; `:355` is now `xfsync`). This reads as
-closed because its sibling ask (`file_create_exclusive`) landed at 1.6.4; it is not. It is the item
-CLAUDE.md's *"posts are durable artifacts"* principle actually depends on, and no source comment marks
-it, so lint cannot see it.
-
-### N3 — The two poll-mode holes · small + medium
-
-Both were recorded as "papercuts" at 1.6.5. One is worse than that label:
-
-- **`session_drain` has no agnos arm and its doc comment is wrong** (`src/main.cyr:2252-2283`). The
-  comment claims `sys_write` is non-blocking on both platforms; the syscall table says otherwise —
-  `lib/syscalls_x86_64_agnos.cyr:179`: `SYS_SOCK_SEND = 48; # … BLOCKS`, and `sys_write` routes tagged
-  socket fds straight to it. So on agnos — **the only target that always polls** — a slow reader blocks
-  the shared sweep and stalls all 64 sessions, and the `EWOULDBLOCK` check at `:2270` is dead code there.
-  `sess_recv_nonblock` (`:2290`) is the in-repo pattern to copy.
-- **`sess_tx_enqueue` drops content silently** (`src/main.cyr:2237-2244`). The over-cap arm returns 1
-  *without copying*, and **158 of 159 send call sites discard that return** — only the 1.6.3 telnet-tx
-  drain acts on it. An over-cap session loses bytes and stays open holding one of 64 slots, which is the
-  failure mode the same file's comment describes in its own words.
-
-### N4 — Fuzz the IAC parser · medium
-
-CLAUDE.md § Key Principles states *"Fuzz every parser path — IAC sequences are adversarial-by-default"*
-as a hard rule. There is no `tests/` directory, no `.fcyr` harness anywhere, and no fuzz step in CI. The
-2026-07-26 audit says it plainly under *What this audit did not cover*: no dynamic analysis at all. The
-deferral dates to [0.2.0] ("fuzz earns its spot at M2+"); the input surface has widened four times since.
-**This is the largest gap between what CLAUDE.md asserts and what the repo does.**
-
-**1.6.7 note — the 6.5.33 pin does not close this, and one new tool does not apply.** `cyrius fuzz`
-already walked `fuzz/*.fcyr` at 6.4.78, so N4 was never blocked upstream; the blocker is that nobody has
-written the harness. New in the span: `cyrius fuzz` now takes an explicit file/dir argument and walks
-`tests/` recursively (6.5.6/6.5.7), and `cyrius fuzz --poison` arms freelist redzones + quarantine
-(6.5.28/6.5.29). **`--poison` instruments only `fl_alloc`/`fl_free`** — and the IAC parser is entirely
-bump-allocated (`src/telnet.cyr`), so a `--poison` run against *the parser* reports
-`fl_poison_violations() == 0` no matter how far it overruns. It is the right tool for the **door-state**
-half (the ~102 `fl_alloc`/`fl_free` sites ADR 0022 introduced), not for this item.
+**Nothing is pinned next.** Pull from § Backlog, or from § Cross-repo if the blocker has moved. The
+long-standing named next — the **sigil identity hand-off across the Descent link** — is still blocked
+MUD-side.
 
 ---
+
 
 ## Cross-repo — blocked on someone else
 
@@ -157,7 +113,7 @@ or a deployment asks.
 | Item | Source | Effort |
 |---|---|---:|
 | Accept-loop rate and per-session memory have **never** been benchmarked — and there are now two serve models to compare. CLAUDE.md P(-1) step 2 requires this baseline. | CLAUDE.md § P(-1); BENCHMARKS.md (parser only) | medium |
-| No `tests/` split and no multi-process harness — concurrency is proven only by smokes **CI never runs**. | `.github/workflows/ci.yml` | medium |
+| **No `tests/` split, and CI still runs no smoke.** Two halves, one now closed. *Closed at 1.7.0*: CI and the release workflow both run `cyrius fuzz fuzz/telnet_iac.fcyr`, and the release workflow — which previously built and **published** without running a single test — now runs `cyrius test` too. *Still open*: the 28 example smokes remain the only proof of the concurrency, serve-model and shutdown behaviour, and CI runs none of them; and `src/test.cyr` does not include `src/main.cyr`, so nothing in `serve_poll`, the fork loop, the session pool, `sess_tx_enqueue` or the N1 shutdown helpers can be unit-tested at all — N1 and N3 shipped covered by smoke 28 and inspection alone. `cyrius audit` still reports `skip: no tests/ directory`. | `.github/workflows/ci.yml`; `src/test.cyr:10-28` (include block); CHANGELOG [1.7.0] § Known limitations | medium |
 | No regression pin for the 1.6.3 slow-reader close path — a HIGH-severity fix resting on inspection alone. | CHANGELOG [1.6.3] § Security | medium |
 | Four separate ADR "measure before refining" gates can never open because the benchmarks were never written (world-lock contention is the clearest). | ADRs 0010, 0014 | medium |
 | aarch64 is claimed as a supported target and nothing verifies it. | CLAUDE.md § Goal | medium |

@@ -12,8 +12,9 @@ Thanks for the interest. agora is a small, focused codebase — the contribution
 
 1. Fork the repo, create a branch named after the change (`m1-iac-parser`, `fix-banner-color`, etc.).
 2. Build clean: `cyrius build src/main.cyr build/agora`.
-3. Add tests in `src/test.cyr` (or new `.tcyr` files in `tests/`) for any new code path.
+3. Add tests in `src/test.cyr` for any new code path. (There is no `tests/` directory — the `.tcyr` split is a backlog item. Note `src/test.cyr` does **not** include `src/main.cyr`, so serve-loop and session-pool code is covered by `docs/examples/` smokes rather than units.)
 4. Run `cyrius test src/test.cyr` — all tests pass.
+5. Run `cyrius fuzz fuzz/telnet_iac.fcyr` if you touched `src/telnet.cyr` — it is a CI and release gate.
 5. Update [`CHANGELOG.md`](CHANGELOG.md) under `[Unreleased]`.
 6. If the change rewrites a doc, refresh the affected row in [`docs/doc-health.md`](docs/doc-health.md).
 7. If the change is a decision worth re-arguing later, add an ADR under [`docs/adr/`](docs/adr/) (use [`docs/adr/template.md`](docs/adr/template.md)).

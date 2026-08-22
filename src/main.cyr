@@ -180,7 +180,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.6.7 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.7.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -1902,7 +1902,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.6.7 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.7.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1946,6 +1946,11 @@ enum ServeMode {
 }
 var g_serve_mode  = 0;   # SERVE_FORK default; set from AGORA_SERVE / platform at serve start
 var g_active_sess = 0;   # session currently being dispatched (send_buf tx target in poll mode)
+# 1.7.0 (N1) — armed ONCE in cmd_serve_on, before the listener exists, and read
+# by whichever serve loop runs. Globals rather than locals because both loops
+# need them and `serve_poll` takes only `sfd`. (0 - 1) = not armed.
+var g_shutdown_sigfd   = 0 - 1;
+var g_shutdown_siginfo = 0;
 var g_sess_pool   = 0;   # alloc(MAX_SESS*8): pre-allocated session slots, reused
 
 enum SessCap {
@@ -1997,6 +2002,11 @@ enum SessOff {
     SESS_REPLY_SUBJECT     = 288;
     SESS_REPLY_SUBJECT_LEN = 296;
     SESS_CHAT_TICK_MS      = 304;   # poll: wall-clock of the last chat live-tail flush
+    # 1.7.0 (roadmap N3, hole B): sticky "this session's tx queue overflowed".
+    # Set by sess_tx_enqueue when it refuses a write; consumed by session_drain,
+    # which both serve models already close on. Occupies the 8 bytes of slack
+    # that were already inside SESS_SIZE, so the slot allocation is unchanged.
+    SESS_TX_OVF            = 312;
     SESS_SIZE              = 320;
 }
 
@@ -2054,6 +2064,10 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_CHAT_TICK_MS, clock_now_ms());
     store64(s + SESS_TX_LEN, 0);
     store64(s + SESS_TX_OFF, 0);
+    # 1.7.0 (N3-B) — the overflow flag is STICKY, so a slot that closed on it
+    # must clear it here or it poisons every later occupant of that slot: the
+    # next client would be dropped on its first drain, having sent nothing.
+    store64(s + SESS_TX_OVF, 0);
     telnet_state_reset(load64(s + SESS_TS));
     store64(s + SESS_LINE_POS, 0);
     store64(s + SESS_POST_POS, 0);
@@ -2232,25 +2246,72 @@ fn serve_mode_from_env(): i64 {
 # poll loop). Returns 1 (caller closes) if s is missing or the queue would
 # overflow — a client not draining its socket fills the queue and gets dropped
 # (the poll-mode slow-reader defense; fork mode uses SO_SNDTIMEO instead).
+#
+# 1.7.0 (roadmap N3, hole B): the over-cap arm now RECORDS the refusal on the
+# session instead of only returning 1. The return value was correct and almost
+# nobody read it — 158 of the 159 send sites discard it, the sole exception
+# being the 1.6.3 telnet-tx drain in process_rx. So the "slow-reader defense"
+# this comment has always advertised did not exist: an over-cap session lost
+# bytes *silently* and stayed open holding one of the 64 slots, mute forever.
+#
+# The fix deliberately does NOT touch 158 call sites. `send_buf` is the single
+# choke point — in poll mode it is the only caller of this function — so the
+# failure is recorded here and acted on in `session_drain`, whose negative
+# return both serve models ALREADY turn into a close. No new close path, no new
+# error plumbing, and no way for a future send site to forget to check.
+#
+# Closing is the right disposition, not a harsh one: the queue is 128 KB, so
+# reaching the cap means the peer has not read 128 KB of pending output. Growing
+# the queue instead would be unbounded-by-design, which is the exact leak class
+# 1.6.2 (ADR 0021) and 1.6.3 (ADR 0022) each spent a cut eliminating.
 fn sess_tx_enqueue(s, buf, len): i64 {
     if (s == 0) { return 1; }
     var tlen = load64(s + SESS_TX_LEN);
-    if (tlen + len > SESS_TX_CAP) { return 1; }
+    if (tlen + len > SESS_TX_CAP) {
+        store64(s + SESS_TX_OVF, 1);
+        return 1;
+    }
     memcpy(load64(s + SESS_TX) + tlen, buf, len);
     store64(s + SESS_TX_LEN, tlen + len);
     return 0;
 }
 
-# Flush session s's tx queue to its socket, NON-BLOCKING. Returns 0 = fully
-# drained (queue reset), 1 = partial (kernel buffer full; remainder kept for the
-# next sweep), <0 = socket error (caller closes). Mirrors descent's session_drain
-# — sys_write is non-blocking on both platforms (agnos socket / Linux O_NONBLOCK).
+# Flush session s's tx queue to its socket. Returns 0 = fully drained (queue
+# reset), 1 = partial (remainder kept for the next sweep), <0 = socket error or
+# a refused enqueue (caller closes).
+#
+# 1.7.0 (roadmap N3, hole A) — THE OLD DOC COMMENT WAS FALSE and the code rested
+# on it. It claimed "sys_write is non-blocking on both platforms (agnos socket /
+# Linux O_NONBLOCK)". Linux is true: `sock_set_nonblocking` sets O_NONBLOCK and
+# EWOULDBLOCK comes back. **agnos is not.** `sock_set_nonblocking` is a literal
+# `return 0;` no-op there (lib/net.cyr), and `sys_write` on a tagged socket fd
+# routes to `SYS_SOCK_SEND = 48`, whose own table entry says `BLOCKS`
+# (lib/syscalls_x86_64_agnos.cyr:351). So on agnos — **the only target that
+# always polls** — this loop kept calling a blocking send until the entire queue
+# was gone, and one slow reader stalled the shared sweep for all 64 sessions.
+# The `EWOULDBLOCK` arm below is unreachable there, so the failure was invisible.
+#
+# There is NO non-blocking send on agnos to switch to: the syscall table has
+# sock_send #48 and nothing else, no MSG_DONTWAIT and no flags argument, and
+# `sock_recv` #49's would-block return has no send-side peer. So the honest fix
+# is to BOUND the exposure rather than pretend to remove it: on agnos, attempt
+# exactly ONE send per drain and hand the remainder to the next sweep via the
+# partial path that already exists. A stalled peer can now cost the sweep one
+# send call instead of an unbounded number, and the 20 ms cadence keeps the
+# other 63 sessions moving. This is a mitigation, not a cure — recorded as such
+# rather than closed, because the real fix is a kernel-side non-blocking send.
+#
+# (Hole B) A session whose enqueue was refused returns <0 here even though the
+# socket itself is healthy, so the poll loop's existing `session_drain(s) < 0`
+# close path retires it. The final flush is best-effort and deliberately still
+# runs: the peer may yet read the "bye" already sitting in the queue.
 fn session_drain(s): i64 {
     var tx_len = load64(s + SESS_TX_LEN);
     var tx_off = load64(s + SESS_TX_OFF);
     if (tx_off >= tx_len) {
         store64(s + SESS_TX_LEN, 0);
         store64(s + SESS_TX_OFF, 0);
+        if (load64(s + SESS_TX_OVF) != 0) { return 0 - 1; }
         return 0;
     }
     var fd = load64(s + SESS_FD);
@@ -2266,12 +2327,22 @@ fn session_drain(s): i64 {
         }
         if (n == 0) { done = 1; rc = 1; continue; }
         tx_off = tx_off + n;
+        # agnos only: one blocking send per drain, then yield to the sweep.
+        # `continue` re-tests the loop guard, so the flag+continue idiom is
+        # required here — `break` is unreliable in a while body that declares
+        # `var` (CLAUDE.md § Cyrius Conventions).
+        #ifdef CYRIUS_TARGET_AGNOS
+        if (tx_off < tx_len) { done = 1; rc = 1; continue; }
+        #endif
     }
     if (rc == 0) {
         store64(s + SESS_TX_LEN, 0);
         store64(s + SESS_TX_OFF, 0);
     } else {
         store64(s + SESS_TX_OFF, tx_off);
+    }
+    if (rc >= 0) {
+        if (load64(s + SESS_TX_OVF) != 0) { return 0 - 1; }
     }
     return rc;
 }
@@ -2312,6 +2383,162 @@ enum PollRuntime {
     CHAT_TICK_MS = 2000;       # chat live-tail flush cadence (CHAT_POLL_SECS)
 }
 
+# --- clean shutdown, SIGINT / SIGTERM (roadmap N1) ----------------------------
+#
+# Until 1.7.0 NEITHER serve loop could exit: both declared `var stop = 0;` and
+# looped `while (stop == 0)` with nothing anywhere assigning `stop`. The server
+# could only be killed — the poll model never drained its 64 slots and the fork
+# model never reaped. The flags had been dead since the loops were written, and
+# the gap appeared in no document until the 2026-07-26 sweep found it.
+#
+# The mechanism is a **signalfd**, not a handler. A handler would have to be
+# async-signal-safe and, on Linux, needs the `rt_sigaction` `sa_restorer`
+# trampoline that ADR 0007 rejected outright. A signalfd turns signal delivery
+# into an ordinary readable fd, which is exactly the shape both loops already
+# know how to consume — and it is the only form that works on agnos, whose
+# `signal_ignore` is a no-op (no `rt_sigaction`) but which does implement
+# `sigprocmask` (#17) and `signalfd` (#18). darshana 0.9.0's `tty_open_signalfd`
+# is the in-ecosystem reference this follows.
+
+enum ShutdownSig {
+    SIGINFO_BYTES  = 128;     # sizeof(struct signalfd_siginfo) — one read record
+    SHUTDOWN_POLLIN = 1;      # poll(2) POLLIN (Linux/macOS, cross-arch identical)
+    FORK_POLL_MS   = 500;     # fork parent: poll timeout; also the reap cadence
+    FORK_GRACE_MS  = 5000;    # fork parent: how long to wait for children at exit
+}
+
+# The sigset_t bitmask for the signals agora shuts down on (SIGINT + SIGTERM).
+#
+# ⚠ THE BIT CONVENTION DIFFERS BY TARGET, and getting it wrong fails SILENTLY —
+# the process arms cleanly, blocks the signals it named, and then simply never
+# wakes, which reads as "clean shutdown is broken" rather than "the mask is
+# wrong". Linux sigset_t numbers bits from ZERO (bit = signum - 1), so
+# SIGINT(2)|SIGTERM(15) is bit1|bit14 = 0x4002. agnos numbers them from ONE
+# (bit = signum), so the same two signals are bit2|bit15 = 0x8004. This is not
+# a guess: darshana carries the identical split for HUP|INT|TERM —
+# `TTY_SIGMASK_EXIT` is 0x4003 on Linux and 0x8006 on agnos (lib/darshana.cyr),
+# and those two constants differ by exactly this one-bit shift.
+fn shutdown_sigmask(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0x8004;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0x4002;
+    #endif
+}
+
+# Route SIGINT/SIGTERM to a signalfd. Returns the fd, or (0 - 1) if arming
+# fails — in which case the caller serves exactly as it did before 1.7.0, with
+# the default dispositions still in force. That degradation is deliberate:
+# failing to arm clean shutdown is not a reason to refuse to serve.
+#
+# ⚠ BLOCKING IS REQUIRED ON LINUX AND WRONG ON AGNOS. The two kernels compute
+# signalfd readiness with OPPOSITE senses:
+#
+#   Linux  — a signal must be BLOCKED or its default action (terminate) runs
+#            first and the process is gone before it can read the fd. Blocking
+#            is what diverts delivery into the queue the fd drains.
+#   agnos  — mirshi computes `deliverable = pending AND NOT blocked`
+#            (mirshi/src/children.cyr:163, consumed by the signalfd#18 path at
+#            dispatch.cyr:959 and :1199), so a BLOCKED signal is exactly the one
+#            the fd will never report. Blocking there would arm a shutdown that
+#            can never fire. It is also unnecessary: `_do_kill`
+#            (mirshi/src/intercept.cyr:509-524) only ORs a pending bit and there
+#            is no default disposition that terminates the guest, so an
+#            unblocked SIGTERM cannot kill us before we read it.
+#
+# Using one arm for both compiles cleanly and fails silently on whichever target
+# you did not test — which, for agnos, is every target agora can actually run
+# its smokes on.
+#
+# SFD_NONBLOCK so the polling read never parks; SFD_CLOEXEC so an exec'd child
+# cannot inherit the fd (fork alone still inherits it — see
+# `shutdown_signals_child_reset`).
+fn shutdown_signals_arm(): i64 {
+    var mask[8];
+    var i = 0;
+    while (i < 8) { store8(&mask + i, 0); i = i + 1; }
+    store64(&mask, shutdown_sigmask());
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sys_sigprocmask(0, &mask, 0) < 0) { return 0 - 1; }   # 0 = SIG_BLOCK
+    #endif
+    var fd = sys_signalfd(0 - 1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ⚠ If signalfd fails after the block succeeded we must UNBLOCK, or we leave
+    # the process in a half-armed state: SIGINT and SIGTERM blocked with nothing
+    # draining them, i.e. an unkillable server. That is strictly worse than the
+    # pre-1.7.0 behaviour this function is supposed to degrade to.
+    if (fd < 0) { sys_sigprocmask(1, &mask, 0); return 0 - 1; }   # 1 = SIG_UNBLOCK
+    #endif
+    return fd;
+}
+
+# Undo `shutdown_signals_arm` in a freshly forked child. MUST be called first
+# thing in the fork-mode child branch.
+#
+# ⚠ WITHOUT THIS, EVERY CONNECTION CHILD IS UNKILLABLE. fork(2) inherits the
+# thread's signal mask, so a child spawned after the parent armed shutdown
+# starts life with SIGINT and SIGTERM blocked and no signalfd being read — an
+# operator's `kill` on a stuck session does nothing at all. Measured before the
+# fix: a child's `/proc/<pid>/status` showed `SigBlk: 0000000000004002`
+# (precisely our mask) and it survived SIGTERM. Children serve untrusted clients
+# and are exactly the processes an operator most needs to be able to kill.
+#
+# The inherited signalfd is closed too: SFD_CLOEXEC only covers exec, not fork,
+# and a child holding a readable copy could consume a shutdown notification the
+# parent is waiting for.
+fn shutdown_signals_child_reset(sigfd): i64 {
+    if (sigfd >= 0) { file_close(sigfd); }
+    #ifndef CYRIUS_TARGET_AGNOS
+    var mask[8];
+    var i = 0;
+    while (i < 8) { store8(&mask + i, 0); i = i + 1; }
+    store64(&mask, shutdown_sigmask());
+    sys_sigprocmask(1, &mask, 0);   # 1 = SIG_UNBLOCK — restore default disposition
+    #endif
+    return 0;
+}
+
+# Has a shutdown signal arrived? Non-blocking; returns 1 if so, 0 otherwise.
+# `infobuf` must be at least SIGINFO_BYTES. The record's contents are not
+# inspected — both signals mean the same thing to us — but the read must still
+# consume one, or the fd stays readable forever.
+fn shutdown_signal_pending(sigfd, infobuf): i64 {
+    if (sigfd < 0) { return 0; }
+    var n = sys_read(sigfd, infobuf, SIGINFO_BYTES);
+    if (n > 0) { return 1; }
+    return 0;
+}
+
+# Retire every live session, then the listener. Poll mode owns all 64 slots in
+# one process, so this is the only place they can be closed cleanly: tell each
+# client why, flush what is queued, close the socket, release the slot (which
+# frees the door state via ADR 0022's DD_FREE hook).
+fn serve_poll_shutdown(sfd, sigfd): i64 {
+    println("agora serve: shutdown signal — closing sessions");
+    var i = 0;
+    while (i < MAX_SESS) {
+        var s = load64(g_sess_pool + i * 8);
+        if (load64(s + SESS_ACTIVE) != 0) {
+            var cfd = load64(s + SESS_FD);
+            # sess_load sets g_active_sess, which is what send_str enqueues to
+            # in poll mode — without it the notice would land on whichever
+            # session happened to be dispatched last.
+            sess_load(s);
+            send_str(cfd, "\r\n(server shutting down -- goodbye)\r\n");
+            session_drain(s);
+            sess_save(s);
+            sock_close(cfd);
+            session_release(s);
+        }
+        i = i + 1;
+    }
+    if (sigfd >= 0) { file_close(sigfd); }
+    sock_close(sfd);
+    println("agora serve: stopped");
+    return 0;
+}
+
 # 1.6.0 single-process poll multiplex: one process serves ALL connections. Each
 # sweep drains pending accepts (non-blocking), then services every active slot —
 # non-blocking recv → process_rx → non-blocking tx drain — swapping the active
@@ -2324,8 +2551,14 @@ fn serve_poll(sfd): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     sock_set_nonblocking(sfd);
     #endif
+    # N1: armed in cmd_serve_on, before the listener existed (see the note there).
+    var sigfd = g_shutdown_sigfd;
+    var siginfo = g_shutdown_siginfo;
     var stop = 0;
     while (stop == 0) {
+        # 0) shutdown check, before any work: a signal that arrived during the
+        # last sweep retires the server rather than starting another one.
+        if (shutdown_signal_pending(sigfd, siginfo) == 1) { stop = 1; continue; }
         # 1) drain pending accepts
         var acc = 1;
         while (acc == 1) {
@@ -2424,8 +2657,7 @@ fn serve_poll(sfd): i64 {
         sleep_ms(POLL_MS);
         #endif
     }
-    sock_close(sfd);
-    return 0;
+    return serve_poll_shutdown(sfd, sigfd);
 }
 
 # Send the connect greeting on session `s`: telnet option salvo, MOTD, first
@@ -2870,18 +3102,22 @@ fn handle_client(cfd): i64 {
     return 0;
 }
 
-# Spin up the listener and run the accept loop. Returns 0 if the loop exits
-# cleanly — which it currently never does: no SIGINT/SIGTERM disposition is
-# installed and neither loop's `stop` flag is ever assigned, so the server can
-# only be killed. Tracked as roadmap § Now N1 (clean shutdown). Returns 1 on
-# bind/listen failure.
+# Spin up the listener and run the accept loop. Returns 0 when the loop exits
+# cleanly, 1 on bind/listen failure.
+#
+# 1.7.0 (roadmap N1, now CLOSED) — "exits cleanly" became reachable. Until then
+# neither loop could end: both declared `var stop = 0;` and nothing anywhere
+# assigned it, so the only way to stop agora was to kill it. Both models now
+# route SIGINT/SIGTERM to a signalfd — poll reads it once per sweep and drains
+# its 64 slots; the fork parent waits on poll(2) over {listener, signalfd},
+# closes the listener and reaps children within a bounded grace window.
 fn cmd_serve_on(port): i64 {
     println("agora serve: opening telnet listener");
 
     # 1.6.2 — ignore SIGPIPE before a single byte can be written.
     #
     # Every byte agora sends leaves through a flagsless `sys_write` (send_buf's
-    # fork branch at :244, session_drain's poll branch at :2103, and the Descent
+    # fork branch, session_drain's poll branch, and the Descent
     # proxy). A peer that closes mid-write makes the kernel raise SIGPIPE, whose
     # DEFAULT disposition terminates the process — no error return, no cleanup.
     # Under fork that cost one child; under the 1.6.0 poll multiplex it costs the
@@ -2891,7 +3127,7 @@ fn cmd_serve_on(port): i64 {
     # SIG_IGN converts it into an EPIPE (-32) return, which BOTH write paths
     # already treat correctly as "close this connection": send_buf returns 1 on
     # any `n <= 0` (the 1.4.4 T1 fix) and session_drain returns the negative errno,
-    # which its callers test with `< 0` (:2224). EWOULDBLOCK keeps its own arm, so
+    # which its callers test with `< 0`. EWOULDBLOCK keeps its own arm, so
     # a slow reader still just retries next sweep.
     #
     # Placed here — before the model dispatch — so it dominates every serve path:
@@ -2900,11 +3136,37 @@ fn cmd_serve_on(port): i64 {
     # because of the rt_sigaction `sa_restorer` trampoline; cyrius 6.4.51's
     # `signal_ignore` builds the 32-byte SIG_IGN act itself and needs no
     # trampoline, so that objection no longer applies. It is a no-op on agnos
-    # (ring-3 has no signal delivery) and on Windows, so the call is portable.
+    # and on Windows, so the call is portable.
+    #
+    # ⚠ 1.7.0 corrects the reason that used to be given here. This said agnos is
+    # a no-op because "ring-3 has no signal delivery". That is not why, and it is
+    # not true: agnos has `sigprocmask` (#17) and `signalfd` (#18), and N1's
+    # clean shutdown uses both on that target. What agnos lacks is
+    # `rt_sigaction` — the mechanism `signal_ignore` is built on — so SIG_IGN
+    # specifically cannot be installed there. It needs no equivalent either:
+    # agnos has no default disposition that terminates the guest (mirshi's
+    # `_do_kill` only ORs a pending bit), so there is no SIGPIPE kill to defend
+    # against. "No signal delivery" would have argued N1's agnos arm was
+    # impossible; it is not.
     # The return is deliberately unchecked: a failure leaves the default
     # disposition, i.e. exactly today's behavior, and there is nothing better to
     # do about it than serve anyway.
     signal_ignore(SIGPIPE);
+
+    # 1.7.0 (N1) — arm clean shutdown HERE, for the same reason SIGPIPE is armed
+    # here: before the listener exists, so it dominates every serve path.
+    #
+    # ⚠ THIS PLACEMENT IS LOAD-BEARING, and getting it wrong produced an
+    # intermittent failure rather than an obvious one. Arming inside `serve_poll`
+    # (the first shape of this patch) left a real window: `cmd_serve_on` binds
+    # and listens FIRST, so the port is already accepting while `serve_poll` is
+    # still running `session_pool_init` + `door_registry_init`. A SIGTERM landing
+    # in that window met the DEFAULT disposition and killed the process — smoke
+    # 28 caught it as `poll/SIGTERM: exit -15` on roughly one run in three, while
+    # passing standalone every time. Signals must be armed before the process can
+    # be reached by anything that might signal it.
+    g_shutdown_sigfd   = shutdown_signals_arm();
+    g_shutdown_siginfo = alloc(SIGINFO_BYTES);
 
     var sr = tcp_socket();
     if (is_ok(sr) == 0) {
@@ -2943,6 +3205,33 @@ fn cmd_serve_on(port): i64 {
     }
     println("agora serve: model = fork (classic per-connection)");
 
+    # N1: arm clean shutdown for the fork parent too.
+    #
+    # The poll model can test the signalfd once per sweep because its loop never
+    # blocks. This loop DOES block — in `sock_accept` — so a signalfd alone would
+    # not be noticed until the next client connected, which on an idle server is
+    # never. The parent therefore waits on BOTH fds with poll(2) and only calls
+    # accept once the listener is actually readable.
+    #
+    # poll(2) is a raw `syscall(7)` because the stdlib exposes no wrapper (only
+    # epoll) — the same call, with the same 8-byte pollfd layout, that
+    # `descent_proxy` and `lib/net.cyr`'s `net_connect_sa_nb` already make. It is
+    # safe unguarded *here* only because this whole loop is fork-mode, which is
+    # Linux-only: `serve_mode_from_env` returns SERVE_POLL on every agnos path.
+    # The guard is kept anyway — 1.6.2 had to fix exactly this call being
+    # unguarded in descent, where 7 is `SYS_OPEN` on agnos.
+    #
+    # If arming failed, `sigfd` is negative and we keep the original blocking
+    # accept: no poll, no non-blocking listener, i.e. precisely the pre-1.7.0
+    # loop. Degrading to the old behaviour beats refusing to serve. Arming
+    # itself happened in cmd_serve_on, before the socket was created.
+    var sigfd = g_shutdown_sigfd;
+    var siginfo = g_shutdown_siginfo;
+    var pfds = alloc(16);
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sigfd >= 0) { sock_set_nonblocking(sfd); }
+    #endif
+
     var stop = 0;
     while (stop == 0) {
         #ifndef CYRIUS_TARGET_AGNOS
@@ -2959,10 +3248,27 @@ fn cmd_serve_on(port): i64 {
         }
         #endif
 
+        # Wait for either a connection or a shutdown signal. On timeout, loop
+        # back so the zombie reap above runs on a regular cadence.
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (sigfd >= 0) {
+            store32(pfds + 0, sfd);   store16(pfds + 4,  SHUTDOWN_POLLIN); store16(pfds + 6,  0);
+            store32(pfds + 8, sigfd); store16(pfds + 12, SHUTDOWN_POLLIN); store16(pfds + 14, 0);
+            var pr = syscall(7, pfds, 2, FORK_POLL_MS);
+            if (pr <= 0) { continue; }
+            if ((load16(pfds + 14) & 0xFFFF) != 0) {
+                if (shutdown_signal_pending(sigfd, siginfo) == 1) { stop = 1; continue; }
+            }
+            if ((load16(pfds + 6) & 0xFFFF) == 0) { continue; }
+        }
+        #endif
+
         var ar = sock_accept(sfd);
         if (is_ok(ar) == 0) {
-            # Transient accept errors should not kill the loop; the only exit
-            # would be signal handling — see roadmap § Now N1.
+            # Transient accept errors should not kill the loop. Since 1.7.0 this
+            # arm also absorbs the EAGAIN that a non-blocking listener returns
+            # when poll(2) reported it readable but another path consumed the
+            # connection first — harmless, and the poll timeout paces the retry.
             continue;
         }
         var cfd = result_unwrap(ar);
@@ -2985,6 +3291,14 @@ fn cmd_serve_on(port): i64 {
         if (pid == 0) {
             # Child: drop the listening fd we inherited (a child crash
             # shouldn't leak the listener), serve the client, exit.
+            #
+            # 1.7.0 (N1) — restore default signal disposition FIRST. fork(2)
+            # inherits the parent's blocked mask, so without this every
+            # connection child runs with SIGINT+SIGTERM blocked and no signalfd
+            # being read: an operator's `kill` on a wedged session would do
+            # nothing. Also closes the inherited signalfd, which SFD_CLOEXEC
+            # does not cover across a plain fork.
+            shutdown_signals_child_reset(sigfd);
             sock_close(sfd);
             handle_client(cfd);
             sys_exit(0);
@@ -3001,7 +3315,41 @@ fn cmd_serve_on(port): i64 {
         #endif
     }
 
+    # N1 shutdown, fork parent. Close the listener FIRST so no further client can
+    # connect, then give the children already serving a bounded window to finish
+    # and be reaped. Bounded, not unbounded: a player parked in a door game would
+    # otherwise hold the operator's shutdown open indefinitely. Children still
+    # alive at the deadline are left running and reparented to init when we exit
+    # — an honest trade, and the reason the count is reported rather than hidden.
+    println("agora serve: shutdown signal — closing listener");
     sock_close(sfd);
+    if (sigfd >= 0) { file_close(sigfd); }
+    #ifndef CYRIUS_TARGET_AGNOS
+    var waited = 0;
+    var live = 0;
+    var draining = 1;
+    while (draining == 1) {
+        live = 0;
+        var rp = 1;
+        while (rp == 1) {
+            var rpid2 = sys_waitpid(0 - 1, 0, WNOHANG);
+            if (rpid2 > 0) { rp = 1; }
+            else {
+                # 0 = children exist but none has exited yet; <0 = none left.
+                if (rpid2 == 0) { live = 1; }
+                rp = 0;
+            }
+        }
+        if (live == 0) { draining = 0; continue; }
+        if (waited >= FORK_GRACE_MS) { draining = 0; continue; }
+        sleep_ms(FORK_POLL_MS);
+        waited = waited + FORK_POLL_MS;
+    }
+    if (live == 1) {
+        println("agora serve: some sessions still active at the grace deadline; exiting anyway");
+    }
+    #endif
+    println("agora serve: stopped");
     return 0;
 }
 
@@ -3683,7 +4031,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.6.7");
+    println("agora 1.7.0");
     return 0;
 }
 

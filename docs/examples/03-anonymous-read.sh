@@ -6,7 +6,8 @@
 # the post written by example 02, but cannot post a new message — the
 # CLI returns a clear "auth required" error and exit 1.
 #
-# Run example 02 first to populate ./bbs/main/1.txt.
+# Run example 02 first to populate ./bbs/ (board "main" is the flat store
+# root — ADR 0004 — so its posts live at ./bbs/<id>.txt, not ./bbs/main/).
 #
 # Success: list shows ID 1; read 1 prints the From + body; anonymous
 # post is rejected with exit 1 and a recognizable error string.

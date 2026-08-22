@@ -370,14 +370,24 @@ fn chat_log_read(store, channel, out, cap): i64 {
     return n;
 }
 
-# Overwrite the channel transcript (caller holds the lock). Returns 0
-# on success, negative on error.
+# Overwrite the channel transcript CRASH-SAFELY (roadmap N2; caller holds the
+# lock). Returns 0 on success, negative on error.
+#
+# 1.7.0: `file_write_all` → `file_write_atomic`. Every `say` rewrites the whole
+# ring, so this is the most FREQUENTLY executed of the three N2 sites — a crash
+# mid-write lost a channel's entire history, not one message.
+#
+# ⚠ Safe for the same reason `world_write` is: the rename replaces the inode,
+# and `chat_lock_acquire` holds its flock on `<chat>/<channel>/.lock`
+# (`chat_lock_path`), never on the transcript being renamed. See the longer note
+# at `world_write` in src/door.cyr.
+# ⚠ Return convention differs from `file_write_all` — 0 on success, not `len`.
 fn chat_log_write(store, channel, buf, len): i64 {
     if (chat_channel_valid(channel) == 0) { return 0 - 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     chat_log_path(store, channel, path);
-    var n = file_write_all(path, buf, len);
-    if (n != len) { return 0 - 1; }
+    var n = store_write_atomic(path, buf, len);
+    if (n != 0) { return 0 - 1; }
     return 0;
 }
 

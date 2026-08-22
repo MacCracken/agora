@@ -32,6 +32,8 @@ Out of scope:
 - Per-platform support comes from `lib/net.cyr` upgrades, not agora changes. The application stays simple; the platform-abstraction concern lives in the stdlib where it belongs.
 - AGNOS arrival is a non-event for agora — when `lib/net.cyr`'s agnos backend lands, the same binary serves telnet on agnos with no source change.
 
+> **Amendment (1.7.0).** The § Decision holds — the listener targets `lib/net.cyr`, not agnos syscalls — > but "no source change" did not survive contact. agnos shipped at 1.5.0 and the tree now carries dozens > of `#ifdef CYRIUS_TARGET_AGNOS` branches, two of them added by 1.7.0 alone: `session_drain` yields after > one send there because `SYS_SOCK_SEND` blocks and has no non-blocking peer, and `shutdown_signals_arm` > skips `sigprocmask` there because mirshi delivers `pending AND NOT blocked`. The portable-primitive > decision is what saved agora work; the *divergences that remain are semantic*, not API, and they are > exactly the ones a shared signature hides.
+
 **Negative**:
 - Until cyrius `lib/net.cyr` gains macOS / Windows backends, "cross-platform" means Linux x86_64 + aarch64 in practice. Other platforms wait on cyrius.
 - The original "iron validation on archaemenid LAN" v1.0 criterion in the roadmap is now one of *several* validation surfaces, not the primary gate. Linux validation comes first.

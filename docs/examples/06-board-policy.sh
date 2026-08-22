@@ -17,7 +17,7 @@ KEY_QIX=./keys/qix
 KEY_PAC=./keys/pac
 
 if [ ! -f "$KEY_QIX" ]; then
-    echo "error: $KEY_QIX not found — run 03-authenticated-post.sh first" >&2
+    echo "error: $KEY_QIX not found — run 02-register-and-post.sh first" >&2
     exit 1
 fi
 

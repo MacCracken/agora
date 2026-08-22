@@ -97,13 +97,24 @@ and `test.cyr`, and the latter links `board.cyr` / `account.cyr` **without**
 - **Negative** — 256 KB of address space reserved for the arena whether or not a
   given deployment needs it. It is allocated lazily on first use, so CLI verbs
   that never call `cmd_alloc` never pay it.
-- **Neutral** — the remaining growth on filesystem commands is **not agora's**.
-  `dir_list` (`lib/fs.cyr:153`) allocates a 4 KB `getdents` buffer, a vec, and
-  one `Str` per directory entry on every call, from the vendored stdlib where
-  agora cannot redirect it. That is the whole of the 4,838 B/cmd residue above,
-  and it scales with directory size. The fix is a cyrius-side `dir_list`
-  variant that writes into a caller-supplied buffer — an upstream ask, the same
-  shape as 1.4.5's `sock_set_send_timeout`.
+- **Neutral (as measured at 1.6.2)** — the 4,838 B/cmd residue above was
+  stdlib-owned, not agora's: `dir_list` allocated a 4 KB `getdents` buffer, a
+  vec, and one `Str` per entry on every call, from a vendored lib agora cannot
+  redirect. Filed upstream, and **fixed at cyrius 6.5.11** (the buffer moved to
+  stack scratch), which agora picked up at the 1.6.7 pin: measured
+  **24,467 → 3,495 B/command** on `boards`/`list`. 6.5.12 added the
+  zero-allocation `dir_list_into` for the per-entry half, which agora has not
+  yet adopted (roadmap § Backlog).
+
+  > **⚠ The general lesson outlived the specific bug, and 1.7.0 proved it.**
+  > A bare `alloc()` inside a *vendored* function is invisible to this arena and
+  > to CLAUDE.md's "no bare `alloc()` reachable from `process_rx`" closeout gate,
+  > which greps agora's own source. N2 nearly reintroduced exactly this class:
+  > the stdlib's `file_write_atomic` builds its temp name with an unfreed
+  > `alloc()` — measured at **64 B per call** — and two of its three call sites
+  > fire per dispatched line. agora wrote `store_write_atomic` (`src/arena.cyr`)
+  > against this arena instead; re-measured at **0 B per call**. When adopting a
+  > stdlib function on a per-line path, read its allocations, do not assume them.
 
 ## Alternatives considered
 

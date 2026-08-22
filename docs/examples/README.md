@@ -6,13 +6,22 @@ All examples assume:
 
 - agora is built at `./build/agora` (`cyrius build src/main.cyr build/agora`).
 - A scratch store at `./bbs/` (delete between runs for a clean slate: `rm -rf ./bbs`).
-- The serve examples use port **2323** (unprivileged; no root needed).
+- The serve examples **default** to port 2323 (unprivileged; no root needed), but several pick their own so they can run without colliding — 11–15 use 2324–2328, and 24 uses two agora ports plus two more for its fake MUD. Check the script before assuming 2323.
 
 Run them in order from a fresh checkout — later examples reuse identity files from earlier ones.
 
+> **⚠ That contract does not actually hold, and there is no runner.** Examples **09, 10, 18, 19 and 20** each
+> `rm -rf ./bbs ./keys` on exit, so a strict in-order run leaves **24, 26 and 27** with no registered `qix` —
+> each of their headers says *"run 02-register-and-post.sh first"*, and that is not advice, it is a
+> prerequisite you must re-satisfy. Separately, **04, 05, 23, 25, 26 and 27 are client-only**: they do not
+> start a server, and each needs one already listening under a specific `AGORA_SERVE` model recorded only in
+> its own header comment (23/25/26/27 want `poll`). 1.7.0 verified all 28 green using a throwaway harness;
+> nothing in the repo reproduces it. This is why smoke 20's breakage went unnoticed for four releases —
+> filed in [roadmap.md](../development/roadmap.md) § Backlog.
+
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
-| 01 | [`01-build-and-test.sh`](01-build-and-test.sh) | Build + unit-test suite (178 tests as of 1.3.3) | none |
+| 01 | [`01-build-and-test.sh`](01-build-and-test.sh) | Build + unit-test suite (count in `docs/development/state.md`) | none |
 | 02 | [`02-register-and-post.sh`](02-register-and-post.sh) | M6: keygen / register / post `--as` (the first writeable flow) | `./bbs/`, `./keys/qix` |
 | 03 | [`03-anonymous-read.sh`](03-anonymous-read.sh) | M6 default "anon-read, auth-post" — reads succeed, anon post denied | `./bbs/` |
 | 04 | [`04-concurrent-smoke.py`](04-concurrent-smoke.py) | ADR 0007 fork-per-conn: 3 simultaneous telnet sessions | `./bbs/` |
@@ -32,6 +41,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 25 | [`25-door-state-churn.py`](25-door-state-churn.py) | 1.6.3: the DD_FREE release paths under churn — enter/quit across all nine practice doors, quit-then-enter alternation (freed blocks recycled straight into the next game), and repeated disconnect-mid-game so `session_release` frees a live slot | none |
 | 26 | [`26-iac-and-idle.py`](26-iac-and-idle.py) | 1.6.4: IAC (0xFF) doubled on egress + dropped at ingress (RFC 854), and `IAC NOP` keepalives no longer hold a session slot (~80s; `--fast` skips the idle half) | `./bbs/` |
 | 27 | [`27-audit-lows.py`](27-audit-lows.py) | 1.6.5: audit LOWs — over-long `--store` refused, BEL/BS/DEL dropped from a stored post, and echo gated correctly (kept for non-negotiating clients, suppressed after `IAC DONT ECHO`) | `./bbs/`, `./keys/qix` |
+| 28 | [`28-clean-shutdown.py`](28-clean-shutdown.py) | 1.7.0 (roadmap N1): SIGINT/SIGTERM shut both serve models down cleanly (exit 0, not 143/130), a connected poll client is told before its socket closes, and **fork children do not inherit the parent's blocked signal mask** — the regression that made every connection process unkillable. Self-contained: starts and signals its own servers. | `/tmp/agora-shutdown-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 
@@ -39,7 +49,7 @@ Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avo
 
 ## What these are not
 
-- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness (178 tests, t01–t178 as of 1.3.3). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
+- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness, and `cyrius fuzz fuzz/telnet_iac.fcyr` is the IAC-parser fuzz harness (new at 1.7.0; both run in CI and at release). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
 - **Not benchmarks** — those live in [`benches/bench_telnet.bcyr`](../../benches/bench_telnet.bcyr).
 - **Not a tutorial** — the prose tutorial is [`docs/guides/getting-started.md`](../guides/getting-started.md). Read that first if you've never run agora.
 

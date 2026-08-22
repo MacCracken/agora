@@ -10,15 +10,15 @@ For the *why* behind any decision below, follow the ADR links — this guide sta
 
 ## Prerequisites
 
-- **Cyrius toolchain ≥ 6.0.1** (pinned in [`cyrius.cyml`](../../cyrius.cyml)). Install with:
+- **Cyrius toolchain — the version pinned in [`cyrius.cyml`](../../cyrius.cyml) `[package].cyrius`** (pinned in [`cyrius.cyml`](../../cyrius.cyml)). Install with:
 
   ```sh
   curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | sh
   ```
 
-  Confirm: `cyrius version` reports `6.0.1` or newer.
+  Confirm: `cyrius --version` matches the pin (a mismatch prints a drift warning).
 
-- **Linux x86_64 or aarch64.** macOS and Windows follow as cyrius `lib/net.cyr` gains backends ([ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
+- **Linux x86_64 or aarch64**, or **AGNOS** (build with `cyrius build --agnos`, served under mirshi with `--net-listen-any`; shipping since 1.5.0 — note agnos always uses the poll serve model, having no `fork`). macOS and Windows follow as cyrius `lib/net.cyr` gains backends ([ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
 - **A telnet client.** `telnet`, `nc`, or `socat - TCP:host:port` all work; agora speaks RFC 854 + 1143 + 1073 + 1091 + 1184.
 - **(Optional)** `openssl` ≥ 3.0 if you want to script telnet authentication — see [Authenticated telnet](#authenticated-telnet) below.
 
@@ -47,7 +47,7 @@ Live binary size lives in [`docs/development/state.md`](../development/state.md)
 cyrius test src/test.cyr
 ```
 
-Expect **80 tests, 0 failures** at 0.9.0. The suite covers the IAC parser (t01–t24, RFCs 854 / 1143 / 1073 / 1091 / 1184), post storage + threading (t25–t49), accounts (t50–t63), the From header + per-board policy (t64–t70), and the 0.7.0 audit regressions (t71–t78). t79 + t80 are the 0.8.x audit-followup regressions (keyfile mode bits + board existence).
+Expect **0 failures** (the suite was 80 tests at 0.9.0 and has grown with every cut; `docs/development/state.md` carries the current count). The suite covers the IAC parser (t01–t24, RFCs 854 / 1143 / 1073 / 1091 / 1184), post storage + threading (t25–t49), accounts (t50–t63), the From header + per-board policy (t64–t70), and the 0.7.0 audit regressions (t71–t78). t79 + t80 are the 0.8.x audit-followup regressions (keyfile mode bits + board existence).
 
 ---
 
@@ -57,7 +57,7 @@ Expect **80 tests, 0 failures** at 0.9.0. The suite covers the IAC parser (t01�
 ./build/agora serve 2323
 ```
 
-You'll see the bannermanor MOTD render to stderr and the listener parks on port 2323. agora forks one process per accepted connection ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) — open as many concurrent telnet sessions as your kernel allows.
+You'll see the bannermanor MOTD render to stderr and the listener parks on port 2323. agora serves with one of two models, chosen at startup ([ADR 0023](../adr/0023-dual-serve-model.md)). On Linux the default is **fork-per-connection** ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) — open as many concurrent sessions as your kernel allows. Set `AGORA_SERVE=poll` for the single-process multiplex, which serves up to 64 sessions from one process and is the only model on AGNOS. **Ctrl-C (or `kill`) shuts either model down cleanly since 1.7.0** — sessions are told, drained and closed rather than cut off.
 
 Storage defaults to `./agora-data/`. Override with `--store <path>`. Custom MOTD: `--motd <path>` (4 KB ceiling).
 
@@ -187,6 +187,6 @@ Each session sees its own banner, its own `g_session_*` slots, and its own bump-
 - [`docs/development/roadmap.md`](../development/roadmap.md) — what's shipped, what's next, what's deferred.
 - [`docs/development/state.md`](../development/state.md) — live state snapshot (version / size / in-flight slot / boot guide).
 - [`docs/examples/`](../examples/) — runnable smoke scripts for each major surface.
-- [`docs/adr/`](../adr/) — eight architecture decisions (cross-platform listener / post storage / RFC-822 headers / board layout / Reply-To threading / identity model / fork concurrency / PostHeaders ABI).
+- [`docs/adr/`](../adr/) — the architecture decision record (0001-0023) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
 - [`CLAUDE.md`](../../CLAUDE.md) — durable agent / contributor process rules.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

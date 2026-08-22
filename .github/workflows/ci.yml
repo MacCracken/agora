@@ -78,6 +78,25 @@ jobs:
         # despite that being implied by kii's CI comment from cyrius
         # 5.6.28). Until we land a tests/agora.tcyr split (likely at
         # M5+ when persistence widens the test surface), the explicit
-        # path is the working form. Runs the 24-test RFC 854 / 1143 /
-        # 1073 / 1091 / 1184 conformance suite.
+        # path is the working form. Runs the full unit suite — RFC 854 /
+        # 1143 / 1073 / 1091 / 1184 conformance plus storage, accounts,
+        # policy and every door game. The count lives in
+        # docs/development/state.md, deliberately not here: this comment
+        # said "24-test" from 0.2.0 until 1.7.0, by which point it was 221.
         run: cyrius test src/test.cyr
+
+      - name: Fuzz the IAC parser
+        # 1.7.0 (roadmap N4) — CLAUDE.md § Key Principles has stated "fuzz every
+        # parser path — IAC sequences are adversarial-by-default" since 0.2.0,
+        # with no harness and no CI step behind it. `fuzz/telnet_iac.fcyr`
+        # drives well over a million bytes through telnet_feed /
+        # telnet_handle_sb across five passes and asserts
+        # its own invariants (state range, buffer bounds, TERMINAL_TYPE length,
+        # option Q-state range, reset cleanliness), exiting with a distinct code
+        # per violated invariant. It is mutation-proven on two independent axes:
+        # deleting the TERM_TYPE_CAP clamp (the CVE-2020-10188 shape) or the
+        # subneg accumulator bound each turns this step RED.
+        #
+        # The PRNG seed is fixed, so a CI failure reproduces locally byte for
+        # byte — `cyrius fuzz fuzz/telnet_iac.fcyr`.
+        run: cyrius fuzz fuzz/telnet_iac.fcyr

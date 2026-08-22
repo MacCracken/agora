@@ -11,9 +11,13 @@ re-derive them.
 
 `callptr(fp, args...)` is valid only in **value position** — `return callptr(...)`
 or `x = callptr(...)`. As a bare expression statement (result discarded) it does
-**not** parse: the compiler emits `expected var, got '('`, and — critically — it
-reports the error at a **cascaded, misleading line** (the start of a *later*
-function), not at the offending `callptr`. During the registry work this sent the
+**not** parse: the compiler emits `expected var, got '('`. **At the time this note
+was written it also reported the error at a cascaded, misleading line** (the start
+of a *later* function) rather than at the offending `callptr`. **Re-verified at
+cyrius 6.5.34 (1.7.0): the location is now correct** — the parse rule itself is
+unchanged and still applies, but the wandering-diagnostic half was fixed by the
+6.5.3 / 6.5.19 / 6.5.24 main-source line-accuracy work. The account below is kept
+as the historical record of what the registry work actually cost. During the registry work this sent the
 reported error wandering through several already-correct functions while the real
 fault sat in a `door_world_begin` / `door_universe_feed` tick/notice call whose
 return value we did not need.

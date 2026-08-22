@@ -55,7 +55,7 @@ Out of scope at M5-A (deferred to later bites in the same cycle):
 
 **Neutral**:
 
-- **Crash consistency is filesystem-level.** A crash mid-write leaves either a complete post or no post (the EXCL flag means the rename-on-close is atomic from the reader's perspective; partial writes show as truncated files which fail the post-read-validate step). Higher-level transaction support would belong to a v2.x cycle and is not required for BBS-shaped use cases.
+- **Crash consistency is filesystem-level.** **Crash consistency here is filesystem-level and weak.** `O_CREAT | O_EXCL` makes *id claiming* atomic; it does nothing for the write, and there is no rename in the post path — the original sentence described a rename-on-close that has never existed. A crash between the create and the last byte leaves a short file. 1.7.0's N2 gave the door saves, the shared world and the chat ring a real temp+`fsync`+`rename` (`store_write_atomic`); **posts were deliberately not converted** and remain on plain `file_write`. Post reads validate headers, so a truncated body degrades to an unreadable post rather than corruption — but CLAUDE.md's *"posts are durable artifacts"* principle is not yet backed by an atomic write. Higher-level transaction support would belong to a v2.x cycle and is not required for BBS-shaped use cases.
 
 ## Alternatives considered
 
