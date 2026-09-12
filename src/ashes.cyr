@@ -592,7 +592,7 @@ fn ash_contest(def_fp, def_army, def_terr, att_fp, att_army, natt, out): i64 {
     var k = 1;
     while (k < nc) {
         if (ash_better(load64(c_fp + k * 8), load64(c_pow + k * 8),
-                       load64(c_fp + win * 8), load64(c_pow + win * 8)) == 1) {
+            load64(c_fp + win * 8), load64(c_pow + win * 8)) == 1) {
             win = k;
         }
         k = k + 1;
@@ -1179,8 +1179,8 @@ fn ash_feed(st, line, len): i64 {
         var r = ash_pact_propose(w, me, owner);
         if (r == ASH_DIP_ALLIED) { ash_msg(st, "alliance sealed — your armies now fight as one."); }
         else { if (r == ASH_DIP_PROPOSED) { ash_msg(st, "alliance proposed — pending their reply."); }
-        else { if (r == ASH_DIP_PENDING)  { ash_msg(st, "already proposed or allied."); }
-        else { ash_msg(st, "no room for another pact."); } } }
+            else { if (r == ASH_DIP_PENDING)  { ash_msg(st, "already proposed or allied."); }
+                else { ash_msg(st, "no room for another pact."); } } }
         return 0;
     }
 

@@ -206,7 +206,7 @@ enum PA {
     PA_MSG      = 168;
     # 1.2.0 Universe (ADR 0010 bite 2), runtime-only:
     PA_WORLD    = 176;    # ptr → in-memory shared-world snapshot (0 = solo); main.cyr
-                          # locks + reads it in before each fed line and writes it back after
+    # locks + reads it in before each fed line and writes it back after
     PA_FP       = 184;    # this player's identity as an i64 (for planet ownership; 0 = solo/anon)
     PA_SIZE     = 192;
 }
@@ -941,14 +941,14 @@ fn pa_feed_buy(st, line, len): i64 {
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 52) {
-        var c = k - 49;
-        var gx = load64(st + PA_GX);
-        if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_SELLS) { pa_msg(st, "Port doesn't sell that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        store64(st + PA_PEND, c);
-        store64(st + PA_SCREEN, PSCR_BUYQTY);
-        return 0;
-    } }
+            var c = k - 49;
+            var gx = load64(st + PA_GX);
+            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_SELLS) { pa_msg(st, "Port doesn't sell that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            store64(st + PA_PEND, c);
+            store64(st + PA_SCREEN, PSCR_BUYQTY);
+            return 0;
+        } }
     pa_msg(st, "Pick 1-4, or x.");
     return 0;
 }
@@ -972,14 +972,14 @@ fn pa_feed_sell(st, line, len): i64 {
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 52) {
-        var c = k - 49;
-        var gx = load64(st + PA_GX);
-        if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_BUYS) { pa_msg(st, "Port doesn't buy that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        store64(st + PA_PEND, c);
-        store64(st + PA_SCREEN, PSCR_SELLQTY);
-        return 0;
-    } }
+            var c = k - 49;
+            var gx = load64(st + PA_GX);
+            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_BUYS) { pa_msg(st, "Port doesn't buy that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            store64(st + PA_PEND, c);
+            store64(st + PA_SCREEN, PSCR_SELLQTY);
+            return 0;
+        } }
     pa_msg(st, "Pick 1-4, or x.");
     return 0;
 }
@@ -1002,26 +1002,26 @@ fn pa_feed_move(st, line, len): i64 {
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 54) {
-        var idx = k - 49;
-        var gx = load64(st + PA_GX);
-        var dest = pa_nth_warp(gx, load64(st + PA_SECTOR), idx);
-        if (dest < 0) { pa_msg(st, "No such warp."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        var rc = pa_move(st, dest);
-        if (rc == (0 - 2)) { pa_msg(st, "Out of turns - end the day."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        if (rc != 0)       { pa_msg(st, "Can't warp there."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-        if (pa_is_universe(st) == 1) {
-            # Universe: fight any hostile garrison left in the new sector
-            # (async PvP), not the NPC raider roll.
-            pa_arrival_universe(st);
-            if (load64(st + PA_OVER) == 2) { pa_msg(st, "Your ship is debris. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+            var idx = k - 49;
+            var gx = load64(st + PA_GX);
+            var dest = pa_nth_warp(gx, load64(st + PA_SECTOR), idx);
+            if (dest < 0) { pa_msg(st, "No such warp."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            var rc = pa_move(st, dest);
+            if (rc == (0 - 2)) { pa_msg(st, "Out of turns - end the day."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (rc != 0)       { pa_msg(st, "Can't warp there."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (pa_is_universe(st) == 1) {
+                # Universe: fight any hostile garrison left in the new sector
+                # (async PvP), not the NPC raider roll.
+                pa_arrival_universe(st);
+                if (load64(st + PA_OVER) == 2) { pa_msg(st, "Your ship is debris. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
+            var amb = pa_roll_ambush(st);
+            if (amb == 1) { pa_msg(st, "Raiders drop out of warp!"); return 0; }
             store64(st + PA_SCREEN, PSCR_MAIN);
             return 0;
-        }
-        var amb = pa_roll_ambush(st);
-        if (amb == 1) { pa_msg(st, "Raiders drop out of warp!"); return 0; }
-        store64(st + PA_SCREEN, PSCR_MAIN);
-        return 0;
-    } }
+        } }
     pa_msg(st, "Pick a warp number, or x.");
     return 0;
 }
@@ -1459,7 +1459,7 @@ fn pa_buy_u(st, c, qty): i64 {
     var w = load64(st + PA_WORLD);
     if (w == 0) { return 0 - 2; }
     var rc = paw_buy(w, load64(st + PA_GX), load64(st + PA_SECTOR), c, qty,
-                     load64(st + PA_CREDITS), pa_holds_free(st));
+      load64(st + PA_CREDITS), pa_holds_free(st));
     if (rc < 0) { return rc; }                       # status code, world untouched
     store64(st + PA_CREDITS, load64(st + PA_CREDITS) - rc);
     pa_set_cargo(st, c, pa_cargo(st, c) + qty);
@@ -1470,7 +1470,7 @@ fn pa_sell_u(st, c, qty): i64 {
     var w = load64(st + PA_WORLD);
     if (w == 0) { return 0 - 2; }
     var rc = paw_sell(w, load64(st + PA_GX), load64(st + PA_SECTOR), c, qty,
-                      pa_cargo(st, c));
+      pa_cargo(st, c));
     if (rc < 0) { return rc; }
     store64(st + PA_CREDITS, load64(st + PA_CREDITS) + rc);
     pa_set_cargo(st, c, pa_cargo(st, c) - qty);

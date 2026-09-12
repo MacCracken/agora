@@ -878,7 +878,7 @@ fn th_cracked_set(st, ri): i64 {
 # (DECODE_CODE_MAX bytes) and returns the variant. Pure.
 fn th_cipher_for_cable(cb, out_secret): i64 {
     var mix = load64(cb + CB_NR) * 131 + load64(cb + CB_AGENT) * 17
-            + load64(cb + CB_DAY) * 7 + load64(cb + CB_KIND) + 1;
+    + load64(cb + CB_DAY) * 7 + load64(cb + CB_KIND) + 1;
     var cell = cmd_alloc(8);
     rng_seed(cell, mix);
     if (load64(cb + CB_KIND) == 2) {                     # intercept -> Words
@@ -1079,13 +1079,13 @@ fn th_feed_cables(st, line, len): i64 {
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 57) {
-        var idx = k - 49;
-        if (idx < th_today_count(st)) {
-            store64(st + TH_CURSOR, idx);
-            store64(st + TH_SCREEN, HSCR_READ);
-            return 0;
-        }
-    } }
+            var idx = k - 49;
+            if (idx < th_today_count(st)) {
+                store64(st + TH_CURSOR, idx);
+                store64(st + TH_SCREEN, HSCR_READ);
+                return 0;
+            }
+        } }
     th_msg(st, "No such cable.");
     return 0;
 }
@@ -1156,10 +1156,10 @@ fn th_feed_orders(st, line, len): i64 {
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 53) {
-        store64(st + TH_PEND, k - 49);
-        store64(st + TH_SCREEN, HSCR_AGENTACT);
-        return 0;
-    } }
+            store64(st + TH_PEND, k - 49);
+            store64(st + TH_SCREEN, HSCR_AGENTACT);
+            return 0;
+        } }
     th_msg(st, "Pick an agent 1-5, or x.");
     return 0;
 }
@@ -1187,14 +1187,14 @@ fn th_feed_movecity(st, line, len): i64 {
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 52) {
-        var rc = th_order_move(st, load64(st + TH_PEND), k - 49);
-        if (rc == 0)       { th_msg(st, "Dispatch order sent."); }
-        if (rc == (0 - 2)) { th_msg(st, "No dispatch points left."); }
-        if (rc == (0 - 3)) { th_msg(st, "Not enough budget."); }
-        if (rc == (0 - 4)) { th_msg(st, "Agent not active."); }
-        store64(st + TH_SCREEN, HSCR_MAIN);
-        return 0;
-    } }
+            var rc = th_order_move(st, load64(st + TH_PEND), k - 49);
+            if (rc == 0)       { th_msg(st, "Dispatch order sent."); }
+            if (rc == (0 - 2)) { th_msg(st, "No dispatch points left."); }
+            if (rc == (0 - 3)) { th_msg(st, "Not enough budget."); }
+            if (rc == (0 - 4)) { th_msg(st, "Agent not active."); }
+            store64(st + TH_SCREEN, HSCR_MAIN);
+            return 0;
+        } }
     th_msg(st, "Pick a city 1-4, or x.");
     return 0;
 }
@@ -1216,13 +1216,13 @@ fn th_feed_accuse(st, line, len): i64 {
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k == 0)   { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 53) {
-        var correct = th_accuse(st, k - 49);
-        if (correct == 1) { th_msg(st, "CONFIRMED. The mole is burned. The network holds."); }
-        else              { th_msg(st, "WRONG. An honest agent burned; the Director is furious."); }
-        if (load64(st + TH_OVER) == 2) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
-        store64(st + TH_SCREEN, HSCR_MAIN);
-        return 0;
-    } }
+            var correct = th_accuse(st, k - 49);
+            if (correct == 1) { th_msg(st, "CONFIRMED. The mole is burned. The network holds."); }
+            else              { th_msg(st, "WRONG. An honest agent burned; the Director is furious."); }
+            if (load64(st + TH_OVER) == 2) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
+            store64(st + TH_SCREEN, HSCR_MAIN);
+            return 0;
+        } }
     th_msg(st, "Name the mole 1-5, or x.");
     return 0;
 }

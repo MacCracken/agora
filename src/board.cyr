@@ -567,7 +567,7 @@ fn header_get(buf, len, name, out_buf, out_max): i64 {
                             var b = load8(buf + ve) & 0xFF;
                             if (b == 13) { eat = 0; }
                             else { if (b == 10) { eat = 0; }
-                                   else         { ve = ve + 1; } }
+                                else         { ve = ve + 1; } }
                         }
                     }
                     found = 1;
@@ -688,17 +688,17 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
     # "From: <handle> <fp16>\r\n"  (M6-E / ADR 0006, only if both
     # from_handle and from_fp are non-null cstrings)
     if (from_handle != 0) { if (from_fp != 0) {
-        var hlen = strlen(from_handle);
-        var flen = strlen(from_fp);
-        if (hlen > 0) { if (flen > 0) {
-            memcpy(out_buf + pos, "From: ", 6); pos = pos + 6;
-            memcpy(out_buf + pos, from_handle, hlen); pos = pos + hlen;
-            store8(out_buf + pos, 32); pos = pos + 1;            # ' '
-            memcpy(out_buf + pos, from_fp, flen); pos = pos + flen;
-            store8(out_buf + pos, 13); pos = pos + 1;
-            store8(out_buf + pos, 10); pos = pos + 1;
+            var hlen = strlen(from_handle);
+            var flen = strlen(from_fp);
+            if (hlen > 0) { if (flen > 0) {
+                    memcpy(out_buf + pos, "From: ", 6); pos = pos + 6;
+                    memcpy(out_buf + pos, from_handle, hlen); pos = pos + hlen;
+                    store8(out_buf + pos, 32); pos = pos + 1;            # ' '
+                    memcpy(out_buf + pos, from_fp, flen); pos = pos + flen;
+                    store8(out_buf + pos, 13); pos = pos + 1;
+                    store8(out_buf + pos, 10); pos = pos + 1;
+                } }
         } }
-    } }
 
     # Blank line — header/body separator
     store8(out_buf + pos, 13); pos = pos + 1;

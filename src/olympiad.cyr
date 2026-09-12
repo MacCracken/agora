@@ -158,7 +158,7 @@ fn ol_make_competitor(st, i, type, s0, s1, s2, s3, cond, faction, nameid): i64 {
 # for any live team so it always has a (slim) chance. Pure.
 fn ol_chariot_form(c): i64 {
     var raw = load64(c + CMP_SPEED) + load64(c + CMP_STAMINA)
-            + load64(c + CMP_HANDLE) + load64(c + CMP_NERVE);
+    + load64(c + CMP_HANDLE) + load64(c + CMP_NERVE);
     if (raw <= 0) { return 0; }
     var cond = load64(c + CMP_COND);
     if (cond < 0)   { cond = 0; }
@@ -368,8 +368,8 @@ fn ol_new(seed, mode): i64 {
     # the founding team: a Blue-faction chariot, modest across the board
     store64(st + OL_NCOMP, 1);
     ol_make_competitor(st, 0, EV_CHARIOT,
-        OL_STAT_START, OL_STAT_START, OL_STAT_START, OL_STAT_START,
-        100, FAC_BLUE, 0);
+      OL_STAT_START, OL_STAT_START, OL_STAT_START, OL_STAT_START,
+      100, FAC_BLUE, 0);
     return st;
 }
 

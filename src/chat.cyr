@@ -81,8 +81,8 @@ fn chat_text_sanitize(src, inlen, out, cap): i64 {
     while (i < inlen) {
         var c = load8(src + i) & 0xFF;
         if (c >= 32) { if (c <= 126) {
-            if (o < cap) { store8(out + o, c); o = o + 1; }
-        } }
+                if (o < cap) { store8(out + o, c); o = o + 1; }
+            } }
         i = i + 1;
     }
     return o;
@@ -201,7 +201,7 @@ fn chat_trim_to_cap(buf, len, cap): i64 {
     while (scanning == 1) {           # advance until i is a line start
         if (i >= len) { scanning = 0; }
         else { if ((load8(buf + i - 1) & 0xFF) == 10) { scanning = 0; }   # prev byte is '\n'
-               else { i = i + 1; } }
+            else { i = i + 1; } }
     }
     var newlen = len - i;
     if (newlen > 0) { memcpy(buf, buf + i, newlen); }

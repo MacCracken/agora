@@ -3103,7 +3103,7 @@ fn t135_pa_universe_actions(): i64 {
     var bc = 0 - 1;
     while (c < PA_COMM) {
         if (s < 0) { var cand = t_paw_find_port(load64(st + PA_GX), c, PF_SELLS);
-                     if (cand >= 0) { s = cand; bc = c; } }
+            if (cand >= 0) { s = cand; bc = c; } }
         c = c + 1;
     }
     if (s >= 0) {

@@ -82,11 +82,11 @@ fn descent_dec(buf, s, e): i64 {
         var ch = load8(buf + i) & 0xFF;
         if (ch < 48) { bad = 1; i = e; }
         else { if (ch > 57) { bad = 1; i = e; }
-        else {
-            v = v * 10 + (ch - 48);
-            if (v > DESCENT_DEC_MAX) { bad = 1; i = e; }
-            else { i = i + 1; }
-        } }
+            else {
+                v = v * 10 + (ch - 48);
+                if (v > DESCENT_DEC_MAX) { bad = 1; i = e; }
+                else { i = i + 1; }
+            } }
     }
     if (bad != 0) { return 0 - 1; }
     return v;
@@ -113,12 +113,12 @@ fn descent_parse_ipv4(buf, s, e): i64 {
             var oc = descent_dec(buf, seg, i);
             if (oc < 0) { bad = 1; go = 0; }
             else { if (oc > 255) { bad = 1; go = 0; }
-            else {
-                packed = packed | (oc << (count * 8));
-                count = count + 1;
-                seg = i + 1;
-                if (atend == 1) { go = 0; } else { i = i + 1; }
-            } }
+                else {
+                    packed = packed | (oc << (count * 8));
+                    count = count + 1;
+                    seg = i + 1;
+                    if (atend == 1) { go = 0; } else { i = i + 1; }
+                } }
         } else { i = i + 1; }
     }
     if (bad != 0) { return 0 - 1; }
@@ -152,9 +152,9 @@ fn descent_parse_endpoint(buf, len, out_addr, out_port): i64 {
             var rc = load8(buf + e - 1) & 0xFF;
             if (rc == 10) { e = e - 1; }
             else { if (rc == 13) { e = e - 1; }
-            else { if (rc == 32) { e = e - 1; }
-            else { if (rc == 9) { e = e - 1; }
-            else { tr = 0; } } } }
+                else { if (rc == 32) { e = e - 1; }
+                    else { if (rc == 9) { e = e - 1; }
+                        else { tr = 0; } } } }
         }
     }
     if (e <= s) { return 1; }
@@ -283,35 +283,35 @@ fn descent_proxy(cfd, mfd): i64 {
         var pr = syscall(7, pfds, 2, DESCENT_POLL_MS);   # poll(2) — Linux/macOS only, hence the guard
         if (pr < 0) { done = 1; }
         else { if (pr == 0) {
-            idle = idle + DESCENT_POLL_MS;
-            if (idle >= DESCENT_IDLE_MS) {
-                descent_write_all(cfd, "\r\n(idle — leaving the Descent)\r\n", 32);
-                done = 1;
-            }
-        } else {
-            idle = 0;
-            var cre = load16(pfds + 6)  & 0xFFFF;
-            var mre = load16(pfds + 14) & 0xFFFF;
-            # client → MUD
-            if ((cre & DESCENT_POLLIN) != 0) {
-                var cn = sys_read(cfd, buf, DESCENT_PROXY_BUF);
-                if (cn <= 0) { done = 1; }
-                else { if (descent_write_all(mfd, buf, cn) != 0) { done = 1; } }
-            }
-            # MUD → client
-            if (done == 0) {
-                if ((mre & DESCENT_POLLIN) != 0) {
-                    var mn = sys_read(mfd, buf, DESCENT_PROXY_BUF);
-                    if (mn <= 0) { done = 1; }
-                    else { if (descent_write_all(cfd, buf, mn) != 0) { done = 1; } }
+                idle = idle + DESCENT_POLL_MS;
+                if (idle >= DESCENT_IDLE_MS) {
+                    descent_write_all(cfd, "\r\n(idle — leaving the Descent)\r\n", 32);
+                    done = 1;
                 }
-            }
-            # hangup / error on either side
-            if (done == 0) {
-                if ((cre & DESCENT_POLLDEAD) != 0) { done = 1; }
-                if ((mre & DESCENT_POLLDEAD) != 0) { done = 1; }
-            }
-        } }
+            } else {
+                idle = 0;
+                var cre = load16(pfds + 6)  & 0xFFFF;
+                var mre = load16(pfds + 14) & 0xFFFF;
+                # client → MUD
+                if ((cre & DESCENT_POLLIN) != 0) {
+                    var cn = sys_read(cfd, buf, DESCENT_PROXY_BUF);
+                    if (cn <= 0) { done = 1; }
+                    else { if (descent_write_all(mfd, buf, cn) != 0) { done = 1; } }
+                }
+                # MUD → client
+                if (done == 0) {
+                    if ((mre & DESCENT_POLLIN) != 0) {
+                        var mn = sys_read(mfd, buf, DESCENT_PROXY_BUF);
+                        if (mn <= 0) { done = 1; }
+                        else { if (descent_write_all(cfd, buf, mn) != 0) { done = 1; } }
+                    }
+                }
+                # hangup / error on either side
+                if (done == 0) {
+                    if ((cre & DESCENT_POLLDEAD) != 0) { done = 1; }
+                    if ((mre & DESCENT_POLLDEAD) != 0) { done = 1; }
+                }
+            } }
     }
     #endif
 
@@ -322,17 +322,17 @@ fn descent_proxy(cfd, mfd): i64 {
         var cn = sys_sock_recv(_agnos_fd_conn(cfd), buf, DESCENT_PROXY_BUF);
         if (cn < 0) { done = 1; }
         else { if (cn > 0) {
-            moved = 1;
-            if (descent_write_all(mfd, buf, cn) != 0) { done = 1; }
-        } }
+                moved = 1;
+                if (descent_write_all(mfd, buf, cn) != 0) { done = 1; }
+            } }
         # MUD → client
         if (done == 0) {
             var mn = sys_sock_recv(_agnos_fd_conn(mfd), buf, DESCENT_PROXY_BUF);
             if (mn < 0) { done = 1; }
             else { if (mn > 0) {
-                moved = 1;
-                if (descent_write_all(cfd, buf, mn) != 0) { done = 1; }
-            } }
+                    moved = 1;
+                    if (descent_write_all(cfd, buf, mn) != 0) { done = 1; }
+                } }
         }
         # idle accounting + pacing (only when neither side moved bytes)
         if (done == 0) {
@@ -375,12 +375,14 @@ fn descent_run(cfd, store, sess_handle): i64 {
     var addr = load64(ap);
     var port = load64(pp);
 
-    var sr = tcp_socket();
-    if (is_ok(sr) == 0) {
+    # 1.7.1 — cyrius 6.6.x value form: Result is a (tag, payload) register pair,
+    # so both halves must be bound. `var sr = tcp_socket();` kept the tag alone.
+    var st, sv = tcp_socket();
+    if (is_ok(st) == 0) {
         send_str(cfd, "\r\nCould not open a socket to the Descent.\r\n");
         return 0;
     }
-    var mfd = result_unwrap(sr);
+    var mfd = result_unwrap(st, sv);
     if (net_connect_nb(mfd, addr, port, DESCENT_CONNECT_MS) != 0) {
         send_str(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
         sock_close(mfd);

@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.34` → `6.6.2`.** Migrated to the `Result` value form:
+  2 first-party file(s) changed. Every surface re-verified — build, tests, and any
+  bench/fuzz/distlib target the repo ships.
+
+
 ## [1.7.0] — 2026-08-22 (roadmap § Now closes: the server can finally stop)
 
 **All four pinned roadmap items — N1, N2, N3, N4 — are done**, plus cyrius **6.5.33 → 6.5.34**.

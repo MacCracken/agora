@@ -604,12 +604,12 @@ fn qu_render(st, buf, cap): i64 {
     if (screen == QSCR_CARDS)   { pos = qu_render_cards(st, buf, pos); pos = qu_render_msg(st, buf, pos); return pos; }
     if (screen == QSCR_FOREST)  { pos = qu_render_forest(st, buf, pos); }
     else { if (screen == QSCR_FIGHT)   { pos = qu_render_fight(st, buf, pos); }
-    else { if (screen == QSCR_HEALER)  { pos = qu_render_healer(st, buf, pos); }
-    else { if (screen == QSCR_BANK)    { pos = qu_render_bank(st, buf, pos); }
-    else { if (screen == QSCR_BANKDEP) { pos = emit_cstr(buf, pos, "How much to deposit? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
-    else { if (screen == QSCR_BANKWD)  { pos = emit_cstr(buf, pos, "How much to withdraw? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
-    else { if (screen == QSCR_INN)     { pos = qu_render_inn(st, buf, pos); }
-    else                               { pos = qu_render_town(st, buf, pos); } } } } } } }
+        else { if (screen == QSCR_HEALER)  { pos = qu_render_healer(st, buf, pos); }
+            else { if (screen == QSCR_BANK)    { pos = qu_render_bank(st, buf, pos); }
+                else { if (screen == QSCR_BANKDEP) { pos = emit_cstr(buf, pos, "How much to deposit? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
+                    else { if (screen == QSCR_BANKWD)  { pos = emit_cstr(buf, pos, "How much to withdraw? (number, or 0 to cancel)"); pos = emit_crlf(buf, pos); }
+                        else { if (screen == QSCR_INN)     { pos = qu_render_inn(st, buf, pos); }
+                            else                               { pos = qu_render_town(st, buf, pos); } } } } } } }
     pos = qu_render_msg(st, buf, pos);
     return pos;
 }

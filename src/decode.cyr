@@ -628,7 +628,7 @@ fn decode_feed(st, line, len): i64 {
     }
 
     var rc = decode_parse_numbers(line, len, guessbuf,
-                                  load64(st + DG_LEN), load64(st + DG_SYMBOLS));
+      load64(st + DG_LEN), load64(st + DG_SYMBOLS));
     if (rc == DEC_BADLEN) {
         var m = load64(st + DG_MSG);
         var p = 0;

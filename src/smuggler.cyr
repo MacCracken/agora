@@ -380,7 +380,7 @@ fn sl_msg(st, s): i64 {
 # runtime buffers (deterministic in seed+day).
 fn sl_regen_prices(st): i64 {
     sl_gen_prices(load64(st + SL_SEED), load64(st + SL_DAY),
-                  load64(st + SL_PRICES), load64(st + SL_EVENT));
+      load64(st + SL_PRICES), load64(st + SL_EVENT));
     return 0;
 }
 
@@ -891,17 +891,17 @@ fn sl_feed_buy(st, line, len): i64 {
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 56) {
-        var g = k - 49;
-        var price = load64(load64(st + SL_PRICES) + g * 8);
-        if (price <= 0) {
-            sl_msg(st, "Not on the street today.");
-            store64(st + SL_SCREEN, SCR_MAIN);
+            var g = k - 49;
+            var price = load64(load64(st + SL_PRICES) + g * 8);
+            if (price <= 0) {
+                sl_msg(st, "Not on the street today.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
+            store64(st + SL_PEND, g);
+            store64(st + SL_SCREEN, SCR_BUYQTY);
             return 0;
-        }
-        store64(st + SL_PEND, g);
-        store64(st + SL_SCREEN, SCR_BUYQTY);
-        return 0;
-    } }
+        } }
     sl_msg(st, "Pick 1-8, or x.");
     return 0;
 }
@@ -925,16 +925,16 @@ fn sl_feed_sell(st, line, len): i64 {
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 56) {
-        var g = k - 49;
-        if (sl_inv(st, g) <= 0) {
-            sl_msg(st, "You're not holding that.");
-            store64(st + SL_SCREEN, SCR_MAIN);
+            var g = k - 49;
+            if (sl_inv(st, g) <= 0) {
+                sl_msg(st, "You're not holding that.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
+            store64(st + SL_PEND, g);
+            store64(st + SL_SCREEN, SCR_SELLQTY);
             return 0;
-        }
-        store64(st + SL_PEND, g);
-        store64(st + SL_SCREEN, SCR_SELLQTY);
-        return 0;
-    } }
+        } }
     sl_msg(st, "Pick 1-8, or x.");
     return 0;
 }
@@ -957,21 +957,21 @@ fn sl_feed_jet(st, line, len): i64 {
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k == 0)   { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
     if (k >= 49) { if (k <= 56) {
-        var dest = k - 49;
-        if (dest == load64(st + SL_LOC)) {
-            sl_msg(st, "You're already there.");
+            var dest = k - 49;
+            if (dest == load64(st + SL_LOC)) {
+                sl_msg(st, "You're already there.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
+            sl_travel(st, dest);
+            if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); return 0; }
+            var enc = sl_roll_encounter(st);
+            if (enc == 1) { sl_msg(st, "The cops have eyes on you!"); return 0; }
+            if (enc == 2) { sl_msg(st, "You got jumped - they grabbed some cash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+            if (enc == 3) { sl_msg(st, "Lucky find - someone ditched a stash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
             store64(st + SL_SCREEN, SCR_MAIN);
             return 0;
-        }
-        sl_travel(st, dest);
-        if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); return 0; }
-        var enc = sl_roll_encounter(st);
-        if (enc == 1) { sl_msg(st, "The cops have eyes on you!"); return 0; }
-        if (enc == 2) { sl_msg(st, "You got jumped - they grabbed some cash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
-        if (enc == 3) { sl_msg(st, "Lucky find - someone ditched a stash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
-        store64(st + SL_SCREEN, SCR_MAIN);
-        return 0;
-    } }
+        } }
     sl_msg(st, "Pick a district 1-8, or x.");
     return 0;
 }

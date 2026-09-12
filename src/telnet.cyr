@@ -677,7 +677,7 @@ fn telnet_handle_sb(ts): i64 {
         # RFC 1184 § 1: payload starts with a LINEMODE sub-command
         # (MODE / FORWARDMASK / SLC), followed by sub-command-specific
         # data. We consume MODE only; SLC is parsed-and-discarded and its described
-# validation was never written — roadmap § Backlog, The wire. SLC is
+        # validation was never written — roadmap § Backlog, The wire. SLC is
         # ignored (the peer's local-character table doesn't drive
         # any server behavior pre-LINEMODE-aware-input-handling).
         if (len < 2) { return 0; }
