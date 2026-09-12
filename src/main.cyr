@@ -4041,7 +4041,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.7.0");
+    println("agora 1.7.1");
     return 0;
 }
 
