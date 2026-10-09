@@ -255,3 +255,14 @@ because a sibling ask shipped — `file_write_atomic` is the clearest, and is no
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
 - **Companion project**: [Yeoman's Descent](https://github.com/MacCracken/cyrius-yeomans-descent) — the MUD
   userland. Same telnet substrate, different application semantics; linked by the 1.4.0 gateway.
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(cyrius ≥ 6.6.18)** re-evaluate **N4**: its row says `--poison` is inapplicable because it instruments
+  `fl_alloc` / `fl_free` and the parser is bump-allocated. Since 6.6.18 `cyrius fuzz --poison` goes through an
+  allocator seam — `alloc()`, arenas, `fl_alloc` and any `_a` API (`poison_allocator()`), with redzones and
+  `--poison=ab`; an overwrite exits 86.
