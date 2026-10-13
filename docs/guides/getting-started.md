@@ -2,7 +2,7 @@
 
 > **Last Updated**: 2026-05-23 (0.9.1 doc-pass — covers the 0.9.0 surface)
 
-Build agora, run the tests, start the listener, post a message anonymously, then come back authenticated. Linux x86_64 or aarch64 today; macOS / Windows pending `lib/net.cyr` backends.
+Build agora, run the tests, start the listener, browse anonymously, then come back authenticated to post. Linux x86_64 or aarch64 today; macOS / Windows pending `lib/net.cyr` backends.
 
 For the *why* behind any decision below, follow the ADR links — this guide stays prescriptive.
 
@@ -57,7 +57,7 @@ Expect **0 failures** (the suite was 80 tests at 0.9.0 and has grown with every 
 ./build/agora serve 2323
 ```
 
-You'll see the bannermanor MOTD render to stderr and the listener parks on port 2323. agora serves with one of two models, chosen at startup ([ADR 0023](../adr/0023-dual-serve-model.md)). On Linux the default is **fork-per-connection** ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) — open as many concurrent sessions as your kernel allows. Set `AGORA_SERVE=poll` for the single-process multiplex, which serves up to 64 sessions from one process and is the only model on AGNOS. **Ctrl-C (or `kill`) shuts either model down cleanly since 1.7.0** — sessions are told, drained and closed rather than cut off.
+agora prints a few status lines and the listener parks on port 2323; each telnet client is greeted with the ANSI MOTD. agora serves with one of two models, chosen at startup ([ADR 0023](../adr/0023-dual-serve-model.md)). On Linux the default is **fork-per-connection** ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) — open as many concurrent sessions as your kernel allows. Set `AGORA_SERVE=poll` for the single-process multiplex, which serves up to 64 sessions from one process and is the only model on AGNOS. **Ctrl-C (or `kill`) shuts either model down cleanly since 1.7.0** — sessions are told, drained and closed rather than cut off, and since 1.8.1 a player's in-game progress is saved on the way out (as it is on any disconnect).
 
 Storage defaults to `./agora-data/`. Override with `--store <path>`. Custom MOTD: `--motd <path>` (4 KB ceiling).
 
@@ -69,7 +69,7 @@ Storage defaults to `./agora-data/`. Override with `--store <path>`. Custom MOTD
 
 ## Default policy: anon-read, auth-post
 
-agora's M6 default is **anonymous reads, authenticated writes**. Unauthenticated CLI / telnet sessions can list and read every board; they cannot `post` or `reply` until they register a key and authenticate ([ADR 0006](../adr/0006-identity-model.md) § Specifics). Operators tighten the read side per board with `.policy` (see [Per-board posting policy](#per-board-posting-policy) below).
+agora's M6 default is **anonymous reads, authenticated writes**. Unauthenticated CLI / telnet sessions can list and read every board; they cannot `post` or `reply` until they register a key and authenticate ([ADR 0006](../adr/0006-identity-model.md) § Specifics). Operators restrict who may **post** per board with `.policy` (see [Per-board posting policy](#per-board-posting-policy) below); reads are never gated.
 
 The in-session commands (mirroring `help`):
 
@@ -86,7 +86,7 @@ The in-session commands (mirroring `help`):
 | `whoami` | print bound identity or `anonymous` | ✅ |
 | `quit` | close the session | ✅ |
 
-Anonymous sessions trying to `post` or `reply` get `post denied by board policy (admin-only or unregistered)`. Anonymous `enter <newname>` on a board that doesn't exist gets `auth required to create new boards` (0.8.3, audit M4). Connect, run `boards` / `list` / `read 1` to confirm read paths work, then come back authenticated.
+Anonymous sessions trying to `post` or `reply` get `auth required — run 'login <handle>' first`. Anonymous `enter <newname>` on a board that doesn't exist gets `auth required to create new boards` (0.8.3, audit M4). Connect, run `boards` / `list` / `read 1` to confirm read paths work, then come back authenticated.
 
 ---
 
@@ -110,7 +110,7 @@ agora's identity model is Ed25519 challenge/response via sigil ([ADR 0006](../ad
    # → qix <fp16>
    ```
 
-   Handles are 1–24 bytes of `[a-z0-9_-]`; the fingerprint (`fp16`) is the lowercase hex of the first 8 bytes of `sha256(pubkey)`. Registry lives at `<store>/.users/<fp16>/`.
+   Handles are 1–32 bytes of `[a-z0-9_-]` (not `anonymous` / `system` / `admin`); the fingerprint (`fp16`) is the lowercase hex of the first 8 bytes of `sha256(pubkey)`. Registry lives at `<store>/.users/<fp16>/`.
 
 3. Author a post from the CLI under that handle:
 
@@ -118,8 +118,8 @@ agora's identity model is Ed25519 challenge/response via sigil ([ADR 0006](../ad
    echo "signed by qix" | ./build/agora post \
      --as qix --key ~/.agora/key --store ./bbs --subject "authored post"
    ./build/agora read 2 --store ./bbs
-   # → Subject: authored post
    # → From: qix <fp16>
+   # → Subject: authored post
    # →
    # → signed by qix
    ```
@@ -150,7 +150,7 @@ Each board can carry a `.policy` file (`open` / `known` / `admin`) and an `.admi
 | `known` | ❌ | ✅ | ✅ |
 | `admin` | ❌ | ❌ | ✅ |
 
-Anonymous is denied across every mode at M6 (auth-post default; per-board anon override is queued as a future ADR per [ADR 0006](../adr/0006-identity-model.md) § Negative). `open` and `known` are functionally identical today — `known` exists to carry future semantics (cross-store federation / web-of-trust per the v2.x roadmap). No `.policy` file → `open` (backwards-compat with 0.5.x stores). The operator edits the files directly today (`agora policy set` / `agora admins {add,rm,list}` are queued as future CLI verbs).
+Anonymous is denied across every mode at M6 (auth-post default; per-board anon override is queued as a future ADR per [ADR 0006](../adr/0006-identity-model.md) § Negative). `open` and `known` are functionally identical today — `known` exists to carry future semantics (cross-store federation / web-of-trust per the v2.x roadmap). No `.policy` file → `open` (backwards-compat with 0.5.x stores). **Since 1.8.1 anything else fails closed**: a `.policy` that cannot be read, or whose first token (after a `#` comment) is not exactly `open` / `known` / `admin`, makes the board admin-only and warns on stderr; and an `.admins` longer than 4 KB is honoured only up to its last whole line. The operator edits the files directly today (`agora policy set` / `agora admins {add,rm,list}` are queued as future CLI verbs).
 
 ```sh
 mkdir -p ./bbs/announce
@@ -166,7 +166,7 @@ Anonymous sessions cannot create new boards over telnet (0.8.3, audit M4) — `e
 
 ## Concurrency
 
-agora forks per connection ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)). To confirm:
+agora has two serve models ([ADR 0023](../adr/0023-dual-serve-model.md)): on Linux the default forks per connection ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)), capped at 64 live connections since 1.8.1; `AGORA_SERVE=poll` (the only model on AGNOS) multiplexes up to 64 sessions in one process and gives each session one command per sweep, so one client's pipelined burst cannot stall the rest. To confirm the fork model:
 
 ```sh
 # In one terminal:
@@ -187,6 +187,6 @@ Each session sees its own banner, its own `g_session_*` slots, and its own bump-
 - [`docs/development/roadmap.md`](../development/roadmap.md) — what's shipped, what's next, what's deferred.
 - [`docs/development/state.md`](../development/state.md) — live state snapshot (version / size / in-flight slot / boot guide).
 - [`docs/examples/`](../examples/) — runnable smoke scripts for each major surface.
-- [`docs/adr/`](../adr/) — the architecture decision record (0001-0023) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
+- [`docs/adr/`](../adr/) — the architecture decision records (0001–0024) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
 - [`CLAUDE.md`](../../CLAUDE.md) — durable agent / contributor process rules.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

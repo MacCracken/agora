@@ -1,76 +1,37 @@
 # agora — Post-v1.0 Roadmap (v2.x sovereignty layer)
 
-> **Last Updated**: 2026-05-23
+> **Last Updated**: 2026-10-12 (shipped door / chatbot work trimmed out — the 1.2.0 Universe, QUEST's
+> single-player climb and Jabberwacky all shipped; only what is still unbuilt remains below. The full
+> QUEST design narrative, now implemented in `src/quest.cyr`, is in this file's git history before
+> 2026-10-12. Pillars unchanged since 2026-05-23.)
 >
-> Unpinned design directions for the v2.x sovereignty layer — the federated, identity-portable, store-and-forward shape that agora grows into after v1.0 (multi-user telnet BBS) ships. Items here are **not on the v1.0 critical path**; they pull forward into a numbered minor when consumer pressure, prior-art convergence, or user direction surfaces. v1.0 milestones live in [`roadmap.md`](roadmap.md).
+> Unpinned design directions — the long-horizon door / chatbot backlog and the v2.x sovereignty layer: the federated, identity-portable, store-and-forward shape agora grows into. Items here are **not scheduled**; they pull forward into a numbered slot in [`roadmap.md`](roadmap.md) when consumer pressure, prior-art convergence, or user direction surfaces.
 >
 > **Frame**: v1.0 is "a BBS that works." v2.x is "a BBS that survives any single node going away." The pillars below are the six shifts that get us there, consolidated from a 2026-05-23 design session.
 
 ---
 
-## Door games — Persistent Universe pulled into 1.2.0
+## Door games — beyond what shipped
 
-The door subsystem's **shared-world multiplayer + leaderboards have graduated from "unpinned future" to the active 1.2.0 cycle** — see [`roadmap.md`](roadmap.md) § In progress and [ADR 0010](../adr/0010-persistent-universe.md). 1.2.0 covers the `flock`'d world-transaction framework, Port Authority's shared galaxy (depletable ports, player planets, deployed fighters/mines, async PvP, alliances), Smuggler's shared economy (prices + heat move with all players), The Handler's shared layer (per-city alerts, intercept pool, anonymous-tip sabotage), and leaderboards for all three games.
+Shipped and out of this file: the door subsystem (1.1.0, ADR 0009), the **Persistent Universe** shared worlds + leaderboards (1.2.0, [ADR 0010](../adr/0010-persistent-universe.md)), QUEST's single-player climb (1.3.2), wager + casino (1.3.4–1.3.5), Olympiad (1.3.6), Ashes of Empire (1.3.7) and Decode (1.4.1–1.4.3). Olympiad's later events are scheduled in [`roadmap.md`](roadmap.md) § 1.12.0. Still unpinned:
 
-Still unpinned **beyond** 1.2.0:
-
-- **The Handler — global world-event track + persistent legacy ranks** across campaigns (the slow-burn crisis layer + Probationary → Director's-Chair progression posted on the board).
-- **Port Authority — deep endgame**: planet citadels + mining tiers, the full ship-upgrade tree beyond holds / fighters / shields.
+- **QUEST — async PvP / shared-world layer**: attack another player's *stored* character (persisted stats, not online) with a next-login notice — the async-PvP model Port Authority's garrisons already ship ([ADR 0010](../adr/0010-persistent-universe.md) bite 3), on a `flock`'d shared character store, with daily attack limits so it is not grief-spam. The largest missing piece of the LORD homage. Also unbuilt from the original spec: the Inn **flirt-to-romance subplot** and the bard.
+- **QUEST — inter-board play** (LORD's IGM / IBBS over FidoNet-style mail): characters competing *across* boards. Rhymes with the v2.x **federation** pillar (below) and a future agora-to-agora link.
+- **The Handler — global world-event track + persistent legacy ranks** across campaigns (the slow-burn crisis layer + Probationary → Director's-Chair progression posted on the board), and the v2 community layer (intercepted rival traffic, inter-section sabotage).
+- **Port Authority — deep endgame**: planet citadels + mining tiers, alliances, the full ship-upgrade tree beyond holds / fighters / shields.
 - **The Handler — 2400-baud teletype effect** (slow-print cables + spacebar-skip), deferred since 1.1.0; needs a raw-mode input path (the server is char-at-a-time + line-mode today).
-
-### QUEST — "Quest of the Undying Emerald Sovereign Throne" (a LORD homage)
-
-> **✅ Single-player climb SHIPPED at 1.3.2** (`src/quest.cyr`, `play quest`): town hub + daily-rationed forest + the twelve Great-Work masters + the Emerald-fragment spine + the Sovereign ascension; solo save + `scores quest`. The design below stands as the full spec; **what remains unpinned is the async-PvP / shared-world Universe layer** (attack stored characters with next-login notice, on the 1.2.0 world transaction + PA garrison model) and the deeper-endgame flourishes.
-
-A fourth door game: an homage to **Legend of the Red Dragon** (Seth Robinson, 1989) — the definitive BBS RPG. Re-themed name + cast per the style-not-copy rule (like Smuggler's abstract goods + Port Authority's re-themed commodities): **"Quest of the Undying Emerald Sovereign Throne" — `play quest`**. A strong fit, because the mechanics that made LORD *LORD* are the patterns agora's door subsystem already implements — QUEST is mostly assembly of existing machinery plus the one thing that can't be reused: voice.
-
-**What actually makes LORD LORD (the design lessons worth stealing):**
-
-- **Daily turn rationing is the load-bearing mechanic, not a detail.** N forest fights/day, a handful of PvP attacks, one-visit events. The rationing is *what makes a single-user-at-a-time game feel like a shared world* — nobody grinds infinitely, the world stays balanced between callers, and "see you tomorrow" is built into the loop. agora already has this exact rhythm: the wall-clock daily-turn cadence ([ADR 0010](../adr/0010-persistent-universe.md) § Decision, the LORD rhythm the games already borrow) via `chrono` rollover. QUEST leans on it directly.
-- **The forest is the core grind:** random encounters scaling to level, gated by **12 named level-masters** (beat the master to advance). Linear, readable progression — a clean fit for the pure-module state machine (`*_render` / `*_feed`, ADR 0009).
-- **The town hub is a menu of flavor activities, and the flavor IS the product.** Re-themed equivalents of: the Inn + the **flirt-to-romance subplot** (LORD's Violet — the "you have been kissed" / marriage arc), the bard, the Healer, the **Bank with interest** (and the infamous mugger risk if you walk around carrying cash), the tavern, and the **Slay-the-Sovereign endgame**. The town is where personality lives; combat is just the engine.
-- **Async PvP that agora already ships.** You attack another player's *stored* character (persisted stats, not online); they get a notification next login. This is precisely the async-PvP model already built for Port Authority's garrisons ([ADR 0010](../adr/0010-persistent-universe.md) bite 3 — act against the assets/state a player left behind, resolved from the world snapshot, never a live duel) plus the next-login notice. Daily attack limits keep it from being grief-spam. The shared character store is a 1.2.0-style `flock`'d world transaction.
-- **Tone is load-bearing — this is the real risk.** LORD's stickiness was its voice: gently comedic, self-aware, a little bawdy. A mechanically faithful clone written in dry corporate-memo prose falls flat — the writing voice is the product. The Handler already proves agora can carry a deliberate tone (its espionage desk-job register), so the transferable skill exists; QUEST must spend its budget on the prose, not just the combat math.
-- **Inter-board LORD (IGM / IBBS over FidoNet-style mail)** — the deep cut: LORD characters competing *across* boards. Out of scope for a first homage, but noted because it is the asynchronous-multiplayer model taken to its logical extreme — and it rhymes with the v2.x **federation** pillar (below) and a future agora-to-agora link.
-
-**The twelve-level arc — full skeleton (the buried reference; nothing is ever labelled).** Design principle throughout: a first-time caller reads a satisfying, slightly-grandiose fantasy climb; a hermetically-literate one reads the **Great Work** unfolding. The second reading lives entirely in structure, colour, and naming — never authorial commentary. The four stages give a colour arc — **nigredo** (blackening: death/dissolution), **albedo** (whitening: purification), **citrinitas** (yellowing: dawning illumination), **rubedo** (reddening: completion/union) — and twelve levels split cleanly into **four acts of three**, each phase getting a beginning, middle, and turn. Masters escalate in the obvious RPG sense; their names, palettes, and what they take from you track the inner process. The four **turning-point masters (levels 3 · 6 · 9 · 12)** each drop one **Emerald fragment** matching its phase's colour.
-
-*Act I — Nigredo (1–3), the Blackening* — prima materia broken down; the world starts in mud, rot, night.
-- **L1 · The Mudlark Warden** — swamp brigand in rusted iron; black / bog-brown. The tutorial; teaches you start as raw material. Drops a blank, tarnished disk (the player assumes junk — it is the unmarked tablet awaiting inscription).
-- **L2 · Sister of the Black Bile** — plague-hermit fighting with rot + despair (weaken / doubt status effects); black-green / ash. Putrefaction, the necessary decay — beating her is *surviving dissolution*, not conquest.
-- **L3 · The Drowned King (turn)** — waterlogged crowned corpse from a flooded barrow, a dark mirror of the Throne; black water / drowned gold. The false king, the ego that must die — closes Nigredo. **Fragment 1**: nearly black, no markings yet.
-
-*Act II — Albedo (4–6), the Whitening* — matter cleansed; palette lifts to silver / white / lunar-pale; the feminine principle.
-- **L4 · The Pale Laundress** — fights at a moonlit river washing what never comes clean; silver / white / moon-blue. Ablution — the washing of the blackened matter. Gentle-seeming, deceptively dangerous.
-- **L5 · The Argent Twins** — mirror-identical duelists fought as a pair (strike one, the other answers); quicksilver / white. Sol and Luna *unreconciled*, the opposites not yet joined; teaches balance + timing. (Quietly: mercury, the twin / hermaphrodite principle.)
-- **L6 · The White Queen (turn)** — serene woman in white fighting with light and clarity, not rage; pure white / pearl. The purified feminine, albedo perfected. **Fragment 2**: pale, washed clean — faint markings begin to surface; the fragments start to look like they belong together.
-
-*Act III — Citrinitas (7–9), the Yellowing* — the historically "forgotten" stage; gold / dawn-light; the solar / illuminated principle awakening.
-- **L7 · The Gilded Augur** — blind, gold-leafed prophet who "sees" by other means, fighting with foresight (dodges / predicts your moves); gold / amber. Insight arriving before understanding.
-- **L8 · The Brass Alchemist** — the most on-the-nose master, disguised as a tinkerer / inventor boss (gears, reagents, bubbling apparatus) so it reads as steampunk flavour, not confession; brass / sulfur-yellow. Fights by *transmuting the battlefield* (altering your stats, swapping effects). The wink hidden in plain sight — the literal alchemist who never says the word.
-- **L9 · The Sunwise Lord (turn)** — radiant solar warrior-king, the dawn made flesh; blazing gold / sunrise orange. Citrinitas perfected. **Fragment 3**: gold-green — the markings across all three collected pieces begin to align; held together they almost spell something.
-
-*Act IV — Rubedo (10–12), the Reddening* — union of opposites, the sacred marriage, the making of the Stone; crimson / royal purple / fire-gold.
-- **L10 · The Crimson Bride / the Red Groom** — a wedding turned battle, two figures (red + white) in the act of being joined; deep red and white intertwining. The chymical wedding — Sol and Luna finally united (callback to the unreconciled Argent Twins of L5). Mechanically the two enemies **fuse mid-fight** into one stronger form.
-- **L11 · The Keeper of the Last Fire** — guardian of the threshold to the Throne, a being of pure refining flame; white-hot / crimson core. The final calcination / projection that fixes the Stone. The hardest gate-fight — it guards *transformation itself*, not treasure.
-- **L12 · The Undying Emerald Sovereign (turn)** — the title made flesh: not a monster but the perfected King upon the Throne, the goal of the whole Work, who must be faced to take his place; emerald and royal gold, crowned in red. He is what the player is becoming — the fight is *succession*, not slaughter. **Fragment 4**: with all four, the tablet completes.
-
-*The Emerald spine + endgame.* Four fragments, one per turning-point master (L3 / 6 / 9 / 12), each matching its phase's colour — **black → white → gold → emerald**. The player experiences a standard collect-the-MacGuffin spine, but the fragments **visibly change as they accumulate**: blank-and-dark, then surfacing markings, then aligning, then completing. With all four joined the tablet is whole and legible — and at that moment the player **ascends to the Undying Emerald Sovereign Throne** they have quested for. The **"as above, so below"** line appears **once, here**, inscribed on the completed tablet — the single moment the buried text is allowed to surface, presented as the artifact's own ancient inscription rather than authorial commentary. A caller who has never heard of the Emerald Tablet reads it as cool victory-screen flavour; a caller who has just realised the entire climb *was* the Work goes back to replay it reading everything twice.
-
-**Fit summary:** pure-module state machine (ADR 0009) ✓ already the house pattern; daily-turn cadence ✓ already in the games; shared character store + async PvP ✓ the 1.2.0 world transaction + PA garrison model; leaderboards ✓ the `scores` surface. The genuinely new work is the **town/flavor content + the comedic voice** — i.e. writing, which is the point. **Pinned to 1.3.2** (the QUEST build-out; see [`roadmap.md`](roadmap.md) release table).
 
 ---
 
-## Chatbot personalities — beyond Eliza / PARRY
+## Chatbot personalities — beyond Eliza / PARRY / Jabberwacky
 
-The 1.3.0 chat area ([ADR 0011](../adr/0011-chat-area.md)) ships **Eliza** (Weizenbaum, 1966) as its anchor inhabitant, and 1.3.1 adds **PARRY** (Colby, 1972) on the same reusable pure decomposition/reassembly engine — both reachable as a `play <bot>` door and a private `/<bot>` side-channel. The historical lineage of conversational agents is a rich, on-theme well of further inhabitants. Unpinned, pull on interest:
+Shipped: **Eliza** (1.3.0), **PARRY** (1.3.1) on the shared decomposition/reassembly engine, and **Jabberwacky** (1.3.3, [ADR 0015](../adr/0015-jabberwacky-corpus-learning.md)), agora's first corpus-learning bot. Unpinned, pull on interest:
 
 - **A.L.I.C.E. / ALICEbot** (Richard Wallace, 1995) — AIML pattern/template matching. The closest fit to the existing decomposition/reassembly engine (AIML *is* a richer pattern→template grammar); the open question is how much AIML to support without a full parser + an external rule-file format (operator-loadable scripts, foreshadowed in ADR 0011's "Eliza script format" open question).
 - **Racter** (1984) — template-driven generative prose with conjugation/agreement bookkeeping. Less a responder than a generator; would stress the engine toward grammar state rather than input reflection.
-- **MegaHAL** (Jason Hutchens, 1990s) — **Markov-model** reply generation trained on prior input. A *different engine* from decomposition/reassembly (n-gram model + learned state), so it would land as a second bot-engine kind, not a script swap — and raises a learning/state-persistence question (does it train on the live chat transcript? privacy + poisoning concerns).
-- **Jabberwacky** (Rollo Carpenter, 1988→) — **learning by retrieval** from a growing corpus of past conversations. Like MegaHAL, a corpus-learning engine rather than a fixed script; the most ambitious (and the one with the heaviest persistent-state + moderation story). **Pinned to 1.3.3** (see [`roadmap.md`](roadmap.md) release table) — it brings agora's first learning / persistent-state bot, so it is the deliberate engine step beyond the Eliza/PARRY fixed-script core.
+- **MegaHAL** (Jason Hutchens, 1990s) — **Markov-model** reply generation trained on prior input. A *different engine* from both decomposition/reassembly and Jabberwacky's retrieval (n-gram model + learned state), and it raises the same learning/state questions Jabberwacky settled in ADR 0015 (does it train on the live chat transcript? privacy + poisoning).
 
-The first two (ALICE, Racter) extend the existing pure-script engine; the latter two (MegaHAL, Jabberwacky) need a learning/corpus engine and so are a larger, separate build. None add external dependencies in principle — all are implementable as pure Cyrius modules — but the learning bots add a persistent-state surface the fixed-script bots do not.
+ALICE and Racter extend the existing pure-script engine; MegaHAL is a second learning-engine kind. None add external dependencies — all are implementable as pure Cyrius modules.
 
 ---
 
@@ -289,7 +250,7 @@ Reading: row "what depends on" column. Pillars 1 and 2 are the foundation; every
 
 ## What this file is NOT
 
-- Not a v1.0 deliverable list — see [`roadmap.md`](roadmap.md).
+- Not a release plan — the scheduled 1.8.x → 1.12.x slots are in [`roadmap.md`](roadmap.md).
 - Not a binding commitment — pillars may collapse, split, or get retired as the v1.x cycle reveals what's actually needed.
 - Not a TODO list — items are *unpinned*; nothing is scheduled until a pull-forward trigger surfaces.
 
@@ -297,7 +258,7 @@ Reading: row "what depends on" column. Pillars 1 and 2 are the foundation; every
 
 ## Cross-references
 
-- [`roadmap.md`](roadmap.md) — v1.0 critical path (M0–M6).
+- [`roadmap.md`](roadmap.md) — the scheduled release slots (1.8.x → 1.12.x).
 - [`../doc-health.md`](../doc-health.md) — fresh/stale ledger across the doc tree.
 - [SecureYeoman](https://github.com/MacCracken/secureyeoman) — owns the threat-level configuration vocabulary that pillar 3 mirrors.
 - [sigil](https://github.com/MacCracken/sigil) — identity primitives behind pillar 1.

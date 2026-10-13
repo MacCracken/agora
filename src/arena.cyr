@@ -50,7 +50,9 @@
 # over the old 256 KB. On a 150-post board that pushed ~15 KB per `read` into
 # the fallback, i.e. straight back into the unreclaimed bump heap. Raised to
 # 512 KB, which covers the real worst case with room to spare; it is one
-# allocation for the life of the process, against a ~14 MB image.
+# allocation for the life of the process (the image was ~14 MB then, ~1 MB
+# since 1.7.1). Since 1.8.1 replies_to reads only a 2 KB header scan per
+# post, so `read` sits far under the cap.
 #
 # The lesson for future call sites: the arena's guarantee is only as good as
 # this number, and a nested call can double a command's footprint without any
@@ -106,8 +108,8 @@ fn cmd_scratch_reset(): i64 {
 #
 # The only difference from the stdlib is where the temp NAME lives: `cmd_alloc`,
 # reclaimed by `cmd_scratch_reset` at the end of the line. The I/O sequence is
-# deliberately identical, including `xunlink`-on-failure so a crashed write
-# leaves no debris.
+# otherwise identical (since 1.8.1 it also refuses a failed fsync), including
+# `xunlink`-on-failure so a crashed write leaves no debris.
 #
 # The pid is part of the temp name because agora genuinely writes concurrently:
 # fork mode has a process per connection, and the ADR 0010 world-transaction
@@ -146,7 +148,12 @@ fn store_write_atomic(path, buf, len): i64 {
         off = off + w;
     }
     if (rc != 0) { file_close(fd); xunlink(tmp); return rc; }
-    xfsync(fd);
+    # 1.8.1 (audit doors I6) — a failed fsync is a failed write: renaming an
+    # unsynced temp over the good copy is how a crash leaves neither. (The stdlib
+    # version, which this mirrors, discards it too.) Windows' BOOL return is
+    # never negative, so this cannot misfire there.
+    var sr = xfsync(fd);
+    if (sr < 0) { file_close(fd); xunlink(tmp); return sr; }
     var cr = file_close(fd);
     if (cr < 0) { xunlink(tmp); return cr; }
     var rr = file_rename(tmp, path);

@@ -4,7 +4,7 @@
 #
 #   <store>/.users/<fp16>/
 #     public_key.bin     # 32 raw bytes (Ed25519 pubkey)
-#     handle             # UTF-8 handle, no trailing CR/LF
+#     handle             # the handle + one LF (readers strip trailing CR/LF)
 #     created.iso8601    # iso8601 timestamp at registration
 #
 # The dot-prefix `.users/` dodges board_name_valid (which rejects
@@ -16,10 +16,10 @@
 # lost the keyfile = lost the identity, by design (see ADR 0006
 # § Consequences / Negative).
 #
-# Cross-platform: piggybacks on board.cyr's syscall + permission
-# constants (SYS_MKDIR, PERM_DIR, PERM_FILE) and lib/io.cyr for
-# file_open / file_read_all / file_write / file_close. lib/fs.cyr's
-# dir_list backs the handle scan.
+# Cross-platform: piggybacks on board.cyr's permission constants
+# (PERM_DIR, PERM_FILE) and store_ensure, and lib/io.cyr for
+# file_open / file_read_all / file_write / file_close. The handle scan
+# lists `.users/` through board.cyr's allocation-free store_dir_scan.
 
 # === Constants ===
 
@@ -35,7 +35,6 @@ enum AccountCap {
     ACCOUNT_NONCE_BYTES     = 32;    # random nonce raw byte count
     ACCOUNT_NONCE_HEX_BYTES = 64;    # nonce hex-encoded length
     ACCOUNT_NONCE_BUF_BYTES = 65;    # +1 for NUL
-    ACCOUNT_SCAN_MAX        = 1024;  # max users enumerated per scan
     ACCOUNT_PERM_KEYFILE    = 0x180; # rw- --- ---  (0o600) for secret-key files
 }
 
@@ -150,6 +149,24 @@ fn build_user_file(store, fp16, file_name, out_buf): i64 {
 # mkdir <store> + <store>/.users + <store>/.users/<fp16>.
 # Treats EEXIST (-17 on Linux) as success at every level. Returns
 # 0 on success, negative errno on failure.
+# 1.8.1 (audit S8) — serialize `agora register`'s check-then-write. Two
+# concurrent registrations of one handle with different keys both passed the
+# uniqueness check and both wrote (28 of 30 trials), leaving the handle to
+# whichever directory readdir happens to list first. A blocking flock on
+# `<store>/.users/.lock` (5 bytes, so the 16-hex handle scan skips it).
+# Returns the held fd, or -1.
+fn account_register_lock(store): i64 {
+    if (store_ensure(store) != 0) { return 0 - 1; }
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    var pos = build_users_dir(store, path);
+    if (store_ensure(path) != 0) { return 0 - 1; }
+    memcpy(path + pos, "/.lock", 7);
+    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
+    return fd;
+}
+
 fn account_dir_ensure(store, fp16): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
@@ -227,11 +244,22 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 #
 # Read the 32-byte public key for (store, fp16) into pk_out.
 # Returns 0 on success, negative on file-not-found / read error.
+#
+# 1.8.1 (audit S4) — the key must HASH to the directory it sits in. Wire login
+# verified a signature against whatever `public_key.bin` held, so anyone able to
+# write the store could copy their own key over qix's, `login qix`, sign with
+# their own key and post as `qix <qix's real fingerprint>` — contradicting ADR
+# 0006's "a store compromise cannot impersonate the original user". (The CLI
+# `--as` path was safe: it derives the fingerprint from the keyfile.) This is
+# also POLICY_KNOWN's check, so a swapped key fails there too.
 fn account_lookup_pubkey(store, fp16, pk_out): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_user_file(store, fp16, "public_key.bin", path_buf);
-    var n = file_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);
+    var n = file_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);   # callers hold exactly 32
     if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
+    var fpk[24];
+    compute_fingerprint(pk_out, &fpk);
+    if (memeq(&fpk, fp16, ACCOUNT_FP_HEX_BYTES) == 0) { return 0 - 1; }
     return 0;
 }
 
@@ -240,7 +268,10 @@ fn account_lookup_pubkey(store, fp16, pk_out): i64 {
 # -1 on file-not-found / read error. out_buf must be ≥
 # ACCOUNT_HANDLE_BUF.
 fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
-    var path_buf = cmd_alloc(PATH_MAX_BYTES);
+    # 1.8.1 (audit H3) — stack, not arena: account_resolve_handle calls this
+    # once PER USER, so 1,000 users spilled the arena on every `login x`.
+    var pathb[512];   # PATH_MAX_BYTES
+    var path_buf = &pathb;
     build_user_file(store, fp16, "handle", path_buf);
     var raw[34];
     memset(&raw, 0, 34);
@@ -261,6 +292,12 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
     if (copy_len > out_max - 1) { copy_len = out_max - 1; }
     if (copy_len > 0) { memcpy(out_buf, &raw, copy_len); }
     store8(out_buf + copy_len, 0);
+    # 1.8.1 (audit storage I2) — re-validate on read, as post_from has since the
+    # 0.7.0 audit (H3). The bound session handle goes out in `welcome,` and
+    # `whoami`, so a tampered handle file must not carry arbitrary bytes there.
+    if (copy_len > 0) {
+        if (handle_valid(out_buf) == 0) { store8(out_buf, 0); return 0 - 1; }
+    }
     return copy_len;
 }
 
@@ -286,7 +323,11 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
 # ACCOUNT_FP_BUF_BYTES). Returns 1 on success, 0 if no From header
 # or malformed (no space separator).
 fn post_from(buf, len, handle_out, h_max, fp_out, fp_max): i64 {
-    var raw_buf = cmd_alloc(h_max + fp_max + 8);
+    # 1.8.1 (audit H3) — stack, not arena: `list` calls this once per post (see
+    # post_read). Callers pass ACCOUNT_HANDLE_BUF + ACCOUNT_FP_BUF_BYTES = 50.
+    var rawb[128];
+    if (h_max + fp_max + 8 > 128) { store8(handle_out, 0); store8(fp_out, 0); return 0; }
+    var raw_buf = &rawb;
     var raw_len = header_get(buf, len, "From", raw_buf, h_max + fp_max + 4);
     if (raw_len <= 0) {
         store8(handle_out, 0);
@@ -523,9 +564,13 @@ fn parse_auth_sig(line, line_len, sig_out): i64 {
     var want_hex = ACCOUNT_SIG_BYTES * 2;       # 128
     if (hex_len != want_hex) { return 0 - 1; }
     if (hex_is_valid(line + off, hex_len) == 0) { return 0 - 1; }
-    var raw = hex_decode(line + off, hex_len);
-    if (raw == 0) { return 0 - 1; }
-    memcpy(sig_out, raw, ACCOUNT_SIG_BYTES);
+    # 1.8.1 (audit H1) — decode straight into the caller's buffer. sigil's
+    # `hex_decode` takes its 64-byte output from the bump heap, which the ADR
+    # 0021 arena never reclaims: 64 B per `auth:` attempt, with no login needed
+    # (any handle shown by `list` will do) — the half of 2026-07-26 H2's "login
+    # path" leak that the 1.6.3 arena work could not see. sig_out holds
+    # ACCOUNT_SIG_BYTES.
+    if (hex_decode_into(line + off, hex_len, sig_out) == 0) { return 0 - 1; }
     return ACCOUNT_SIG_BYTES;
 }
 
@@ -533,17 +578,17 @@ fn account_resolve_handle(store, handle, fp_out): i64 {
     var users_path = cmd_alloc(PATH_MAX_BYTES);
     build_users_dir(store, users_path);
 
-    var entries = dir_list(str_from(users_path));
-    if (entries == 0) { return 0; }
-    var n = vec_len(entries);
-    if (n > ACCOUNT_SCAN_MAX) { n = ACCOUNT_SCAN_MAX; }
+    # 1.8.1 (audit H1 / S8) — the allocation-free workspace scan (board.cyr),
+    # and no 1,024-entry scan cap: a user past entry 1,024 was invisible here,
+    # so `register` let a second key claim their handle.
+    var n = store_dir_scan(users_path);
+    if (n <= 0) { return 0; }
 
     var handle_buf = cmd_alloc(ACCOUNT_HANDLE_BUF);
     var i = 0;
     var found = 0;
     while (i < n) {
-        var entry_str = vec_get(entries, i);
-        var entry = str_data(entry_str);
+        var entry = store_dir_name(i);
         # Entry must look like a 16-char hex fingerprint. Quick
         # length check — skip dotfiles + index sidecars + anything
         # not the right shape.

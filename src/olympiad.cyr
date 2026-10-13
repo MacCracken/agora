@@ -315,8 +315,10 @@ fn ol_spend_action(st): i64 {
 }
 
 # Advance to the next day: refill the action ration, bump the day counter.
-# (Wall-clock gating of the refill — QUEST's "see you tomorrow" hook — is
-# wired in the loop bite; this is the pure refill.)
+# (1.8.1, audit hygiene H3 — this said wall-clock gating of the refill was
+# "wired in the loop bite". It never was: `[N]ext-day` refills on demand and
+# OL_LASTDAY is only round-tripped through the save. A real daily ration is
+# roadmap § 1.12.0.)
 fn ol_day_advance(st): i64 {
     store64(st + OL_DAY, load64(st + OL_DAY) + 1);
     store64(st + OL_ACTIONS, OL_DAY_ACTIONS);

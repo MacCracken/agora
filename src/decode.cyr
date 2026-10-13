@@ -715,8 +715,20 @@ fn decode_load_parse(buf, len): i64 {
     var i = 0;
     while (i < clen) { store8(sec + i, save_get_i64(buf, len, cur)); i = i + 1; }
 
-    if (tries < 0)                 { tries = 0; }
-    if (tries > DECODE_TRIES_MAX)  { tries = DECODE_TRIES_MAX; }
+    # 1.8.1 (audit G9) — MAXTRIES was not clamped at all, and `tries` was
+    # clamped to DECODE_TRIES_MAX INCLUSIVE: a save with tries = 10, maxtries
+    # > 10 and over = 0 made the next guess write history row 10, past the
+    # 80-byte DG_GUESSES / DG_MARKS freelist blocks, with player-chosen bytes.
+    # Both now fit the buffers, and a live game with no tries left is rejected.
+    var mt = load64(st + DG_MAXTRIES);
+    if (mt < 1)                { mt = 1; }
+    if (mt > DECODE_TRIES_MAX) { mt = DECODE_TRIES_MAX; }
+    store64(st + DG_MAXTRIES, mt);
+    if (tries < 0)  { tries = 0; }
+    if (tries > mt) { tries = mt; }
+    if (tries >= mt) {
+        if (load64(st + DG_OVER) == 0) { decode_free(st); return 0; }
+    }
     store64(st + DG_TRIES, tries);
     var t = 0;
     while (t < tries) {

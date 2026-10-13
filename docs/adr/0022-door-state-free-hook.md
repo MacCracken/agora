@@ -119,3 +119,9 @@ Freeing it would corrupt the pool.
   per-game map of which offsets are owned pointers versus borrowed ones (the
   world pointer), i.e. exactly the per-game knowledge a `*_free` already
   encodes — but stored one file away from the constructor it must mirror.
+
+> **1.8.1 amendment (audit M5).** The "every buffer a door state owns is freed by its `DD_FREE`" claim had
+> one hole: The Handler's decrypt lever (1.4.3, ADR 0019) built a Decode state per crack and never freed
+> it — ~738 B per attempt, reachable in practice mode with no login. Fixed in `th_feed_decrypt` and
+> `th_free`. The lesson for door #11: a state that EMBEDS another door's state owns it, and must free it
+> on every path (end of round, and `*_free` for a player who leaves mid-round).

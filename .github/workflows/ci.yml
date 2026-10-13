@@ -35,6 +35,12 @@ jobs:
         # `cyrius deps` failed with "pins 6.2.2 but it is not installed at
         # .../versions/6.2.2/lib" (and could not read sigil's u256/thread
         # deps). install.sh lays out the versioned snapshot correctly.
+        #
+        # 1.8.1 (audit hygiene H18) — `shell: bash` runs this with
+        # `-eo pipefail`. GitHub's default `bash -e` has no pipefail, so a failed
+        # `curl` fed `sh` an empty script and the step went GREEN; the job then
+        # failed later, at deps or build, mis-attributed.
+        shell: bash
         run: |
           set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
@@ -66,19 +72,23 @@ jobs:
         # a `version_str.cyr` build-hook are a v1.0 close-out item —
         # see CHANGELOG [0.2.0] note about the inlined-version-string
         # technical debt.
+        #
+        # 1.8.1 (audit hygiene H13) — all THREE literals. Only cmd_version was
+        # checked, so the banner (`v<ver>`) and the MOTD line (`agora <ver> —`)
+        # could drift silently.
         run: |
-          EXPECTED="agora $(cat VERSION | tr -d '[:space:]')"
+          V="$(cat VERSION | tr -d '[:space:]')"
+          EXPECTED="agora $V"
           ACTUAL=$(./build/agora --version | head -1)
           test "$ACTUAL" = "$EXPECTED" || { echo "version drift: binary says '$ACTUAL', VERSION says '$EXPECTED'"; exit 1; }
+          grep -q "println(\"v$V " src/main.cyr || { echo "version drift: print_banner literal is not v$V"; exit 1; }
+          grep -q "\"  agora $V " src/main.cyr || { echo "version drift: MOTD literal is not agora $V"; exit 1; }
 
       - name: Test
-        # Explicit `src/test.cyr` path: at cyrius 6.0.1 bare `cyrius
-        # test` only searches tests/*.tcyr and exits 1 if nothing's
-        # there (it does NOT fall back to [build].test in cyrius.cyml,
-        # despite that being implied by kii's CI comment from cyrius
-        # 5.6.28). Until we land a tests/agora.tcyr split (likely at
-        # M5+ when persistence widens the test surface), the explicit
-        # path is the working form. Runs the full unit suite — RFC 854 /
+        # Explicit `src/test.cyr` path — the canonical form (CLAUDE.md §
+        # Closeout Pass). Since cyrius 6.6.17 a bare `cyrius test` also runs
+        # the [build] test entry (before that it searched tests/*.tcyr and
+        # exited 1); the `tests/` split is roadmap 1.8.3. Runs the full unit suite — RFC 854 /
         # 1143 / 1073 / 1091 / 1184 conformance plus storage, accounts,
         # policy and every door game. The count lives in
         # docs/development/state.md, deliberately not here: this comment

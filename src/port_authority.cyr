@@ -628,6 +628,15 @@ fn pa_load_parse(buf, len): i64 {
         pa_set_cargo(st, i, save_get_i64(buf, len, cur));
         i = i + 1;
     }
+    # 1.8.1 (audit D3) — the two fields used as INDEXES must be in range, or the
+    # save is rejected (the launcher sets it aside and starts fresh): PA_SECTOR
+    # indexes the galaxy tables and the shared world, PA_PLANET (-1 = none) the
+    # planet-owner cells. A sector of 1e12 crashed a poll server outright.
+    var ok = idx_ok(load64(st + PA_SECTOR), PA_SECTORS);
+    if (load64(st + PA_PLANET) != (0 - 1)) {
+        if (idx_ok(load64(st + PA_PLANET), PA_SECTORS) == 0) { ok = 0; }
+    }
+    if (ok == 0) { pa_free(st); return 0; }
     return st;
 }
 
@@ -1299,34 +1308,48 @@ fn paw_valid(buf, len): i64 {
 
 fn paw_seed(w): i64 { return load64(w + PAW_OFF_SEED * 8); }
 
+# 1.8.1 (audit D3) — every accessor refuses an out-of-range sector or
+# commodity (reads 0, writes nothing). The world buffer is the session slot's,
+# and a save with a bad PA_SECTOR made a garrison deploy write the player's fp
+# and a chosen fighter count past it — under poll, into memory other sessions
+# own. The loader now rejects such saves too; this is the backstop.
 fn paw_stock(w, s, c): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
+    if (idx_ok(c, PA_COMM) == 0)    { return 0; }
     return load64(w + (PAW_OFF_STOCK + s * PA_COMM + c) * 8);
 }
 
 fn paw_set_stock(w, s, c, v): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
+    if (idx_ok(c, PA_COMM) == 0)    { return 0; }
     store64(w + (PAW_OFF_STOCK + s * PA_COMM + c) * 8, v);
     return 0;
 }
 
 fn paw_planet_owner(w, s): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     return load64(w + (paw_planet_base() + s) * 8);
 }
 
 fn paw_set_planet_owner(w, s, fp): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     store64(w + (paw_planet_base() + s) * 8, fp);
     return 0;
 }
 
 # Garrison (deployed-fighter) accessors — the async-PvP layer (bite 3).
 fn paw_garrison_owner(w, s): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     return load64(w + (paw_deploy_base() + s * 2) * 8);
 }
 
 fn paw_garrison_fighters(w, s): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     return load64(w + (paw_deploy_base() + s * 2 + 1) * 8);
 }
 
 fn paw_set_garrison(w, s, owner, fighters): i64 {
+    if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     store64(w + (paw_deploy_base() + s * 2) * 8, owner);
     store64(w + (paw_deploy_base() + s * 2 + 1) * 8, fighters);
     return 0;

@@ -1,6 +1,7 @@
-# test.cyr — unit tests for the telnet protocol module.
+# test.cyr — agora's unit suite: the telnet parser plus every module that can
+# be built without src/main.cyr (storage, accounts, the doors, chat, bots).
 #
-# Pure-parser tests — no socket, no kernel. Every test feeds a
+# The telnet tests are pure-parser — no socket, no kernel. Every test feeds a
 # byte sequence into a TelnetState, then asserts on the emitted
 # events + queued IAC responses + accumulated subneg payload.
 #
@@ -432,6 +433,7 @@ fn t14_announce_then_will_silent(): i64 {
 # Payload: IAC SB NAWS 0x00 0x50 0x00 0x18 IAC SE  → 80×24 (classic VT)
 fn t16_naws_parse(): i64 {
     var ts = telnet_state_new();
+    t_agree_him(ts, OPT_NAWS);   # 1.8.1 (W4): an SB counts only once the option is agreed
     telnet_feed(ts, IAC);
     telnet_feed(ts, SB);
     telnet_feed(ts, OPT_NAWS);
@@ -463,6 +465,7 @@ fn t16_naws_parse(): i64 {
 # Payload: IAC SB NAWS 0x00 IAC IAC 0x00 0x18 IAC SE  → 255×24
 fn t17_naws_iac_escape(): i64 {
     var ts = telnet_state_new();
+    t_agree_him(ts, OPT_NAWS);   # 1.8.1 (W4): an SB counts only once the option is agreed
     telnet_feed(ts, IAC);
     telnet_feed(ts, SB);
     telnet_feed(ts, OPT_NAWS);
@@ -490,6 +493,7 @@ fn t17_naws_iac_escape(): i64 {
 # Payload: IAC SB TT IS X T E R M IAC SE  → "XTERM"
 fn t18_terminal_type_is(): i64 {
     var ts = telnet_state_new();
+    t_agree_him(ts, OPT_TERMINAL_TYPE);   # 1.8.1 (W4): an SB counts only once the option is agreed
     telnet_feed(ts, IAC);
     telnet_feed(ts, SB);
     telnet_feed(ts, OPT_TERMINAL_TYPE);
@@ -611,6 +615,7 @@ fn t21_will_linemode_emits_mode_request(): i64 {
 # IAC SB LINEMODE MODE 0x07 IAC SE  (EDIT|TRAPSIG|MODE_ACK)
 fn t22_linemode_mode_ack_parse(): i64 {
     var ts = telnet_state_new();
+    t_agree_him(ts, OPT_LINEMODE);   # 1.8.1 (W4): an SB counts only once the option is agreed
     telnet_feed(ts, IAC);
     telnet_feed(ts, SB);
     telnet_feed(ts, OPT_LINEMODE);
@@ -5380,6 +5385,327 @@ fn t225_text_iac_double(): i64 {
     return 0;
 }
 
+# t226 — 1.8.1 (audit S1): `.policy` fails CLOSED. Only an empty / all-
+# whitespace file is the ADR 0006 open default; the three tokens parse with a
+# trailing comment and surrounding whitespace; everything else — mis-cased, a
+# comment-only file, a BOM, a token a truncated read may have cut — is INVALID
+# (board_policy_get maps that to admin-only). Before 1.8.1 all of these were OPEN.
+fn t226_policy_c(s, trunc): i64 { return board_policy_parse(s, strlen(s), trunc); }
+# (t226 body)
+fn t226_board_policy_parse(): i64 {
+    var name = "t226_board_policy_parse";
+    if (t226_policy_c("", 0) != POLICY_OPEN)                 { test_fail(name, "empty"); return 1; }
+    if (t226_policy_c(" \t\r\n\n", 0) != POLICY_OPEN)       { test_fail(name, "whitespace"); return 1; }
+    if (t226_policy_c("open\n", 0) != POLICY_OPEN)           { test_fail(name, "open"); return 1; }
+    if (t226_policy_c("known", 0) != POLICY_KNOWN)           { test_fail(name, "known"); return 1; }
+    if (t226_policy_c("admin\r\n", 0) != POLICY_ADMIN)       { test_fail(name, "admin crlf"); return 1; }
+    if (t226_policy_c("  admin  # ops only\n", 0) != POLICY_ADMIN) { test_fail(name, "comment"); return 1; }
+    if (t226_policy_c("# header\n\nknown\n", 0) != POLICY_KNOWN) { test_fail(name, "leading comment line"); return 1; }
+    if (t226_policy_c("admin\nopen\n", 0) != POLICY_ADMIN)  { test_fail(name, "first token decides"); return 1; }
+    if (t226_policy_c("Admin\n", 0) != POLICY_INVALID)       { test_fail(name, "mis-cased"); return 1; }
+    if (t226_policy_c("# admin only\n", 0) != POLICY_INVALID) { test_fail(name, "comment-only"); return 1; }
+    if (t226_policy_c("\xef\xbb\xbfadmin\n", 0) != POLICY_INVALID) { test_fail(name, "BOM"); return 1; }
+    if (t226_policy_c("adminx", 0) != POLICY_INVALID)         { test_fail(name, "suffix"); return 1; }
+    if (t226_policy_c("open", 1) != POLICY_INVALID)           { test_fail(name, "cut token"); return 1; }
+    if (t226_policy_c("open\n####", 1) != POLICY_OPEN)        { test_fail(name, "whole token, cut tail"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t227 — 1.8.1 (audit S2): an `.admins` file over the read cap keeps only
+# WHOLE lines. The scanner treats end-of-buffer as end-of-line, so before the
+# fix `qixbert` cut at the cap to `qix` admitted handle `qix`.
+fn t227_board_admins_whole(): i64 {
+    var name = "t227_board_admins_whole";
+    var buf = alloc(64);
+    memcpy(buf, "# ops\npac\nqixbert\n", 18);
+    # Fits: unchanged, and the scan matches whole lines only.
+    if (board_admins_whole(buf, 18, 32) != 18)       { test_fail(name, "fit changed n"); return 1; }
+    if (board_admins_scan(buf, 18, "qixbert") != 1)  { test_fail(name, "whole line"); return 1; }
+    if (board_admins_scan(buf, 18, "qix") != 0)      { test_fail(name, "prefix matched"); return 1; }
+    # Over a cap of 13 the read stops inside "qixbert": only "# ops\npac\n" survives.
+    var n = board_admins_whole(buf, 14, 13);
+    if (n != 10)                                     { test_fail(name, "cut length"); return 1; }
+    if (board_admins_scan(buf, n, "qix") != 0)       { test_fail(name, "cut prefix admitted"); return 1; }
+    if (board_admins_scan(buf, n, "pac") != 1)       { test_fail(name, "earlier line lost"); return 1; }
+    # No LF inside the cap at all: nothing is trusted.
+    if (board_admins_whole(buf, 40, 4) != 0)         { test_fail(name, "no-LF cut"); return 1; }
+    if (board_admins_scan(buf, 0, "pac") != 0)       { test_fail(name, "empty scan"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t228 — 1.8.1 (audit H1 / S7 / S10): the allocation-free directory workspace.
+# Starts from a 2-entry workspace so every scan below forces dir_list_into's
+# "full" return and a doubling; post_list must sort the WHOLE board and keep
+# the NEWEST max_ids (it used to stop at the cap, unsorted); boards_list must
+# return only valid, existing board directories, as copies.
+fn t228_mkfile(root, id): i64 {
+    var p = alloc(128);
+    var rl = strlen(root);
+    memcpy(p, root, rl);
+    store8(p + rl, 47);
+    var nb[24];
+    var nl = fmt_int_buf(id, &nb);
+    memcpy(p + rl + 1, &nb, nl);
+    memcpy(p + rl + 1 + nl, ".txt", 5);
+    var fd = file_create_exclusive(p, PERM_FILE);
+    if (fd >= 0) { file_close(fd); }
+    return 0;
+}
+# (t228 body)
+fn t228_dir_workspace(): i64 {
+    var name = "t228_dir_workspace";
+    var root = "/tmp/agora-t228-store";
+    store_ensure(root);
+    var k = 0;
+    while (k < 12) {
+        t228_mkfile(root, ((k * 7) % 12) + 1);    # 1..12, out of order
+        k = k + 1;
+    }
+    board_ensure(root, "zax");
+    store_ensure("/tmp/agora-t228-store/.games");
+    store_ensure("/tmp/agora-t228-store/Not_Valid");
+    store_ensure("/tmp/agora-t228-store/abcdefghijklmnopqrstuvwxyz0123456789-toolong");
+    store_dir_grow(2);
+    var ids = alloc(16 * 8);
+    var c = post_list(root, "main", ids, 5);
+    if (c != 5)                    { test_fail(name, "newest-5 count"); return 1; }
+    var j = 0;
+    while (j < 5) {
+        if (load64(ids + j * 8) != 8 + j) { test_fail(name, "newest-5 window"); return 1; }
+        j = j + 1;
+    }
+    if (g_dir_cap < 16)            { test_fail(name, "workspace did not grow"); return 1; }
+    c = post_list(root, "main", ids, 100);
+    if (c != 12)                   { test_fail(name, "full count"); return 1; }
+    j = 0;
+    while (j < 12) {
+        if (load64(ids + j * 8) != j + 1) { test_fail(name, "not ascending"); return 1; }
+        j = j + 1;
+    }
+    if (post_max_id(root, "main") != 12) { test_fail(name, "max id"); return 1; }
+    var names = alloc(8 * 8);
+    var bc = boards_list(root, names, 8);
+    if (bc != 1)                   { test_fail(name, "boards count"); return 1; }
+    if (streq(load64(names), "zax") == 0) { test_fail(name, "boards name"); return 1; }
+    # The copy survives the next scan overwriting the workspace.
+    post_list(root, "main", ids, 100);
+    if (streq(load64(names), "zax") == 0) { test_fail(name, "name not a copy"); return 1; }
+    if (store_dir_scan("/tmp/agora-t228-store/no-such-dir") != (0 - 1)) { test_fail(name, "missing dir"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t229 — 1.8.1 (audit H1): the allocation-free ISO-8601 formatter that
+# replaced chrono's iso8601_now in post_format must be byte-identical to it —
+# leap days, century years, year boundaries and a pseudo-random sweep.
+fn t229_iso8601_into(): i64 {
+    var name = "t229_iso8601_into";
+    var out = alloc(32);
+    var fixed = alloc(12 * 8);
+    store64(fixed, 0);              # 1970-01-01T00:00:00Z
+    store64(fixed + 8, 951782400);  # 2000-02-29
+    store64(fixed + 16, 951868799); # 2000-02-29T23:59:59
+    store64(fixed + 24, 978307199); # 2000-12-31T23:59:59
+    store64(fixed + 32, 1709164800);# 2024-02-29
+    store64(fixed + 40, 4107542400);# 2100-03-01 (2100 is not a leap year)
+    store64(fixed + 48, 4107456000);# 2100-02-28
+    store64(fixed + 56, 1791676800);# 2026-10-12
+    store64(fixed + 64, 86399);
+    store64(fixed + 72, 253402300799); # 9999-12-31T23:59:59
+    var k = 0;
+    while (k < 10) {
+        var e = load64(fixed + k * 8);
+        if (iso8601_into(e, out) != 20) { test_fail(name, "length"); return 1; }
+        if (memeq(out, iso8601(e), 21) == 0) { test_fail(name, "fixed epoch mismatch"); return 1; }
+        k = k + 1;
+    }
+    var x = 88172645463325252;
+    var r = 0;
+    while (r < 2000) {
+        x = x ^ (x << 13);
+        x = x ^ lshr(x, 7);
+        x = x ^ (x << 17);
+        var e2 = lshr(x, 1) % 253402300800;
+        iso8601_into(e2, out);
+        if (memeq(out, iso8601(e2), 21) == 0) { test_fail(name, "random epoch mismatch"); return 1; }
+        r = r + 1;
+    }
+    test_pass(name);
+    return 0;
+}
+
+# t230 — 1.8.1 (audit D3 / D8 / G9 / G10): saves and shared-world snapshots
+# are treated as damaged-or-hostile on load. Index fields out of range reject
+# the save (PA sector / planet; Handler mole, agent city, cable agent / cities);
+# Decode's history counters are clamped to the buffers it allocated; Ashes'
+# order count, order provinces and pact statuses are validated; a Handler save
+# whose values would overflow the save buffer is refused, not written past it.
+fn t230_roundtrip_pa(st): i64 {
+    var buf = alloc(4096);
+    var n = pa_save_format(st, buf, 4096);
+    return pa_load_parse(buf, n);
+}
+# Format + reparse a Handler state (t230).
+fn t230_roundtrip_th(st): i64 {
+    var buf = alloc(65536);
+    var n = th_save_format(st, buf, 65536);
+    return th_load_parse(buf, n);
+}
+# (t230 body)
+fn t230_save_loaders(): i64 {
+    var name = "t230_save_loaders";
+    # Port Authority
+    var pa = pa_new(77, DOOR_SOLO, 30);
+    store64(pa + PA_SECTOR, 49);
+    var l = t230_roundtrip_pa(pa);
+    if (l == 0)                         { test_fail(name, "PA valid sector rejected"); return 1; }
+    pa_free(l);
+    store64(pa + PA_SECTOR, 50);
+    if (t230_roundtrip_pa(pa) != 0)     { test_fail(name, "PA sector 50 accepted"); return 1; }
+    store64(pa + PA_SECTOR, 0 - 1);
+    if (t230_roundtrip_pa(pa) != 0)     { test_fail(name, "PA sector -1 accepted"); return 1; }
+    store64(pa + PA_SECTOR, 3);
+    store64(pa + PA_PLANET, 50);
+    if (t230_roundtrip_pa(pa) != 0)     { test_fail(name, "PA planet 50 accepted"); return 1; }
+    store64(pa + PA_PLANET, 0 - 1);
+    l = t230_roundtrip_pa(pa);
+    if (l == 0)                         { test_fail(name, "PA no-planet rejected"); return 1; }
+    pa_free(l);
+    # The world accessors refuse out-of-range cells.
+    var w = paw_new(77);
+    if (paw_garrison_owner(w, 50) != 0) { test_fail(name, "paw read OOB"); return 1; }
+    paw_set_garrison(w, 50, 777, 7);
+    paw_set_stock(w, 0 - 1, 0, 99);
+    if (paw_stock(w, 0, 0) == 99)       { test_fail(name, "paw write OOB"); return 1; }
+    # Handler
+    var th = th_new(91, DOOR_SOLO, TH_DEF_DAYS);
+    l = t230_roundtrip_th(th);
+    if (l == 0)                         { test_fail(name, "TH valid save rejected"); return 1; }
+    th_free(l);
+    var a0 = th_agent(th, 0);
+    var city = load64(a0 + AG_CITY);
+    store64(a0 + AG_CITY, TH_CITIES);
+    if (t230_roundtrip_th(th) != 0)     { test_fail(name, "TH agent city accepted"); return 1; }
+    store64(a0 + AG_CITY, city);
+    var mole = load64(th + TH_MOLEIDX);
+    store64(th + TH_MOLEIDX, TH_AGENTS);
+    if (t230_roundtrip_th(th) != 0)     { test_fail(name, "TH mole index accepted"); return 1; }
+    store64(th + TH_MOLEIDX, mole);
+    if (thw_alert(thw_new(), TH_CITIES) != 0) { test_fail(name, "thw read OOB"); return 1; }
+    # Handler save cap: 256 cables of 19-digit values, valid indexes.
+    store64(th + TH_REGCOUNT, TH_REG_MAX);
+    var j = 0;
+    while (j < TH_REG_MAX) {
+        var cb = th_cable_at(th, j);
+        store64(cb + CB_AGENT, 0);
+        store64(cb + CB_VIA, 0);
+        store64(cb + CB_TRUECITY, 0);
+        store64(cb + CB_DAY, 1000000000000000000);
+        store64(cb + CB_AMOUNT, 1000000000000000000);
+        store64(cb + CB_NR, 1000000000000000000);
+        store64(cb + CB_KIND, 1000000000000000000);
+        store64(cb + CB_CIPHER, 1000000000000000000);
+        store64(cb + CB_DATEOK, 1000000000000000000);
+        store64(cb + CB_ANOM, 1000000000000000000);
+        j = j + 1;
+    }
+    var big = alloc(65536);
+    if (th_save_format(th, big, 32768) != (0 - 1)) { test_fail(name, "TH save ignored cap"); return 1; }
+    if (th_save_format(th, big, 65536) <= 32768)   { test_fail(name, "TH save under a large cap"); return 1; }
+    # Decode
+    var dg = decode_new(5, DOOR_SOLO);
+    decode_set_numbers(dg);
+    var dbuf = alloc(4096);
+    store64(dg + DG_MAXTRIES, 1000);
+    store64(dg + DG_TRIES, 3);
+    var dn = decode_save_format(dg, dbuf, 4096);
+    var dl = decode_load_parse(dbuf, dn);
+    if (dl == 0)                                   { test_fail(name, "decode valid rejected"); return 1; }
+    if (load64(dl + DG_MAXTRIES) != DECODE_TRIES_MAX) { test_fail(name, "maxtries not clamped"); return 1; }
+    decode_free(dl);
+    store64(dg + DG_TRIES, DECODE_TRIES_MAX);
+    store64(dg + DG_OVER, 0);
+    dn = decode_save_format(dg, dbuf, 4096);
+    if (decode_load_parse(dbuf, dn) != 0)          { test_fail(name, "decode no-tries-left accepted"); return 1; }
+    # Ashes
+    var aw = ashw_new(13);
+    var asz = ashw_byte_size();
+    if (ashw_valid(aw, asz) != 1)                  { test_fail(name, "ashes fresh invalid"); return 1; }
+    ashw_set_norders(aw, 0 - 1);
+    if (ashw_valid(aw, asz) != 0)                  { test_fail(name, "ashes norders -1"); return 1; }
+    ashw_set_norders(aw, ASH_MAXORD + 1);
+    if (ashw_valid(aw, asz) != 0)                  { test_fail(name, "ashes norders > max"); return 1; }
+    ashw_set_norders(aw, 0);
+    ashw_order_push(aw, 5, 0, ASH_TERR, 1);
+    if (ashw_valid(aw, asz) != 0)                  { test_fail(name, "ashes order dst OOB"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# 1.8.1 (audit W4) — the client offers `opt` (IAC WILL opt) and agora agrees,
+# so a following subnegotiation for it is legal (RFC 855). The DO reply is
+# discarded.
+fn t_agree_him(ts, opt): i64 {
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, WILL);
+    telnet_feed(ts, opt);
+    telnet_tx_consume(ts);
+    return 0;
+}
+
+# t231 — 1.8.1 (audit W4): a subnegotiation for an option the client never
+# enabled is ignored — before the fix, IAC SB NAWS 0 200 0 60 IAC SE alone set
+# cols/rows = 200 x 60.
+fn t231_sb_requires_agreement(): i64 {
+    var name = "t231_sb_requires_agreement";
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC); telnet_feed(ts, SB); telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, 0x00); telnet_feed(ts, 0xC8); telnet_feed(ts, 0x00); telnet_feed(ts, 0x3C);
+    telnet_feed(ts, IAC);
+    if (telnet_feed(ts, SE) != EV_SB) { test_fail(name, "expected EV_SB"); return 1; }
+    telnet_handle_sb(ts);
+    if (telnet_term_cols(ts) == 200)  { test_fail(name, "unsolicited NAWS accepted"); return 1; }
+    t_agree_him(ts, OPT_NAWS);
+    telnet_feed(ts, IAC); telnet_feed(ts, SB); telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, 0x00); telnet_feed(ts, 0xC8); telnet_feed(ts, 0x00); telnet_feed(ts, 0x3C);
+    telnet_feed(ts, IAC); telnet_feed(ts, SE);
+    telnet_handle_sb(ts);
+    if (telnet_term_cols(ts) != 200)  { test_fail(name, "agreed NAWS ignored"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t232 — 1.8.1 (audit H3): helpers that run once PER POST or PER USER must not
+# take per-command arena memory. post_read, post_from and account_lookup_handle
+# each took a cmd_alloc per call, so `list` / `replies_to` / the handle scan on
+# a big store spilled the 512 KB arena and every allocation after that leaked.
+# 3,000 calls inside one "command" (no reset) must leave the arena untouched.
+fn t232_loop_helpers_no_arena(): i64 {
+    var name = "t232_loop_helpers_no_arena";
+    var root = "/tmp/agora-t228-store";        # t228 created posts 1..12 here
+    var fbuf = alloc(4096);
+    var hb = alloc(64);
+    var fb = alloc(64);
+    var post = "From: qix 0123456789abcdef\r\nSubject: s\r\n\r\nbody\r\n";
+    var plen = strlen(post);
+    cmd_alloc(8);                               # make sure the arena exists
+    var before = g_cmd_arena_off;
+    var k = 0;
+    while (k < 3000) {
+        post_read(root, "main", (k % 12) + 1, fbuf, 4096);
+        post_from(post, plen, hb, ACCOUNT_HANDLE_BUF, fb, ACCOUNT_FP_BUF_BYTES);
+        account_lookup_handle(root, "0123456789abcdef", hb, ACCOUNT_HANDLE_BUF);
+        k = k + 1;
+    }
+    if (g_cmd_arena_off != before) { test_fail(name, "a per-iteration helper took arena memory"); return 1; }
+    post_from(post, plen, hb, ACCOUNT_HANDLE_BUF, fb, ACCOUNT_FP_BUF_BYTES);
+    if (streq(hb, "qix") == 0)     { test_fail(name, "post_from parse"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
@@ -5624,6 +5950,13 @@ fn main(): i64 {
     t223_text_sanitize_rule();
     t224_text_chunk_end();
     t225_text_iac_double();
+    t226_board_policy_parse();
+    t227_board_admins_whole();
+    t228_dir_workspace();
+    t229_iso8601_into();
+    t230_save_loaders();
+    t231_sb_requires_agreement();
+    t232_loop_helpers_no_arena();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

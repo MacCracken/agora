@@ -66,3 +66,11 @@ Start narrow (framework + one depletable-stock slice) and get a concurrency smok
 - **SQLite / an embedded DB for world state** — no cyrius stdlib support; flat files + `flock` are agora's whole storage idiom (ADR 0002). A DB would be a new external dependency for marginal gain at BBS scale.
 - **Per-game bespoke concurrency** — rejected; three divergent locking implementations is three times the surface for race bugs. One shared world-transaction framework in `door.cyr`, three games on top.
 - **Event-log world (append-only events + periodic snapshot)** instead of a locked snapshot file — more crash-resilient and audit-friendly, but more machinery than the first cut needs. The temp-file + `rename` snapshot is atomic enough; revisit the event log if world history/rollback becomes a feature.
+
+> **1.8.1 notes (audit M1, M2, L9, L10).** A player's per-player Universe save is now written on every
+> close path, not only on a clean `q` — before 1.8.1 a disconnect kept the world effects of a turn and
+> refunded its costs (a garrison could be duplicated indefinitely). A finished Universe run removes its
+> save. Shared-world accessors refuse out-of-range cells and loaders reject out-of-range indexes; an
+> unreadable snapshot is no longer treated as "no world" and re-minted over the real one, and an invalid
+> one is set aside as `snapshot.bad`; a failed snapshot write is reported to the player. The real-time
+> daily-turn cadence described above is not enforced for these games (see ADR 0009's note).

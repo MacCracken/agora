@@ -94,6 +94,14 @@ fn imax(a, b): i64 {
     return b;
 }
 
+# 1 if 0 <= i < n, else 0. 1.8.1 (audit D3) — the shared-world accessors and
+# the save loaders check every file-supplied index with this before using it.
+fn idx_ok(i, n): i64 {
+    if (i < 0)  { return 0; }
+    if (i >= n) { return 0; }
+    return 1;
+}
+
 fn iclamp(x, lo, hi): i64 {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
@@ -269,7 +277,9 @@ fn door_save_exists(store, fp16, game): i64 {
 # Validates fp16 + game (traversal guard), ensures the dir ladder,
 # then writes. Returns 0 on success, negative on any error.
 #
-# 1.7.0: `file_write_all` → `file_write_atomic`. The old call opened with
+# 1.7.0: `file_write_all` → `file_write_atomic` semantics, implemented by
+# agora's own `store_write_atomic` (arena.cyr — the stdlib version leaks a bare
+# alloc() per call; see its header). The old call opened with
 # O_TRUNC, which empties the target AT OPEN — so a crash or short write between
 # the open and the last byte left the player's save truncated or zero-length,
 # with the previous good copy already gone. `file_write_atomic` writes a temp
@@ -303,6 +313,69 @@ fn door_save_read(store, fp16, game, out_buf, cap): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
     return file_read_all(path, out_buf, cap);
+}
+
+# 1.8.1 (audit D2) — remove a save slot: a FINISHED run's checkpoint. Before
+# this, a finished Solo run skipped its save and left the last mid-game
+# checkpoint on disk, so the next `play <game> solo` resumed it and the run
+# could be finished — and posted to the leaderboard — again and again; a
+# finished Universe run was saved finished and re-entered straight onto the end
+# screen forever. Returns 0 (removed, or there was nothing to remove).
+fn door_save_remove(store, fp16, game): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0 - 1; }
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    door_save_path(store, fp16, game, path);
+    xunlink(path);
+    return 0;
+}
+
+# 1.8.1 (audit D6) — move a save that exists but cannot be read or parsed aside
+# to `<game>.sav.bad`, so the fresh run that replaces it does not silently
+# overwrite the player's progress on exit (a backup restored with the wrong
+# owner, a save from an incompatible build). Returns file_rename's result.
+fn door_save_quarantine(store, fp16, game): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0 - 1; }
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    var pos = door_save_path(store, fp16, game, path);
+    var bad = cmd_alloc(PATH_MAX_BYTES);
+    memcpy(bad, path, pos);
+    memcpy(bad + pos, ".bad", 5);
+    return file_rename(path, bad);
+}
+
+# 1.8.1 (audit D1) — the per-(identity, slot) play lock, held for the life of a
+# saved door session. Two sessions under one identity used to load the same
+# save, and whichever left LAST wrote its copy over the other's: open a second
+# session as a snapshot, gamble in the first, and leave the snapshot last to
+# erase the loss. `<game>.lock` beside the save, flock'd non-blocking, so the
+# second `play` is refused instead. Returns the held fd (release it with
+# door_play_unlock), -1 if another session holds it, or -2 if the lock file
+# could not be opened at all (the caller plays on unlocked: an operator problem
+# must not lock everyone out of their games).
+fn door_play_lock(store, fp16, game): i64 {
+    if (fp16_valid(fp16) == 0)      { return 0 - 2; }
+    if (game_name_valid(game) == 0) { return 0 - 2; }
+    if (door_dir_ensure(store, fp16) != 0) { return 0 - 2; }
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    var pos = door_games_dir(store, fp16, path);
+    store8(path + pos, 47); pos = pos + 1;             # '/'
+    var glen = strlen(game);
+    memcpy(path + pos, game, glen); pos = pos + glen;
+    memcpy(path + pos, ".lock", 6);
+    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
+    if (fd < 0) { return 0 - 2; }
+    if (file_trylock(fd) != 0) { file_close(fd); return 0 - 1; }
+    return fd;
+}
+
+# Release a play lock taken by door_play_lock (a negative fd is a no-op).
+fn door_play_unlock(fd): i64 {
+    if (fd < 0) { return 0; }
+    file_unlock(fd);
+    file_close(fd);
+    return 0;
 }
 
 # === Shared render helpers (used by all door games) ===
@@ -607,20 +680,41 @@ fn world_lock_release(fd): i64 {
 # Read the world snapshot into out_buf (cap bytes). Returns bytes read,
 # or 0 if the world has no snapshot yet (a fresh/empty world). Invalid
 # game → 0.
+#
+# 1.8.1 (audit D6) — returns 0 only when there is NO snapshot yet, and a
+# negative when one exists but could not be read (EACCES — a backup restored
+# with the wrong owner — EIO, EMFILE). Both used to be 0, i.e. "no world", so
+# the next player's entry minted a fresh world over the real one.
 fn world_read(store, game, out_buf, cap): i64 {
     if (game_name_valid(game) == 0) { return 0; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, "snapshot", path);
     var n = file_read_all(path, out_buf, cap);
-    if (n < 0) { return 0; }
+    if (n < 0) {
+        if (store_read_missing(n) == 1) { return 0; }
+        return n;
+    }
     return n;
+}
+
+# 1.8.1 (audit D6) — set an invalid snapshot (wrong size or version: corrupt,
+# or from an incompatible build) aside as `snapshot.bad` before a fresh world
+# replaces it, so the operator can recover it. Caller holds the world lock.
+fn world_quarantine(store, game): i64 {
+    if (game_name_valid(game) == 0) { return 0 - 1; }
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    world_file(store, game, "snapshot", path);
+    var bad = cmd_alloc(PATH_MAX_BYTES);
+    world_file(store, game, "snapshot.bad", bad);
+    return file_rename(path, bad);
 }
 
 # Overwrite the world snapshot, CRASH-SAFELY (roadmap N2). Caller holds the
 # world lock across the read→compute→write. Returns 0 on success, negative on
 # error.
 #
-# 1.7.0: `file_write_all` → `file_write_atomic`. The old comment argued a plain
+# 1.7.0: `file_write_all` → atomic write (agora's `store_write_atomic`, arena.cyr).
+# The old comment argued a plain
 # O_TRUNC write was "correct against cooperating processes" — which was true and
 # beside the point: the danger was never a competing writer, it was a crash
 # BETWEEN the O_TRUNC and the final byte, which loses the SHARED world for every
@@ -662,6 +756,7 @@ fn world_txn_add(store, game, delta): i64 {
     var buf = cmd_alloc(8);
     var cur = 0;
     var n = world_read(store, game, buf, 8);
+    if (n < 0) { world_lock_release(fd); return 0 - 1; }   # 1.8.1 (D6): never overwrite
     if (n == 8) { cur = load64(buf); }
     cur = cur + delta;
     store64(buf, cur);
@@ -705,17 +800,27 @@ fn lb_line_score(buf, start, end): i64 {
             else { i = i + 1; }
         }
     }
+    # 1.8.1 (audit I4) — a leading '-' is a negative score (a Smuggler run that
+    # ends in debt), which ranked as 0; and the digits stop at 18, so a damaged
+    # field cannot wrap an i64 into a giant (or negative) score.
+    var neg = 0;
+    if (i < end) { if ((load8(buf + i) & 0xFF) == 45) { neg = 1; i = i + 1; } }
     var v = 0;
+    var digits = 0;
     var done = 0;
     while (done == 0) {
         if (i >= end) { done = 1; }
         else {
             var c = load8(buf + i) & 0xFF;
             if (c >= 48) {
-                if (c <= 57) { v = v * 10 + (c - 48); i = i + 1; }
+                if (c <= 57) {
+                    if (digits < 18) { v = v * 10 + (c - 48); digits = digits + 1; }
+                    i = i + 1;
+                }
                 else { done = 1; }
             } else { done = 1; }
         }
     }
+    if (neg == 1) { return 0 - v; }
     return v;
 }

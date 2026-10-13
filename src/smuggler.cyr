@@ -1182,7 +1182,8 @@ fn sl_feed(st, line, len): i64 {
 # the shared heat in that district for EVERYONE, and dealing nudges it
 # up; high heat raises the cop-encounter odds for whoever arrives next.
 # Heat is the clean, bounded shared mechanic; aggregate price pressure
-# is a deeper follow-on. Pure model + transforms here; main.cyr wraps
+# (prices moved by every player's trades) is not built — recorded in
+# roadmap-future.md § Door games. Pure model + transforms here; main.cyr wraps
 # the per-line flock transaction (shared with PA + Handler).
 # ============================================================
 
@@ -1216,11 +1217,15 @@ fn slw_valid(buf, len): i64 {
     return 1;
 }
 
+# 1.8.1 (audit D3) — out-of-range districts read 0 and write nothing (the
+# world buffer belongs to the session slot; see paw_stock).
 fn slw_heat(w, d): i64 {
+    if (idx_ok(d, SL_DISTRICTS) == 0) { return 0; }
     return load64(w + (SLW_OFF_HEAT + d) * 8);
 }
 
 fn slw_set_heat(w, d, v): i64 {
+    if (idx_ok(d, SL_DISTRICTS) == 0) { return 0; }
     store64(w + (SLW_OFF_HEAT + d) * 8, iclamp(v, 0, SLW_HEAT_MAX));
     return 0;
 }

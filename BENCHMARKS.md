@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-12 (1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 on the same machine the same day — within noise of each other; both sit ~5–15% above the August 1.7.0 row, unattributed. Prior: 2026-08-22, 1.7.0 re-run on cyrius **6.5.34**; 1.6.7's 6.5.33 row kept for comparison. All four parser paths remain within noise of the 0.9.2 baseline — the parser source is untouched since M1 — and `subneg_naws` + `announce_salvo` each recovered a few ns against 1.6.7) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-12 (1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -31,10 +31,13 @@ Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 | **1.7.0 (toolchain 6.5.34)** † | **9–10 ns** | **58–68 ns** | **68–76 ns** | **95–100 ns** | **121–128 ns** |
 | 1.7.1 (toolchain 6.6.2) ‡ | 10–11 ns | 68–74 ns | 77–89 ns | 110–132 ns | 140–166 ns |
 | **1.8.0 (toolchain 6.7.9)** ‡ | **8–14 ns** | **66–86 ns** | **77–89 ns** | **103–116 ns** | **137–142 ns** |
+| **1.8.1 (toolchain 6.7.9)** § | **8–9 ns** | **60–62 ns** | **70–74 ns** | **102–103 ns** § | **126–127 ns** |
 
 † **1.6.7 rows are net of a measured clock floor; every earlier row is gross.** cyrius **6.5.19** taught `lib/bench.cyr` to subtract the timer's own overhead. At this suite's `batch_size = 10,000` the correction is **under 1 ns** — inside the ±2 ns these columns have always carried — so the columns remain comparable, but **do not read a 1–2 ns drop across this row as a win**.
 
 (**1.6.7** re-benched on cyrius 6.5.33 over **eight runs**, reported as the observed range with the median in parentheses: `plain_byte` 8–9 (9), `iac_untracked` 61–69 (63), `iac_tracked_agree` 71–75 (73), `subneg_naws` 98–111 (100), `announce_salvo` 122–132 (129). **The four parser paths are within noise of both the 0.9.2 and the 1.6.1 baselines — i.e. unchanged**, which is the expected result: the parser source has not moved since M1. The one real change is `announce_salvo` giving back 1.6.1's −7%: 134 (0.9.2) → 124 (1.6.1) → **~129 (1.6.7)**, roughly back to the pre-6.4.x codegen. Not investigated — it is one-time-per-connection work, ~5 ns on a path that runs once per `accept()`.
+
+§ **1.8.1 `subneg_naws` is not 1:1 with earlier rows.** 1.8.1 accepts a subnegotiation only for an option the client has enabled (RFC 855, audit L20), so the bench now marks NAWS agreed (`opt_set_him`) on every iteration — otherwise it would time the new early rejection. Same-day A/B against a `git archive` of 1.8.0, six runs each: `plain_byte` 8–9 / 8–9, `iac_untracked` 60–62 / 61, `iac_tracked_agree` 70–74 / 71–72, `announce_salvo` 126–127 / 126–127 — **unchanged** — and `subneg_naws` 102–103 vs 94–95 for the old bench body: the extra store in the bench plus the gate's load + compare, on a path that runs once or twice per connection. (Both rows here are ~10% under the 1.8.0 row measured at the 1.8.0 cut, on every path including untouched ones: that is workstation state between sessions, not code.)
 
 ‡ **1.7.1 was never benched at its own cut**; this row was measured at the 1.8.0 cut from a `git archive` of the 1.7.1 tree on cyrius 6.6.2, run back to back with the 1.8.0 runs on the same workstation, six runs each.
 

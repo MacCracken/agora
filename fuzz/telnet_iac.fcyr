@@ -99,18 +99,27 @@ fn check(ts, ev): i64 {
     return 0;
 }
 
-# The RFC 1143 Q-state arrays are one byte per option; a stray store64 through
-# them would show up as an out-of-range byte. Swept periodically rather than
-# per-byte (512 loads per fed byte would dominate the runtime).
+# The RFC 1143 Q-state arrays are one byte per option, and only three states
+# exist (Q_NO / Q_WANTYES / Q_YES). Two real invariants, swept periodically
+# rather than per byte (512 loads per fed byte would dominate the runtime):
+#   - every state is one of the three — a stray store through the arrays (a
+#     pointer, a count) leaves a byte above Q_YES;
+#   - an option agora does not track is naive-refused and must never leave
+#     Q_NO — if one does, the negotiation logic agreed to something it does
+#     not prefer (RFC 1143 forbids that).
+# 1.8.1 (audit W5) — this used to assert each byte was 0..255, after opt_us /
+# opt_him had already masked it with `& 0xFF`: it could never fire.
 fn check_optq(ts): i64 {
     var i = 0;
     while (i < 256) {
         var u = opt_us(ts, i);
-        if (u < 0)   { syscall(60, 17); }
-        if (u > 255) { syscall(60, 17); }
+        if (u > Q_YES) { syscall(60, 17); }
         var h = opt_him(ts, i);
-        if (h < 0)   { syscall(60, 17); }
-        if (h > 255) { syscall(60, 17); }
+        if (h > Q_YES) { syscall(60, 17); }
+        if (opt_tracked(i) == 0) {
+            if (u != Q_NO) { syscall(60, 17); }
+            if (h != Q_NO) { syscall(60, 17); }
+        }
         i = i + 1;
     }
     return 0;

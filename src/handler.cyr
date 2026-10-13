@@ -32,6 +32,7 @@ enum THConfig {
     TH_START_BUDGET = 5000;
     TH_DISPATCH_PTS = 4;         # dispatch points per turn
     TH_REG_MAX      = 256;       # registry cable ceiling
+    TH_SAVE_CABLE_MAX = 224;     # 1.8.1 — worst-case bytes one cable adds to a save
     TH_MOLE_CHANCE  = 70;        # % chance a campaign actually has a mole
     TH_MOLE_RATE    = 70;        # % of the mole's cables that are dirty
 }
@@ -235,7 +236,13 @@ fn th_gen_day(st): i64 {
                     }
                 }
                 if (anomalous == 1) {
-                    store64(cb + CB_ANOM, 1);
+                    # 1.8.1 (audit D9) — CB_ANOM marks a PLANT: the mole's
+                    # forgery only. It was set for an honest agent's clerical
+                    # error too, so the decrypt lever called every discrepancy
+                    # "a plant" (875 innocent cables in a 200-seed x 30-day
+                    # sweep, and never once "noise") — pointing at the innocent
+                    # in ~22% of cracks, the opposite of ADR 0019's verdict.
+                    if (load64(a + AG_MOLE) == 1) { store64(cb + CB_ANOM, 1); }
                     if (dclass == 0) { store64(cb + CB_VIA, (truecity + 1) % TH_CITIES); }
                     if (dclass == 1) { store64(cb + CB_DATEOK, 0); }
                     if (dclass == 2) { store64(cb + CB_CIPHER, 0); }
@@ -618,6 +625,11 @@ fn th_save_format(st, buf, cap): i64 {
     pos = save_put_i64(buf, pos, n);
     var j = 0;
     while (j < n) {
+        # 1.8.1 (audit D8) — honour `cap`. One cable is at most 10 fields x 21
+        # bytes; the agents and header above are under 1.5 KB. Values that load
+        # as big numbers (or fields missing at a file's end, re-written as "0")
+        # made a re-save of a crafted 32 KB file ~2 KB longer than the buffer.
+        if (pos + TH_SAVE_CABLE_MAX > cap) { return 0 - 1; }
         var cb = th_cable_at(st, j);
         pos = save_put_i64(buf, pos, load64(cb + CB_AGENT));
         pos = save_put_i64(buf, pos, load64(cb + CB_DAY));
@@ -692,7 +704,33 @@ fn th_load_parse(buf, len): i64 {
         store64(cb + CB_ANOM,     save_get_i64(buf, len, cur));
         j = j + 1;
     }
+    if (th_load_indexes_ok(st) == 0) { th_free(st); return 0; }
     return st;
+}
+
+# 1.8.1 (audit D3) — every loaded field later used as an INDEX must be in
+# range, or th_load_parse rejects the save (the launcher sets it aside). The
+# cable COUNT was clamped at 1.4.4 [S1/R4], but not what the cables and agents
+# point at: TH_MOLEIDX feeds th_agent() unchecked, and AG_CITY reaches
+# thw_add_alert's store into the shared world. Pure.
+fn th_load_indexes_ok(st): i64 {
+    var mole = load64(st + TH_MOLEIDX);
+    if (mole != (0 - 1)) { if (idx_ok(mole, TH_AGENTS) == 0) { return 0; } }
+    var i = 0;
+    while (i < TH_AGENTS) {
+        if (idx_ok(load64(th_agent(st, i) + AG_CITY), TH_CITIES) == 0) { return 0; }
+        i = i + 1;
+    }
+    var n = load64(st + TH_REGCOUNT);
+    var j = 0;
+    while (j < n) {
+        var cb = th_cable_at(st, j);
+        if (idx_ok(load64(cb + CB_AGENT), TH_AGENTS) == 0)    { return 0; }
+        if (idx_ok(load64(cb + CB_VIA), TH_CITIES) == 0)      { return 0; }
+        if (idx_ok(load64(cb + CB_TRUECITY), TH_CITIES) == 0) { return 0; }
+        j = j + 1;
+    }
+    return 1;
 }
 
 # === Runtime init ===
@@ -715,13 +753,16 @@ fn th_start(st): i64 {
     return 0;
 }
 
-# 1.6.3 (ADR 0022) — release a Handler state and its four owned buffers.
+# 1.6.3 (ADR 0022) — release a Handler state and its owned buffers.
 # TH_AGENTS_P / TH_REG_P are allocated by BOTH th_new and th_load_parse (the
 # cable register is the biggest state buffer in the tree at TH_REG_MAX*CB_SIZE);
 # TH_MSG and TH_CRACKED come from th_start, which runs after either. TH_WORLD is
 # NOT freed — the shared city-alert snapshot belongs to the session slot.
+# 1.8.1 (audit D4) — plus TH_DECODE, the decode round of a player who leaves
+# mid-crack (decode_free(0) is a no-op).
 fn th_free(st): i64 {
     if (st == 0) { return 0; }
+    decode_free(load64(st + TH_DECODE));
     fl_free(load64(st + TH_AGENTS_P));
     fl_free(load64(st + TH_REG_P));
     fl_free(load64(st + TH_MSG));
@@ -912,7 +953,7 @@ fn th_begin_decrypt(st, ri): i64 {
 }
 
 # A successful crack marks the cable read. The verdict (plant vs noise) is
-# rendered from CB_ANOM by th_render_decrypt_line. Pure.
+# rendered by th_render_decrypt_line from th_cable_is_plant. Pure.
 fn th_apply_decrypt(st, ri): i64 {
     th_cracked_set(st, ri);
     return 0;
@@ -920,12 +961,23 @@ fn th_apply_decrypt(st, ri): i64 {
 
 # The READ-screen line under a cable: the cryptanalysis verdict once cracked,
 # else the "[D] break the cipher" prompt (cost-gated).
+# 1 if cable `cb` is a deliberate plant: flagged anomalous AND filed by the
+# mole. The second test also corrects saves from before 1.8.1, whose CB_ANOM
+# was set for honest agents' clerical errors too (audit D9). Pure.
+fn th_cable_is_plant(st, cb): i64 {
+    if (load64(cb + CB_ANOM) != 1) { return 0; }
+    var ai = load64(cb + CB_AGENT);
+    if (idx_ok(ai, TH_AGENTS) == 0) { return 0; }
+    if (load64(th_agent(st, ai) + AG_MOLE) != 1) { return 0; }
+    return 1;
+}
+
 fn th_render_decrypt_line(st, buf, pos, ri): i64 {
     if (th_cracked_get(st, ri) == 1) {
         var cb = th_cable_at(st, ri);
         pos = emit_sgr(buf, pos, 36);
         pos = emit_cstr(buf, pos, " CRYPTANALYSIS: ");
-        if (load64(cb + CB_ANOM) == 1) {
+        if (th_cable_is_plant(st, cb) == 1) {
             pos = emit_cstr(buf, pos, "routing DELIBERATELY FORGED -- a plant.");
         } else {
             pos = emit_cstr(buf, pos, "clerical noise -- no plant here.");
@@ -1135,6 +1187,10 @@ fn th_feed_decrypt(st, line, len): i64 {
     } else {
         th_msg(st, "The cipher holds. The dispatch point is spent.");
     }
+    # 1.8.1 (audit D4) — release the round. It was only un-pointed, so every
+    # decrypt attempt abandoned five freelist buffers (~740 B): under poll, an
+    # unbounded leak reachable without login (practice mode).
+    decode_free(dg);
     store64(st + TH_DECODE, 0);
     store64(st + TH_DECRI, 0 - 1);
     store64(st + TH_SCREEN, HSCR_READ);
@@ -1290,11 +1346,15 @@ fn thw_valid(buf, len): i64 {
     return 1;
 }
 
+# 1.8.1 (audit D3) — out-of-range cities read 0 and write nothing (the world
+# buffer belongs to the session slot; a save with AG_CITY = 4 wrote past it).
 fn thw_alert(w, c): i64 {
+    if (idx_ok(c, TH_CITIES) == 0) { return 0; }
     return load64(w + (THW_OFF_ALERT + c) * 8);
 }
 
 fn thw_set_alert(w, c, v): i64 {
+    if (idx_ok(c, TH_CITIES) == 0) { return 0; }
     store64(w + (THW_OFF_ALERT + c) * 8, iclamp(v, 0, THW_ALERT_MAX));
     return 0;
 }

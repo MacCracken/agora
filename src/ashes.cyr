@@ -231,6 +231,25 @@ fn ashw_new(seed): i64 {
 fn ashw_valid(buf, len): i64 {
     if (len != ashw_byte_size()) { return 0; }
     if (load64(buf + ASHW_OFF_VERSION * 8) != ASHW_VERSION) { return 0; }
+    # 1.8.1 (audit G10) — the size + version check let a corrupt order count
+    # through: negative, `ashw_order_push` wrote 32 bytes BEFORE the snapshot
+    # (into the session slot's neighbour); over ASH_MAXORD, the resolver read
+    # past the snapshot and overran its 64-entry arena arrays. The queued
+    # orders' provinces and the pact statuses are range-checked with it.
+    var no = ashw_norders(buf);
+    if (no < 0)          { return 0; }
+    if (no > ASH_MAXORD) { return 0; }
+    var i = 0;
+    while (i < no) {
+        if (idx_ok(ashw_ord_src(buf, i), ASH_TERR) == 0) { return 0; }
+        if (idx_ok(ashw_ord_dst(buf, i), ASH_TERR) == 0) { return 0; }
+        i = i + 1;
+    }
+    var p = 0;
+    while (p < ASH_MAXPACT) {
+        if (idx_ok(ashw_pact_status(buf, p), ASH_PACT_ALLIED + 1) == 0) { return 0; }
+        p = p + 1;
+    }
     return 1;
 }
 
@@ -353,6 +372,33 @@ fn ashw_order_push(w, owner, src, dst, qty): i64 {
 }
 
 fn ashw_orders_clear(w): i64 { ashw_set_norders(w, 0); return 0; }
+
+# 1.8.1 (audit G6) — queued orders owned by `fp` this window. Pure.
+fn ash_orders_of(w, fp): i64 {
+    var n = ashw_norders(w);
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (ashw_ord_owner(w, i) == fp) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# A player's order share for the window: two per province held, at least two.
+# Twelve provinces x 2 = 24, well inside ASH_MAXORD, so no legitimate plan is
+# cut short while no single player can fill the shared queue. Pure.
+fn ash_order_share(w, fp): i64 {
+    var held = 0;
+    var t = 0;
+    while (t < ASH_TERR) {
+        if (ashw_owner(w, t) == fp) { held = held + 1; }
+        t = t + 1;
+    }
+    var share = held * 2;
+    if (share < 2) { share = 2; }
+    return share;
+}
 
 # === Alliances / diplomacy (snapshot v3) ===
 #
@@ -1144,11 +1190,19 @@ fn ash_feed(st, line, len): i64 {
         var src = load64(nums);
         var dst = load64(nums + 8);
         var qty = load64(nums + 16);
-        if (src >= ASH_TERR) { ash_msg(st, "no such source province."); return 0; }
-        if (dst >= ASH_TERR) { ash_msg(st, "no such target province."); return 0; }
+        if (idx_ok(src, ASH_TERR) == 0) { ash_msg(st, "no such source province."); return 0; }
+        if (idx_ok(dst, ASH_TERR) == 0) { ash_msg(st, "no such target province."); return 0; }
         if (ashw_owner(w, src) != me) { ash_msg(st, "you don't hold that province."); return 0; }
         if (ash_adjacent(src, dst) != 1) { ash_msg(st, "you can only march to a neighbouring province."); return 0; }
         if (qty <= 0) { ash_msg(st, "march at least 1 army."); return 0; }
+        # 1.8.1 (audit G6) — a per-player share of the window's queue. The
+        # ASH_MAXORD queue is one pool for the whole world, so a player holding
+        # a single province could issue 64 marches and lock everyone else out
+        # until the window rolled over — and refill it right after.
+        if (ash_orders_of(w, me) >= ash_order_share(w, me)) {
+            ash_msg(st, "you have issued all the orders your provinces can carry this turn.");
+            return 0;
+        }
         if (ashw_order_push(w, me, src, dst, qty) == 1) {
             var m = load64(st + AE_MSG);
             var mp = 0;

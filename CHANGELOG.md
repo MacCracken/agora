@@ -4,6 +4,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-10-12 (code audit + repair: one client can no longer starve or exhaust the server)
+
+A full-tree audit of 1.8.0 in six parallel slices — the wire; storage and identity; serve loops and
+memory; the door framework and trade doors; the RPG/war doors, chat, chatbots and the Descent link; the
+closeout gates and doc-vs-code truth — with every finding re-verified, fixed one at a time, and A/B'd
+against a `git archive` build of 1.8.0 using the auditors' own repros. **3 HIGH, 12 MEDIUM, 26 LOW fixed;
+14 INFO recorded, the open ones scheduled in the roadmap.** No CRITICAL. No new features. Full report:
+[`docs/audit/2026-10-12-audit-1.8.1.md`](docs/audit/2026-10-12-audit-1.8.1.md).
+
+**232/232** tests (+7: t226–t232), also **232/232 on aarch64** under qemu; fuzz green plain, `--poison` and
+`--poison=ab`; **30/30** example smokes, 34 runs (new: `30-audit-1.8.1.py`, which fails all 11 of its
+checks against 1.8.0). `build/agora` **968,720 → 986,144 B** (+17,424); `--agnos` 965,280 → 982,656 B;
+`--aarch64` 2,348,864 → 2,415,440 B. Toolchain unchanged (cyrius 6.7.9, darshana 1.3.0).
+
+### Security
+
+The headline numbers, 1.8.0 → 1.8.1, poll model (the only one on agnos):
+
+| Attack (anonymous unless noted) | 1.8.0 | 1.8.1 |
+|---|---:|---:|
+| bystander echo latency, 16 clients pipelining `read 1` | 13,701 ms | **22 ms** |
+| … pipelining `list` / `login x` | 1,077 / 200 ms | **23 / 19 ms** |
+| heap per `login nobody` / per `login` + `auth:` | 223 / 287 B | **0 / 0 B** |
+| heap per `list` or `read`, ~1,500-post board | ~400 KB (masked by a dropped session) | **0 B** |
+| heap per Handler decrypt / per `descent` (logged in) | 737 / 647 B | **0 / 0 B** |
+| fork children from 200 idle connections | 200 | **64** |
+
+- **HIGH — vendored allocations on per-line paths leaked without login** (audit H1). `dir_list`,
+  `str_from`, sigil's `hex_decode` and chrono's `iso8601_now` allocate on the bump heap, which the
+  per-command arena never reclaims; `login x`, `list`, `read`, `boards` and `enter` reached them with no
+  login, pipelinable: +2.5 MB/s from one connection on an empty store, +15 MB/s with 301 users. **Fixed**:
+  every listing goes through `dir_list_into` into one process-lifetime workspace that grows only by
+  doubling (`store_dir_scan`); `Str` headers in the arena; `hex_decode_into`; an allocation-free
+  `iso8601_into` (byte-identical to chrono's, t229).
+- **HIGH — one client could stall every session** (H2). Every line of a 4 KB recv ran before the sweep
+  moved on, and each `read` re-read up to 66 KB of every post. **Fixed**: a per-sweep line budget
+  (`POLL_LINE_BUDGET` = 1) with the remainder parked in the slot; the sweep skips its sleep while anything
+  is parked, so a lone client keeps full speed; compose lines don't count; `replies_to` reads a 2 KB
+  header scan.
+- **HIGH — per-post arena allocations spilled the arena** (H3, found re-measuring H1). `post_read`,
+  `post_from` and `account_lookup_handle` took `cmd_alloc` memory on every call inside per-post /
+  per-user loops; past 512 KB every allocation falls back to a bare, leaking `alloc()`. **Fixed**: stack
+  buffers; t232 pins all three (mutation-checked).
+- **MEDIUM — door saves** (M1): a dropped connection saved nothing while the shared world saved every
+  line — garrisons duplicated (29 → 145, ship unchanged), lost bets erased (Port Authority 2,000 →
+  893,641 credits), finished runs replayed to the leaderboard forever. **Fixed**: every close path
+  checkpoints like `q`; a finished run removes its save; a save that loads already over starts fresh; a
+  per-identity play lock (`<game>.lock`) refuses a second session on the same save.
+- **MEDIUM — damaged saves / snapshots wrote out of bounds** (M2): unchecked `PA_SECTOR`, `PA_PLANET`,
+  `TH_MOLEIDX`, `AG_CITY`, cable indexes, Decode `MAXTRIES`, Ashes `norders`. **Fixed** in the loaders
+  and in the shared-world accessors (t230).
+- **MEDIUM — `.policy` failed open; `.admins` past 4 KB matched a cut-off prefix** (M3, M4). An
+  unrecognised or unreadable policy now means admin-only (with a warning); only whole `.admins` lines
+  count (t226, t227).
+- **MEDIUM** — Handler decrypt leaked a Decode state per attempt (M5); `descent` leaked bare heap per call
+  (M6); a poll player was reaped on returning from any MUD visit over 60 s (M7); any poll command printing
+  > 128 KB dropped the session — a busy board could not be listed (M8); fork mode had no connection cap and
+  an IAC NOP held a child forever (M9); a non-reading client pinned a fork child for hours (M10); one NUL
+  byte bypassed 1.6.4's idle reap (M11); and on agnos the stdlib's 6.6.7 send-retry loop silently undid the
+  one-send-per-drain bound (M12) — all fixed.
+- **LOW** (26, detail in the audit): wire login now requires `public_key.bin` to hash to its fingerprint
+  (L1 — a store-writer could log in as another user); short post writes are cleaned up (L2); board names
+  off the disk are bounded (L3); `register` is serialized (L4 — 30/30 → 0/30 duplicate handles); `list`
+  keeps the newest 4,096 posts, sorted (L5); bodies over 64 KB are refused, not truncated (L6); `serve
+  --store` with no value no longer spins (L7); leaderboards no longer freeze after 256 finishes (L8); an
+  unreadable world is not re-minted (L9); failed world writes are reported (L10); the Handler save honours
+  its cap (L11); the decrypt lever stops calling innocent agents' errors "a plant" (L12, 875 → 0); Descent
+  visit boundaries (L13, L14, L16, L22); Ashes order-queue griefing (L15); chat transcript render bound
+  (L17); greet arena reset (L18); SIGTERM honoured during a Descent visit (L19, mitigated); subnegotiation
+  only for agreed options (L20); id digit cap (L21); leaderboard score parse (L23); tick-length guard
+  (L24); fsync checked (L25); handle re-validation, policy re-check at commit, CLI reply parent (L26).
+
+### Changed
+
+- **Behaviour an operator or player can see**: `.policy` files that are not exactly `open` / `known` /
+  `admin` (after a `#` comment) make a board admin-only; a second session playing the same saved game is
+  refused; a dropped connection keeps door progress (and losses); a finished run starts fresh next time;
+  `boards` lists only directories with valid board names; a board over 4,096 posts lists its newest 4,096;
+  under fork, a 65th simultaneous connection gets "server full"; returning from the Descent re-sends the
+  telnet option salvo.
+- `sort_i64_asc` is a heapsort (O(n log n)); `post_list` sorts the whole board.
+- CLAUDE.md's allocator gate: the `descent_proxy` exception is retired, and a new rule records that **the
+  arena is a budget, not a free list** — no per-iteration `cmd_alloc` in loops; prove boundedness by a
+  poll-mode heap A/B, not by reading `src/`.
+- ADRs 0005, 0006, 0009, 0010, 0013, 0017, 0021, 0022 and 0023 amended where 1.8.1 changed or falsified a
+  statement (ADR 0006's "a store compromise cannot impersonate" was false until L1).
+- CI: the installer step runs with `pipefail` (a failed `curl | sh` went green); the version-drift check
+  covers all three literals; a stale comment corrected. `benches/bench_telnet.bcyr`'s NAWS bench marks
+  the option agreed, so it still times the decode path (L20 would otherwise make it time a rejection).
+- Roadmap rebuilt around release slots (1.8.x → 1.12.x); `state.md` rewritten as a snapshot (it had grown
+  to 168 KB of superseded slot notes); `roadmap-future.md` trimmed of shipped door / chatbot work.
+
+### Added
+
+- `docs/examples/30-audit-1.8.1.py`; tests t226–t232; the fuzz harness's Q-state invariant now checks
+  something (I2 — it range-checked an already-masked byte; mutation-proven).
+
+### Verification
+
+- Tests **232/232** (x86_64) and **232/232** via `cyrius test --aarch64` under qemu. Fuzz 1/1, also under
+  `--poison` and `--poison=ab`. Example smokes **30/30**, 34 runs (04/05/23/25 under both serve models) via
+  a throwaway harness. Full clean build (`rm -rf build lib cyrius.lock && cyrius deps && CYRIUS_DCE=1
+  cyrius build`; the regenerated `lib/` is byte-identical). `cyrius capacity --check` ok. `cyrius lint`
+  tree-wide: **176 warnings** (178 at 1.8.0; all line length) / **0 untracked deferrals**; `cyrfmt --check`
+  clean. **`cyrius audit` exits 1** — as it did at 1.8.0, unrecorded: 176 lint warnings and 358
+  undocumented public functions (roadmap 1.8.2).
+- Benchmarks, six runs each, A/B'd same-day against the 1.8.0 tree: `plain_byte` 8–9 / 8–9 ns,
+  `iac_untracked` 60–62 / 61, `iac_tracked_agree` 70–74 / 71–72, `announce_salvo` 126–127 / 126–127 —
+  unchanged. `subneg_naws` 102–103 vs 94–95: the bench now also marks NAWS agreed each iteration, and the
+  RFC 855 gate (L20) adds a load + compare; it runs once or twice per connection. See
+  [`BENCHMARKS.md`](BENCHMARKS.md).
+- Slow-reader defense re-checked under poll: a client that stops reading is still closed (now once the
+  kernel's buffers are full — 1.8 MB handed over — rather than at 128 KB of queued output), and a
+  bystander stays responsive meanwhile.
+
+### Known limitations (recorded, not fixed)
+
+- The Descent proxy still holds the poll sweep for a whole MUD visit; a blackholed endpoint costs up to
+  4 s per connect, at most once per 30 s (roadmap 1.11.0).
+- Store opens follow symlinks and block on FIFOs (needs store write access; roadmap 1.9.0). A crash —
+  not a short write — mid-post still leaves a truncated post (roadmap 1.9.0).
+- agnos' stdlib socket table holds 8 sockets, so the real session ceiling there is ~8 (ADR 0023 note).
+- The agnos fixes (M12, the signalfd watch in L19) are verified by reading the vendored stdlib and by the
+  `--agnos` build; nothing ran under mirshi this cut.
+
 ## [1.8.0] — 2026-10-12 (toolchain 6.7.9 + darshana 1.3.0: other people's text stops driving your terminal)
 
 cyrius **6.6.2 → 6.7.9** and darshana **0.9.0 → 1.3.0** — the last consumer off a pre-freeze darshana, onto

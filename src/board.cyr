@@ -10,7 +10,7 @@
 # operator's CLI; the storage layer treats paths as opaque cstrings.
 #
 # Cross-platform: built on lib/io.cyr (file_open / file_read /
-# file_write / file_read_all) plus lib/fs.cyr (dir_list). Per the
+# file_write / file_read_all) plus lib/fs.cyr (dir_list_into, is_dir). Per the
 # M1-and-onward cross-platform stance (ADR 0001), AGNOS is one
 # target among many — same source builds on every platform the
 # cyrius stdlib reaches.
@@ -45,7 +45,8 @@ enum BoardPerm {
 enum BoardCap {
     POST_MAX_BYTES = 65536;
     PATH_MAX_BYTES = 512;
-    DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once
+    DIRENT_ID_MAX  = 4096;   # max post IDs returned by post_list at once (the newest)
+    POST_HEAD_SCAN = 2048;   # 1.8.1 — bytes replies_to reads per post (headers only)
     BOARD_NAME_MAX = 32;     # ADR 0004 validation: ≤ 32 bytes
     BOARD_LIST_MAX = 256;    # max named boards listed at once
     BOARD_ADMINS_MAX_BYTES = 4096;  # M6-F: max .admins file we'll read
@@ -70,13 +71,14 @@ enum BoardCap {
 #
 # Operator sets policy by editing the files directly (`echo known >
 # <store>/<board>/.policy`); no CLI verb at first-cut M6-F. A future
-# bite (roadmap § Backlog, "No operator CLI") may add `agora policy set <board> <mode>`
+# bite (roadmap § 1.9.2, "Operator CLI") may add `agora policy set <board> <mode>`
 # if real deployments demand it.
 
 enum BoardPolicy {
     POLICY_OPEN  = 0;
     POLICY_KNOWN = 1;
     POLICY_ADMIN = 2;
+    POLICY_INVALID = 3;   # 1.8.1 — parse result only; board_policy_get maps it to ADMIN
 }
 
 # === ADR 0004: per-board layout ===
@@ -90,8 +92,7 @@ enum BoardPolicy {
 #   - 1 to BOARD_NAME_MAX bytes
 #   - bytes are lowercase ASCII (a-z), digits (0-9), `-`, or `_`
 #   - first byte is a letter or digit (no leading dash/underscore — dodges
-#     "starts-with-dot" sniffer for hidden files; reserves `_*` for
-#     future internal-use namespace)
+#     the "starts-with-dot" sniffer for hidden files)
 #   - the literal name "main" is reserved
 #   - the literal name ".lock" (and anything starting with `.`) is
 #     impossible per the leading-letter-or-digit rule
@@ -168,7 +169,7 @@ fn board_path(store, board, out_buf): i64 {
 # the per-byte reasoning in the body below. (This header said the
 # opposite until 1.6.5 corrected the body and left the summary behind;
 # BS/DEL no longer reach a post. Making BS *edit* the line for
-# non-LINEMODE clients is still open — roadmap § Backlog, The wire.)
+# non-LINEMODE clients is still open — roadmap § 1.10.0.)
 #
 # ⚠ This filter is per BYTE, so it cannot tell UTF-8 text from the C1
 # controls that share the 128-159 range (0x9B is the 8-bit CSI; C2 9B is
@@ -411,7 +412,7 @@ fn board_exists(store, board): i64 {
     if (streq(board, "main") != 0) { return 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path);
-    return is_dir(str_from(path));
+    return is_dir(path_str(path));
 }
 
 # Ensure the (store, board) path exists. For board == "main" this
@@ -495,16 +496,100 @@ fn parse_post_id(name): i64 {
 # Find the highest existing post ID in `(store, board)`. Returns 0
 # if the board is empty / non-existent. Per ADR 0004 each board has
 # its own monotonic counter — listing scans only that board's dir.
+# === 1.8.1 (audit H1): directory listing without bump-heap residue ===
+#
+# `dir_list` builds a vec plus one `Str` per entry on the bump heap, which the
+# ADR 0021 arena reset never reclaims: ~170 B per call plus ~75 B per entry,
+# reachable WITHOUT login and pipelinable (`login x` scans `.users/`; `list`,
+# `read` and `boards` scan boards). Measured at 1.8.0 under poll: +2.5 MB/s from
+# one anonymous connection on an EMPTY store, +15 MB/s with 301 users. Every
+# listing now goes through `dir_list_into` (cyrius 6.5.12), which allocates
+# nothing, into ONE process-lifetime workspace. The workspace doubles when a
+# directory outgrows it (`dir_list_into`'s -3 / -4), so its total size is
+# bounded by about twice the largest directory ever listed — never by the
+# number of calls. Results live in the workspace until the next
+# `store_dir_scan`: consume or copy them before scanning again.
+enum DirScan {
+    DIR_SCRATCH_BYTES = 32768;     # getdents batch buffer
+    DIR_INIT_ENTRIES  = 4608;      # DIRENT_ID_MAX + boards + dotfiles, first size
+    DIR_NAME_AVG      = 24;        # names-buffer bytes budgeted per entry
+    DIR_MAX_ENTRIES   = 1048576;   # growth ceiling — a bigger directory fails the scan
+}
+
+var g_dir_scratch = 0;   # getdents scratch
+var g_dir_names   = 0;   # NUL-terminated names, packed
+var g_dir_offs    = 0;   # per-entry offset into g_dir_names
+var g_dir_ids     = 0;   # i64 scratch with the same capacity (post_list's sort)
+var g_dir_cap     = 0;   # entry capacity of g_dir_offs / g_dir_ids
+
+# (Re)size the workspace to `want` entries. The superseded buffers are not
+# reclaimed — the bump heap cannot — which is why it only ever doubles.
+fn store_dir_grow(want): i64 {
+    if (g_dir_scratch == 0) { g_dir_scratch = alloc(DIR_SCRATCH_BYTES); }
+    var nm = alloc(want * DIR_NAME_AVG);
+    var of = alloc(want * 8);
+    var ids = alloc(want * 8);
+    if (g_dir_scratch == 0) { return 0 - 1; }
+    if (nm == 0) { return 0 - 1; }
+    if (of == 0) { return 0 - 1; }
+    if (ids == 0) { return 0 - 1; }
+    g_dir_names = nm;
+    g_dir_offs = of;
+    g_dir_ids = ids;
+    g_dir_cap = want;
+    return 0;
+}
+
+# A `Str` header for a NUL-terminated path, in the per-command arena. The
+# stdlib's directory calls take a `Str`, and `str_from` takes its 16 bytes from
+# the bump heap — 16 B per `enter` and per `boards` entry, never reclaimed.
+fn path_str(cstr): i64 {
+    var s = cmd_alloc(16);
+    store64(s, cstr);
+    store64(s + 8, strlen(cstr));
+    return s;
+}
+
+# List the directory `path` (NUL-terminated) into the workspace. Returns the
+# entry count (`.` and `..` skipped), or -1 if it could not be opened or read
+# (or outgrew DIR_MAX_ENTRIES). Entries: store_dir_name(0 .. count-1).
+fn store_dir_scan(path): i64 {
+    if (g_dir_cap == 0) {
+        if (store_dir_grow(DIR_INIT_ENTRIES) < 0) { return 0 - 1; }
+    }
+    var p = path_str(path);
+    var result = 0 - 1;
+    var going = 1;
+    while (going == 1) {
+        var r = dir_list_into(p, g_dir_scratch, DIR_SCRATCH_BYTES,
+          g_dir_names, g_dir_cap * DIR_NAME_AVG, g_dir_offs, g_dir_cap);
+        var full = 0;
+        if (r == (0 - 3)) { full = 1; }
+        if (r == (0 - 4)) { full = 1; }
+        if (full == 0) {
+            if (r >= 0) { result = r; }
+            going = 0;
+            continue;
+        }
+        if (g_dir_cap * 2 > DIR_MAX_ENTRIES) { going = 0; continue; }
+        if (store_dir_grow(g_dir_cap * 2) < 0) { going = 0; continue; }
+    }
+    return result;
+}
+
+# Entry `i` of the last store_dir_scan, NUL-terminated.
+fn store_dir_name(i): i64 {
+    return g_dir_names + load64(g_dir_offs + i * 8);
+}
+
 fn post_max_id(store, board): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
-    var entries = dir_list(str_from(path_buf));
-    var n = vec_len(entries);
+    var n = store_dir_scan(path_buf);
     var max_id = 0;
     var i = 0;
     while (i < n) {
-        var entry = vec_get(entries, i);
-        var id = parse_post_id(str_data(entry));
+        var id = parse_post_id(store_dir_name(i));
         if (id > max_id) { max_id = id; }
         i = i + 1;
     }
@@ -555,10 +640,66 @@ fn store_lock_release(fd): i64 {
 
 # Read a post by (board, id) into the caller-allocated buffer.
 # Returns the number of bytes read, or negative on error.
+#
+# 1.8.1 (audit H3, found re-measuring H1) — the path lives on the STACK. It
+# came from the per-command arena, and `list` and `replies_to` call this once
+# PER POST: on a ~1,500-post board that is ~770 KB of 512-byte paths in one
+# command, past the 512 KB arena, after which EVERY cmd_alloc in the command
+# silently fell back to a never-reclaimed bare alloc() — ~400 KB leaked per
+# anonymous `list` or `read` under poll. (1.8.0 hid it: a `list` that size
+# overflowed the tx queue and the session was dropped first.)
 fn post_read(store, board, id, out_buf, out_cap): i64 {
-    var path_buf = cmd_alloc(PATH_MAX_BYTES);
-    build_post_path(store, board, id, path_buf);
-    return file_read_all(path_buf, out_buf, out_cap);
+    var path_buf[512];   # PATH_MAX_BYTES
+    build_post_path(store, board, id, &path_buf);
+    return file_read_all(&path_buf, out_buf, out_cap);
+}
+
+# Write "YYYY-MM-DDTHH:MM:SSZ" for `epoch` (seconds, >= 0) into `out`, which
+# must hold 21 bytes; NUL-terminated. Returns 20. 1.8.1 (audit H1) — replaces
+# chrono's `iso8601_now()` in post_format, which took 72 bytes of bump heap per
+# post (a 48-byte date struct plus the string) that the per-command arena never
+# reclaims, and whose 0 return on a refused allocation would have reached
+# `strlen`. Civil-from-days per H. Hinnant; no allocation. Pure.
+fn iso8601_into(epoch, out): i64 {
+    var days = epoch / 86400;
+    var rem = epoch % 86400;
+    var z = days + 719468;
+    var era = z / 146097;
+    var doe = z - era * 146097;
+    var yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+    var y = yoe + era * 400;
+    var doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+    var mp = ((5 * doy) + 2) / 153;
+    var d = doy - (((153 * mp) + 2) / 5) + 1;
+    var m = mp + 3;
+    if (m > 12) { m = m - 12; }
+    if (m <= 2) { y = y + 1; }
+    iso_put_digits(out, 0, y, 4);
+    store8(out + 4, 45);                  # '-'
+    iso_put_digits(out, 5, m, 2);
+    store8(out + 7, 45);
+    iso_put_digits(out, 8, d, 2);
+    store8(out + 10, 84);                 # 'T'
+    iso_put_digits(out, 11, rem / 3600, 2);
+    store8(out + 13, 58);                 # ':'
+    iso_put_digits(out, 14, (rem % 3600) / 60, 2);
+    store8(out + 16, 58);
+    iso_put_digits(out, 17, rem % 60, 2);
+    store8(out + 19, 90);                 # 'Z'
+    store8(out + 20, 0);
+    return 20;
+}
+
+# Write `val` as exactly `width` zero-padded decimal digits at out+pos.
+fn iso_put_digits(out, pos, val, width): i64 {
+    var k = width - 1;
+    var v = val;
+    while (k >= 0) {
+        store8(out + pos + k, 48 + (v % 10));
+        v = v / 10;
+        k = k - 1;
+    }
+    return 0;
 }
 
 # === RFC 822-shaped headers (ADR 0003) ===
@@ -768,9 +909,7 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
 
     # "Date: <iso8601>\r\n"
     memcpy(out_buf + pos, "Date: ", 6); pos = pos + 6;
-    var iso = iso8601_now();
-    var ilen = strlen(iso);
-    memcpy(out_buf + pos, iso, ilen); pos = pos + ilen;
+    pos = pos + iso8601_into(clock_epoch_secs(), out_buf + pos);
     store8(out_buf + pos, 13); pos = pos + 1;
     store8(out_buf + pos, 10); pos = pos + 1;
 
@@ -845,10 +984,23 @@ fn post_new(store, board, ph, body, body_len): i64 {
     # atomic there, but a refusal instead of silent data loss.
     var fd = file_create_exclusive(path_buf, PERM_FILE);
     if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
-    var n = file_write(fd, fbuf, flen);
+    # 1.8.1 (audit S6) — write the whole post (write(2) may return short), and
+    # on failure REMOVE it, under the lock, before anyone can list it. A short
+    # write (full disk, RLIMIT_FSIZE) returned -1 but left the truncated post
+    # published under its id with intact headers — listed, readable, attributed —
+    # and a retry made a duplicate. Fully crash-safe posts (temp + link) are
+    # roadmap 1.9.0; this closes the failure the code can see.
+    var off = 0;
+    var wok = 1;
+    while (off < flen) {
+        var n = file_write(fd, fbuf + off, flen - off);
+        if (n <= 0) { wok = 0; off = flen; continue; }
+        off = off + n;
+    }
     file_close(fd);
+    if (wok == 0) { xunlink(path_buf); }
     store_lock_release(lock_fd);
-    if (n != flen) { return 0 - 1; }
+    if (wok == 0) { return 0 - 1; }
     return id;
 }
 
@@ -884,16 +1036,24 @@ fn post_reply_to(buf, len): i64 {
 # Find every reply (in `board`) whose Reply-To header equals
 # `parent_id`. Writes child IDs (sorted ascending) into out_ids;
 # returns count. O(n) in the board's post count per ADR 0005.
+#
+# 1.8.1 (audit S3) — reads only each post's first POST_HEAD_SCAN bytes. It read
+# up to POST_MAX_BYTES + 1 KB of EVERY post to parse one header, on every
+# anonymous `read`: ~20 ms per `read` on a 2,000 × 16 KB board, so one
+# pipelined 4 KB packet of `read 1` stalled the whole poll process for ~10 s.
+# An agora-written header block is under ~450 bytes; a post whose header
+# terminator is not inside the scan simply has no Reply-To here (header_get
+# finds no body offset), which is the right answer for a hand-made file.
 fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
     var ids = cmd_alloc(DIRENT_ID_MAX * 8);
     var count = post_list(store, board, ids, DIRENT_ID_MAX);
-    var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
+    var fbuf = cmd_alloc(POST_HEAD_SCAN);
     var out_count = 0;
     var i = 0;
     while (i < count) {
         if (out_count >= max_ids) { i = count; continue; }
         var id = load64(ids + i * 8);
-        var flen = post_read(store, board, id, fbuf, POST_MAX_BYTES + 1024);
+        var flen = post_read(store, board, id, fbuf, POST_HEAD_SCAN);
         if (flen > 0) {
             if (post_reply_to(fbuf, flen) == parent_id) {
                 store64(out_ids + out_count * 8, id);
@@ -960,31 +1120,45 @@ fn subject_reply_prefix(parent_subject, parent_len, out_buf, out_max): i64 {
     return pos;
 }
 
-# Insertion sort an i64 array in place. O(n²); used by post_list
-# to deliver IDs in ascending order. Insertion sort is appropriate
-# for the v1.0 BBS scale — DIRENT_ID_MAX is 4,096 and post counts
-# in real-world BBS use are well below; quicksort overhead isn't
-# worth it. Bumping the sort algorithm earns a bite if a consumer
-# reports a perf concern.
-fn sort_i64_asc(arr, count): i64 {
-    var i = 1;
-    while (i < count) {
-        var j = i;
-        var swapping = 1;
-        while (swapping == 1) {
-            if (j <= 0) { swapping = 0; }
-            else {
-                var prev = load64(arr + (j - 1) * 8);
-                var curr = load64(arr + j * 8);
-                if (prev <= curr) { swapping = 0; }
-                else {
-                    store64(arr + (j - 1) * 8, curr);
-                    store64(arr + j * 8, prev);
-                    j = j - 1;
-                }
-            }
+# Heapsort an i64 array ascending, in place. 1.8.1 — was an O(n²) insertion
+# sort, run on every `list` and every reply scan; now that post_list sorts the
+# WHOLE board before keeping the newest DIRENT_ID_MAX (audit S10), the board
+# size is unbounded and the sort has to be O(n log n). No allocation.
+fn sort_sift_down(arr, start, end): i64 {
+    var root = start;
+    var going = 1;
+    while (going == 1) {
+        var child = root * 2 + 1;
+        if (child >= end) { going = 0; continue; }
+        var big = root;
+        if (load64(arr + big * 8) < load64(arr + child * 8)) { big = child; }
+        if (child + 1 < end) {
+            if (load64(arr + big * 8) < load64(arr + (child + 1) * 8)) { big = child + 1; }
         }
-        i = i + 1;
+        if (big == root) { going = 0; continue; }
+        var t = load64(arr + root * 8);
+        store64(arr + root * 8, load64(arr + big * 8));
+        store64(arr + big * 8, t);
+        root = big;
+    }
+    return 0;
+}
+
+# Sort arr[0..count) ascending in place (heapsort; see sort_sift_down above).
+fn sort_i64_asc(arr, count): i64 {
+    if (count < 2) { return 0; }
+    var start = (count - 2) / 2;
+    while (start >= 0) {
+        sort_sift_down(arr, start, count);
+        start = start - 1;
+    }
+    var end = count - 1;
+    while (end > 0) {
+        var t = load64(arr);
+        store64(arr, load64(arr + end * 8));
+        store64(arr + end * 8, t);
+        sort_sift_down(arr, 0, end);
+        end = end - 1;
     }
     return 0;
 }
@@ -996,69 +1170,65 @@ fn sort_i64_asc(arr, count): i64 {
 fn post_list(store, board, out_ids, max_ids): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
-    var entries = dir_list(str_from(path_buf));
-    var n = vec_len(entries);
-    var count = 0;
+    var n = store_dir_scan(path_buf);
+    # 1.8.1 (audit S10) — sort the WHOLE board, then keep the newest max_ids.
+    # This used to stop collecting at max_ids and return BEFORE sorting, so a
+    # board past 4,096 posts listed an arbitrary readdir-order subset, unsorted,
+    # with posts silently missing — and replies_to, which relies on the order,
+    # missed replies outside the subset.
+    var c = 0;
     var i = 0;
     while (i < n) {
-        if (count >= max_ids) { return count; }
-        var entry = vec_get(entries, i);
-        var id = parse_post_id(str_data(entry));
+        var id = parse_post_id(store_dir_name(i));
         if (id > 0) {
-            store64(out_ids + count * 8, id);
-            count = count + 1;
+            store64(g_dir_ids + c * 8, id);
+            c = c + 1;
         }
         i = i + 1;
     }
-    sort_i64_asc(out_ids, count);
-    return count;
+    sort_i64_asc(g_dir_ids, c);
+    var first = 0;
+    if (c > max_ids) { first = c - max_ids; }
+    var k = 0;
+    while (first + k < c) {
+        store64(out_ids + k * 8, load64(g_dir_ids + (first + k) * 8));
+        k = k + 1;
+    }
+    return k;
 }
 
-# List all named boards in the store. Writes Str-pointers into
-# out_names (8 bytes each); returns the count.
+# List all named boards in the store. Writes NUL-terminated name pointers into
+# out_names (8 bytes each); returns the count. The names are copies in the
+# per-command arena, so they survive further listings in the same command.
 #
-# "main" is implicit — never returned by this function. Callers
-# render "main" themselves alongside the named-board list. Per ADR
-# 0004, named boards are subdirectories of `<store>`; anything in
-# `<store>` that isn't a regular file (post .txt + lockfile) or a
-# subdirectory is silently skipped.
+# "main" is implicit — never returned by this function. Callers render "main"
+# themselves alongside the named-board list. Per ADR 0004, named boards are
+# subdirectories of `<store>`.
 #
-# The names are surfaced verbatim from the filesystem — board_name_valid
-# isn't enforced on read (operators may have created weird names
-# pre-validator-introduction); the validator only gates writes
-# from the wire.
+# 1.8.1 (audit S7) — only directories whose name passes `board_name_valid`. A
+# name read off the disk used to be memcpy'd into a PATH_MAX_BYTES path with no
+# bound (a 250-byte name under a 417-byte `--store` wrote 157 bytes past it),
+# and a board with an invalid name could never be `enter`ed anyway. This also
+# skips post files, the lockfile and every dot-directory without special cases.
 fn boards_list(store, out_names, max_boards): i64 {
-    var entries = dir_list(str_from(store));
-    var n = vec_len(entries);
+    var n = store_dir_scan(store);
+    var full = cmd_alloc(PATH_MAX_BYTES);
+    var slen = strlen(store);
     var count = 0;
     var i = 0;
-    # 1.6.2 — hoisted out of the loop below. It used to allocate a fresh
-    # PATH_MAX_BYTES buffer per directory entry, so listing a store with many
-    # boards burned 512 B × entries every time anyone typed `boards`. It is pure
-    # scratch (only `entry` is stored into out_names), so one buffer reused
-    # across iterations is equivalent and allocates once per call.
-    var full = cmd_alloc(PATH_MAX_BYTES);
     while (i < n) {
-        if (count >= max_boards) { return count; }
-        var entry = vec_get(entries, i);
-        var name_cstr = str_data(entry);
-        # Filter: skip post files (.txt suffix) and the lockfile.
-        var keep = 1;
-        if (parse_post_id(name_cstr) > 0) { keep = 0; }
-        if (streq(name_cstr, ".lock") != 0) { keep = 0; }
-        # Skip files starting with '.' generally (hidden / lockfile)
-        if ((load8(name_cstr) & 0xFF) == 46) { keep = 0; }
-        if (keep != 0) {
-            # We need to verify it's a directory. Build full path,
-            # call is_dir. (`full` is hoisted above the loop — 1.6.2.)
-            var slen = strlen(store);
+        if (count >= max_boards) { i = n; continue; }
+        var name_cstr = store_dir_name(i);
+        if (board_name_valid(name_cstr) == 1) {
+            var nlen = strlen(name_cstr);
             memcpy(full, store, slen);
             store8(full + slen, 47);     # '/'
-            var nlen = strlen(name_cstr);
             memcpy(full + slen + 1, name_cstr, nlen);
             store8(full + slen + 1 + nlen, 0);
-            if (is_dir(str_from(full)) == 1) {
-                store64(out_names + count * 8, entry);
+            if (is_dir(path_str(full)) == 1) {
+                var copy = cmd_alloc(nlen + 1);
+                memcpy(copy, name_cstr, nlen + 1);
+                store64(out_names + count * 8, copy);
                 count = count + 1;
             }
         }
@@ -1087,44 +1257,160 @@ fn board_admins_path(store, board, out_buf): i64 {
     return pos;
 }
 
-# Read the policy file, parse one of `open` / `known` / `admin`,
-# return the corresponding POLICY_* enum value. Missing file or
-# unparseable contents → POLICY_OPEN (the default per ADR 0006).
+# 1.8.1 — does a negative `file_read_all` return mean "the file is not there"?
+# Linux and macOS return -errno, so only -ENOENT (-2) counts. agnos returns -1
+# for EVERY error, so there "missing" and "unreadable" cannot be told apart and
+# -1 has to count as missing — the common case (a board with no `.policy`) must
+# keep working. Every other negative is a file that exists and could not be
+# read, which a caller deciding an ACCESS question must not mistake for absent.
+fn store_read_missing(n): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (n == (0 - 1)) { return 1; }
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (n == (0 - 2)) { return 1; }
+    #endif
+    return 0;
+}
+
+enum PolicyFile {
+    POLICY_FILE_CAP = 256;     # bytes of `.policy` parsed (a token + a comment)
+}
+
+# 1 if `c` is whitespace inside a `.policy` line (SP, TAB, CR). Pure.
+fn policy_ws(c): i64 {
+    if (c == 32) { return 1; }
+    if (c == 9)  { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# Locate a `.policy` file's deciding token: the first line that still holds
+# one after a `#` comment is cut and whitespace trimmed. Writes the token's
+# [start, end) to out+0 / out+8 and, at out+16, 1 if that line runs to the end
+# of the buffer (a truncated read may have cut it). Returns 1 if found, 0 if no
+# line holds a token. Pure.
+fn policy_token(buf, n, out): i64 {
+    var found = 0;
+    var i = 0;
+    while (i < n) {
+        var le = i;
+        var scan = 1;
+        while (scan == 1) {
+            if (le >= n) { scan = 0; continue; }
+            if ((load8(buf + le) & 0xFF) == 10) { scan = 0; continue; }
+            le = le + 1;
+        }
+        var te = i;
+        var cscan = 1;
+        while (cscan == 1) {
+            if (te >= le) { cscan = 0; continue; }
+            if ((load8(buf + te) & 0xFF) == 35) { cscan = 0; continue; }   # '#'
+            te = te + 1;
+        }
+        var ts = i;
+        var tl = 1;
+        while (tl == 1) {
+            if (ts >= te) { tl = 0; continue; }
+            if (policy_ws(load8(buf + ts) & 0xFF) == 0) { tl = 0; continue; }
+            ts = ts + 1;
+        }
+        var tr = 1;
+        while (tr == 1) {
+            if (te <= ts) { tr = 0; continue; }
+            if (policy_ws(load8(buf + te - 1) & 0xFF) == 0) { tr = 0; continue; }
+            te = te - 1;
+        }
+        if (found == 0) {
+            if (te > ts) {
+                found = 1;
+                store64(out, ts);
+                store64(out + 8, te);
+                store64(out + 16, 0);
+                if (le >= n) { store64(out + 16, 1); }
+            }
+        }
+        i = le + 1;
+    }
+    return found;
+}
+
+# Parse a `.policy` file's bytes (1.8.1, audit S1). The deciding token
+# (policy_token) must be exactly `open`, `known` or `admin`. A file that is
+# empty or all whitespace is ADR 0006's default, POLICY_OPEN. ANYTHING ELSE is
+# POLICY_INVALID — an unknown or mis-cased token, a comment-only file, a BOM, or
+# a deciding line that a truncated read (`truncated` = the file was longer than
+# the buffer) may have cut. Before 1.8.1 every one of those silently meant
+# open, so `admin # ops only` or `Admin` let any registered user post. Pure.
+fn board_policy_parse(buf, n, truncated): i64 {
+    var tok[24];
+    if (policy_token(buf, n, &tok) == 0) {
+        var k = 0;
+        while (k < n) {
+            var c = load8(buf + k) & 0xFF;
+            if (c != 10) { if (policy_ws(c) == 0) { return POLICY_INVALID; } }
+            k = k + 1;
+        }
+        return POLICY_OPEN;
+    }
+    if (load64((&tok) + 16) == 1) { if (truncated == 1) { return POLICY_INVALID; } }
+    var ts = load64(&tok);
+    var tlen = load64((&tok) + 8) - ts;
+    if (tlen == 4) { if (memeq(buf + ts, "open", 4)  == 1) { return POLICY_OPEN;  } }
+    if (tlen == 5) { if (memeq(buf + ts, "known", 5) == 1) { return POLICY_KNOWN; } }
+    if (tlen == 5) { if (memeq(buf + ts, "admin", 5) == 1) { return POLICY_ADMIN; } }
+    return POLICY_INVALID;
+}
+
+# Read `<store>/<board>/.policy` and return its POLICY_* mode. A MISSING file
+# is POLICY_OPEN (ADR 0006). A file that exists but cannot be read (EACCES — a
+# root-owned 0600 file — EISDIR, EIO) or does not parse fails CLOSED to
+# POLICY_ADMIN, so only `.admins` can post, and warns on stderr so the operator
+# learns why posting stopped. (1.8.1, audit S1 — both used to mean open.)
 fn board_policy_get(store, board): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_policy_path(store, board, path);
-    var buf[32];
-    var n = file_read_all(path, &buf, 32);
-    if (n < 0) { return POLICY_OPEN; }
-    if (n == 0) { return POLICY_OPEN; }
-    # Trim trailing whitespace + CR/LF
-    var trim = 1;
-    while (trim == 1) {
-        if (n <= 0) { trim = 0; continue; }
-        var c = load8((&buf) + n - 1) & 0xFF;
-        if (c == 10) { n = n - 1; continue; }
-        if (c == 13) { n = n - 1; continue; }
-        if (c == 32) { n = n - 1; continue; }
-        if (c == 9)  { n = n - 1; continue; }
-        trim = 0;
+    var buf = cmd_alloc(POLICY_FILE_CAP + 1);
+    var n = file_read_all(path, buf, POLICY_FILE_CAP + 1);
+    var pol = POLICY_INVALID;
+    if (n < 0) {
+        if (store_read_missing(n) == 1) { return POLICY_OPEN; }
+    } else {
+        var trunc = 0;
+        if (n > POLICY_FILE_CAP) { trunc = 1; }
+        pol = board_policy_parse(buf, n, trunc);
     }
-    if (n == 4)  { if (memeq(&buf, "open", 4)  == 1) { return POLICY_OPEN;  } }
-    if (n == 5)  { if (memeq(&buf, "known", 5) == 1) { return POLICY_KNOWN; } }
-    if (n == 5)  { if (memeq(&buf, "admin", 5) == 1) { return POLICY_ADMIN; } }
-    return POLICY_OPEN;
+    if (pol == POLICY_INVALID) {
+        eprint("agora: unreadable or unrecognised .policy, board is admin-only: ", 64);
+        eprint(path, strlen(path));
+        eprint("\n", 1);
+        return POLICY_ADMIN;
+    }
+    return pol;
 }
 
-# Check if `handle` appears as an entry in `<store>/<board>/.admins`.
-# File format: one handle per line, blank lines and `#`-comment lines
-# ignored, trailing CR/LF/whitespace trimmed per line. Returns 1 if
-# present, 0 otherwise (including missing / unreadable file).
-fn board_admin_check(store, board, handle): i64 {
-    var path = cmd_alloc(PATH_MAX_BYTES);
-    board_admins_path(store, board, path);
-    var buf = cmd_alloc(BOARD_ADMINS_MAX_BYTES);
-    var n = file_read_all(path, buf, BOARD_ADMINS_MAX_BYTES);
-    if (n <= 0) { return 0; }
+# How many leading bytes of an `.admins` read are WHOLE lines (1.8.1, audit
+# S2). When the file is longer than `cap` the read stops mid-line, and the
+# scanner treats end-of-buffer as end-of-line — so the cut-off PREFIX of the
+# straddling line matched as a complete handle (`qixbert` cut to `qix` let
+# `qix` post to an admin-only board). Over the cap, keep only up to the last LF
+# inside the first `cap` bytes; the handles past it are ignored, which fails
+# closed. Returns `n` unchanged when the file fit. Pure.
+fn board_admins_whole(buf, n, cap): i64 {
+    if (n <= cap) { return n; }
+    var i = cap;
+    var keep = 0;
+    while (i > 0) {
+        if ((load8(buf + i - 1) & 0xFF) == 10) { keep = i; i = 0; continue; }
+        i = i - 1;
+    }
+    return keep;
+}
 
+# Does `handle` appear as an entry in an `.admins` buffer? One handle per line;
+# blank and `#`-comment lines ignored; leading and trailing whitespace (and a
+# CR) trimmed per line. Returns 1 if present, else 0. Pure.
+fn board_admins_scan(buf, n, handle): i64 {
     var hlen = strlen(handle);
     if (hlen == 0) { return 0; }
 
@@ -1182,6 +1468,23 @@ fn board_admin_check(store, board, handle): i64 {
         i = i + 1;
     }
     return found;
+}
+
+# Check if `handle` appears in `<store>/<board>/.admins`. Returns 1 if present,
+# 0 otherwise (including a missing or unreadable file — fails closed).
+fn board_admin_check(store, board, handle): i64 {
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    board_admins_path(store, board, path);
+    var buf = cmd_alloc(BOARD_ADMINS_MAX_BYTES + 1);
+    var n = file_read_all(path, buf, BOARD_ADMINS_MAX_BYTES + 1);
+    if (n <= 0) { return 0; }
+    if (n > BOARD_ADMINS_MAX_BYTES) {
+        eprint("agora: .admins over 4096 bytes, later handles ignored: ", 55);
+        eprint(path, strlen(path));
+        eprint("\n", 1);
+    }
+    n = board_admins_whole(buf, n, BOARD_ADMINS_MAX_BYTES);
+    return board_admins_scan(buf, n, handle);
 }
 
 # Single decision point — given a session identity (fp + handle —

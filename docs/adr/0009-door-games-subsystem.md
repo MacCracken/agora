@@ -40,3 +40,9 @@ In scope at 1.1.0: the `door.cyr` framework, the three games' Practice + Solo ex
 - **Use the kernel CSPRNG for game randomness.** Rejected — non-reproducible: no replayable Solo days, no fixed-dice regression tests, no stored-seed re-simulation. A deterministic PRNG is mandatory for The Handler's solvable-mole requirement.
 - **Add `lib/random.cyr` / `lib/math.cyr` to deps.** Rejected — `random.cyr` is still a CSPRNG (see above) and `math.cyr` is f64-only; both would add stdlib surface we don't use. A ~30-line in-module PRNG + integer helpers is smaller and exactly fit.
 - **Literally implement DOOR.SYS / DORINFO1.DEF + SQLite for The Handler.** Rejected — agora does not exec external doors; there is no host BBS to write a drop file. Native sigil identity + flat files are the faithful adaptation. (If a *standalone* door binary runnable under other BBS software is ever wanted, that is a separate deliverable, not part of agora's in-process session.)
+
+> **1.8.1 note (audit I4).** The daily-turn rhythm described here is not enforced in real time for
+> Smuggler's Ledger, Port Authority or The Handler: their days advance whenever the player presses the
+> next-day key. (QUEST does gate on the wall clock.) A real daily ration is roadmap § 1.12.0. 1.8.1 did
+> close the exploit that made this matter most — a dropped connection now saves like a clean `q`, so a
+> loss can no longer be undone by disconnecting (audit M1).

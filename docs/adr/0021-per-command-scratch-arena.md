@@ -103,8 +103,10 @@ and `test.cyr`, and the latter links `board.cyr` / `account.cyr` **without**
   redirect. Filed upstream, and **fixed at cyrius 6.5.11** (the buffer moved to
   stack scratch), which agora picked up at the 1.6.7 pin: measured
   **24,467 → 3,495 B/command** on `boards`/`list`. 6.5.12 added the
-  zero-allocation `dir_list_into` for the per-entry half, which agora has not
-  yet adopted (roadmap § Backlog).
+  zero-allocation `dir_list_into` for the per-entry half, which agora
+  adopted at **1.8.1** (audit H1): every listing goes through one
+  process-lifetime workspace (`store_dir_scan`, board.cyr) that grows only by
+  doubling, so its size is bounded by the largest directory, not by calls.
 
   > **⚠ The general lesson outlived the specific bug, and 1.7.0 proved it.**
   > A bare `alloc()` inside a *vendored* function is invisible to this arena and

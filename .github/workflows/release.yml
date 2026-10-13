@@ -31,6 +31,8 @@ jobs:
       - name: Install Cyrius toolchain
         # Upstream installer (lays out the version-matched snapshot at
         # $HOME/.cyrius/versions/<ver>/lib — required since 6.2.x, see ci.yml).
+        # `shell: bash` = -eo pipefail, so a failed curl fails this step (1.8.1).
+        shell: bash
         run: |
           set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"

@@ -56,6 +56,7 @@ enum ChatCap {
     CHAT_SCROLLBACK_LINES = 16;    # lines shown on join
     CHAT_TAIL_CAP        = 8192;   # per-tick rendered-tail buffer
     CHAT_LINE_DISP_MAX   = 300;    # max bytes one rendered "<handle> text\r\n" needs
+    CHAT_HANDLE_DISP     = 32;     # 1.8.1 — handle bytes rendered (handles are <= 32)
 }
 
 # === Channel-name validation ===
@@ -147,6 +148,17 @@ fn chat_render_one(buf, start, end, out): i64 {
     var hend = i;                                  # handle = [hstart, hend)
     var tstart = i;
     if (tstart < end) { tstart = tstart + 1; }     # skip the tab before text
+    # 1.8.1 (audit G8) — the rendered line is bounded by CHAT_LINE_DISP_MAX,
+    # which is what every caller reserves per line. A transcript line can be
+    # ~32 KB long (a damaged or hand-edited log), and both fields were copied
+    # whole: 2,000 bytes into a 512-byte window overran it by ~1.5 KB (on the
+    # live-tail path, a bare-heap static). agora's own lines are ~237 bytes, so
+    # a valid line is byte-identical.
+    if (hend - hstart > CHAT_HANDLE_DISP) { hend = hstart + CHAT_HANDLE_DISP; }
+    var tmax = CHAT_LINE_DISP_MAX - 5 - (hend - hstart);
+    var tend = end;
+    if (tend - tstart > tmax) { tend = tstart + tmax; }
+    end = tend;
     var p = 0;
     store8(out + p, 60); p = p + 1;                # '<'
     memcpy(out + p, buf + hstart, hend - hstart); p = p + (hend - hstart);
@@ -373,7 +385,8 @@ fn chat_log_read(store, channel, out, cap): i64 {
 # Overwrite the channel transcript CRASH-SAFELY (roadmap N2; caller holds the
 # lock). Returns 0 on success, negative on error.
 #
-# 1.7.0: `file_write_all` → `file_write_atomic`. Every `say` rewrites the whole
+# 1.7.0: `file_write_all` → atomic write (agora's `store_write_atomic`, arena.cyr
+# — not the stdlib's `file_write_atomic`, which leaks per call). Every `say` rewrites the whole
 # ring, so this is the most FREQUENTLY executed of the three N2 sites — a crash
 # mid-write lost a channel's entire history, not one message.
 #

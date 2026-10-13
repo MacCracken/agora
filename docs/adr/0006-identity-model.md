@@ -96,12 +96,12 @@ Reply-To: <id>           (optional, ADR 0005)
 **Key file format**:
 - `~/.agora/key` default, override via `--key <path>` flag on any verb that needs a key.
 - Format: **32 bytes raw — the Ed25519 seed**. The seed is the minimum canonical form; `sigil`'s `ed25519_keypair(seed, sk_out, pk_out)` derives the 64-byte secret_key and 32-byte pubkey from it on load. No header, no checksum, no PEM — keep it dead-simple, secret material never touches the wire.
-- File mode 0600 enforced at write time (`fchmod` after `O_CREAT | O_EXCL`); a read-time mode check warns when the file is world / group readable but does not abort (operator-discretion warning, not a hard gate — protects against accidental over-share without blocking valid use under unusual umasks).
+- File mode 0600 set at creation (the create mode of an `O_CREAT | O_EXCL` open — there is no separate `fchmod`; corrected at 1.8.1); a read-time mode check warns when the file is world / group readable but does not abort (operator-discretion warning, not a hard gate — protects against accidental over-share without blocking valid use under unusual umasks).
 - `agora keygen` writes a new keyfile; refuses to overwrite an existing one (`O_EXCL`).
 - (M6-D first-cut stores only the seed. An earlier draft of this ADR specified "96 bytes — seed || sk" but that duplicates the seed bytes inside sk; the cleaner 32-byte-seed-only shape lands at first-cut.)
 
 **CLI surface**:
-- `agora keygen [--key <path>] [--handle <handle>]` — generates a fresh Ed25519 keypair via sigil, writes the keyfile, prints `created <handle> <fp16>`. With `--handle`, also writes `<store>/.users/<fp>/` registration (requires `--store`); without `--handle`, key exists but isn't registered with any agora deployment.
+- `agora keygen [--key <path>]` — generates a fresh Ed25519 keypair via sigil and writes the keyfile; registration is the separate `agora register --handle <h> [--key <path>] [--store <dir>]`. (1.8.1 correction: this described a `keygen --handle` that registered in one step; it was never built.)
 - `agora register --key <path> --handle <handle> [--store <path>]` — registers an existing keyfile's pubkey under a handle in the given store. Refuses if the handle is taken.
 - `agora whoami [--key <path>]` — decodes the keyfile, prints `<handle?> <fp16>`. Handle resolution requires `--store` to look up the registration; without `--store`, prints just the fingerprint.
 - `agora post --as <handle> [--key <path>] [--store <path>] [...]` — op-testing flag. Same effect as wire `login` + `post`; writes `From: <handle> <fp16>` to the post file.
@@ -139,7 +139,7 @@ Reply-To: <id>           (optional, ADR 0005)
 
 **Neutral**:
 
-- **Server holds public keys** (not secrets); a compromised server leaks the pubkey registry (which is public-by-design — pubkeys are the verifier input, not the secret). Worst-case server compromise lets the attacker forge `<store>/.users/<fp>/handle` to grab handles, but cannot impersonate the original user (still need the secret key to sign the nonce).
+- **Server holds public keys** (not secrets); a compromised server leaks the pubkey registry (which is public-by-design — pubkeys are the verifier input, not the secret). Worst-case server compromise lets the attacker forge `<store>/.users/<fp>/handle` to grab handles, but cannot impersonate the original user (still need the secret key to sign the nonce). > **1.8.1 correction (audit L1)**: until 1.8.1 that was false for anyone who could write the store — wire login verified the signature against whatever `public_key.bin` held, so a key copied over another user's logged in AS them. `account_lookup_pubkey` now refuses a key that does not hash to its directory's fingerprint, which makes this sentence true. Handles are still mutable by a store-writer (and `.admins` grants by handle — roadmap § 1.9.2).
 - **The `From:` header field name** is already canonical in RFC 5322 § 3.6.2 — "From: address". We're overloading it for `<handle> <fingerprint>`. Defensible: our posts are not email; the field reads naturally as "from this user"; the two-token shape is distinct from any email-address syntax.
 - **The 30-second login deadline** is generous for a human-paced login (`sigil sign` is sub-second) but tight enough that a stale challenge doesn't sit on the server indefinitely. Tuneable; not a load-bearing decision.
 

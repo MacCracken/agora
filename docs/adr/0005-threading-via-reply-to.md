@@ -80,3 +80,9 @@ Specifics:
 **Tree-view display in `read`.** Rejected at M5-F first cut. Deeper than one-level adds rendering complexity (indentation, line wrapping, NAWS-awareness) that isn't shippable as a small bite. One-level "Replies: N, M, ..." after the body lets users navigate the tree manually with successive `read` commands.
 
 **Storing the parent's subject in the reply's headers** (e.g. an extra `Re-Subject: ...` field) for fast `list` display without reading the parent. Rejected. Adds a field that duplicates information already retrievable via `Reply-To`. If the parent's subject changes (which we don't currently support but might in a future bite), the duplicate goes stale. Better to read the parent file when needed.
+
+> **1.8.1 amendment (audit H2 / H3).** Scan-on-read stays, but its cost changed: `replies_to` now reads
+> only a 2 KB header scan per post (it read up to 66 KB of each), and `post_list` sorts the whole board
+> and keeps the newest 4,096 ids (it used to stop at 4,096 in readdir order, unsorted, so replies outside
+> that subset were missed). The scan is O(n) file opens per `read`; the index-vs-scan decision is roadmap
+> § 1.9.1, to be made on 1.8.3's numbers.

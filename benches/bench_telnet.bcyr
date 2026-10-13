@@ -64,8 +64,12 @@ fn work_iac_tracked_agree(): i64 {
 # B4 — full NAWS subnegotiation: 9 bytes through the parser
 # (IAC SB NAWS w_hi w_lo h_hi h_lo IAC SE) plus the handle_sb
 # dispatch that decodes the 4-byte payload into TS_TERM_*.
+# 1.8.1 — NAWS is marked agreed first: telnet_handle_sb now ignores a
+# subnegotiation for an option the client never enabled (RFC 855, audit W4),
+# so without this the bench would time that early rejection instead.
 # ----------------------------------------------------------------
 fn work_subneg_naws(): i64 {
+    opt_set_him(g_ts, OPT_NAWS, Q_YES);
     store64(g_ts + TS_STATE, ST_DATA);
     store64(g_ts + TS_TX_LEN, 0);
     store64(g_ts + TS_SB_LEN, 0);

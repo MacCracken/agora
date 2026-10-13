@@ -17,10 +17,10 @@
 # per-keyword response set (ez_resp_*), the opener/goodbye, and the
 # NONE/memory templates. The one piece still DOCTOR-shaped is the
 # dispatch: ez_respond / ez_resp_none are a hand-written if-chain over
-# script content rather than a data-driven descriptor. Factoring that
-# into a script-descriptor (keyword table + response-fn table + strings,
-# passed through ez_new) is the recommended FIRST step of the 1.3.1
-# PARRY bite — after which a new personality is purely a new descriptor.
+# script content rather than a data-driven descriptor. (A script-descriptor
+# refactor was recommended here before 1.3.1; PARRY shipped without it, on its
+# own affect-gated dispatch, so the if-chain stands. A future script-engine bot
+# — ALICE / Racter, roadmap-future.md — is where it would earn its keep.)
 # The engine pipeline, per input line:
 #   normalize  → lowercase, punctuation→space, keep apostrophes, cap
 #   reflect    → whole-word pronoun swap (I<->you, my<->your, am->are…)

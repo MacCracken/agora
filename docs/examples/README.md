@@ -16,8 +16,8 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 > prerequisite you must re-satisfy. Separately, **04, 05, 23, 25, 26 and 27 are client-only**: they do not
 > start a server, and each needs one already listening under a specific `AGORA_SERVE` model recorded only in
 > its own header comment (23/25/26/27 want `poll`). 1.7.0 verified all 28 green using a throwaway harness,
-> and 1.8.0 all 29 (plus 04/05/23 under both models); nothing in the repo reproduces it. This is why smoke 20's breakage went unnoticed for four releases —
-> filed in [roadmap.md](../development/roadmap.md) § Backlog.
+> 1.8.0 all 29 (plus 04/05/23 under both models), and 1.8.1 all 30; nothing in the repo reproduces it yet. This is why smoke 20's breakage went unnoticed for four releases —
+> scheduled in [roadmap.md](../development/roadmap.md) § 1.8.2 (examples runner + CI smokes).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -36,6 +36,13 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 13 | [`13-parry.sh`](13-parry.sh) | 1.3.1 PARRY: the `play parry` door is calm then a Mafia "flare" launches the delusion; private `/parry` off the transcript — ADR 0012 | `./bbs/`, `./keys/qix` |
 | 14 | [`14-quest.sh`](14-quest.sh) | 1.3.2 QUEST: the `play quest` practice flow — town hub render, Bank screen, forest hunt, a fight resolves — ADR 0009 | none |
 | 15 | [`15-jabberwacky.sh`](15-jabberwacky.sh) | 1.3.3 Jabberwacky: the door learns a pair mid-session and replays it; `/jabberwacky` answers privately; a `solo` pair survives a disconnect (per-user persistence) — ADR 0015 | `./bbs/`, `./keys/qix` |
+| 16 | [`16-casino.sh`](16-casino.sh) | 1.3.5: the shared wager module across three doors — the Port Authority cantina Dabo Wheel, the Smuggler dice and the QUEST card table — ADR 0013 | `./bbs/`, `./keys/qix` |
+| 17 | [`17-olympiad.sh`](17-olympiad.sh) | 1.3.6: the Olympiad stable sim — a chariot race on the `compete()` primitive, the same weights pricing the book — ADR 0016 | `./bbs/`, `./keys/qix` |
+| 18 | [`18-ashes.sh`](18-ashes.sh) | 1.3.7: Ashes of Empire — login-gated; orders and diplomacy mutate ONE shared map across separate sessions — ADR 0014 | `./bbs/`, `./keys/` |
+| 19 | [`19-ashes-concurrency.sh`](19-ashes-concurrency.sh) | 1.3.7: Ashes under concurrent callers — no lost updates, no colliding foundings — ADR 0014 | `./bbs/`, `./keys/` |
+| 20 | [`20-descent.sh`](20-descent.sh) | 1.4.0: the Descent gateway — "No Descent linked." without config; with it, a logged-in citizen is proxied into the real sibling MUD (needs `../cyrius-yeomans-descent`) — ADR 0017 | `./bbs/`, `./keys/qix` |
+| 21 | [`21-decode.sh`](21-decode.sh) | 1.4.1 / 1.4.2: Decode — Numbers (Mastermind) and Words (Wordle) on one engine — ADR 0018 | none |
+| 22 | [`22-handler-decrypt.sh`](22-handler-decrypt.sh) | 1.4.3: The Handler's decrypt lever — spend a dispatch point to break a cable's cipher — ADR 0019 | none |
 | 23 | [`23-sigpipe-survival.py`](23-sigpipe-survival.py) | 1.6.2: SIGPIPE — rude disconnects close one session, not the server (has teeth only under `AGORA_SERVE=poll`; kills an unpatched server at exit 141) | none |
 | 24 | [`24-descent-serve-models.sh`](24-descent-serve-models.sh) | 1.6.2: the Descent byte-proxy forwards client→MUD under BOTH serve models, asserted against a fake MUD that logs what it receives | `./bbs/`, `./keys/qix` |
 | 25 | [`25-door-state-churn.py`](25-door-state-churn.py) | 1.6.3: the DD_FREE release paths under churn — enter/quit across all nine practice doors, quit-then-enter alternation (freed blocks recycled straight into the next game), and repeated disconnect-mid-game so `session_release` frees a live slot | none |
@@ -43,6 +50,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 27 | [`27-audit-lows.py`](27-audit-lows.py) | 1.6.5: audit LOWs — over-long `--store` refused, BEL/BS/DEL dropped from a stored post, and echo gated correctly (kept for non-negotiating clients, suppressed after `IAC DONT ECHO`) | `./bbs/`, `./keys/qix` |
 | 28 | [`28-clean-shutdown.py`](28-clean-shutdown.py) | 1.7.0 (roadmap N1): SIGINT/SIGTERM shut both serve models down cleanly (exit 0, not 143/130), a connected poll client is told before its socket closes, and **fork children do not inherit the parent's blocked signal mask** — the regression that made every connection process unkillable. Self-contained: starts and signals its own servers. | `/tmp/agora-shutdown-smoke-$$` |
 | 29 | [`29-egress-sanitize.py`](29-egress-sanitize.py) | 1.8.0 (ADR 0024): stored text reaches readers with every terminal control neutralized — C1 controls (raw and UTF-8-encoded) in a wire post, ESC/BEL in a CLI post, malformed UTF-8 — each shown as `?`, while UTF-8 text, TAB and CR LF arrive byte-for-byte and the post on disk is untouched. Both serve models, plus `agora read` / `agora list` on stdout. Self-contained; `AGORA_BIN=` A/Bs an older build (1.7.1 fails 44 checks). | `/tmp/agora-sanitize-smoke-$$` |
+| 30 | [`30-audit-1.8.1.py`](30-audit-1.8.1.py) | 1.8.1 (audit): `.policy` / `.admins` fail closed; CLI 64 KB body refused; `serve --store` without a value exits; poll fairness under 4 pipelining readers; a >128 KB `list` arrives whole under poll; a dropped connection saves door progress and a second session cannot play the same save (both serve models); a public key copied over another user's does not log in as them. Self-contained; `AGORA_BIN=` A/Bs an older build (1.8.0 fails all 11 checks). | `/tmp/agora-audit181-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

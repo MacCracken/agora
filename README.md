@@ -2,9 +2,9 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: **v1.8.0 — 2026-10-12** — other people's text no longer drives your terminal: every stored post, subject, handle and board name now leaves the server through darshana's output sanitizer (control sequences become `?`, UTF-8 text is untouched), closing a stored-text escape-injection path into every reader's session ([ADR 0024](docs/adr/0024-egress-text-sanitization.md)). Toolchain cyrius 6.7.9, darshana 1.3.0 (its frozen v1 API).
+**Status**: **v1.8.1 — 2026-10-12** — a code audit and repair cut, no new features ([audit](docs/audit/2026-10-12-audit-1.8.1.md): 3 HIGH, 12 MEDIUM, 26 LOW, all fixed). The headline repairs: one anonymous client can no longer stall or exhaust a poll server (a per-sweep command budget; directory listings and login scans no longer leak), board `.policy` / `.admins` fail closed, a dropped connection saves door progress (so it can't be used to undo losses), and damaged saves can't corrupt memory. v1.8.0 (same day) sanitizes every stored string at egress ([ADR 0024](docs/adr/0024-egress-text-sanitization.md)). Toolchain cyrius 6.7.9, darshana 1.3.0.
 
-Built on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, and full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance — since extended with door games, a persistent shared universe, a live chat area with four chatbots, a casino, a war-game, a code-breaking door, a gateway into the sibling Yeoman's Descent MUD, an AGNOS target, and a single-process poll multiplex.
+Built on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, and full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance — since extended with door games, a persistent shared universe, a live chat area with three chatbots, a casino, a war-game, a code-breaking door, a gateway into the sibling Yeoman's Descent MUD, an AGNOS target, and a single-process poll multiplex.
 
 **This paragraph deliberately does not narrate the release history** — it used to, and rotted fourteen releases deep. Per-tag detail is in [`CHANGELOG.md`](CHANGELOG.md); the live snapshot (version, binary size, test count, in-flight work) is [`docs/development/state.md`](docs/development/state.md); doc currency is [`docs/doc-health.md`](docs/doc-health.md); what is next is [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
@@ -22,7 +22,7 @@ The naming convention adds a **Greek lane** to the AGNOS ecosystem (previously S
 
 ## Roadmap
 
-Full milestone table + sub-bites + v1.0 criteria in [`docs/development/roadmap.md`](docs/development/roadmap.md). M0–M6 + 0.7.0 security sweep + 0.8.x audit followups + 0.9.0 ABI freeze + 0.9.1 doc-pass + 0.9.2 closeout sweep all shipped 2026-05-23. **v1.0.0 cut after archaemenid iron validation, same day.** Post-1.0 directions live in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md) — six unpinned v2.x sovereignty pillars, pulled forward on consumer pressure rather than calendar.
+The release plan (1.8.x → 1.12.x) and a one-row-per-line history of what shipped are in [`docs/development/roadmap.md`](docs/development/roadmap.md); v1.0's criteria are in CHANGELOG `[1.0.0]`. M0–M6 + 0.7.0 security sweep + 0.8.x audit followups + 0.9.0 ABI freeze + 0.9.1 doc-pass + 0.9.2 closeout sweep all shipped 2026-05-23. **v1.0.0 cut after archaemenid iron validation, same day.** Post-1.0 directions live in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md) — six unpinned v2.x sovereignty pillars, pulled forward on consumer pressure rather than calendar.
 
 ## Build
 
@@ -32,7 +32,7 @@ cyrius build src/main.cyr build/agora
 ./build/agora serve 2323     # telnet on localhost:2323
 ```
 
-End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–28). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
+End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–30). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
 
 ## Architecture
 
@@ -69,7 +69,7 @@ agora binary (~874 KB static ELF at 1.3.7)
 └── fuzz/telnet_iac.fcyr    IAC-parser fuzz harness (CI + release)
 ```
 
-Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darshana (SGR + output sanitizing) + sigil + freelist + bayan + ct (the ed25519 call chain; `bigint` was folded into `bayan` at cyrius 6.2.2). No external deps beyond cyrius.
+Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + ct (the ed25519 call chain; `bigint` was folded into `bayan` at cyrius 6.2.2); first-party git dep: darshana (SGR + output sanitizing). The MOTD banner was rendered offline with bannermanor and baked in — bannermanor is not a build dep. No external deps beyond cyrius.
 
 ## Docs
 
@@ -79,7 +79,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darsha
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — twenty-eight runnable smoke scripts covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`).
+- [`docs/examples/`](docs/examples/) — thirty runnable smoke scripts covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (~9 ns/byte hot path, unchanged across every release since M1-close).
 - [`fuzz/`](fuzz/) — the IAC-parser fuzz harness (`cyrius fuzz`), run by CI and at release.
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.

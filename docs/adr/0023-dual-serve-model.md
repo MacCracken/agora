@@ -48,6 +48,18 @@ The poll model is built from four pieces:
   no-op and `sys_write` on a socket fd routes to `SYS_SOCK_SEND`, which blocks — so on the one target
   that *always* polls, a slow reader stalled the whole sweep. agnos has no non-blocking send to switch
   to, so 1.7.0 (roadmap N3) **bounds** it to one send attempt per drain rather than removing it.
+  > **1.8.1 amendment (audit M12).** That bound broke silently at the 1.8.0 pin move: since cyrius 6.6.7
+  > the agnos `sys_write` on a socket is `_agnos_sock_send_all`, which retries "no progress" until a 30 s
+  > stall deadline re-armed on any byte — so one zero-window peer froze the agnos sweep for 30 s+, a
+  > trickling one indefinitely. `session_drain` now makes ONE raw `sock_send#48` per drain on agnos,
+  > which restores the bound described here (one send, which the kernel may itself hold ~8 s).
+  > **Capacity note (audit I13):** agnos' stdlib socket table holds 8 sockets, so the real ceiling there
+  > is ~8 sessions (a Descent visit uses one more), not `MAX_SESS` = 64.
+- **A per-sweep line budget** (added 1.8.1, audit H2). `process_rx` runs at most `POLL_LINE_BUDGET`
+  (one) *counted* line per session per sweep and parks the rest of the recv in the slot
+  (`SESS_RX_OFF`/`LEN`); the sweep skips its sleep while anything is parked. Before it, one anonymous
+  client pipelining 585 `read 1` per packet held every other session for seconds (13.7 s with 16 such
+  clients). Compose lines do not count, so pasting a post is not throttled.
 - **`send_buf` is model-aware** — under poll it enqueues to the active session's tx queue; under fork it
   writes. Every `send_str` call site is unchanged.
 
@@ -69,9 +81,13 @@ to line dispatch, or to the arena reset, or to a send-failure path, applies to b
   2. **A child's death bounded a bad connection.** A slow reader parked one worker; under poll it parks
      *everyone*. **Mitigated**, not fixed, across 1.6.2–1.7.0: SIGPIPE ignored, send returns checked,
      the Descent write bounded (1.6.2–1.6.5); an over-cap tx queue now closes the session instead of
-     going mute-but-open, and the agnos drain yields after one send (1.7.0, roadmap N3). Two stalls
-     remain by construction — the agnos blocking send has no non-blocking peer, and `descent_proxy`
-     holds the sweep for a player's whole MUD session.
+     going mute-but-open, and the agnos drain yields after one send (1.7.0, roadmap N3). 1.8.1 adds
+     the per-sweep line budget (one client's pipeline can no longer monopolise the sweep), a drain
+     before the tx queue is declared overflowed (a big `list` is not a slow reader), and, under fork,
+     a sticky send failure plus a 64-child cap (`MAX_SESS` is now the operator's bound in both
+     models). Two stalls remain by construction — the agnos blocking send has no non-blocking peer,
+     and `descent_proxy` holds the sweep for a player's whole MUD session (since 1.8.1 it at least
+     watches the shutdown signalfd, and a failed connect is not redialled for 30 s).
   3. **A crash cost one connection.** Under poll it costs all 64.
 ### Clean shutdown (added 1.7.0)
 
@@ -102,7 +118,7 @@ Two things this cost, both worth recording because neither is obvious:
   The pattern is worth stating plainly for the next structural change: **ask what the old model was
   silently providing, not just what the new code does.**
 - **Negative** — the Descent proxy still blocks the sweep for as long as a player is in the MUD, stalling
-  the other 63 sessions. Known, documented at `src/descent.cyr`, tracked as roadmap § Cross-repo.
+  the other 63 sessions. Known, documented at `src/descent.cyr`, tracked as roadmap § 1.11.0.
 - **Neutral** — `AGORA_SERVE=epoll` is accepted and aliased to poll. A real epoll loop is a later
   optimisation; the sweep is a `sleep_ms(20)` tick on both platforms today.
 

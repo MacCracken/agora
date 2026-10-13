@@ -107,38 +107,37 @@ var g_reply_subject_len = 0;
 
 # M6-C: per-session identity binding. NUL terminator at offset 0
 # (empty cstring) = anonymous; populated by a successful `login`
-# challenge/response round. Single-tracking accept loop note from
-# g_reply_to applies here too — these are per-session in effect,
-# pulled to per-conn locals when concurrent-accept lands.
-var g_session_fp     = 0;             # alloc'd in handle_client (ACCOUNT_FP_BUF_BYTES)
-var g_session_handle = 0;             # alloc'd in handle_client (ACCOUNT_HANDLE_BUF)
+# challenge/response round. Like every g_* below, these are swapped in and
+# out of the session slot around each dispatch (sess_load / sess_save,
+# since 1.6.0) — the buffers live in the slot (session_alloc).
+var g_session_fp     = 0;             # slot buffer (ACCOUNT_FP_BUF_BYTES)
+var g_session_handle = 0;             # slot buffer (ACCOUNT_HANDLE_BUF)
 
 # M6-C: parked login challenge. g_login_fp holds the fingerprint
 # resolved from the typed handle; g_login_nonce holds the hex-encoded
 # 32-byte nonce we sent on the wire. Both empty (NUL at offset 0)
 # = no login in flight. Cleared on every auth attempt (pass or fail)
 # + on session close.
-var g_login_fp    = 0;                # alloc'd in handle_client (ACCOUNT_FP_BUF_BYTES)
-var g_login_nonce = 0;                # alloc'd in handle_client (ACCOUNT_NONCE_BUF_BYTES)
+var g_login_fp    = 0;                # slot buffer (ACCOUNT_FP_BUF_BYTES)
+var g_login_nonce = 0;                # slot buffer (ACCOUNT_NONCE_BUF_BYTES)
 
 # 1.1.0 door subsystem (ADR 0009). Active game id (DoorGame enum),
 # heap pointer to the running game state, and the play mode (DoorMode).
-# Per-session in effect via fork-per-accept, like g_session_* above;
-# initialized in handle_client. GAME_NONE = no game active.
+# Per-session via sess_load / sess_save, like g_session_* above.
+# GAME_NONE = no game active.
 var g_door_game  = 0;
 var g_door_state = 0;
 var g_door_mode  = 0;
 
 # 1.2.0 Universe (ADR 0010 bites 2-4). Per-session shared-world snapshot
-# buffer, alloc'd lazily on entry to `play <game> universe` (sized to the
-# largest game world). The flock'd lock→read→feed→write transaction
+# buffer, owned by the session slot since 1.6.2 (sized to the largest game
+# world). The flock'd lock→read→feed→write transaction
 # around each input line reads into this buffer and writes it back, so
 # concurrent players serialize on the world lock with no lost updates.
 var g_uni_world = 0;
 
-# 1.3.0 chat (ADR 0011). Per-session chat state, per-session-in-effect
-# via fork-per-accept like g_session_* / g_door_*; initialized in
-# handle_client. g_chat_channel is the joined channel name buffer (empty
+# 1.3.0 chat (ADR 0011). Per-session chat state, swapped per session like
+# g_session_* / g_door_*. g_chat_channel is the joined channel name buffer (empty
 # = not in chat); g_chat_seen is the highest transcript seq this session
 # has shown (the live-tail watermark — keyed on absolute seq, not a byte
 # offset, so the ring's front-trim never desyncs it); g_chat_idle
@@ -167,6 +166,8 @@ enum DoorRuntime {
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
     DOOR_WORLD_CAP = 8192;        # 1.2.0 Universe shared-world snapshot buffer (largest world fits)
     LB_ROW_CAP     = 320;         # leaderboard display row: "NN) " + row + CR LF (bounded at 1.8.0)
+    LB_TOP         = 10;          # rows `scores` shows
+    LB_CHUNK       = 16384;       # 1.8.1 — leaderboard read piece (the whole file is streamed)
 }
 
 # 0.7.0 audit M6 — explicit 30 s deadline on a parked login challenge.
@@ -181,7 +182,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.8.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.8.1 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -235,6 +236,16 @@ fn send_buf(cfd, buf, len): i64 {
     if (g_serve_mode == SERVE_POLL) {
         return sess_tx_enqueue(g_active_sess, buf, len);
     }
+    # 1.8.1 (audit H19 / P10) — a failed fork-mode send is STICKY, as the poll
+    # queue's overflow already is (1.7.0, N3-B). Each write to a client that has
+    # stopped reading parks for SEND_TIMEOUT_SECS (60 s), and session_execute
+    # discards almost every send's return, so the next send parked another 60 s:
+    # `read 1` x500 into a non-reading client held its child ~3 min and counting
+    # (the theoretical bound was hours). After one failure every later send is
+    # refused at once and process_rx closes the connection.
+    if (g_active_sess != 0) {
+        if (load64(g_active_sess + SESS_TX_OVF) != 0) { return 1; }
+    }
     var off = 0;
     while (off < len) {
         var n = sys_write(cfd, buf + off, len - off);
@@ -243,7 +254,10 @@ fn send_buf(cfd, buf, len): i64 {
         # exits cleanly — the prior flag+continue idiom spun forever here:
         # with off < len still true, `done` only suppressed work, never
         # terminated the loop (a remotely-triggerable CPU-peg DoS). [T1]
-        if (n <= 0) { return 1; }
+        if (n <= 0) {
+            if (g_active_sess != 0) { store64(g_active_sess + SESS_TX_OVF, 1); }
+            return 1;
+        }
         off = off + n;
     }
     return 0;
@@ -389,9 +403,12 @@ fn line_parse_int(line, off, line_len): i64 {
         else { if ((load8(line + i) & 0xFF) != 32) { skipping = 0; }
             else                                { i = i + 1; } }
     }
-    # Read digits
+    # Read digits. 1.8.1 (audit W6) — at most 18, as parse_post_id has had since
+    # the 0.7.0 audit (M3): a 20-digit `read` id wrapped the i64. Only ever a
+    # wrong post number, but the two id parsers now agree.
     var n = 0;
     var got_any = 0;
+    var ndig = 0;
     var reading = 1;
     while (reading == 1) {
         if (i >= line_len) { reading = 0; }
@@ -399,10 +416,11 @@ fn line_parse_int(line, off, line_len): i64 {
             var c = load8(line + i) & 0xFF;
             if (c < 48) { reading = 0; }
             else { if (c > 57) { reading = 0; }
-                else        { n = n * 10 + (c - 48); got_any = 1; i = i + 1; } }
+                else        { n = n * 10 + (c - 48); got_any = 1; ndig = ndig + 1; i = i + 1; } }
         }
     }
     if (got_any == 0) { return 0 - 1; }
+    if (ndig > 18)    { return 0 - 1; }
     if (n <= 0)       { return 0 - 1; }
     return n;
 }
@@ -460,15 +478,14 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         var bcount = boards_list(g_store_buf, names, BOARD_LIST_MAX);
         var i = 0;
         while (i < bcount) {
-            var entry = load64(names + i * 8);
-            var name_cstr = str_data(entry);
+            var name_cstr = load64(names + i * 8);
             var pcount = post_list(g_store_buf, name_cstr, idsmain, DIRENT_ID_MAX);
             send_str(cfd, "  ");
             # 1.8.0 — a directory name read off the disk is content, not a
-            # literal: `boards_list` keeps any non-dot directory, and only names
-            # made through `enter` are known to pass `board_name_valid`. It goes
-            # out through `send_text` (IAC doubling + ADR 0024 sanitization) like
-            # every other stored string. A valid name is byte-identical.
+            # literal, so it goes out through `send_text` (IAC doubling + ADR
+            # 0024 sanitization) like every other stored string. Since 1.8.1
+            # `boards_list` only returns names that pass `board_name_valid`, so
+            # this is defence in depth; a valid name is byte-identical.
             send_text(cfd, name_cstr, strlen(name_cstr));
             # Pad to 10 columns for visual alignment with "main      "
             var nlen = strlen(name_cstr);
@@ -685,8 +702,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     # M5-F: `reply <id>` — compose a reply to parent post <id> in
     # the current board. Computes Re-prefixed subject from parent,
     # skips Subject prompt, transitions straight to MODE_POSTING.
-    # The session's `reply_to_out` global slot is set here and read
-    # by handle_client when finalizing the post.
+    # The parent id and derived subject are parked in g_reply_to /
+    # g_reply_subject (session-slot state) and read by
+    # session_finalize_post at the `.` commit.
     if (line_has_prefix(line, len, "reply") != 0) {
         # M6-E auth gate + M6-F per-board policy (same as `post`).
         if (board_can_post(g_store_buf, current_board, g_session_fp, g_session_handle) == 0) {
@@ -708,15 +726,13 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "reply: parent post not found\r\n");
             return MODE_COMMAND;
         }
-        # Build derived Re: subject — copy into the session's subject
-        # buffer via the `current_board` trick: we expose the slot
-        # through globals (set_reply_state below).
+        # Build the derived Re: subject.
         var parent_sub = cmd_alloc(SUBJECT_MAX_BYTES);
         var ps_len = post_subject(fbuf, flen, parent_sub, SUBJECT_MAX_BYTES);
         var derived = cmd_alloc(SUBJECT_MAX_BYTES + 8);
         subject_reply_prefix(parent_sub, ps_len, derived, SUBJECT_MAX_BYTES + 8);
-        # Park the derived subject + parent_id in globals — they're
-        # picked up by handle_client at the next MODE_POSTING '.' commit.
+        # Park the derived subject + parent_id in the session globals —
+        # session_finalize_post picks them up at the MODE_POSTING '.' commit.
         g_reply_to = parent_id;
         var dlen = strlen(derived);
         # (1.6.2: g_reply_subject is owned by the session slot — always non-0.)
@@ -812,7 +828,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var glen = p - gstart;
         if (glen <= 0) {
-            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad|ashes|decode> [practice|solo]\r\n");
+            send_str(cfd, "usage: play <smuggler|port|handler|eliza|parry|quest|jabberwacky|olympiad|ashes|decode> [practice|solo|universe]\r\n");
             return MODE_COMMAND;
         }
         if (glen > 15) { glen = 15; }
@@ -870,7 +886,8 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
 
         if (dmode == DOOR_UNIVERSE) {
-            # 1.2.0 (ADR 0010 bites 2-4): all three games have a shared
+            # 1.2.0 (ADR 0010 bites 2-4): the Universe doors (Smuggler, Port
+            # Authority, The Handler; Ashes since 1.3.7) have a shared
             # Universe. Login-gated — a persistent actor needs an identity.
             if ((load8(g_session_fp) & 0xFF) == 0) {
                 send_str(cfd, "Universe play needs an identity — log in first ('login <handle>').\r\n");
@@ -878,10 +895,11 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             # 1.6.3 — a `play` while a state is already live would orphan it.
             door_state_free();
-            g_door_game = game;
-            g_door_mode = DOOR_UNIVERSE;
             # (1.6.2: g_uni_world is owned by the session slot — always non-0.)
             var uslot = door_universe_slot(game);
+            if (door_take_play_lock(cfd, uslot) == 0) { return MODE_COMMAND; }
+            g_door_game = game;
+            g_door_mode = DOOR_UNIVERSE;
             var uloaded = 0;
             if (door_save_exists(g_store_buf, g_session_fp, uslot) == 1) {
                 var ulbuf = cmd_alloc(DOOR_SAVE_CAP);
@@ -893,6 +911,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (ulfp != 0) { g_door_state = callptr(ulfp, ulbuf, uln); }
                     if (g_door_state != 0) { uloaded = 1; }
                 }
+                uloaded = door_vet_loaded(cfd, game, uslot, uloaded);
             }
             if (uloaded == 0) {
                 var und = door_desc_for(game);
@@ -931,6 +950,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 }
                 door_world_commit(ufd);
             }
+            store64(g_active_sess + SESS_DOOR_OVER0, door_is_over());
             door_send_frame(cfd);
             return MODE_DOOR;
         }
@@ -945,6 +965,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # live state pointer, or its buffers are orphaned for the life of the
         # server under poll.
         door_state_free();
+        if (dmode == DOOR_SOLO) {
+            if (door_take_play_lock(cfd, door_game_name(game)) == 0) { return MODE_COMMAND; }
+        }
         g_door_game = game;
         g_door_mode = dmode;
         var seed = clock_now_ns();
@@ -961,6 +984,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                     if (slfp != 0) { g_door_state = callptr(slfp, lbuf, ln); }
                     if (g_door_state != 0) { loaded = 1; }
                 }
+                loaded = door_vet_loaded(cfd, game, nm, loaded);
             }
         }
         if (loaded == 0) {
@@ -976,6 +1000,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             var sstfp = load64(ssd + DD_START);
             if (sstfp != 0) { var ssr = callptr(sstfp, g_door_state); }
         }
+        store64(g_active_sess + SESS_DOOR_OVER0, door_is_over());
         door_send_frame(cfd);
         return MODE_DOOR;
     }
@@ -1086,7 +1111,9 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             send_str(cfd, "descent needs an identity — log in first ('login <handle>').\r\n");
             return MODE_COMMAND;
         }
+        session_flush_now(cfd);
         descent_run(cfd, g_store_buf, g_session_handle);
+        session_after_descent(cfd);
         return MODE_COMMAND;
     }
 
@@ -1529,7 +1556,13 @@ fn door_world_begin(): i64 {
     if (fd < 0) { return 0 - 1; }
     var cap = door_world_bytes(g_door_game);
     var n = world_read(g_store_buf, name, g_uni_world, cap);
+    # 1.8.1 (audit D6) — a snapshot that exists but cannot be read is NOT "no
+    # world": refuse (the caller says the world is busy) rather than mint a fresh
+    # world over it. An INVALID one (corrupt, wrong version) is set aside as
+    # snapshot.bad before the fresh world replaces it.
+    if (n < 0) { world_lock_release(fd); return 0 - 1; }
     if (door_world_valid(g_door_game, g_uni_world, n) == 0) {
+        if (n > 0) { world_quarantine(g_store_buf, name); }
         door_world_fresh_into(g_door_game, g_uni_world);
         world_write(g_store_buf, name, g_uni_world, cap);
     }
@@ -1542,6 +1575,9 @@ fn door_world_begin(): i64 {
     var dt = door_desc_for(g_door_game);
     if (dt != 0) {
         var tfp = load64(dt + DD_WORLD_TICK);
+        # 1.8.1 (audit I3) — a tick hook with no tick length would divide by
+        # zero and SIGFPE the whole poll server; such a registration is skipped.
+        if (load64(dt + DD_TICK_NS) <= 0) { tfp = 0; }
         if (tfp != 0) {
             var turn = clock_epoch_ns() / load64(dt + DD_TICK_NS);
             var tr = callptr(tfp, g_uni_world, turn);
@@ -1582,22 +1618,16 @@ fn door_universe_feed(line, len): i64 {
         var ffp = load64(d + DD_FEED);
         if (ffp != 0) { ctrl = callptr(ffp, g_door_state, line, len); }
     }
-    door_world_commit(fd);
+    # 1.8.1 (audit D7) — the 2026-06-15 R6 fix made door_world_commit RETURN the
+    # write status, but no caller looked at it, so a failed snapshot write (a
+    # full disk) lost the turn silently. Tell the player.
+    if (door_world_commit(fd) != 0) {
+        if (d != 0) {
+            var wmfp = load64(d + DD_MSG);
+            if (wmfp != 0) { var wmr = callptr(wmfp, g_door_state, "The shared world could not be saved — that move may not have taken."); }
+        }
+    }
     return ctrl;
-}
-
-# Persist the active Universe player's per-player state under its
-# "<game>u" slot, keyed by fp — separate from the Solo save.
-fn door_universe_save(): i64 {
-    if ((load8(g_session_fp) & 0xFF) == 0) { return 0; }
-    var d = door_desc_for(g_door_game);
-    if (d == 0) { return 0; }
-    var fp = load64(d + DD_SAVE_FMT);
-    if (fp == 0) { return 0; }
-    var buf = cmd_alloc(DOOR_SAVE_CAP);
-    var n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
-    if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_universe_slot(g_door_game), buf, n); }
-    return 0;
 }
 
 # Render the active game's current frame and send it to the client.
@@ -1643,7 +1673,7 @@ fn door_is_over(): i64 {
 }
 
 # === 1.2.0 bite 5 — cross-game leaderboards (generalizes the 1.1.0
-# Handler standings to all three games) ===
+# Handler standings to every scored door) ===
 #
 # Each game appends "<handle>\t<score>\t<rank>\n" to a shared, flock'd
 # per-game file <store>/.games/<game>/leaderboard on a finished run
@@ -1708,75 +1738,69 @@ fn door_post_score(game): i64 {
     return 0;
 }
 
-# Send the top-10 (by score) of a game's leaderboard to the client.
+# Send the top 10 (by score) of a game's leaderboard to the client.
+#
+# 1.8.1 (audit D5) — streams the WHOLE file in LB_CHUNK pieces, keeping a
+# running top 10. It read only the first 16 KB and ranked only the first 256
+# rows of an append-only file, so every board froze for good after 256
+# finishes: a new best score landed in the file and never on the board. Ties
+# keep the earlier row, as the old selection sort did.
 fn door_render_leaderboard(cfd, game): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     door_leaderboard_path(game, path);
-    var cap = 16384;
-    var buf = cmd_alloc(cap);
-    var total = file_read_all(path, buf, cap);
     send_str(cfd, "== ");
     send_str(cfd, door_game_name(game));
     send_str(cfd, " leaderboard ==\r\n");
-    if (total <= 0) { send_str(cfd, "No scores posted yet — finish a run to make the board.\r\n"); return 0; }
-
-    var maxe = 256;
-    # 1.6.3 — hoisted out of the ranking loop below (one buffer reused per row
-    # instead of one allocation per row).
-    var ln = cmd_alloc(LB_ROW_CAP);
-    var starts = cmd_alloc(maxe * 8);
-    var ends   = cmd_alloc(maxe * 8);
-    var scores = cmd_alloc(maxe * 8);
+    var rows = cmd_alloc(LB_TOP * LB_ROW_CAP);
+    var lens = cmd_alloc(LB_TOP * 8);
+    var scores = cmd_alloc(LB_TOP * 8);
     var count = 0;
-    var i = 0;
-    var ls = 0;
-    while (i <= total) {
-        var atend = 0;
-        if (i == total) { atend = 1; }
-        else { if ((load8(buf + i) & 0xFF) == 10) { atend = 1; } }
-        if (atend == 1) {
-            if (i > ls) {
-                if (count < maxe) {
-                    store64(starts + count * 8, ls);
-                    store64(ends + count * 8, i);
-                    store64(scores + count * 8, lb_line_score(buf, ls, i));
-                    count = count + 1;
+    var fd = file_open(path, 0, 0);
+    if (fd >= 0) {
+        var buf = cmd_alloc(LB_CHUNK);
+        var have = 0;        # bytes carried over (a partial line) at buf[0..have)
+        var skipping = 0;    # inside a line longer than a whole chunk: drop to LF
+        var reading = 1;
+        while (reading == 1) {
+            var n = file_read(fd, buf + have, LB_CHUNK - have);
+            var eof = 0;
+            if (n <= 0) { eof = 1; n = 0; }
+            var total = have + n;
+            var ls = 0;
+            var i = 0;
+            while (i < total) {
+                if ((load8(buf + i) & 0xFF) == 10) {
+                    if (skipping == 0) { count = lb_offer(buf, ls, i, rows, lens, scores, count); }
+                    skipping = 0;
+                    ls = i + 1;
                 }
+                i = i + 1;
             }
-            ls = i + 1;
+            if (eof == 1) {
+                if (ls < total) { if (skipping == 0) { count = lb_offer(buf, ls, total, rows, lens, scores, count); } }
+                reading = 0;
+                continue;
+            }
+            have = total - ls;
+            if (have >= LB_CHUNK) { have = 0; skipping = 1; }   # no LF in a whole chunk
+            else { if (ls > 0) { memcpy(buf, buf + ls, have); } }   # forward copy, dst < src
         }
-        i = i + 1;
+        file_close(fd);
     }
+    if (count == 0) { send_str(cfd, "No scores posted yet — finish a run to make the board.\r\n"); return 0; }
 
-    var shown = count;
-    if (shown > 10) { shown = 10; }
+    var ln = cmd_alloc(LB_ROW_CAP + 16);
     var k = 0;
-    while (k < shown) {
-        var best = k;
-        var j = k + 1;
-        while (j < count) {
-            if (load64(scores + j * 8) > load64(scores + best * 8)) { best = j; }
-            j = j + 1;
-        }
-        var ts = load64(starts + k * 8); store64(starts + k * 8, load64(starts + best * 8)); store64(starts + best * 8, ts);
-        var te = load64(ends + k * 8);   store64(ends + k * 8,   load64(ends + best * 8));   store64(ends + best * 8, te);
-        var tc = load64(scores + k * 8); store64(scores + k * 8, load64(scores + best * 8)); store64(scores + best * 8, tc);
-
+    while (k < count) {
         var p = 0;
         p = emit_int(ln, p, k + 1);
         store8(ln + p, 41); p = p + 1;    # )
         store8(ln + p, 32); p = p + 1;    # space
-        var s2 = load64(starts + k * 8);
-        var e2 = load64(ends + k * 8);
-        # 1.8.0 — bound the copy to the row buffer. A row is a line of a shared
-        # file, copied here with no limit into `ln` (LB_ROW_CAP bytes): rows
-        # agora writes are ~50 bytes, but a damaged or hand-edited leaderboard
-        # with a 400-byte line overran the arena allocation. Longer rows are
-        # truncated for display; the CR LF below always fits.
-        if (e2 - s2 > LB_ROW_CAP - 2 - p) { e2 = s2 + (LB_ROW_CAP - 2 - p); }
-        var x = s2;
-        while (x < e2) {
-            var ch = load8(buf + x) & 0xFF;
+        var rl = load64(lens + k * 8);
+        var row = rows + k * LB_ROW_CAP;
+        var x = 0;
+        while (x < rl) {
+            var ch = load8(row + x) & 0xFF;
             if (ch == 9) { ch = 32; }      # tabs -> spaces for display
             store8(ln + p, ch); p = p + 1;
             x = x + 1;
@@ -1789,6 +1813,39 @@ fn door_render_leaderboard(cfd, game): i64 {
         k = k + 1;
     }
     return 0;
+}
+
+# Offer leaderboard line buf[s, e) to the running top LB_TOP (scores
+# descending; a tie keeps the earlier row). The row is copied, clamped to
+# LB_ROW_CAP - 8 bytes (1.8.0's bound: agora's rows are ~50 bytes, a damaged
+# line is truncated for display). Returns the new count.
+fn lb_offer(buf, s, e, rows, lens, scores, count): i64 {
+    if (e <= s) { return count; }
+    var sc = lb_line_score(buf, s, e);
+    var pos = count;
+    var scan = 1;
+    while (scan == 1) {
+        if (pos <= 0) { scan = 0; continue; }
+        if (load64(scores + (pos - 1) * 8) >= sc) { scan = 0; continue; }
+        pos = pos - 1;
+    }
+    if (pos >= LB_TOP) { return count; }
+    var last = count;
+    if (last >= LB_TOP) { last = LB_TOP - 1; }
+    var k = last;
+    while (k > pos) {
+        memcpy(rows + k * LB_ROW_CAP, rows + (k - 1) * LB_ROW_CAP, LB_ROW_CAP);
+        store64(lens + k * 8, load64(lens + (k - 1) * 8));
+        store64(scores + k * 8, load64(scores + (k - 1) * 8));
+        k = k - 1;
+    }
+    var rl = e - s;
+    if (rl > LB_ROW_CAP - 8) { rl = LB_ROW_CAP - 8; }
+    memcpy(rows + pos * LB_ROW_CAP, buf + s, rl);
+    store64(lens + pos * 8, rl);
+    store64(scores + pos * 8, sc);
+    if (count < LB_TOP) { return count + 1; }
+    return count;
 }
 
 # 1.6.3 (ADR 0022) — release the active door state through its descriptor's
@@ -1807,7 +1864,8 @@ fn door_render_leaderboard(cfd, game): i64 {
 # being handed to a NEW connection while a game was still open — i.e. the
 # player disconnected mid-game), and the `play` launcher before it installs a
 # replacement.
-fn door_state_free(): i64 {
+# Release the active door state's buffers (DD_FREE) and clear the globals.
+fn door_state_drop(): i64 {
     if (g_door_state == 0) { g_door_game = GAME_NONE; return 0; }
     var d = door_desc_for(g_door_game);
     if (d != 0) {
@@ -1819,36 +1877,114 @@ fn door_state_free(): i64 {
     return 0;
 }
 
-# On leaving a door: persist a solo checkpoint (logged-in, mid-game),
-# and post a Handler standing on a finished campaign.
+# Leave the active door entirely: drop its state AND release its play lock
+# (1.8.1, audit D1).
+fn door_state_free(): i64 {
+    door_state_drop();
+    if (g_active_sess != 0) {
+        door_play_unlock(load64(g_active_sess + SESS_DOOR_LOCK));
+        store64(g_active_sess + SESS_DOOR_LOCK, 0 - 1);
+        store64(g_active_sess + SESS_DOOR_OVER0, 0);
+    }
+    return 0;
+}
+
+# 1.8.1 (audit D1) — take the play lock for (this identity, `slot`) before a
+# saved door loads. Returns 1 to go ahead, 0 if another session holds it (the
+# caller has told the player). A lock file that cannot be opened (-2) plays on
+# unlocked rather than refusing.
+fn door_take_play_lock(cfd, slot): i64 {
+    var lk = door_play_lock(g_store_buf, g_session_fp, slot);
+    if (lk == (0 - 1)) {
+        send_str(cfd, "you are already playing that game in another session — finish there first.\r\n");
+        return 0;
+    }
+    if (lk >= 0) { store64(g_active_sess + SESS_DOOR_LOCK, lk); }
+    return 1;
+}
+
+# 1.8.1 (audit D2 / D6) — vet a save the launcher just tried to load. A save
+# that exists but could not be read or parsed (`loaded == 0`) is moved aside to
+# `<slot>.sav.bad` and the player is told, rather than being overwritten by the
+# fresh run on exit. A run that loaded already OVER is discarded so a fresh one
+# starts: replaying a finished checkpoint is how one win was posted forever.
+# Returns 1 if a usable, unfinished state is now in g_door_state, else 0.
+fn door_vet_loaded(cfd, game, slot, loaded): i64 {
+    if (loaded == 0) {
+        door_save_quarantine(g_store_buf, g_session_fp, slot);
+        send_str(cfd, "(your saved game could not be read — it was set aside as ");
+        send_str(cfd, slot);
+        send_str(cfd, ".sav.bad and a new one begins)\r\n");
+        return 0;
+    }
+    if (door_is_over() == 1) {
+        door_state_drop();
+        g_door_game = game;
+        door_save_remove(g_store_buf, g_session_fp, slot);
+        return 0;
+    }
+    return 1;
+}
+
+# On leaving a door — a clean `q`, OR (1.8.1) any disconnect or shutdown, via
+# session_door_checkpoint: persist the player's state, or retire it if the run
+# is over, and post a finished run to the leaderboard.
+#
+# 1.8.1 (audit D1 / D2 / G3):
+#  - this used to run ONLY on a clean `q`. A dropped connection saved nothing,
+#    while a Universe game's world was written on every line — so a disconnect
+#    refunded a player's costs and kept the world effects (deploy fighters, drop
+#    the link, re-enter: the garrison grew 29 → 58 → 87 … while the ship kept
+#    30), and erased any lost bet (2,000 → 893,641 credits in 14 all-in bets).
+#  - a finished run now REMOVES its save (Solo kept the last checkpoint, Universe
+#    saved the finished state); the launcher also discards a save that loads
+#    already over (door_vet_loaded). One finish = one leaderboard row.
+#  - a run that was already over when entered (Ashes domination is a property
+#    of the shared map, true on every later entry) does not post again.
 fn door_save_on_exit(cfd): i64 {
-    # 1.2.0 Universe: the shared world is already persisted per action;
-    # checkpoint the player's own state under the "<game>u" slot.
-    if (g_door_mode == DOOR_UNIVERSE) {
-        door_universe_save();
-    } else { if (g_door_mode == DOOR_SOLO) {
-            if ((load8(g_session_fp) & 0xFF) != 0) {
-                if (door_is_over() == 0) {
-                    var d = door_desc_for(g_door_game);
-                    var n = 0;
-                    if (d != 0) {
-                        var fp = load64(d + DD_SAVE_FMT);
-                        if (fp != 0) {
-                            var buf = cmd_alloc(DOOR_SAVE_CAP);
-                            n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
-                            if (n > 0) { door_save_write(g_store_buf, g_session_fp, door_game_name(g_door_game), buf, n); }
-                        }
+    var over = door_is_over();
+    if ((load8(g_session_fp) & 0xFF) != 0) {
+        var slot = 0;
+        if (g_door_mode == DOOR_UNIVERSE) { slot = door_universe_slot(g_door_game); }
+        if (g_door_mode == DOOR_SOLO)     { slot = door_game_name(g_door_game); }
+        if (slot != 0) {
+            if (over == 1) { door_save_remove(g_store_buf, g_session_fp, slot); }
+            else {
+                var d = door_desc_for(g_door_game);
+                if (d != 0) {
+                    var fp = load64(d + DD_SAVE_FMT);
+                    if (fp != 0) {
+                        var buf = cmd_alloc(DOOR_SAVE_CAP);
+                        var n = callptr(fp, g_door_state, buf, DOOR_SAVE_CAP);
+                        if (n > 0) { door_save_write(g_store_buf, g_session_fp, slot, buf, n); }
                     }
                 }
             }
-        } }
-    # 1.2.0 bite 5: any finished run by a logged-in player posts to the
-    # cross-game leaderboard (solo or universe; all three games).
-    if (door_is_over() == 1) {
-        if ((load8(g_session_handle) & 0xFF) != 0) {
-            door_post_score(g_door_game);
         }
     }
+    # 1.2.0 bite 5: a finished run by a logged-in player posts to the cross-game
+    # leaderboard — in any mode (a practice run is a real, fresh run). Only a run
+    # that became over during THIS session (SESS_DOOR_OVER0, 1.8.1).
+    if (over == 1) {
+        var over0 = 0;
+        if (g_active_sess != 0) { over0 = load64(g_active_sess + SESS_DOOR_OVER0); }
+        if (over0 == 0) {
+            if ((load8(g_session_handle) & 0xFF) != 0) {
+                door_post_score(g_door_game);
+            }
+            if (g_active_sess != 0) { store64(g_active_sess + SESS_DOOR_OVER0, 1); }
+        }
+    }
+    return 0;
+}
+
+# 1.8.1 (audit D1) — save a live door session that is ending WITHOUT a clean
+# `q`: a disconnect, an idle reap, a server shutdown. Called on every close path
+# before the state is freed, after sess_save(s) has made the slot current.
+fn session_door_checkpoint(s): i64 {
+    if (load64(s + SESS_DOOR_STATE) == 0) { return 0; }
+    sess_load(s);
+    door_save_on_exit(load64(s + SESS_FD));
     return 0;
 }
 
@@ -1863,6 +1999,14 @@ fn door_save_on_exit(cfd): i64 {
 fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
     if (body_len <= 0) {
         send_str(cfd, "(empty post discarded)\r\n");
+        g_reply_to = 0;
+        return 0;
+    }
+    # 1.8.1 (audit storage I4) — re-check the board policy at COMMIT. It was
+    # checked only when `post` / `reply` began, so an operator tightening a
+    # board's policy while someone was composing did not stop that post.
+    if (board_can_post(g_store_buf, current_board, g_session_fp, g_session_handle) == 0) {
+        send_str(cfd, "post refused — the board's policy changed while you were writing\r\n");
         g_reply_to = 0;
         return 0;
     }
@@ -1951,7 +2095,7 @@ fn render_motd(buf): i64 {
 
     # Yellow version line.
     pos = tty_sgr_buf(buf, pos, TTY_FG_YELLOW);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.8.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = motd_emit_cstr(buf, pos, "  agora 1.8.1 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -1961,9 +2105,10 @@ fn render_motd(buf): i64 {
     return pos;
 }
 
-# Serve one connection. Sends MOTD + initial prompt, then runs the
-# M5-B in-session command interpreter (`list` / `read <id>` / `post`
-# / `help` / `quit`) until the peer disconnects or sends `quit`.
+# How a connection is served, in both models (session_greet sends the MOTD +
+# first prompt; process_rx, below, is the byte loop that handle_client's fork
+# worker and serve_poll's sweep both drive): the in-session command
+# interpreter runs until the peer disconnects or sends `quit`.
 #
 # Per-byte dispatch: every byte goes through the IAC state machine
 # first (M1), then the data byte (when present) drives the line
@@ -1978,8 +2123,8 @@ fn render_motd(buf): i64 {
 # ============================================================================
 # 1.6.0 — single-process session-multiplex (poll) serve model.
 #
-# The classic path (serve_fork on Linux / serial-accept on agnos) serves one
-# connection at a time. serve_poll multiplexes N connections in ONE process via a
+# The fork path (Linux only — agnos has no fork and always polls) serves each
+# connection in its own process. serve_poll multiplexes N connections in ONE process via a
 # pre-allocated session POOL (no per-conn alloc/free): each slot is a heap struct
 # snapshotting every per-connection global + a non-blocking tx queue. The operator
 # picks the model at runtime with AGORA_SERVE={fork,poll}; agnos has no fork so it
@@ -1991,7 +2136,7 @@ fn render_motd(buf): i64 {
 # ============================================================================
 
 enum ServeMode {
-    SERVE_FORK = 0;      # classic: fork-per-conn (Linux) / serial-accept (agnos)
+    SERVE_FORK = 0;      # fork-per-conn (Linux only; agnos always polls)
     SERVE_POLL = 1;      # single-process poll-multiplex (both platforms)
 }
 var g_serve_mode  = 0;   # SERVE_FORK default; set from AGORA_SERVE / platform at serve start
@@ -2057,14 +2202,23 @@ enum SessOff {
     # which both serve models already close on. Occupies the 8 bytes of slack
     # that were already inside SESS_SIZE, so the slot allocation is unchanged.
     SESS_TX_OVF            = 312;
-    SESS_SIZE              = 320;
+    # 1.8.1 (audit H2) — the unconsumed tail of the last recv, parked by the poll
+    # line budget: bytes [SESS_RX_OFF, SESS_RX_LEN) of SESS_RXBUF still to run.
+    SESS_RX_OFF            = 320;
+    SESS_RX_LEN            = 328;
+    # 1.8.1 (audit D1 / G3) — the door play lock's fd (-1 = none held), and
+    # whether the active door's run was already over when it was entered.
+    SESS_DOOR_LOCK         = 336;
+    SESS_DOOR_OVER0        = 344;
+    SESS_POST_FULL         = 352;   # 1.8.1 (S12) — the compose body hit POST_MAX_BYTES
+    SESS_SIZE              = 360;
 }
 
 # Build the pool once (at serve_poll start): MAX_SESS slots, each with its per-conn
 # buffers allocated ONCE and reused. Slots start free (SESS_ACTIVE=0, fd=-1).
 # Allocate one session slot + all its per-connection buffers (reused across
-# connections; fd=-1, inactive). Used by both the pool (poll mode) and the
-# standalone fork/serial handle_client.
+# connections; fd=-1, inactive). Used by both the pool (poll mode) and a fork
+# child's standalone handle_client.
 fn session_alloc(): i64 {
     var s = alloc(SESS_SIZE);
     memset(s, 0, SESS_SIZE);
@@ -2087,10 +2241,12 @@ fn session_alloc(): i64 {
     # always saw 0 and allocated again: an 8 KB + 264 B leak for every session
     # that entered a Universe door or replied to a post — bounded by sessions
     # SERVED, i.e. unbounded over a server's life. Owning them in the slot makes
-    # it 64 allocations total, ever (+541 KB once against a ~13 MB image).
+    # it 64 allocations total, ever (+541 KB once; the image was ~13 MB then,
+    # ~1 MB since 1.7.1).
     store64(s + SESS_UNI_WORLD,      alloc(DOOR_WORLD_CAP));
     store64(s + SESS_REPLY_SUBJECT,  alloc(SUBJECT_MAX_BYTES + 8));
     store64(s + SESS_FD, 0 - 1);
+    store64(s + SESS_DOOR_LOCK, 0 - 1);
     return s;
 }
 
@@ -2118,9 +2274,12 @@ fn session_reset(s, cfd): i64 {
     # must clear it here or it poisons every later occupant of that slot: the
     # next client would be dropped on its first drain, having sent nothing.
     store64(s + SESS_TX_OVF, 0);
+    store64(s + SESS_RX_OFF, 0);
+    store64(s + SESS_RX_LEN, 0);
     telnet_state_reset(load64(s + SESS_TS));
     store64(s + SESS_LINE_POS, 0);
     store64(s + SESS_POST_POS, 0);
+    store64(s + SESS_POST_FULL, 0);
     store64(s + SESS_SUBJECT_LEN, 0);
     var cb = load64(s + SESS_CURBOARD);
     memcpy(cb, "main", 4);
@@ -2135,7 +2294,8 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_LOGIN_STARTED_MS, 0);
     # 1.6.3 — defensive: releasing normally goes through session_release, but a
     # slot must never hand a stale state to its next occupant, and dropping the
-    # pointer here without freeing would leak it.
+    # pointer here without freeing would leak it. (Also releases a held door
+    # play lock, 1.8.1.)
     session_door_free(s);
     store64(s + SESS_DOOR_GAME, GAME_NONE);
     store64(s + SESS_DOOR_STATE, 0);
@@ -2177,6 +2337,9 @@ fn session_acquire(cfd): i64 {
 # globals here would free the wrong session's game — so read the state and the
 # game id straight out of the slot.
 fn session_door_free(s): i64 {
+    door_play_unlock(load64(s + SESS_DOOR_LOCK));
+    store64(s + SESS_DOOR_LOCK, 0 - 1);
+    store64(s + SESS_DOOR_OVER0, 0);
     var ds = load64(s + SESS_DOOR_STATE);
     if (ds != 0) {
         var d = door_desc_for(load64(s + SESS_DOOR_GAME));
@@ -2316,10 +2479,31 @@ fn serve_mode_from_env(): i64 {
 # 1.6.2 (ADR 0021) and 1.6.3 (ADR 0022) each spent a cut eliminating.
 fn sess_tx_enqueue(s, buf, len): i64 {
     if (s == 0) { return 1; }
+    if (load64(s + SESS_TX_OVF) != 0) { return 1; }
     var tlen = load64(s + SESS_TX_LEN);
     if (tlen + len > SESS_TX_CAP) {
-        store64(s + SESS_TX_OVF, 1);
-        return 1;
+        # 1.8.1 (audit S5 / P3) — make room before calling it an overflow. The
+        # queue is only drained by the sweep AFTER a command returns, so "full"
+        # meant "this one command printed more than SESS_TX_CAP", not "the peer
+        # stopped reading" (the 1.7.0 rationale): a `list` of ~600+ posts cut off
+        # at 128 KB and the session was dropped, so a busy board could never be
+        # listed under poll — on agnos, never at all. Drain what the socket will
+        # take now (non-blocking on Linux; one bounded send on agnos), compact
+        # the queue, and only flag an overflow if there is still no room.
+        if (session_drain(s) < 0) { store64(s + SESS_TX_OVF, 1); return 1; }
+        var off = load64(s + SESS_TX_OFF);
+        tlen = load64(s + SESS_TX_LEN);
+        if (off > 0) {
+            var tx = load64(s + SESS_TX);
+            memcpy(tx, tx + off, tlen - off);   # forward copy, dst < src
+            tlen = tlen - off;
+            store64(s + SESS_TX_LEN, tlen);
+            store64(s + SESS_TX_OFF, 0);
+        }
+        if (tlen + len > SESS_TX_CAP) {
+            store64(s + SESS_TX_OVF, 1);
+            return 1;
+        }
     }
     memcpy(load64(s + SESS_TX) + tlen, buf, len);
     store64(s + SESS_TX_LEN, tlen + len);
@@ -2370,7 +2554,21 @@ fn session_drain(s): i64 {
     var rc = 0;
     while (done == 0) {
         if (tx_off >= tx_len) { done = 1; rc = 0; continue; }
+        # 1.8.1 (audit H5) — on agnos, ONE raw sock_send#48. Since cyrius 6.6.7
+        # the stdlib's agnos `sys_write` on a socket is `_agnos_sock_send_all`,
+        # which retries a 0 ("no progress after ~8 s") until a 30 s stall
+        # deadline that re-arms whenever any byte moves — so one zero-window
+        # peer froze the whole sweep for 30 s+, and a peer ACKing a trickle froze
+        # it indefinitely. That arrived with the 1.8.0 pin move unnoticed; the
+        # raw call restores the bound ADR 0023 documents (one send, then yield).
+        #ifdef CYRIUS_TARGET_AGNOS
+        var conn = _agnos_fd_conn(fd);
+        var n = 0 - 1;
+        if (conn >= 0) { n = sys_sock_send(conn, tx + tx_off, tx_len - tx_off); }
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
         var n = sys_write(fd, tx + tx_off, tx_len - tx_off);
+        #endif
         if (n < 0) {
             if (n == (0 - EWOULDBLOCK_ERR)) { done = 1; rc = 1; continue; }
             done = 1; rc = n; continue;
@@ -2395,6 +2593,46 @@ fn session_drain(s): i64 {
         if (load64(s + SESS_TX_OVF) != 0) { return 0 - 1; }
     }
     return rc;
+}
+
+# 1.8.1 (audit G5) — write the active session's queued output NOW, blocking
+# (bounded by descent_write_all's wall-clock limit). Only the Descent link needs
+# it: the proxy writes the client fd directly, so anything still queued — the
+# echo of the `descent` line, earlier output — would otherwise arrive after the
+# whole MUD session. A no-op in fork mode, where send_buf never queues.
+fn session_flush_now(cfd): i64 {
+    if (g_serve_mode != SERVE_POLL) { return 0; }
+    var s = g_active_sess;
+    var off = load64(s + SESS_TX_OFF);
+    var len = load64(s + SESS_TX_LEN);
+    if (len > off) { descent_write_all(cfd, load64(s + SESS_TX) + off, len - off); }
+    store64(s + SESS_TX_OFF, 0);
+    store64(s + SESS_TX_LEN, 0);
+    return 0;
+}
+
+# 1.8.1 — back at the BBS from the Descent.
+#  - (audit G2) the visit was activity: SESS_LAST_MS was not touched while the
+#    player was in the MUD, so under poll the sweep reaped them the moment they
+#    returned from any visit longer than SESS_IDLE_MS (60 s).
+#  - (audit G4) re-assert our telnet options. The MUD negotiates its own ECHO
+#    (WILL ECHO around the passphrase, then WONT ECHO), the client follows it,
+#    and agora never saw that exchange — so it kept echoing into a client that
+#    had gone back to local echo: every character doubled for the rest of the
+#    session. Resetting the Q-state and re-announcing lets RFC 1143 converge
+#    again from whatever the client now believes.
+fn session_after_descent(cfd): i64 {
+    var s = g_active_sess;
+    store64(s + SESS_LAST_MS, clock_now_ms());
+    var ts = load64(s + SESS_TS);
+    telnet_state_reset(ts);
+    telnet_announce(ts);
+    var tl = telnet_tx_len(ts);
+    if (tl > 0) {
+        send_buf(cfd, telnet_tx_buf(ts), tl);
+        telnet_tx_consume(ts);
+    }
+    return 0;
 }
 
 # Read up to RECV_BUF_BYTES into session s's rxbuf WITHOUT blocking. Returns
@@ -2428,6 +2666,7 @@ enum StoreLimit {
 }
 
 enum PollRuntime {
+    POLL_LINE_BUDGET = 1;      # 1.8.1 (H2) — counted lines per session per sweep
     POLL_MS      = 20;         # sweep cadence
     SESS_IDLE_MS = 60000;      # general idle reap (mirrors RECV_TIMEOUT_SECS)
     CHAT_TICK_MS = 2000;       # chat live-tail flush cadence (CHAT_POLL_SECS)
@@ -2602,6 +2841,7 @@ fn serve_poll_shutdown(sfd, sigfd): i64 {
             send_str(cfd, "\r\n(server shutting down -- goodbye)\r\n");
             session_drain(s);
             sess_save(s);
+            session_door_checkpoint(s);      # 1.8.1 (D1) — keep in-game progress
             sock_close(cfd);
             session_release(s);
         }
@@ -2627,6 +2867,7 @@ fn serve_poll(sfd): i64 {
     #endif
     # N1: armed in cmd_serve_on, before the listener existed (see the note there).
     var sigfd = g_shutdown_sigfd;
+    g_descent_stop_fd = sigfd;     # 1.8.1 (P8) — the Descent proxy watches it too
     var siginfo = g_shutdown_siginfo;
     var stop = 0;
     while (stop == 0) {
@@ -2651,9 +2892,10 @@ fn serve_poll(sfd): i64 {
                     # cut off exactly the trailing CRLF: the one message a
                     # client gets when the 64-slot pool is full arrived
                     # unterminated, and its next output ran on from there.
-                    # This is also the only socket write in agora that does not
-                    # go through send_buf — there is no session to enqueue into
-                    # yet — so a send_buf-based audit misses it.
+                    # Like the fork loop's cap refusal and the Descent proxy's
+                    # descent_write_all, this writes the socket directly — there
+                    # is no session to enqueue into yet — so a send_buf-based
+                    # audit misses it. (1.8.1: it used to call itself the only one.)
                     sys_write(cfd, "server full — try again shortly\r\n", 35);
                     sock_close(cfd);
                 } else {
@@ -2667,6 +2909,7 @@ fn serve_poll(sfd): i64 {
         }
         # 2) sweep active sessions
         var now = clock_now_ms();
+        var parked = 0;
         var i = 0;
         while (i < MAX_SESS) {
             var s = load64(g_sess_pool + i * 8);
@@ -2674,62 +2917,77 @@ fn serve_poll(sfd): i64 {
                 var cfd = load64(s + SESS_FD);
                 sess_load(s);
                 var close_it = 0;
-                var n = sess_recv_nonblock(s);
-                if (n > 0) {
-                    # 1.6.4 (audit M3) — the idle timer is NOT refreshed here.
-                    #
-                    # It used to be, on ANY bytes arriving, which made the 64-slot
-                    # pool trivially pinnable: `IAC NOP` (2 bytes) is consumed by
-                    # the state machine with no response and no data byte, so 64
-                    # connections sending one every 50 s held every slot forever
-                    # at ~2 bytes/minute each — invisibly, since nothing was ever
-                    # typed. Protocol chatter is not activity. `process_rx` now
-                    # refreshes the timer only when a byte actually reaches the
-                    # session as DATA, so a keepalive-only connection ages out
-                    # like a silent one.
-                    g_chat_idle = 0;
-                    if (process_rx(s, n) == 1) { close_it = 1; }
+                # 1.8.1 (audit H2) — a remainder parked by the line budget runs
+                # before anything new is read; it IS this sweep's input.
+                var poff = load64(s + SESS_RX_OFF);
+                var n = 0;
+                if (poff < load64(s + SESS_RX_LEN)) { n = 0 - 2; }
+                else { n = sess_recv_nonblock(s); }
+                if (n == (0 - 2)) {
+                    if (process_rx(s, poff, load64(s + SESS_RX_LEN), POLL_LINE_BUDGET) == 1) { close_it = 1; }
                 }
-                else { if (n < 0) { close_it = 1; }
-                    else {
-                        # would-block: no input this sweep. Chat live-tail tick +
-                        # idle reaping (fork mode gets these from the recv timeout).
-                        if (load64(s + SESS_MODE) == MODE_CHAT) {
-                            if (now - load64(s + SESS_CHAT_TICK_MS) >= CHAT_TICK_MS) {
-                                store64(s + SESS_CHAT_TICK_MS, now);
-                                if (load64(s + SESS_LINE_POS) == 0) {
-                                    if (g_chat_bot == 0) { chat_flush_tail(cfd); }
+                else { if (n > 0) {
+                        # 1.6.4 (audit M3) — the idle timer is NOT refreshed here.
+                        #
+                        # It used to be, on ANY bytes arriving, which made the 64-slot
+                        # pool trivially pinnable: `IAC NOP` (2 bytes) is consumed by
+                        # the state machine with no response and no data byte, so 64
+                        # connections sending one every 50 s held every slot forever
+                        # at ~2 bytes/minute each — invisibly, since nothing was ever
+                        # typed. Protocol chatter is not activity. `process_rx` now
+                        # refreshes the timer only when a byte actually reaches the
+                        # session as DATA, so a keepalive-only connection ages out
+                        # like a silent one. (1.8.1: the chat reaper's g_chat_idle
+                        # likewise resets in process_rx, on a kept byte only.)
+                        if (process_rx(s, 0, n, POLL_LINE_BUDGET) == 1) { close_it = 1; }
+                    }
+                    else { if (n < 0) { close_it = 1; }
+                        else {
+                            # would-block: no input this sweep. Chat live-tail tick +
+                            # idle reaping (fork mode gets these from the recv timeout).
+                            if (load64(s + SESS_MODE) == MODE_CHAT) {
+                                if (now - load64(s + SESS_CHAT_TICK_MS) >= CHAT_TICK_MS) {
+                                    store64(s + SESS_CHAT_TICK_MS, now);
+                                    if (load64(s + SESS_LINE_POS) == 0) {
+                                        if (g_chat_bot == 0) { chat_flush_tail(cfd); }
+                                    }
+                                    g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
+                                    if (g_chat_idle >= CHAT_IDLE_SECS) {
+                                        send_str(cfd, "\r\n(idle — leaving chat)\r\n");
+                                        close_it = 1;
+                                    }
                                 }
-                                g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
-                                if (g_chat_idle >= CHAT_IDLE_SECS) {
-                                    send_str(cfd, "\r\n(idle — leaving chat)\r\n");
-                                    close_it = 1;
-                                }
+                            } else {
+                                if (now - load64(s + SESS_LAST_MS) >= SESS_IDLE_MS) { close_it = 1; }
                             }
-                        } else {
-                            if (now - load64(s + SESS_LAST_MS) >= SESS_IDLE_MS) { close_it = 1; }
-                        }
-                    } }
+                        } } }
                 # 3) flush queued output
                 if (close_it == 0) {
                     if (session_drain(s) < 0) { close_it = 1; }
                 }
                 sess_save(s);
                 if (close_it == 1) {
+                    session_door_checkpoint(s);  # 1.8.1 (D1) — a drop saves like `q`
                     session_drain(s);            # best-effort final flush (e.g. "bye")
                     sock_close(cfd);
                     session_release(s);
+                } else {
+                    if (load64(s + SESS_RX_OFF) < load64(s + SESS_RX_LEN)) { parked = 1; }
                 }
             }
             i = i + 1;
         }
-        # 4) pace the sweep
-        #ifdef CYRIUS_TARGET_AGNOS
-        sys_sleep_ms(POLL_MS);
-        #endif
-        #ifndef CYRIUS_TARGET_AGNOS
-        sleep_ms(POLL_MS);
-        #endif
+        # 4) pace the sweep — but not while a session has a parked remainder
+        # (1.8.1, H2): the budget is for fairness between sessions, not a rate
+        # limit, so a lone scripted client still runs at full speed.
+        if (parked == 0) {
+            #ifdef CYRIUS_TARGET_AGNOS
+            sys_sleep_ms(POLL_MS);
+            #endif
+            #ifndef CYRIUS_TARGET_AGNOS
+            sleep_ms(POLL_MS);
+            #endif
+        }
     }
     return serve_poll_shutdown(sfd, sigfd);
 }
@@ -2739,6 +2997,11 @@ fn serve_poll(sfd): i64 {
 fn session_greet(s): i64 {
     var cfd = load64(s + SESS_FD);
     var ts  = load64(s + SESS_TS);
+    # 1.8.1 (audit P5) — the greeting runs OUTSIDE any line dispatch, so nothing
+    # reset the arena after its MOTD scratch: on a quiet poll server a flood of
+    # connect-and-close clients filled the 512 KB arena, and every greeting
+    # after that fell back to a bare 1 KB alloc() — never reclaimed.
+    cmd_scratch_reset();
     # Open with the preferred-options salvo (IAC WILL ECHO / WILL SGA / DO NAWS /
     # DO TERMINAL_TYPE) before any application bytes flow.
     telnet_announce(ts);
@@ -2791,7 +3054,16 @@ fn session_rx_idle(s, n): i64 {
 # reads (poll multiplex) or across a blocking loop (fork). The deep session
 # globals are swapped by the caller (sess_load/sess_save). Returns 1 iff the
 # client asked to quit (quit flag set).
-fn process_rx(s, n): i64 {
+#
+# 1.8.1 (audit H2) — runs bytes [start, n) and stops after `budget` counted
+# lines (0 = no limit), parking the rest in SESS_RX_OFF / SESS_RX_LEN. Under
+# poll every complete line in a 4 KB recv used to run before the sweep moved
+# on, so one anonymous client pipelining `read 1` (585 per packet) or `login x`
+# held every other session for seconds — 4 such clients put 2.5 s on a
+# bystander's echo, 16 put 10 s. The serve_poll sweep passes POLL_LINE_BUDGET,
+# so each session gets that many lines per pass, round-robin; the fork worker
+# passes 0, since its process is its own.
+fn process_rx(s, start, n, budget): i64 {
     var cfd = load64(s + SESS_FD);
     var rxbuf = load64(s + SESS_RXBUF);
     var ts = load64(s + SESS_TS);
@@ -2805,9 +3077,17 @@ fn process_rx(s, n): i64 {
     var mode = load64(s + SESS_MODE);
     var last_cr = load64(s + SESS_LAST_CR);
     var quit = load64(s + SESS_QUIT);
-    var i = 0;
+    var lines = 0;
+    var park = 0 - 1;
+    var i = start;
     while (i < n) {
         if (load64(quit) != 0) { i = n; continue; }
+        # 1.8.1 (audit H19) — a session whose output has failed (sticky, both
+        # models) runs nothing more: quit, and the caller closes it.
+        if (load64(s + SESS_TX_OVF) != 0) { store64(quit, 1); i = n; continue; }
+        if (budget > 0) {
+            if (lines >= budget) { park = i; i = n; continue; }
+        }
         var b = load8(rxbuf + i) & 0xFF;
         var ev = telnet_feed(ts, b);
 
@@ -2838,21 +3118,24 @@ fn process_rx(s, n): i64 {
         }
 
         if (ev == EV_DATA) {
-            # 1.6.4 (audit M3) — THIS is what counts as activity: a byte that
-            # survived the telnet layer and is destined for the session. Moved
-            # here from the poll sweep so protocol-only traffic (IAC NOP, option
-            # negotiation, an unterminated subnegotiation) cannot hold a slot.
-            # Harmless in fork mode, where the recv timeout bounds idling and
-            # SESS_LAST_MS is not consulted.
-            store64(s + SESS_LAST_MS, clock_now_ms());
             var db = telnet_data_byte(ts) & 0xFF;
-            # M5-H input filter: drop NUL + ESC silently before
-            # they reach the line buffer or get echoed back to
-            # the client. See input_byte_ok for the reasoning.
+            # M5-H input filter (widened at 1.6.4 / 1.6.5): drop C0 except
+            # TAB/CR/LF, DEL and IAC silently before they reach the line
+            # buffer or get echoed. See input_byte_ok for the reasoning.
             if (input_byte_ok(db) == 0) {
                 i = i + 1;
                 continue;
             }
+            # 1.6.4 (audit M3) — THIS is what counts as activity: a byte that
+            # survived the telnet layer AND the input filter. Protocol-only
+            # traffic (IAC NOP, option negotiation, an unterminated
+            # subnegotiation) cannot hold a slot. 1.8.1 (audit P9 / G11) — the
+            # refresh used to sit ABOVE the filter, so a NUL every 50 s (dropped,
+            # never echoed) pinned a slot exactly like the IAC NOP M3 closed; and
+            # the chat reaper's counter was zeroed by the sweep on ANY recv. Both
+            # now move only on a byte the session actually keeps.
+            store64(s + SESS_LAST_MS, clock_now_ms());
+            g_chat_idle = 0;
             # === EOL detection: CR is canonical; LF after CR is
             # silently absorbed (consumed-here, NOT passed on to
             # the printable-byte branch — would otherwise land at
@@ -2881,11 +3164,29 @@ fn process_rx(s, n): i64 {
                 g_pipe_tail  = rxbuf + i + 1;
                 g_pipe_len   = n - i - 1;
                 g_pipe_taken = 0;
+                # 1.8.1 — the LF paired with this line's CR is part of the line
+                # ending, not the start of the tail; the MUD was handed a stray
+                # leading newline (an empty command) on every pipelined descent.
+                if (db == 13) {
+                    if (g_pipe_len > 0) {
+                        if ((load8(g_pipe_tail) & 0xFF) == 10) {
+                            g_pipe_tail = g_pipe_tail + 1;
+                            g_pipe_len = g_pipe_len - 1;
+                        }
+                    }
+                }
                 # 1.6.2 — reclaim the per-command scratch arena. This is the one
                 # point that dominates EVERY line dispatch below (command, door,
                 # chat, login, posting) in BOTH serve models, since the fork
                 # worker drives process_rx too. See cmd_alloc's header.
                 cmd_scratch_reset();
+                # 1.8.1 (H2) — a line that will run something counts against
+                # the poll budget. Compose lines (subject / body) only append
+                # to a buffer, so a pasted post is not throttled to one line
+                # per sweep; the `.` that commits it follows a counted `post`.
+                if (mode != MODE_POSTING) {
+                    if (mode != MODE_POSTING_SUBJECT) { lines = lines + 1; }
+                }
                 # Mode-aware line dispatch.
                 if (mode == MODE_COMMAND) {
                     mode = session_execute(cfd, line, line_pos, current_board, quit);
@@ -2905,12 +3206,10 @@ fn process_rx(s, n): i64 {
                 else { if (mode == MODE_LOGIN_AWAIT_SIG) {
                         # M6-C: client sent `auth: <128-hex-sig>`.
                         # Parse + verify against the parked challenge.
-                        # Heap-allocated buffers via alloc() — matches the
-                        # pattern other handle_client paths use for
-                        # session-scoped working memory (rxbuf / line /
-                        # post / subject above), and avoids the
-                        # cyrius `var buf[N]`-in-deep-nesting hazards
-                        # flagged in CLAUDE.md.
+                        # Working buffers come from cmd_alloc (the per-command
+                        # arena, ADR 0021), which also avoids the cyrius
+                        # `var buf[N]`-in-deep-nesting hazards flagged in
+                        # CLAUDE.md.
                         #
                         # 0.7.0 audit M6 — explicit 30 s deadline. Even
                         # if the wire stayed warm (slowloris timeout
@@ -3089,6 +3388,7 @@ fn process_rx(s, n): i64 {
                                         if ((load8(line) & 0xFF) == 46) {
                                             session_finalize_post(cfd, current_board, subject, post, post_pos);
                                             post_pos = 0;
+                                            store64(s + SESS_POST_FULL, 0);
                                             subject_len = 0;
                                             store8(subject, 0);
                                             line_pos = 0;
@@ -3098,11 +3398,24 @@ fn process_rx(s, n): i64 {
                                         }
                                     }
                                     # Otherwise append line + CRLF to post body.
-                                    if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
-                                        memcpy(post + post_pos, line, line_pos);
-                                        post_pos = post_pos + line_pos;
-                                        store8(post + post_pos, 13); post_pos = post_pos + 1;
-                                        store8(post + post_pos, 10); post_pos = post_pos + 1;
+                                    # 1.8.1 (audit S12) — the first line that
+                                    # does not fit CLOSES the body: it and every
+                                    # later line are dropped, and the user is told
+                                    # once. It used to drop only lines that did
+                                    # not fit and keep appending shorter ones, so
+                                    # a long paste lost a run of lines from the
+                                    # middle and still answered "posted as #N".
+                                    var pfull = load64(s + SESS_POST_FULL);
+                                    if (pfull == 0) {
+                                        if (post_pos + line_pos + 2 < POST_MAX_BYTES) {
+                                            memcpy(post + post_pos, line, line_pos);
+                                            post_pos = post_pos + line_pos;
+                                            store8(post + post_pos, 13); post_pos = post_pos + 1;
+                                            store8(post + post_pos, 10); post_pos = post_pos + 1;
+                                        } else {
+                                            store64(s + SESS_POST_FULL, 1);
+                                            send_str(cfd, "(the post is full at 64 KB — later lines are not kept; '.' alone posts what fit)\r\n");
+                                        }
                                     }
                                     line_pos = 0;
                                 } } } } }
@@ -3137,12 +3450,19 @@ fn process_rx(s, n): i64 {
     store64(s + SESS_SUBJECT_LEN, subject_len);
     store64(s + SESS_MODE, mode);
     store64(s + SESS_LAST_CR, last_cr);
+    if (park >= 0) {
+        store64(s + SESS_RX_OFF, park);
+        store64(s + SESS_RX_LEN, n);
+    } else {
+        store64(s + SESS_RX_OFF, 0);
+        store64(s + SESS_RX_LEN, 0);
+    }
     if (load64(quit) != 0) { return 1; }
     return 0;
 }
 
-# Classic serve path: serve ONE connection to completion in THIS process — a fork
-# child on Linux, or serially on agnos. Uses a standalone session slot; the deep
+# Fork serve path: serve ONE connection to completion in THIS process — a fork
+# child (Linux; agnos always polls). Uses a standalone session slot; the deep
 # session globals ARE this connection (sess_load restores them from the slot each
 # iteration, sess_save persists them, so process_rx / session_greet see exactly
 # the globals the dispatch functions expect).
@@ -3167,11 +3487,21 @@ fn handle_client(cfd): i64 {
         if (n <= 0) {
             done = session_rx_idle(s, n);
         } else {
-            g_chat_idle = 0;
-            done = process_rx(s, n);
+            done = process_rx(s, 0, n, 0);
+            # 1.8.1 (audit P4) — the 1.6.4 M3 rule, fork side: protocol chatter
+            # is not activity. SO_RCVTIMEO restarts on ANY received byte, so an
+            # IAC NOP every 20 s held a fork child forever while a silent one was
+            # reaped at 60 s. SESS_LAST_MS moves only on a byte the session keeps
+            # (process_rx), so judge idleness by it. Chat has its own reaper.
+            if (done == 0) {
+                if (load64(s + SESS_MODE) != MODE_CHAT) {
+                    if (clock_now_ms() - load64(s + SESS_LAST_MS) >= SESS_IDLE_MS) { done = 1; }
+                }
+            }
         }
         sess_save(s);
     }
+    session_door_checkpoint(s);    # 1.8.1 (D1) — the fork child's EOF / reap path
     sock_close(cfd);
     return 0;
 }
@@ -3206,7 +3536,7 @@ fn cmd_serve_on(port): i64 {
     #
     # Placed here — before the model dispatch — so it dominates every serve path:
     # poll, the fork parent (and its children, which inherit the disposition
-    # across fork), and the agnos serial loop. ADR 0007 rejected `sigaction`
+    # across fork); agnos always polls. ADR 0007 rejected `sigaction`
     # because of the rt_sigaction `sa_restorer` trampoline; cyrius 6.4.51's
     # `signal_ignore` builds the 32-byte SIG_IGN act itself and needs no
     # trampoline, so that objection no longer applies. It is a no-op on agnos
@@ -3316,6 +3646,11 @@ fn cmd_serve_on(port): i64 {
     if (sigfd >= 0) { sock_set_nonblocking(sfd); }
     #endif
 
+    # 1.8.1 (audit P4) — live connection children, so fork mode has the same
+    # operator bound as poll (MAX_SESS). It had none: 200 idle connections made
+    # 200 processes, and an anonymous client could keep adding them until
+    # RLIMIT_NPROC — also starving every other process of the same user.
+    var nchild = 0;
     var stop = 0;
     while (stop == 0) {
         #ifndef CYRIUS_TARGET_AGNOS
@@ -3323,12 +3658,13 @@ fn cmd_serve_on(port): i64 {
         # accept. Non-blocking — exits the loop immediately when no
         # zombies are ready. Without this the process table fills as
         # children exit and the kernel keeps their exit-status entries
-        # around indefinitely. (Fork model only; agnos serves serially,
-        # so there are no children to reap — and agnos has no WNOHANG.)
+        # around indefinitely. (Fork model only — Linux. agnos always polls, so
+        # this loop never runs there, and agnos has no WNOHANG.)
         var reap = 1;
         while (reap == 1) {
             var rpid = sys_waitpid(0 - 1, 0, WNOHANG);
             if (rpid <= 0) { reap = 0; }
+            else { if (nchild > 0) { nchild = nchild - 1; } }
         }
         #endif
 
@@ -3358,13 +3694,18 @@ fn cmd_serve_on(port): i64 {
         var cfd = result_unwrap(at, av);
 
         # 1.6.6 — the agnos serial-accept arm that stood here is DELETED. It was
-        # unreachable: `serve_mode_from_env` (:2213) returns SERVE_POLL on every
+        # unreachable: `serve_mode_from_env` returns SERVE_POLL on every
         # agnos path — the default, an explicit "poll", AND an explicit "fork" —
         # so `cmd_serve_on` dispatches to serve_poll and returns long before this
         # loop. It had been dead since 1.6.0, and its comment still announced the
         # poll multiplex as pending work that the very same cut had shipped. The
         # agnos serial model is recorded where it belongs, in docs/adr/0023.
         #ifndef CYRIUS_TARGET_AGNOS
+        if (nchild >= MAX_SESS) {
+            sys_write(cfd, "server full — try again shortly\r\n", 35);
+            sock_close(cfd);
+            continue;
+        }
         # ADR 0007: fork-per-accept. Each connection becomes its own
         # process; the kernel handles per-conn memory cleanup at child
         # exit (closes audit M1) and globals are per-process (closes
@@ -3395,6 +3736,7 @@ fn cmd_serve_on(port): i64 {
             continue;
         }
         # Parent: child owns cfd now via fork; we drop our copy.
+        nchild = nchild + 1;
         sock_close(cfd);
         #endif
     }
@@ -3467,16 +3809,17 @@ fn cmd_serve(): i64 {
     # is taken as the port; --motd consumes the next arg as an MOTD
     # path; --store consumes the next arg as the post-storage root
     # used by the in-session command interpreter (M5-B).
+    # 1.8.1 (audit S13) — a missing flag value returns 2 directly. It used to
+    # set a `go = 0` flag and `continue`, but the loop's first statement was
+    # `if (go == 0) { continue; }`, which never advanced `i`: `agora serve
+    # --store` with no path spun at 100% CPU forever (the 2026-06-15 T1 shape).
     var i = 2;
-    var go = 1;
     while (i < n) {
-        if (go == 0) { continue; }
         var arg = argv(i);
         if (streq(arg, "--motd") != 0) {
             if (i + 1 >= n) {
                 println("agora serve: --motd requires a path argument");
-                go = 0;
-                continue;
+                return 2;
             }
             load_motd_file(argv(i + 1));
             i = i + 2;
@@ -3485,8 +3828,7 @@ fn cmd_serve(): i64 {
         if (streq(arg, "--store") != 0) {
             if (i + 1 >= n) {
                 println("agora serve: --store requires a path argument");
-                go = 0;
-                continue;
+                return 2;
             }
             # 1.6.5 (audit L1) — bound the store path ONCE, here, rather than
             # at each of the ~30 path builders. `board_path` memcpy's this
@@ -3511,7 +3853,6 @@ fn cmd_serve(): i64 {
         if (p > 0) { port = p; }
         i = i + 1;
     }
-    if (go == 0) { return 2; }
 
     return cmd_serve_on(port);
 }
@@ -3696,8 +4037,8 @@ fn parse_reply_to_flag(): i64 {
 # M6-E: --as <handle> for CLI-side authored posts. When given, the
 # CLI loads the keyfile (default ~/.agora/key, override --key),
 # derives the fingerprint, and validates that the handle is registered
-# to that fingerprint in the store. Anonymous posts (default — no
-# --as) keep the 0.5.x shape (no From header).
+# to that fingerprint in the store. Without --as the post would be
+# anonymous, which board_can_post refuses under every policy (ADR 0006).
 fn parse_as_flag(): i64 {
     args_init();
     var n = argc();
@@ -3777,11 +4118,10 @@ fn cmd_post(): i64 {
             return 2;
         }
     }
-    # M6-F: per-board policy check. Anonymous CLI posts (no --as)
-    # still need to pass policy — `open` admits them, `known` and
-    # `admin` reject. (Anonymous CLI posts at the open default are
-    # the 0.5.x shape; tightening the operator surface is what
-    # policy is for.)
+    # M6-F: per-board policy check. board_can_post refuses EVERY anonymous post,
+    # under every policy (ADR 0006: anon-read, auth-post), so a CLI post needs
+    # --as. (1.8.1, audit H6 — this said `open` admitted anonymous CLI posts;
+    # it never has since M6.)
     if (board_can_post(store, board, from_fp, from_handle) == 0) {
         if (from_fp == 0) {
             println("agora post: board policy requires authentication (rerun with --as <handle> --key <path>)");
@@ -3795,9 +4135,14 @@ fn cmd_post(): i64 {
     # flow. Subject explicitly passed via --subject wins over the
     # derived one (operator can still override).
     if (reply_to > 0) {
+        # 1.8.1 (audit storage I5) — the parent must exist, as on the wire.
+        var pfbuf = alloc(POST_MAX_BYTES + 1024);
+        var pflen = post_read(store, board, reply_to, pfbuf, POST_MAX_BYTES + 1024);
+        if (pflen <= 0) {
+            println("agora post: --reply-to names a post that does not exist on that board");
+            return 1;
+        }
         if (subject == 0) {
-            var pfbuf = alloc(POST_MAX_BYTES + 1024);
-            var pflen = post_read(store, board, reply_to, pfbuf, POST_MAX_BYTES + 1024);
             if (pflen > 0) {
                 var psub = alloc(SUBJECT_MAX_BYTES);
                 var pslen = post_subject(pfbuf, pflen, psub, SUBJECT_MAX_BYTES);
@@ -3807,17 +4152,23 @@ fn cmd_post(): i64 {
             }
         }
     }
-    var body = alloc(POST_MAX_BYTES);
+    var body = alloc(POST_MAX_BYTES + 1);
     var total = 0;
     var rgo = 1;
     while (rgo == 1) {
-        var n = sys_read(STDIN, body + total, POST_MAX_BYTES - total);
+        var n = sys_read(STDIN, body + total, POST_MAX_BYTES + 1 - total);
         if (n <= 0) { rgo = 0; continue; }
         total = total + n;
-        if (total >= POST_MAX_BYTES) { rgo = 0; }
+        if (total > POST_MAX_BYTES) { rgo = 0; }
     }
     if (total <= 0) {
         println("agora post: no input on stdin (pipe in post body)");
+        return 1;
+    }
+    # 1.8.1 (audit S12) — refuse an over-long body instead of storing its first
+    # 64 KB and exiting 0: the tail was lost without a word.
+    if (total > POST_MAX_BYTES) {
+        println("agora post: body exceeds 64 KB (POST_MAX_BYTES); nothing posted");
         return 1;
     }
     # 0.9.0 ABI (ADR 0008): PostHeaders struct.
@@ -4069,6 +4420,12 @@ fn cmd_register(): i64 {
     var pk = alloc(ACCOUNT_PK_BYTES);
     seed_to_pk(seed, pk);
 
+    # 1.8.1 (audit S8) — the check and the write happen under one lock.
+    var rlk = account_register_lock(store);
+    if (rlk < 0) {
+        println("agora register: could not lock the user registry");
+        return 1;
+    }
     # Refuse if the handle is taken (different fp).
     var found_fp = alloc(ACCOUNT_FP_BUF_BYTES);
     if (account_resolve_handle(store, handle, found_fp) == 1) {
@@ -4077,13 +4434,16 @@ fn cmd_register(): i64 {
         var our_fp = alloc(ACCOUNT_FP_BUF_BYTES);
         compute_fingerprint(pk, our_fp);
         if (streq(found_fp, our_fp) == 0) {
+            store_lock_release(rlk);
             println("agora register: handle already registered to a different fingerprint");
             return 1;
         }
     }
 
     var fp_out = alloc(ACCOUNT_FP_BUF_BYTES);
-    if (account_register(store, pk, handle, fp_out) != 0) {
+    var regrc = account_register(store, pk, handle, fp_out);
+    store_lock_release(rlk);
+    if (regrc != 0) {
         println("agora register: write failed (mkdir / open / write error)");
         return 1;
     }
@@ -4119,7 +4479,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.8.0");
+    println("agora 1.8.1");
     return 0;
 }
 
@@ -4157,5 +4517,6 @@ var exit_code = main();
 # framebuffer console grid), so the raw form made an agnos build query the
 # console, discard the answer, and fall off the end of the program instead of
 # terminating. `sys_exit` picks the right number per target and is what the
-# fork child at :2708 already used — these two top-level exits were the outlier.
+# fork child in cmd_serve_on's accept loop already used — these two top-level
+# exits were the outlier.
 sys_exit(exit_code);
