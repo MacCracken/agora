@@ -46,8 +46,12 @@ exits 0** for the first time. `build/agora` **986,144 → 986,152 B**; `--agnos`
   the "post-hook" CLAUDE.md once promised, whose absence let 1.6.6 and 1.7.1 ship unrecorded.
 - **`scripts/check-toolchain.sh`** — the pre-cut provenance gate: the local snapshot's SOURCE_COMMIT and
   every stdlib file against the cyrius tag, the vendored `lib/` against the snapshot, and the compiler the
-  build actually runs. Mutation-checked with a doctored snapshot. (1.6.7 found a dirty snapshot inflating a
-  measured binary by 215,520 B; the check was a manual `cmp` sweep until now.)
+  build actually runs — compared by resolved identity plus `cycc --version`, not by path: a fresh install
+  where the pin is the active version (every CI runner) reaches the pinned `cycc` as `~/.cyrius/bin/cycc`,
+  a symlink into `versions/<pin>/bin`, and a path match rejected it on the first GitHub run.
+  Mutation-checked with a doctored snapshot, a substituted `cycc`, and a reproduction of the runner layout.
+  (1.6.7 found a dirty snapshot inflating a measured binary by 215,520 B; the check was a manual `cmp`
+  sweep until now.)
 
 ### Changed
 

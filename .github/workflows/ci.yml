@@ -54,7 +54,8 @@ jobs:
 
       - name: Toolchain provenance
         # scripts/check-toolchain.sh (1.8.2): the vendored lib/ matches the
-        # installed snapshot, and the build runs the snapshot's own cycc.
+        # installed snapshot, and the build runs the snapshot's own cycc (by
+        # identity: here it is ~/.cyrius/bin/cycc, a symlink into versions/<pin>).
         # (--no-repo: the snapshot-against-tag half needs a cyrius checkout; it
         # is the local pre-cut gate, where a dirty snapshot was actually found.)
         run: scripts/check-toolchain.sh --no-repo

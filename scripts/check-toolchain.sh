@@ -21,7 +21,8 @@
 #   3. every vendored lib/*.cyr in this repo that came from the stdlib is
 #      byte-identical to the snapshot's (a stale `cyrius deps` / `lib sync`;
 #      architecture note 002);
-#   4. `cyrius build -v` resolves the compiler inside the snapshot.
+#   4. the compiler `cyrius build -v` runs is the snapshot's cycc (the same file
+#      by resolved path, or byte-identical) and reports `cycc <pin>`.
 # Usage: scripts/check-toolchain.sh [--no-repo]   (--no-repo: skip 1's commit match and 2)
 # Exit 0 = verified; 1 = a mismatch; 2 = could not verify.
 
@@ -78,15 +79,27 @@ for f in lib/*.cyr; do
 done
 echo "toolchain: $v vendored stdlib files compared against the snapshot${other:+ (not from the stdlib:$other)}"
 
-# 4 — the compiler the build actually runs
+# 4 — the compiler the build actually runs, compared by identity, not by path
+# text: where the pin is not the active version the wrapper runs
+# versions/<pin>/bin/cycc, but where it is (a fresh CI install) it runs
+# ~/.cyrius/bin/cycc, and the installer makes ~/.cyrius/bin a symlink into
+# versions/<active>/bin — the same file reached another way.
 tmpo="$(mktemp)"
 comp="$(cyrius build -v src/main.cyr "$tmpo" 2>&1 | grep -o 'compiler: [^ ]*' | head -1 | cut -d' ' -f2)"
 rm -f "$tmpo"
-case "$comp" in
-    "$SNAP"/bin/cycc*) echo "toolchain: compiler $comp" ;;
-    "") bad "could not read the compiler from 'cyrius build -v'" ;;
-    *) bad "the build runs $comp, not the pinned snapshot's cycc" ;;
-esac
+if [ -z "$comp" ]; then
+    bad "could not read the compiler from 'cyrius build -v'"
+else
+    cver="$("$comp" --version 2>/dev/null | head -1)"
+    if [ "$(readlink -f "$comp")" != "$(readlink -f "$SNAP/bin/cycc")" ] \
+       && ! cmp -s "$comp" "$SNAP/bin/cycc"; then
+        bad "the build runs $comp (${cver:-no --version}), not the pinned snapshot's cycc"
+    elif [ "$cver" != "cycc $PIN" ]; then
+        bad "the build's compiler $comp reports '${cver:-nothing}', not 'cycc $PIN'"
+    else
+        echo "toolchain: compiler $comp ($cver)"
+    fi
+fi
 
 [ "$fail" -eq 0 ] && echo "toolchain: OK — cyrius $PIN verified"
 exit "$fail"
