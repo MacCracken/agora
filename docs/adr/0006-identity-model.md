@@ -80,6 +80,7 @@ Six load-bearing decisions:
 - Default: **anon read, auth post**. `read` / `list` / `boards` / `enter` / `leave` / `help` / `whoami` / `login` / `quit` run from anonymous sessions. `post` / `reply` reply with `auth required` and abort if the session is anonymous.
 - Per-board operator config (M6-F): each board may carry `<store>/<board>/.policy` (one of `open` / `known` / `admin`). `open` = current default (authenticated user can post). `known` = post requires the user to be registered (any registered handle). `admin` = post requires the user's handle to be in `<store>/<board>/.admins` (one handle per line). Missing `.policy` file means `open`. Main board defaults to `open` if no `<store>/.policy` exists.
 - **No anonymous-post mode at M6 first cut.** A future ADR may add `anon-allowed` to `<store>/<board>/.policy` if a real deployment wants a no-account-required board (e.g., a "feedback" board where the operator explicitly accepts unauthenticated posts).
+- **1.9.2 — amended by [ADR 0028](0028-board-policy-modes.md):** `known` is now **members-only** (login to read and to post — it had been identical to `open`), the promised anon-allowed ships as the `anon` mode, `.admins` entries may be fingerprints (and `agora admins add` writes them, so rights follow the key), and `agora policy` / `agora admins` edit both files.
 
 **`From:` header on posts**:
 ```

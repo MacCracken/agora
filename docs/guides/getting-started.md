@@ -69,7 +69,7 @@ Storage defaults to `./agora-data/`. Override with `--store <path>`. Custom MOTD
 
 ## Default policy: anon-read, auth-post
 
-agora's M6 default is **anonymous reads, authenticated writes**. Unauthenticated CLI / telnet sessions can list and read every board; they cannot `post` or `reply` until they register a key and authenticate ([ADR 0006](../adr/0006-identity-model.md) § Specifics). Operators restrict who may **post** per board with `.policy` (see [Per-board posting policy](#per-board-posting-policy) below); reads are never gated.
+agora's M6 default is **anonymous reads, authenticated writes**. Unauthenticated CLI / telnet sessions can list and read every board; they cannot `post` or `reply` until they register a key and authenticate ([ADR 0006](../adr/0006-identity-model.md) § Specifics). Operators set per-board policy with `agora policy` (see [Per-board policy](#per-board-policy) below): since 1.9.2 a board can be members-only (`known` — login to read), open to anonymous posts (`anon`), or admin-only.
 
 The in-session commands (mirroring `help`):
 
@@ -140,25 +140,38 @@ agora's identity model is Ed25519 challenge/response via sigil ([ADR 0006](../ad
 
 ---
 
-## Per-board posting policy
+## Per-board policy
 
-Each board can carry a `.policy` file (`open` / `known` / `admin`) and an `.admins` file (one handle per line) ([ADR 0006](../adr/0006-identity-model.md) § Specifics, M6-F):
+Each board can carry a `.policy` file and an `.admins` file ([ADR 0028](../adr/0028-board-policy-modes.md),
+amending [ADR 0006](../adr/0006-identity-model.md)). Since 1.9.2 every mode means something:
 
-| Mode | Anon | Registered | Admin |
-|---|---|---|---|
-| `open` (default) | ❌ | ✅ | ✅ |
-| `known` | ❌ | ✅ | ✅ |
-| `admin` | ❌ | ❌ | ✅ |
+| Mode | Who reads (`enter` / `list` / `read`) | Who posts |
+|---|---|---|
+| `open` (default) | anyone | any logged-in user |
+| `known` | **members only** — a logged-in user | a logged-in user |
+| `anon` | anyone | **anyone, anonymous sessions included** |
+| `admin` | anyone | only the board's `.admins` |
 
-Anonymous is denied across every mode at M6 (auth-post default; per-board anon override is queued as a future ADR per [ADR 0006](../adr/0006-identity-model.md) § Negative). `open` and `known` are functionally identical today — `known` exists to carry future semantics (cross-store federation / web-of-trust per the v2.x roadmap). No `.policy` file → `open` (backwards-compat with 0.5.x stores). **Since 1.8.1 anything else fails closed**: a `.policy` that cannot be read, or whose first token (after a `#` comment) is not exactly `open` / `known` / `admin`, makes the board admin-only and warns on stderr; and an `.admins` longer than 4 KB is honoured only up to its last whole line. The operator edits the files directly today (`agora policy set` / `agora admins {add,rm,list}` are queued as future CLI verbs).
+No `.policy` file → `open`. A `.policy` that cannot be read, or that names no mode, **fails closed**: the
+board is admin-only for posting and members-only for reading, and the server warns on stderr. `anon` is an
+explicit opt-in — use it for a feedback or guest board, not for a busy one.
+
+Set them with the operator CLI (or edit the files — the format is unchanged):
 
 ```sh
-mkdir -p ./bbs/announce
-echo admin > ./bbs/announce/.policy
-echo qix >  ./bbs/announce/.admins
+agora policy set announce admin --store ./bbs     # creates the board if needed
+agora admins add announce qix --store ./bbs       # writes qix's FINGERPRINT
+agora admins list announce --store ./bbs
+agora policy get announce --store ./bbs
+agora policy set feedback anon --store ./bbs
+agora policy set staff known --store ./bbs
 ```
 
-`announce` is now admin-only; non-`qix` registered users get `post denied by board policy`; anonymous sessions get `auth required`.
+`announce` is now admin-only: non-`qix` registered users get `post denied by board policy`, anonymous
+sessions `auth required`. **`.admins` entries are fingerprints** when written by `agora admins add`: the
+right follows the key, so if qix's key re-registers under another handle and someone else takes `qix`, the
+newcomer is not an admin. A line that is a handle still works, but carries that risk. Anonymous sessions see
+a `known` board as `members only` in `boards` and cannot enter it.
 
 Anonymous sessions cannot create new boards over telnet (0.8.3, audit M4) — `enter <newname>` returns `auth required to create new boards`.
 

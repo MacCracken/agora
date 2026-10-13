@@ -5998,8 +5998,8 @@ fn t227_board_admins_stream(): i64 {
     board_ensure(root, "adm");
     var buf = alloc(64);
     memcpy(buf, "# ops\npac\nqixbert\n", 18);
-    if (board_admins_scan(buf, 18, "qixbert") != 1)  { test_fail(name, "whole line"); return 1; }
-    if (board_admins_scan(buf, 18, "qix") != 0)      { test_fail(name, "prefix matched"); return 1; }
+    if (board_admins_scan(buf, 18, "qixbert", 0) != 1)  { test_fail(name, "whole line"); return 1; }
+    if (board_admins_scan(buf, 18, "qix", 0) != 0)      { test_fail(name, "prefix matched"); return 1; }
     if (board_admins_lines(buf, 14) != 10)           { test_fail(name, "whole-line prefix"); return 1; }
     if (board_admins_lines(buf, 4) != 0)             { test_fail(name, "no-LF prefix"); return 1; }
     # 4,093 bytes of comments, then `qixbert` cut by the 4,096-byte window edge
@@ -6013,22 +6013,22 @@ fn t227_board_admins_stream(): i64 {
     while (k < 50) { memset(big + n, 35, 99); store8(big + n + 99, 10); n = n + 100; k = k + 1; }
     memcpy(big + n, "pac\n", 4); n = n + 4;
     t227_admins(root, big, n);
-    if (board_admin_check(root, "adm", "qix") != 0)     { test_fail(name, "a cut prefix admitted qix"); return 1; }
-    if (board_admin_check(root, "adm", "qixbert") != 1) { test_fail(name, "the straddling line"); return 1; }
-    if (board_admin_check(root, "adm", "pac") != 1)     { test_fail(name, "a handle past 4 KB"); return 1; }
+    if (board_admin_check(root, "adm", "qix", 0) != 0)     { test_fail(name, "a cut prefix admitted qix"); return 1; }
+    if (board_admin_check(root, "adm", "qixbert", 0) != 1) { test_fail(name, "the straddling line"); return 1; }
+    if (board_admin_check(root, "adm", "pac", 0) != 1)     { test_fail(name, "a handle past 4 KB"); return 1; }
     # An 8,196-byte line — two whole windows and `aaaa` — then `dig`: the long
     # line is skipped to its LF, so its tail is never read as the handle `aaaa`.
     memset(big, 97, 8196);
     memcpy(big + 8196, "\ndig\n", 5);
     t227_admins(root, big, 8201);
-    if (board_admin_check(root, "adm", "dig") != 1)  { test_fail(name, "the line after a long one"); return 1; }
-    if (board_admin_check(root, "adm", "aaaa") != 0) { test_fail(name, "a long line read as handles"); return 1; }
+    if (board_admin_check(root, "adm", "dig", 0) != 1)  { test_fail(name, "the line after a long one"); return 1; }
+    if (board_admin_check(root, "adm", "aaaa", 0) != 0) { test_fail(name, "a long line read as handles"); return 1; }
     # `jst` past the 1 MiB cap is ignored.
     n = 0;
     while (n < 1048600) { memset(big + n, 35, 99); store8(big + n + 99, 10); n = n + 100; }
     memcpy(big + n, "jst\n", 4);
     t227_admins(root, big, n + 4);
-    if (board_admin_check(root, "adm", "jst") != 0)  { test_fail(name, "a handle past the cap"); return 1; }
+    if (board_admin_check(root, "adm", "jst", 0) != 0)  { test_fail(name, "a handle past the cap"); return 1; }
     test_pass(name);
     return 0;
 }
@@ -6741,6 +6741,138 @@ fn t239_reply_index_prepare(): i64 {
     return 0;
 }
 
+# t240 — 1.9.2 (ADR 0028): the four board modes each mean something. `anon` lets
+# an anonymous session post; `known` is members-only — no anonymous read, no read
+# or post by a key that is not registered; `open` and `admin` read open and
+# refuse anonymous posts. A members-only board whose `.policy` cannot be read
+# stays closed to anonymous readers (fails closed), and is admin-only for posts.
+fn t240_policy(root, board, mode): i64 {
+    board_ensure(root, board);
+    var p = alloc(PATH_MAX_BYTES);
+    board_policy_path(root, board, p);
+    xunlink(p);
+    if (mode != 0) { file_write_all(p, mode, strlen(mode)); }
+    return 0;
+}
+# (t240 body)
+fn t240_policy_modes(): i64 {
+    var name = "t240_policy_modes";
+    var root = "/tmp/agora-t240-store";
+    t_rmtree(root);
+    if (board_policy_parse("anon\n", 5, 0) != POLICY_ANON) { test_fail(name, "parse anon"); return 1; }
+    var pk = alloc(32);
+    memset(pk, 31, 32);
+    var fp = alloc(ACCOUNT_FP_BUF_BYTES);
+    account_register(root, pk, "qix", fp);
+    var stranger = "0123456789abcdef";       # well-formed, not registered
+    t240_policy(root, "pub", "anon\n");
+    t240_policy(root, "mem", "known\n");
+    t240_policy(root, "adm", "admin\n");
+    t240_policy(root, "plain", 0);
+    if (board_can_post(root, "pub", 0, 0) != 1) {
+        test_fail(name, "anon board refused an anonymous post");
+        return 1;
+    }
+    if (board_can_post(root, "plain", 0, 0) != 0) {
+        test_fail(name, "open board took an anonymous post");
+        return 1;
+    }
+    if (board_can_post(root, "mem", 0, 0) != 0) {
+        test_fail(name, "members board took an anonymous post");
+        return 1;
+    }
+    if (board_can_post(root, "pub", fp, "qix") != 1)   { test_fail(name, "anon board refused a member"); return 1; }
+    if (board_can_post(root, "mem", fp, "qix") != 1)   { test_fail(name, "members board refused a member"); return 1; }
+    if (board_can_post(root, "adm", fp, "qix") != 0)   { test_fail(name, "admin board took a non-admin"); return 1; }
+    if (board_can_read(root, "mem", 0) != 0) {
+        test_fail(name, "members board readable anonymously");
+        return 1;
+    }
+    if (board_can_read(root, "mem", stranger) != 0) {
+        test_fail(name, "members board readable by an unregistered key");
+        return 1;
+    }
+    if (board_can_read(root, "mem", fp) != 1) {
+        test_fail(name, "members board unreadable by a member");
+        return 1;
+    }
+    if (board_can_read(root, "plain", 0) != 1)         { test_fail(name, "open board not anon-readable"); return 1; }
+    if (board_can_read(root, "pub", 0) != 1)           { test_fail(name, "anon board not anon-readable"); return 1; }
+    if (board_can_read(root, "adm", 0) != 1)           { test_fail(name, "admin board not anon-readable"); return 1; }
+    # An unreadable `.policy` (a directory where the file belongs).
+    var pp = alloc(PATH_MAX_BYTES);
+    board_policy_path(root, "mem", pp);
+    xunlink(pp);
+    xmkdir(pp, PERM_DIR);
+    var r0 = board_can_read(root, "mem", 0);
+    var r1 = board_can_read(root, "mem", fp);
+    var w1 = board_can_post(root, "mem", fp, "qix");
+    xrmdir(pp);
+    if (r0 != 0) { test_fail(name, "an unreadable .policy opened reading"); return 1; }
+    if (r1 != 1) { test_fail(name, "an unreadable .policy shut a member out of reading"); return 1; }
+    if (w1 != 0) { test_fail(name, "an unreadable .policy is not admin-only for posts"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t241 — 1.9.2 (audit 1.8.1 I9, ADR 0028): `.admins` entries. A fingerprint entry
+# matches only the session's key, never a handle — even a handle that is itself
+# 16 hex digits; a handle entry matches the handle; an inline `# comment` is
+# allowed; a line of two words is no entry at all.
+fn t241_admins_entries(): i64 {
+    var name = "t241_admins_entries";
+    var b = "# ops\n0123456789abcdef  # qix\npac\nzax extra\ndig # the operator\ndeadbeefdeadbeef\n";
+    var n = strlen(b);
+    if (board_admins_scan(b, n, "qix", "0123456789abcdef") != 1) { test_fail(name, "fingerprint entry"); return 1; }
+    if (board_admins_scan(b, n, "qix", "1111111111111111") != 0) {
+        test_fail(name, "a handle matched via a fingerprint line's comment");
+        return 1;
+    }
+    if (board_admins_scan(b, n, "pac", 0) != 1)                  { test_fail(name, "handle entry"); return 1; }
+    if (board_admins_scan(b, n, "zax", 0) != 0) {
+        test_fail(name, "a two-word line matched");
+        return 1;
+    }
+    if (board_admins_scan(b, n, "dig", 0) != 1)                  { test_fail(name, "inline comment"); return 1; }
+    if (board_admins_scan(b, n, "deadbeefdeadbeef", "2222222222222222") != 0) {
+        test_fail(name, "a fingerprint-shaped HANDLE matched a fingerprint entry");
+        return 1;
+    }
+    if (board_admins_scan(b, n, "jst", "deadbeefdeadbeef") != 1) {
+        test_fail(name, "the key for that entry");
+        return 1;
+    }
+    test_pass(name);
+    return 0;
+}
+
+# t242 — 1.9.2 (audit 1.8.1 I10): chat channels are capped. With 64 channels in
+# place a NEW one is refused (-CHAT_E_FULL); an existing one still opens.
+fn t242_chat_channel_cap(): i64 {
+    var name = "t242_chat_channel_cap";
+    var root = "/tmp/agora-t242-store";
+    t_rmtree(root);
+    var nm = alloc(16);
+    var k = 0;
+    while (k < CHAT_CHANNELS_MAX) {
+        memcpy(nm, "ch", 2);
+        var l = fmt_int_buf(k, nm + 2);
+        store8(nm + 2 + l, 0);
+        if (chat_dir_ensure(root, nm) != 0) { test_fail(name, "creating the first 64"); return 1; }
+        k = k + 1;
+    }
+    if (chat_dir_ensure(root, "onemore") != (0 - CHAT_E_FULL)) {
+        test_fail(name, "a 65th channel was created");
+        return 1;
+    }
+    if (chat_dir_ensure(root, "ch7") != 0) {
+        test_fail(name, "an existing channel refused");
+        return 1;
+    }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -7000,6 +7132,9 @@ fn main(): i64 {
     t237_index_prepare();
     t238_reply_index();
     t239_reply_index_prepare();
+    t240_policy_modes();
+    t241_admins_entries();
+    t242_chat_channel_cap();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

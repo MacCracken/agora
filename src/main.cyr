@@ -227,6 +227,16 @@ fn print_help(): i64 {
     println("  whoami [--key <path>] [--store <path>]");
     println("                 print '<handle?> <fp16>' for the keyfile's identity");
     println("                 (handle from a --store lookup; fp from the keyfile alone)");
+    println("  policy get <board> [--store <path>]");
+    println("  policy set <board> <open|known|anon|admin> [--store <path>]");
+    println("                 a board's posting/reading mode (ADR 0028): open = anyone");
+    println("                 reads, logged-in users post (default); known = members");
+    println("                 only, login to read and post; anon = anyone posts,");
+    println("                 anonymous included; admin = only .admins post");
+    println("  admins list <board> [--store <path>]");
+    println("  admins add|rm <board> <handle|fingerprint> [--store <path>]");
+    println("                 edit a board's .admins; add writes the key's fingerprint");
+    println("                 (rights follow the key, not the handle)");
     println("  version        print version string");
     println("  help           show this message");
     println("");
@@ -480,12 +490,17 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     if (line_has_prefix(line, len, "boards") != 0) {
         var idsmain = cmd_alloc(DIRENT_ID_MAX * 8);
         var maincount = post_list(g_store_buf, "main", idsmain, DIRENT_ID_MAX);
-        # Always list main
+        # Always list main. 1.9.2 — a members-only board (ADR 0028) shows "members
+        # only" instead of its post count to a session that may not read it.
         send_str(cfd, "  main      ");
-        var ibuf[24];
-        var ilen = fmt_int_buf(maincount, &ibuf);
-        send_buf(cfd, &ibuf, ilen);
-        send_str(cfd, " posts\r\n");
+        if (board_can_read(g_store_buf, "main", g_session_fp) == 0) {
+            send_str(cfd, "members only\r\n");
+        } else {
+            var ibuf[24];
+            var ilen = fmt_int_buf(maincount, &ibuf);
+            send_buf(cfd, &ibuf, ilen);
+            send_str(cfd, " posts\r\n");
+        }
 
         var names = cmd_alloc(BOARD_LIST_MAX * 8);
         var bcount = boards_list(g_store_buf, names, BOARD_LIST_MAX);
@@ -507,10 +522,14 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 send_str(cfd, " ");
                 pad = pad - 1;
             }
-            var pbuf[24];
-            var plen = fmt_int_buf(pcount, &pbuf);
-            send_buf(cfd, &pbuf, plen);
-            send_str(cfd, " posts\r\n");
+            if (board_can_read(g_store_buf, name_cstr, g_session_fp) == 0) {
+                send_str(cfd, "members only\r\n");
+            } else {
+                var pbuf[24];
+                var plen = fmt_int_buf(pcount, &pbuf);
+                send_buf(cfd, &pbuf, plen);
+                send_str(cfd, " posts\r\n");
+            }
             i = i + 1;
         }
         return MODE_COMMAND;
@@ -562,6 +581,11 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 return MODE_COMMAND;
             }
         }
+        # 1.9.2 — a members-only board (ADR 0028) is entered by members only.
+        if (board_can_read(g_store_buf, name_buf, g_session_fp) == 0) {
+            send_str(cfd, "members only — run 'login <handle>' first\r\n");
+            return MODE_COMMAND;
+        }
         # Switch + (no-op if already exists) auto-create. board_ensure
         # is safe to call on an existing board.
         memcpy(current_board, name_buf, name_len);
@@ -582,6 +606,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "list") != 0) {
+        # 1.9.2 — checked on every list, not only at `enter`: the board may have
+        # become members-only since (and `main` is where every session starts).
+        if (board_can_read(g_store_buf, current_board, g_session_fp) == 0) {
+            send_str(cfd, "members only — run 'login <handle>' first\r\n");
+            return MODE_COMMAND;
+        }
         var ids = cmd_alloc(DIRENT_ID_MAX * 8);
         var count = post_list(g_store_buf, current_board, ids, DIRENT_ID_MAX);
         if (count == 0) {
@@ -629,6 +659,10 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "read") != 0) {
+        if (board_can_read(g_store_buf, current_board, g_session_fp) == 0) {
+            send_str(cfd, "members only — run 'login <handle>' first\r\n");
+            return MODE_COMMAND;
+        }
         var id = line_parse_int(line, 4, len);
         if (id < 0) {
             send_str(cfd, "usage: read <id>\r\n");
@@ -1100,7 +1134,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
                 return MODE_COMMAND;
             }
         }
-        if (chat_dir_ensure(g_store_buf, chan) != 0) {
+        var crc = chat_dir_ensure(g_store_buf, chan);
+        if (crc == (0 - CHAT_E_FULL)) {
+            send_str(cfd, "too many chat channels (64) — join an existing one\r\n");
+            return MODE_COMMAND;
+        }
+        if (crc != 0) {
             send_str(cfd, "could not open channel\r\n");
             return MODE_COMMAND;
         }
@@ -4549,6 +4588,307 @@ fn cmd_register(): i64 {
     return 0;
 }
 
+# === Operator CLI: board policy + admins (1.9.2, ADR 0028) ===
+#
+# Operators edited `<board>/.policy` and `<board>/.admins` by hand (roadmap
+# § 1.9.2, open since the 0.6.0 closeout). Both files keep their format; these
+# verbs validate what they write, take the board lock, and replace the file with
+# store_write_atomic — whole or not at all, never through a symlink.
+
+# Print a NUL-terminated string (no newline) — the operator verbs' literals, so
+# no length is ever counted by hand.
+fn cli_put(s): i64 {
+    print(s, strlen(s));
+    return 0;
+}
+
+# Validate a CLI board argument ("main" or a valid board name); prints the error
+# and returns 0 when it is not one.
+fn cli_board_ok(verb, board): i64 {
+    if (board == 0) { return 0; }
+    if (streq(board, "main") != 0) { return 1; }
+    if (board_name_valid(board) == 1) { return 1; }
+    cli_put("agora ");
+    print(verb, strlen(verb));
+    println(": invalid board name (lowercase ASCII + digits + '-' / '_', 1-32 bytes)");
+    return 0;
+}
+
+# The POLICY_* value a mode word names, or POLICY_INVALID.
+fn policy_from_word(w): i64 {
+    if (streq(w, "open")  != 0) { return POLICY_OPEN; }
+    if (streq(w, "known") != 0) { return POLICY_KNOWN; }
+    if (streq(w, "anon")  != 0) { return POLICY_ANON; }
+    if (streq(w, "admin") != 0) { return POLICY_ADMIN; }
+    return POLICY_INVALID;
+}
+
+# The mode word for a POLICY_* value (POLICY_INVALID → "invalid").
+fn policy_word(pol): i64 {
+    if (pol == POLICY_OPEN)  { return "open"; }
+    if (pol == POLICY_KNOWN) { return "known"; }
+    if (pol == POLICY_ANON)  { return "anon"; }
+    if (pol == POLICY_ADMIN) { return "admin"; }
+    return "invalid";
+}
+
+# `agora policy get <board>` / `agora policy set <board> <mode>`. Exit 0, 1 (no
+# such board / write failed), 2 (usage).
+fn cmd_policy(): i64 {
+    var store = parse_store(DEFAULT_STORE);
+    var sub = nth_positional(0);
+    var board = nth_positional(1);
+    if (sub == 0) {
+        println("agora policy: usage: policy get <board> | policy set <board> <open|known|anon|admin>");
+        return 2;
+    }
+    if (cli_board_ok("policy", board) == 0) {
+        if (board == 0) { println("agora policy: missing <board>"); }
+        return 2;
+    }
+    var path = alloc(PATH_MAX_BYTES);
+    board_policy_path(store, board, path);
+    if (streq(sub, "get") != 0) {
+        if (streq(board, "main") == 0) {
+            if (board_exists(store, board) == 0) { println("agora policy: no such board"); return 1; }
+        }
+        var pol = board_policy_read(store, board);
+        print(board, strlen(board));
+        cli_put(": ");
+        if (pol == POLICY_INVALID) {
+            println("invalid (.policy unreadable or unrecognised: admin-only posting, members-only reading)");
+            return 1;
+        }
+        var w = policy_word(pol);
+        print(w, strlen(w));
+        if (store_name_exists(path) == 0) { cli_put(" (default: no .policy)"); }
+        println("");
+        return 0;
+    }
+    if (streq(sub, "set") != 0) {
+        var word = nth_positional(2);
+        if (word == 0) { println("agora policy: usage: policy set <board> <open|known|anon|admin>"); return 2; }
+        if (policy_from_word(word) == POLICY_INVALID) {
+            println("agora policy: mode must be one of open, known, anon, admin");
+            return 2;
+        }
+        if (board_ensure(store, board) != 0) { println("agora policy: could not create the board"); return 1; }
+        var lk = store_lock_acquire(store, board);
+        if (lk < 0) { println("agora policy: could not lock the board"); return 1; }
+        var line = alloc(16);
+        var wl = strlen(word);
+        memcpy(line, word, wl);
+        store8(line + wl, 10);
+        var wr = store_write_atomic(path, line, wl + 1);
+        store_lock_release(lk);
+        if (wr != 0) { println("agora policy: write failed"); return 1; }
+        print(board, strlen(board));
+        cli_put(": ");
+        println(word);
+        return 0;
+    }
+    println("agora policy: usage: policy get <board> | policy set <board> <open|known|anon|admin>");
+    return 2;
+}
+
+# Resolve an `agora admins` target — a fingerprint or a handle — into fp_out
+# (ACCOUNT_FP_BUF_BYTES, "" when a handle is not registered) and handle_out
+# (ACCOUNT_HANDLE_BUF, "" when a fingerprint has no handle). Returns 1, or 0 when
+# `who` is neither.
+fn admins_resolve(store, who, fp_out, handle_out): i64 {
+    store8(fp_out, 0);
+    store8(handle_out, 0);
+    var wl = strlen(who);
+    if (board_admins_is_fp(who, wl) == 1) {
+        memcpy(fp_out, who, 16);
+        store8(fp_out + 16, 0);
+        account_lookup_handle(store, fp_out, handle_out, ACCOUNT_HANDLE_BUF);
+        return 1;
+    }
+    if (handle_valid(who) == 0) { return 0; }
+    memcpy(handle_out, who, wl);
+    store8(handle_out + wl, 0);
+    account_resolve_handle(store, who, fp_out);
+    return 1;
+}
+
+# `agora admins list|add|rm <board> [<handle|fingerprint>]`. `add` writes the
+# key's fingerprint ("<fp>  # <handle>"): rights follow the key (audit 1.8.1 I9).
+# `rm` removes the fingerprint entry and any handle entry for the target. Exit 0,
+# 1 (unknown handle / not an admin / write failed), 2 (usage).
+fn cmd_admins(): i64 {
+    var store = parse_store(DEFAULT_STORE);
+    var sub = nth_positional(0);
+    var board = nth_positional(1);
+    if (sub == 0) {
+        println("agora admins: usage: admins list <board> | admins add|rm <board> <handle|fingerprint>");
+        return 2;
+    }
+    if (cli_board_ok("admins", board) == 0) {
+        if (board == 0) { println("agora admins: missing <board>"); }
+        return 2;
+    }
+    var path = alloc(PATH_MAX_BYTES);
+    board_admins_path(store, board, path);
+    var cap = BOARD_ADMINS_FILE_CAP;
+    var buf = alloc(cap + 256);
+    var ent = alloc(16);
+    var hb = alloc(ACCOUNT_HANDLE_BUF);
+
+    if (streq(sub, "list") != 0) {
+        var n = store_read_all(path, buf, cap);
+        if (n < 0) {
+            if (store_read_missing(n) == 1) { println("(no .admins)"); return 0; }
+            println("agora admins: .admins could not be read");
+            return 1;
+        }
+        var ls = 0;
+        var i = 0;
+        while (i <= n) {
+            var eol = 0;
+            if (i == n) { eol = 1; } else { if ((load8(buf + i) & 0xFF) == 10) { eol = 1; } }
+            if (eol == 1) {
+                if (board_admins_line_entry(buf, ls, i, ent) == 1) {
+                    var es = buf + load64(ent);
+                    var el = load64(ent + 8);
+                    sys_write(1, es, el);
+                    if (board_admins_is_fp(es, el) == 1) {
+                        var fpz = alloc(24);
+                        memcpy(fpz, es, 16);
+                        store8(fpz + 16, 0);
+                        if (account_lookup_handle(store, fpz, hb, ACCOUNT_HANDLE_BUF) > 0) {
+                            cli_put("  ");
+                            print(hb, strlen(hb));
+                        } else {
+                            cli_put("  (no registered user)");
+                        }
+                    } else {
+                        cli_put("  (by handle: a re-registered handle inherits it; prefer the fingerprint)");
+                    }
+                    println("");
+                }
+                ls = i + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    var add = streq(sub, "add");
+    var rm = streq(sub, "rm");
+    if (add == 0) {
+        if (rm == 0) {
+            println("agora admins: usage: admins list <board> | admins add|rm <board> <handle|fingerprint>");
+            return 2;
+        }
+    }
+    var who = nth_positional(2);
+    if (who == 0) { println("agora admins: missing <handle|fingerprint>"); return 2; }
+    var fp = alloc(ACCOUNT_FP_BUF_BYTES);
+    var handle = alloc(ACCOUNT_HANDLE_BUF);
+    if (admins_resolve(store, who, fp, handle) == 0) {
+        println("agora admins: not a handle or a 16-hex fingerprint");
+        return 2;
+    }
+    if (add != 0) {
+        if ((load8(fp) & 0xFF) == 0) {
+            println("agora admins: unknown handle (register it first, or give the fingerprint)");
+            return 1;
+        }
+    }
+    if (board_ensure(store, board) != 0) { println("agora admins: could not create the board"); return 1; }
+    var lk = store_lock_acquire(store, board);
+    if (lk < 0) { println("agora admins: could not lock the board"); return 1; }
+    var n2 = store_read_all(path, buf, cap);
+    if (n2 < 0) {
+        if (store_read_missing(n2) == 0) {
+            store_lock_release(lk);
+            println("agora admins: .admins could not be read");
+            return 1;
+        }
+        n2 = 0;
+    }
+    if (n2 >= cap) {
+        store_lock_release(lk);
+        println("agora admins: .admins is over 1 MiB; edit it by hand");
+        return 1;
+    }
+    var out = alloc(cap + 256);
+    var on = 0;
+    var hit = 0;
+    var hl = strlen(handle);
+    var ls2 = 0;
+    var j = 0;
+    while (j <= n2) {
+        var eol2 = 0;
+        if (j == n2) { eol2 = 1; } else { if ((load8(buf + j) & 0xFF) == 10) { eol2 = 1; } }
+        if (eol2 == 1) {
+            var keep = 1;
+            if (board_admins_line_entry(buf, ls2, j, ent) == 1) {
+                var es2 = buf + load64(ent);
+                var el2 = load64(ent + 8);
+                var hitln = 0;
+                if (board_admins_is_fp(es2, el2) == 1) {
+                    if ((load8(fp) & 0xFF) != 0) { if (memeq(es2, fp, 16) == 1) { hitln = 1; } }
+                } else {
+                    if (hl > 0) { if (el2 == hl) { if (memeq(es2, handle, hl) == 1) { hitln = 1; } } }
+                }
+                if (hitln == 1) {
+                    hit = hit + 1;
+                    if (rm != 0) { keep = 0; }
+                }
+            }
+            if (keep == 1) {
+                if (j > ls2) {
+                    memcpy(out + on, buf + ls2, j - ls2);
+                    on = on + (j - ls2);
+                    store8(out + on, 10);
+                    on = on + 1;
+                }
+            }
+            ls2 = j + 1;
+        }
+        j = j + 1;
+    }
+    if (add != 0) {
+        if (hit > 0) {
+            store_lock_release(lk);
+            println("already an admin");
+            return 0;
+        }
+        memcpy(out + on, fp, 16);
+        on = on + 16;
+        if (hl > 0) {
+            memcpy(out + on, "  # ", 4);
+            on = on + 4;
+            memcpy(out + on, handle, hl);
+            on = on + hl;
+        }
+        store8(out + on, 10);
+        on = on + 1;
+    } else {
+        if (hit == 0) {
+            store_lock_release(lk);
+            println("agora admins: not an admin of this board");
+            return 1;
+        }
+    }
+    var wr = store_write_atomic(path, out, on);
+    store_lock_release(lk);
+    if (wr != 0) { println("agora admins: write failed"); return 1; }
+    if (add != 0) {
+        cli_put("added ");
+        print(fp, 16);
+    } else {
+        cli_put("removed ");
+        fmt_int(hit);
+        cli_put(" entr");
+        if (hit == 1) { cli_put("y"); } else { cli_put("ies"); }
+    }
+    println("");
+    return 0;
+}
+
 # `agora whoami [--key <path>] [--store <path>]` — decode the
 # keyfile, derive the fingerprint, optionally look up the handle in
 # the store. Prints `<handle?> <fp16>` or just `<fp16>`. Returns 1
@@ -4601,6 +4941,8 @@ fn main(): i64 {
     if (streq(verb, "whoami")   != 0) { return cmd_whoami(); }
     if (streq(verb, "keygen")   != 0) { return cmd_keygen(); }
     if (streq(verb, "register") != 0) { return cmd_register(); }
+    if (streq(verb, "policy")   != 0) { return cmd_policy(); }
+    if (streq(verb, "admins")   != 0) { return cmd_admins(); }
     if (streq(verb, "worldbench") != 0) { return cmd_worldbench(); }
     if (streq(verb, "worldread") != 0) { return cmd_worldread(); }
     println("agora: unknown command");

@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.2] — 2026-10-13 (board policy + operator CLI)
+
+Closes the 1.9.x line. Every board mode now changes what users can do, admin rights follow the key instead of
+the handle, operators get CLI verbs for `.policy` / `.admins`, chat channels are capped, and the one
+knowingly accepted serve-model risk is written down. ADR [0028](docs/adr/0028-board-policy-modes.md) (amending
+0006); ADR 0023 amended.
+
+**249** tests (242 module + 7 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`; **34**
+example smokes (new: 34), both CI legs green; `cyrius audit` exit 0. `build/agora` **998,552 → 1,008,768 B**;
+`--agnos` 995,064 → 1,005,280 B; `--aarch64` 2,415,568 → 2,417,584 B.
+
+### Breaking
+
+- **`known` now means members-only.** It meant "a registered user may post", which every logged-in user is,
+  so it behaved exactly like `open`. Since 1.9.2 a `known` board is **read** by logged-in members only:
+  anonymous sessions get `members only` from `enter` / `list` / `read`, and `boards` shows `members only`
+  instead of the post count. Posting is unchanged. **Migration:** a board set to `known` that should stay
+  anonymously readable → `agora policy set <board> open` (identical posting rules).
+- **A 16-hex `.admins` line is a fingerprint** and matches only that key, never a handle — even a handle that
+  is itself 16 hex digits (that would let anyone register an admin's fingerprint as a handle). No agora tool
+  wrote such a handle line; `agora admins list` shows how each entry is read.
+
+### Security
+
+- **`.admins` granted rights by handle (audit 1.8.1 I9; MEDIUM).** When a key re-registered under a new
+  handle, the old handle was free for anyone to register — with the admin rights an `.admins` line gave it.
+  Fingerprint entries match the key; `agora admins add` writes them (`<fp>  # <handle>`). Smoke 34 § C: after
+  qix's key renames itself and someone else registers `qix`, the newcomer is refused and the key still posts.
+  Handle entries keep working, with that risk, and are labelled so by `agora admins list`.
+- **Chat channels were uncapped (audit 1.8.1 I10; LOW).** Any logged-in user could create unlimited
+  `<store>/.chat/<name>/`. Joining a *new* channel past 64 is refused (`too many chat channels`); existing ones
+  stay joinable. A cap, not an exact count: two joins racing for the last slot can both create one.
+- **An unreadable `.policy` now fails closed for reading too** — members-only, alongside 1.8.1's admin-only
+  for posting — so a broken `known` board cannot become world-readable.
+
+### Added
+
+- **Board modes** (ADR 0028): `open` (default: anyone reads, logged-in users post), `known` (members only),
+  `anon` (**anyone posts, anonymous sessions included** — ADR 0006's promised anon-allowed, an explicit
+  per-board opt-in for feedback / guest boards; posts render `[anon]`), `admin`. `board_can_read` gates the
+  wire's `enter`, `list` and `read` (each time, not only at `enter`), and `boards`.
+- **Operator CLI**: `agora policy get|set <board> [open|known|anon|admin]` and `agora admins list|add|rm <board>
+  [<handle|fingerprint>]`. They validate the board and the mode, take the board lock, and write with
+  `store_write_atomic` (ADR 0025); `admins add` resolves a handle through the handle index (ADR 0026) and
+  refuses an unknown one; `admins rm` drops the fingerprint and any handle entry for the target. The formats
+  are unchanged apart from `anon`, fingerprint entries and an inline `# comment` — hand edits still work.
+- `docs/examples/34-board-policy.py` — the CLI, every mode on the wire under both serve models, and the I9
+  rebinding. Against a 1.9.1 build it fails 17 of 35 checks (no CLI; `anon` read as invalid; fingerprint
+  entries never matched).
+- Tests: `t240` the four modes (anonymous / member / unregistered key, and an unreadable `.policy` closed both
+  ways), `t241` `.admins` entries (fingerprints match only keys — a fingerprint-shaped HANDLE included; inline
+  comments; a two-word line is no entry), `t242` the chat cap. Mutation-checked: 6 mutants, 6 caught.
+
+### Changed
+
+- **ADR 0023 records the accepted slow-typist risk** (roadmap § 1.9.2; CHANGELOG [1.6.4] argued it and never
+  recorded it): a client sending one real byte every 50 s holds a slot like a slow typist, and 64 of them hold
+  the server. A lifetime cap would cut legitimate long sessions and a per-source cap needs `getpeername`,
+  which agnos lacks; `MAX_SESS` and the network edge are the operator's tools; revisit if agnos gains it.
+- `board_admins_scan` is built on `board_admins_line_entry`, which the CLI shares, so `agora admins` edits
+  exactly the entries the server matches.
+- The getting-started guide's policy section is rewritten (it said `known` = `open` and that the CLI verbs
+  were future).
+
+### Verification
+
+- `cyrius test`: **242/242** + **7/7**, the same under `cyrius test --aarch64`. Fuzz plain and `--poison=ab`.
+  `cyrius audit` **exit 0**. `scripts/check-version-sync.sh` and `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs exactly as CI runs them, on 4 CPUs: **fork 25/25, poll 33/33** (34
+  smokes; 20 ran against the sibling MUD).
+
 ## [1.9.1] — 2026-10-13 (the reply index)
 
 `read` stops paying for the whole board. The replies a post lists ("Replies: 2, 4") came from opening every

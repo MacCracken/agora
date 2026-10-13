@@ -1,9 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.9.1 (the reply index) shipped**: `read` is O(replies), not O(posts)
-> (ADR 0027). Next slot: **1.9.2**, board policy + operator CLI. Earlier the same day: 1.9.0 (durable posts +
-> store hardening), 1.8.2 (tooling); 1.8.1 (code audit + repair) and the re-plan into 1.8.x → 1.12.x slots on
-> 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.9.2 (board policy + operator CLI) shipped, closing the 1.9.x line**
+> (its sections are gone; its row is in § Shipped). Next slot: **1.10.0**, telnet conformance. The same day:
+> 1.9.1 (reply index), 1.9.0 (durable posts + store hardening), 1.8.2 (tooling); 1.8.1 and the re-plan into
+> 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -30,9 +30,7 @@ did) and the slots after it shift.
 
 | Slot | Theme | Kind | Status |
 |---|---|---|---|
-| **1.9.0** | Durable posts + store hardening | correctness / security | ✅ 2026-10-13 |
-| **1.9.1** | Reply index | scale | ✅ 2026-10-13 |
-| **1.9.2** | Board policy + operator CLI | feature | planned |
+| **1.9.2** | Board policy + operator CLI (closes the 1.9.x line: 1.9.0 store hardening, 1.9.1 reply index) | feature | ✅ 2026-10-13 |
 | **1.10.0** | Telnet conformance | protocol | planned |
 | **1.10.1** | Terminal-aware output | protocol / UX | planned |
 | **1.11.0** | Descent as a poll state + serve-model debt | structure | planned |
@@ -40,35 +38,6 @@ did) and the slots after it shift.
 | **1.12.0** | Olympiad events + door content | content | planned |
 | **1.12.1** | Wager audit trail | content / fairness | planned |
 | 1.x | Cross-repo and toolchain-blocked work | — | blocked — see § Unscheduled |
-
----
-
-## 1.9.x — storage and scale
-
-### 1.9.0 — Durable posts + store hardening ✅
-
-Shipped 2026-10-13 — all four rows: store opens refuse symlinks and non-regular files (audit 1.8.1 I11 — a
-FIFO hung the whole poll server; ADR 0025); posts published crash-safely by temp + fsync + `link` (CLAUDE.md
-"posts are durable artifacts", now backed; ADR 0025); the handle index (audit 1.8.1 H1 / L4 — unknown-handle
-login 16.98 → 0.16 ms at 3,000 users; ADR 0026); `.admins` read to the end (audit 1.8.1 M4). Detail:
-CHANGELOG `[1.9.0]`. Delete this section when the 1.9.x line closes.
-
-### 1.9.1 — Reply index ✅
-
-Shipped 2026-10-13 — `<board>/.replies/<parent>`, verified against the posts (ADR 0027, amending 0005): a post
-with no replies 23.7 → 0.18 ms at 4,096 posts, a 409-reply thread 29.4 → 2.5 ms, and replies older than the
-newest 4,096 posts listed at last. Also the directory half of the store's FIFO hardening (ADR 0025). Detail:
-CHANGELOG `[1.9.1]`. Delete this section when the 1.9.x line closes.
-
-### 1.9.2 — Board policy + operator CLI
-
-| Item | Source | Effort |
-|---|---|---:|
-| **`open` and `known` are functionally identical** — a documented policy an operator can set and observe nothing from. Write the promised `anon-allowed` policy ADR and make the modes mean something (or collapse them). | [ADR 0006](../adr/0006-identity-model.md) | medium |
-| **Operator CLI** — `agora policy set <board> <mode>`, `agora admins {add,rm,list}`. Operators edit `.policy` / `.admins` by hand today. | long-standing (0.6.0 closeout) | medium |
-| Session-slot exhaustion by a slow-but-real typist is a knowingly accepted risk with **no recorded acceptance** — record it in ADR 0023 or bound it | CHANGELOG [1.6.4] § Changed | small |
-| **`.admins` grants by handle**, and a key re-registered under a new handle frees the old one for anyone — key admin rights on the fingerprint (or accept both forms) | audit 1.8.1 I9 | small |
-| Chat channel directories have no cap — any logged-in user can create unlimited `<store>/.chat/<name>/` | audit 1.8.1 I10 | small |
 
 ---
 
@@ -205,6 +174,7 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 | Targets + serve models | 1.5.0 – 1.6.7 | agnos target; single-process poll multiplex (`AGORA_SERVE`); per-command arena; `DD_FREE`; 2026-07-26 audit ledger closed; doc-truth cut; toolchain to 6.5.33 | 2026-08-22 |
 | Durability + egress | 1.7.0 – 1.8.0 | clean shutdown (signalfd); crash-safe door / world / chat writes; poll holes; IAC fuzz harness; `Result` value form; darshana 1.3.0 + egress sanitization (2026-10-12 audit closed) | 2026-10-12 |
 | Audit + repair, tooling | 1.8.1 – 1.8.2 | six-slice audit, 41 fixes (poll fairness, vendored-allocation leaks, fail-closed policy, door save lifecycle, loader bounds, fork caps); then the Closeout Pass in CI, serve-layer unit tests, generated version string, serve-level baselines | 2026-10-13 |
+| Storage, scale, policy | 1.9.0 – 1.9.2 | store opens refuse symlinks and FIFOs (files and directories); crash-safe post publish; the handle index (unknown login O(1)); the reply index (`read` O(replies)); `.admins` read whole and keyed on fingerprints; four board modes that each mean something (members-only, anonymous posting); `agora policy` / `agora admins`; chat channel cap; the slot risk recorded (ADRs 0025–0028) | 2026-10-13 |
 
 ---
 
@@ -212,9 +182,10 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door / chatbot backlog.
-- [`docs/adr/`](../adr/) — 27 ADRs (0001–0027). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
+- [`docs/adr/`](../adr/) — 28 ADRs (0001–0028). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
   0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization; 0025–0026
-  the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index); 0027 the reply index.
+  the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index); 0027 the reply index;
+  0028 the board policy modes.
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2,
   closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut), 2026-10-12-audit-1.8.1 (closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).

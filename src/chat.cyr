@@ -57,6 +57,8 @@ enum ChatCap {
     CHAT_TAIL_CAP        = 8192;   # per-tick rendered-tail buffer
     CHAT_LINE_DISP_MAX   = 300;    # max bytes one rendered "<handle> text\r\n" needs
     CHAT_HANDLE_DISP     = 32;     # 1.8.1 — handle bytes rendered (handles are <= 32)
+    CHAT_CHANNELS_MAX    = 64;     # 1.9.2 — channels that may exist; joining a new one past it is refused
+    CHAT_E_FULL          = 28;     # chat_dir_ensure's refusal (ENOSPC): the channel cap is reached
 }
 
 # === Channel-name validation ===
@@ -345,8 +347,33 @@ fn chat_dir_ensure(store, channel): i64 {
     chat_root(store, path);
     rc = store_ensure(path);
     if (rc != 0) { return rc; }
+    # 1.9.2 (audit 1.8.1 I10) — joining a channel that does not exist creates it,
+    # and any logged-in user could create `<store>/.chat/<name>/` without limit.
+    # Past CHAT_CHANNELS_MAX a NEW channel is refused (existing ones, however many,
+    # stay joinable). A cap, not an exact count: two joins racing past the last
+    # free slot can both create one.
+    # Counted only for a NEW channel — chat_lock_acquire comes through here on every
+    # `say`, and an existing channel must cost no directory scan.
     chat_channel_dir(store, channel, path);
+    if (store_name_exists(path) == 0) {
+        var root = cmd_alloc(PATH_MAX_BYTES);
+        chat_root(store, root);
+        if (chat_channel_count(root) >= CHAT_CHANNELS_MAX) { return 0 - CHAT_E_FULL; }
+    }
     return store_ensure(path);
+}
+
+# How many channel directories `<store>/.chat` (`root`) holds — entries with a
+# valid channel name; 0 if it cannot be listed.
+fn chat_channel_count(root): i64 {
+    var n = store_dir_scan(root);
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (chat_channel_valid(store_dir_name(i)) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
 }
 
 # === Channel I/O ===

@@ -14,7 +14,7 @@ docs/examples/run.sh --fast --skip 01     # skip the slow halves (26's idle wait
 [`run.sh`](run.sh) (1.8.2) knows what each script needs: a clean `./bbs` and `./keys`, a freshly registered
 `qix` (03, 05, 06, 11–13, 15, 24, 26, 27), or a server it must start itself under the requested model (the
 client-only 04, 05, 23, 25, 26, 27). Scripts that start their own server inherit `AGORA_SERVE`, so
-`--model fork|poll|both` covers them too; 24 and 28–33 drive both models internally and run once. 20 skips
+`--model fork|poll|both` covers them too; 24 and 28–34 drive both models internally and run once. 20 skips
 itself unless the sibling `../cyrius-yeomans-descent` repo is present. Logs land in `build/smoke-logs/`.
 **CI runs the whole set on every push, once per serve model.** The runner refuses to start if `./bbs` or
 `./keys` already exist, since the scripts create and delete them (`--force` to override).
@@ -25,7 +25,7 @@ under a model named only in their header. Every release from 1.6.7 to 1.8.1 was 
 harness — the reason smoke 20's breakage went unnoticed for four releases.)
 
 Running one by hand still works: each script's header says what it needs. Defaults: `./build/agora`,
-a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–33 pick their own).
+a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–34 pick their own).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -34,7 +34,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–33 pic
 | 03 | [`03-anonymous-read.sh`](03-anonymous-read.sh) | M6 default "anon-read, auth-post" — reads succeed, anon post denied | `./bbs/` |
 | 04 | [`04-concurrent-smoke.py`](04-concurrent-smoke.py) | ADR 0007 fork-per-conn: 3 simultaneous telnet sessions | `./bbs/` |
 | 05 | [`05-telnet-login.sh`](05-telnet-login.sh) | M6 challenge/response over telnet (openssl-signed) | `./bbs/`, `./keys/qix` |
-| 06 | [`06-board-policy.sh`](06-board-policy.sh) | M6-F `.policy` / `.admins` (open / known / admin) | `./bbs/` |
+| 06 | [`06-board-policy.sh`](06-board-policy.sh) | M6-F `.policy` / `.admins` (open / known / admin) via CLI posts; the 1.9.2 modes on the wire are 34 | `./bbs/` |
 | 07 | [`07-play-door.sh`](07-play-door.sh) | 1.1.0 door games: plays Smuggler's Ledger / Port Authority / The Handler over telnet (practice mode) — ADR 0009 | none |
 | 08 | [`08-world-concurrency.sh`](08-world-concurrency.sh) | 1.2.0 world-transaction framework: N processes hammer one shared world, assert no lost updates — ADR 0010 | `/tmp/agora-world-smoke-$$` |
 | 09 | [`09-universe-port.sh`](09-universe-port.sh) | 1.2.0 bite 2 PA shared galaxy: two players `play port universe` — shared map, exclusive planet ownership across sessions, world persists, login-gated — ADR 0010 | `./bbs/`, `./keys/` |
@@ -62,6 +62,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–33 pic
 | 31 | [`31-slow-reader.py`](31-slow-reader.py) | 1.8.2: the slow-reader close path (1.6.3 / 1.7.0 / 1.8.1) pinned — a client that asks for ~12 MB and reads nothing is disconnected: under poll promptly with a bystander unaffected, under fork within one send timeout (watched via the connection's child, since reading would un-stall the writer). Self-contained; `--fast` skips the ~70 s fork half; a 1.8.0 build fails the fork half, and so did 1.8.2's first cut (186 s — CHANGELOG [1.8.2] § Fixed). | `/tmp/agora-slowreader-smoke-$$` |
 | 32 | [`32-store-hardening.py`](32-store-hardening.py) | 1.9.0 (audit 1.8.1 I11, ADR 0025): store opens refuse FIFOs and symlinks — a FIFO named `2.txt` must not hang `list` / `read` (under poll it hung the whole server, and a new client was never greeted), and `3.txt -> <a file outside the store>` must not be served as a post. Both serve models; the symlink checks run first so each fails on its own merits. A 1.8.2 build fails 9 of 10. **1.9.1 § B**: a FIFO in place of `.users/` must not hang `login` (a 1.9.0 poll server hangs). Self-contained. | `/tmp/agora-storehard-smoke-$$` |
 | 33 | [`33-reply-index.py`](33-reply-index.py) | 1.9.1 (ADR 0027): the first smoke to check a `Replies:` line — a hand-written board indexed at server start, a CLI `--reply-to` listed at once, a reply added by hand NOT listed under a complete index (the scan no longer runs), and the rebuild after deleting `.replies/`. Both serve models; a 1.9.0 build fails the index checks. Self-contained (own key + store). | `/tmp/agora-replyidx-smoke-$$` |
+| 34 | [`34-board-policy.py`](34-board-policy.py) | 1.9.2 (ADR 0028): `agora policy` / `agora admins`; every mode on the wire — `anon` (an anonymous post, listed `[anon]`), `known` (members only: no anonymous enter / list, `boards` says so), `admin` by fingerprint — and audit I9: after the admin's key renames itself and someone else registers the old handle, the newcomer is not an admin. Both serve models; a 1.9.1 build fails 17 of 35. Self-contained (own keys + store; openssl). | `/tmp/agora-policy-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

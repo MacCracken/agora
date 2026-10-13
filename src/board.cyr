@@ -55,31 +55,37 @@ enum BoardCap {
 
 # === M6-F: per-board posting policy (ADR 0006 § Specifics) ===
 #
-# `<store>/<board>/.policy` is one of `open` / `known` / `admin`.
+# `<store>/<board>/.policy` is one of `open` / `known` / `anon` / `admin`.
 # (`<store>/.policy` for the main board.) Missing file = `open`.
 #
-#   open   — any authenticated session may post. At M6, since every
-#            login binds to a locally-registered handle, this is
-#            equivalent to `known`; the distinction is forward-compat
-#            for federation (v2.x pillar 1), where `open` would also
-#            accept federated identities not registered locally.
-#   known  — authenticated AND fingerprint resolves to a local
-#            registration in `<store>/.users/`. At M6 this is true
-#            whenever the session is non-anonymous (login always goes
-#            through local resolution).
-#   admin  — authenticated AND handle appears in `<store>/<board>/.admins`
-#            (one handle per line; blank + leading-`#` lines ignored).
+#   open   — anyone reads; any authenticated session may post (the default).
+#   known  — (1.9.2) MEMBERS ONLY: reading (`enter` / `list` / `read`) and
+#            posting both need a logged-in session whose key is still
+#            registered. Until 1.9.2 it meant "a registered user may post",
+#            which every logged-in user is — `open` under another name.
+#   anon   — (1.9.2) anyone posts, anonymous sessions included: the operator's
+#            explicit opt-in (ADR 0006's promised anon-allowed, ADR 0028).
+#   admin  — authenticated AND listed in `<store>/<board>/.admins`: one entry
+#            per line — a 16-hex FINGERPRINT (matches the key; what
+#            `agora admins add` writes) or a handle — blank and `#` lines
+#            ignored, an inline `# comment` allowed (board_admins_scan).
 #
-# Operator sets policy by editing the files directly (`echo known >
-# <store>/<board>/.policy`); no CLI verb at first-cut M6-F. A future
-# bite (roadmap § 1.9.2, "Operator CLI") may add `agora policy set <board> <mode>`
-# if real deployments demand it.
+# Operators set both with `agora policy set <board> <mode>` and `agora admins
+# add|rm <board> <who>` (1.9.2, main.cyr); hand edits keep working.
 
+# 1.9.2 (ADR 0028) — four modes that each mean something:
+#   open   anyone reads; a logged-in user posts            (the default: no `.policy`)
+#   known  MEMBERS ONLY: login to read (enter / list / read) and to post
+#   anon   anyone reads and anyone posts — anonymous sessions included (opt-in)
+#   admin  anyone reads; only `.admins` post
+# `known` used to mean "a registered user may post", which every logged-in user
+# is — so it was `open` under another name (roadmap § 1.9.2).
 enum BoardPolicy {
     POLICY_OPEN  = 0;
     POLICY_KNOWN = 1;
     POLICY_ADMIN = 2;
     POLICY_INVALID = 3;   # 1.8.1 — parse result only; board_policy_get maps it to ADMIN
+    POLICY_ANON  = 4;     # 1.9.2
 }
 
 # === ADR 0004: per-board layout ===
@@ -1609,6 +1615,7 @@ fn board_policy_parse(buf, n, truncated): i64 {
     if (tlen == 4) { if (memeq(buf + ts, "open", 4)  == 1) { return POLICY_OPEN;  } }
     if (tlen == 5) { if (memeq(buf + ts, "known", 5) == 1) { return POLICY_KNOWN; } }
     if (tlen == 5) { if (memeq(buf + ts, "admin", 5) == 1) { return POLICY_ADMIN; } }
+    if (tlen == 4) { if (memeq(buf + ts, "anon", 4)  == 1) { return POLICY_ANON;  } }
     return POLICY_INVALID;
 }
 
@@ -1618,6 +1625,16 @@ fn board_policy_parse(buf, n, truncated): i64 {
 # POLICY_ADMIN, so only `.admins` can post, and warns on stderr so the operator
 # learns why posting stopped. (1.8.1, audit S1 — both used to mean open.)
 fn board_policy_get(store, board): i64 {
+    var pol = board_policy_read(store, board);
+    if (pol == POLICY_INVALID) { return POLICY_ADMIN; }
+    return pol;
+}
+
+# `.policy` as written: a POLICY_* mode, POLICY_OPEN when the file is missing, or
+# POLICY_INVALID — with a warning on stderr — when it exists but cannot be read or
+# parsed. board_policy_get maps INVALID to ADMIN for posting; board_can_read maps
+# it to members-only for reading: an unreadable `.policy` fails closed both ways.
+fn board_policy_read(store, board): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_policy_path(store, board, path);
     var buf = cmd_alloc(POLICY_FILE_CAP + 1);
@@ -1634,72 +1651,127 @@ fn board_policy_get(store, board): i64 {
         eprint("agora: unreadable or unrecognised .policy, board is admin-only: ", 64);
         eprint(path, strlen(path));
         eprint("\n", 1);
-        return POLICY_ADMIN;
     }
     return pol;
 }
 
-# Does `handle` appear as an entry in an `.admins` buffer? One handle per line;
-# blank and `#`-comment lines ignored; leading and trailing whitespace (and a
-# CR) trimmed per line. Returns 1 if present, else 0. Pure.
-fn board_admins_scan(buf, n, handle): i64 {
-    var hlen = strlen(handle);
-    if (hlen == 0) { return 0; }
-
-    # Scan line by line. Track line start; on '\n' (or EOF), compare.
-    var i = 0;
-    var line_start = 0;
-    var found = 0;
+# Length of the entry in an `.admins` line (already trimmed, not blank, not a
+# whole-line comment): one token, optionally followed by whitespace and a `#`
+# comment (1.9.2 — `agora admins add` writes "<fp>  # <handle>"). 0 when the line
+# holds anything else, e.g. two words — never matched. Pure.
+fn board_admins_token(p, len): i64 {
+    var k = 0;
     var scanning = 1;
     while (scanning == 1) {
+        if (k >= len) { scanning = 0; continue; }
+        var c = load8(p + k) & 0xFF;
+        if (c == 32) { scanning = 0; continue; }
+        if (c == 9)  { scanning = 0; continue; }
+        k = k + 1;
+    }
+    var tl = k;
+    while (k < len) {
+        var c2 = load8(p + k) & 0xFF;
+        if (c2 == 35) { return tl; }                  # '#' starts the comment
+        if (c2 != 32) { if (c2 != 9) { return 0; } }  # a second word: not an entry
+        k = k + 1;
+    }
+    return tl;
+}
+
+# 1 if p[0..len) is a fingerprint: exactly 16 lowercase hex digits. Pure.
+fn board_admins_is_fp(p, len): i64 {
+    if (len != 16) { return 0; }
+    var i = 0;
+    while (i < 16) {
+        var c = load8(p + i) & 0xFF;
+        var ok = 0;
+        if (c >= 48) { if (c <= 57) { ok = 1; } }      # 0-9
+        if (c >= 97) { if (c <= 102) { ok = 1; } }     # a-f
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Does the session (`handle`, `fp` — either may be 0 or empty) appear as an entry
+# in an `.admins` buffer? One entry per line; blank and `#` lines ignored; leading
+# and trailing whitespace (and a CR) trimmed; an inline `# comment` allowed.
+# Returns 1 if present, else 0. Pure.
+#
+# 1.9.2 (audit 1.8.1 I9, ADR 0028) — an entry that is a fingerprint (16 lowercase
+# hex digits) matches ONLY the session's fingerprint: rights follow the key. A
+# handle entry still works, but a key re-registered under a new handle frees the
+# old one for anyone to register, rights included — `agora admins add` writes the
+# fingerprint. A fingerprint-shaped entry is never compared with a handle: a
+# handle may legally be 16 hex digits, and registering one equal to an admin's
+# fingerprint must not make its owner an admin.
+fn board_admins_scan(buf, n, handle, fp): i64 {
+    var hlen = 0;
+    if (handle != 0) { hlen = strlen(handle); }
+    var flen = 0;
+    if (fp != 0) { flen = strlen(fp); }
+    if (hlen == 0) { if (flen == 0) { return 0; } }
+    var ent[16];
+    var found = 0;
+    var line_start = 0;
+    var i = 0;
+    while (i <= n) {
         var at_eol = 0;
-        if (i >= n) { at_eol = 1; }
-        else {
-            if ((load8(buf + i) & 0xFF) == 10) { at_eol = 1; }
-        }
-        if (at_eol != 0) {
-            var line_end = i;
-            # Trim trailing CR + whitespace
-            var trim = 1;
-            while (trim == 1) {
-                if (line_end <= line_start) { trim = 0; continue; }
-                var c = load8(buf + line_end - 1) & 0xFF;
-                if (c == 13) { line_end = line_end - 1; continue; }
-                if (c == 32) { line_end = line_end - 1; continue; }
-                if (c == 9)  { line_end = line_end - 1; continue; }
-                trim = 0;
-            }
-            # Trim leading whitespace
-            var ls = line_start;
-            var trim_l = 1;
-            while (trim_l == 1) {
-                if (ls >= line_end) { trim_l = 0; continue; }
-                var c2 = load8(buf + ls) & 0xFF;
-                if (c2 == 32) { ls = ls + 1; continue; }
-                if (c2 == 9)  { ls = ls + 1; continue; }
-                trim_l = 0;
-            }
-            var line_len = line_end - ls;
-            # Skip blank lines + comment lines
-            var skip = 0;
-            if (line_len == 0) { skip = 1; }
-            if (skip == 0) {
-                if ((load8(buf + ls) & 0xFF) == 35) { skip = 1; }   # '#'
-            }
-            if (skip == 0) {
-                if (line_len == hlen) {
-                    if (memeq(buf + ls, handle, hlen) == 1) {
-                        found = 1;
+        if (i == n) { at_eol = 1; }
+        else { if ((load8(buf + i) & 0xFF) == 10) { at_eol = 1; } }
+        if (at_eol == 1) {
+            if (found == 0) {
+                if (board_admins_line_entry(buf, line_start, i, &ent) == 1) {
+                    var es = buf + load64(&ent);
+                    var tl = load64((&ent) + 8);
+                    if (board_admins_is_fp(es, tl) == 1) {
+                        if (flen == 16) { if (memeq(es, fp, 16) == 1) { found = 1; } }
+                    } else {
+                        if (tl == hlen) { if (memeq(es, handle, hlen) == 1) { found = 1; } }
                     }
                 }
             }
             line_start = i + 1;
-            if (found == 1) { scanning = 0; continue; }
         }
-        if (i >= n) { scanning = 0; continue; }
         i = i + 1;
     }
     return found;
+}
+
+# The entry on the `.admins` line buf[ls..le): leading and trailing whitespace
+# (and a CR) trimmed, blank and whole-line `#` comments skipped, then one token
+# with an optional inline `# comment` (board_admins_token). Writes the entry's
+# offset into buf and its length to out[0] / out[1] and returns 1; returns 0 for
+# a line with no entry. Pure — board_admins_scan and the `agora admins` verbs
+# (1.9.2) share it, so the CLI edits exactly the entries the server matches.
+fn board_admins_line_entry(buf, ls, le, out): i64 {
+    var a = ls;
+    var b = le;
+    var trimming = 1;
+    while (trimming == 1) {
+        if (b <= a) { trimming = 0; continue; }
+        var c = load8(buf + b - 1) & 0xFF;
+        if (c == 13) { b = b - 1; continue; }
+        if (c == 32) { b = b - 1; continue; }
+        if (c == 9)  { b = b - 1; continue; }
+        trimming = 0;
+    }
+    trimming = 1;
+    while (trimming == 1) {
+        if (a >= b) { trimming = 0; continue; }
+        var c2 = load8(buf + a) & 0xFF;
+        if (c2 == 32) { a = a + 1; continue; }
+        if (c2 == 9)  { a = a + 1; continue; }
+        trimming = 0;
+    }
+    if (a >= b) { return 0; }
+    if ((load8(buf + a) & 0xFF) == 35) { return 0; }           # '#'
+    var tl = board_admins_token(buf + a, b - a);
+    if (tl <= 0) { return 0; }
+    store64(out, a);
+    store64(out + 8, tl);
+    return 1;
 }
 
 # Bytes of buf[0..n) that are WHOLE lines: the offset just past its last LF, or 0
@@ -1714,8 +1786,9 @@ fn board_admins_lines(buf, n): i64 {
     return keep;
 }
 
-# Check if `handle` appears in `<store>/<board>/.admins`. Returns 1 if present,
-# 0 otherwise (including a missing or unreadable file — fails closed).
+# Check if the session — `handle` or `fp` (board_admins_scan's rules) — appears in
+# `<store>/<board>/.admins`. Returns 1 if present, 0 otherwise (including a
+# missing or unreadable file — fails closed).
 #
 # 1.9.0 — the whole file is read, in BOARD_ADMINS_CHUNK windows. It stopped at 4
 # KB (~120 handles) with no continuation, and after 1.8.1 (audit S2 / M4) the
@@ -1726,7 +1799,7 @@ fn board_admins_lines(buf, n): i64 {
 # `qix`). A line longer than a window cannot be a handle and is skipped to its
 # LF. Past BOARD_ADMINS_FILE_CAP the rest is ignored, with a warning — the bound
 # on what one `post` can be made to read.
-fn board_admin_check(store, board, handle): i64 {
+fn board_admin_check(store, board, handle, fp): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_admins_path(store, board, path);
     var fd = store_open(path, O_RDONLY);
@@ -1757,7 +1830,7 @@ fn board_admin_check(store, board, handle): i64 {
         if (n < 0) { reading = 0; continue; }
         if (n == 0) {
             # End of file ends the carried line.
-            if (skipping == 0) { if (have > 0) { found = board_admins_scan(buf, have, handle); } }
+            if (skipping == 0) { if (have > 0) { found = board_admins_scan(buf, have, handle, fp); } }
             reading = 0;
             continue;
         }
@@ -1774,7 +1847,7 @@ fn board_admin_check(store, board, handle): i64 {
             if (start < 0) { start = end; } else { skipping = 0; }
         }
         var w = board_admins_lines(buf + start, end - start);
-        if (w > 0) { found = board_admins_scan(buf + start, w, handle); }
+        if (w > 0) { found = board_admins_scan(buf + start, w, handle, fp); }
         var rest = end - start - w;
         if (rest == BOARD_ADMINS_CHUNK) {
             skipping = 1;
@@ -1797,26 +1870,42 @@ fn board_admin_check(store, board, handle): i64 {
 # accepted in (store, board). Returns 1 = allowed, 0 = denied.
 # Caller is responsible for surfacing the right user-visible reason.
 fn board_can_post(store, board, session_fp, session_handle): i64 {
-    # Anonymous always denied at M6 (operator override via per-board
-    # policy `anon-allowed` is a future ADR per ADR 0006 § Negative).
-    if (session_fp == 0)              { return 0; }
-    if ((load8(session_fp) & 0xFF) == 0) { return 0; }
+    var anon = 0;
+    if (session_fp == 0) { anon = 1; }
+    else { if ((load8(session_fp) & 0xFF) == 0) { anon = 1; } }
 
     var pol = board_policy_get(store, board);
+    # 1.9.2 (ADR 0028) — `anon` is the operator's explicit opt-in to anonymous
+    # posting (ADR 0006's promised anon-allowed). Every other mode still refuses an
+    # anonymous session, as it always has.
+    if (pol == POLICY_ANON) { return 1; }
+    if (anon == 1) { return 0; }
     if (pol == POLICY_OPEN)  { return 1; }
     if (pol == POLICY_KNOWN) {
-        # At M6, every authenticated session is locally-registered
-        # (login resolves through `.users/`). Verify the fp still
-        # has a `public_key.bin` on disk — guards against a stale
-        # session whose user was unregistered out-of-band.
+        # A members-only board: the session's key must still be registered —
+        # guards a stale session whose user was removed out of band.
         var pk_buf[32];
         if (account_lookup_pubkey(store, session_fp, &pk_buf) != 0) { return 0; }
         return 1;
     }
     if (pol == POLICY_ADMIN) {
-        if (session_handle == 0)               { return 0; }
-        if ((load8(session_handle) & 0xFF) == 0) { return 0; }
-        return board_admin_check(store, board, session_handle);
+        return board_admin_check(store, board, session_handle, session_fp);
     }
     return 0;
+}
+
+# May the session read `board` — `enter` it, `list` it, `read` its posts? 1.9.2
+# (ADR 0028): only `known` (members-only) gates reading, to a logged-in session
+# whose key is still registered. An unreadable or unparseable `.policy` fails
+# closed to members-only here, as it fails closed to admin-only for posting — a
+# broken `known` board must not become world-readable. Every other mode reads open
+# (ADR 0006's anon-read default). The CLI viewers are the operator's and not gated.
+fn board_can_read(store, board, session_fp): i64 {
+    var pol = board_policy_read(store, board);
+    if (pol != POLICY_KNOWN) { if (pol != POLICY_INVALID) { return 1; } }
+    if (session_fp == 0) { return 0; }
+    if ((load8(session_fp) & 0xFF) == 0) { return 0; }
+    var pk_buf[32];
+    if (account_lookup_pubkey(store, session_fp, &pk_buf) != 0) { return 0; }
+    return 1;
 }

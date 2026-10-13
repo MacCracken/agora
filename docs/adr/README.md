@@ -20,7 +20,7 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0003 | [RFC-822-shaped post headers (Subject + Date)](0003-rfc-822-post-headers.md) | Accepted (2026-05-23) |
 | 0004 | [Board layout: flat-root = main, subdirs = named](0004-board-layout.md) | Accepted (2026-05-23) |
 | 0005 | [Threading via Reply-To header](0005-threading-via-reply-to.md) | Accepted (2026-05-23); reply enumeration superseded by 0027 (1.9.1) |
-| 0006 | [Identity model: sigil Ed25519, `.users/<fp>`, challenge/response login](0006-identity-model.md) | Accepted (2026-05-23); storage + login lookup amended by 0026 (1.9.0) |
+| 0006 | [Identity model: sigil Ed25519, `.users/<fp>`, challenge/response login](0006-identity-model.md) | Accepted (2026-05-23); storage + login lookup amended by 0026 (1.9.0), posting policy by 0028 (1.9.2) |
 | 0007 | [Concurrent connections via fork-per-accept](0007-fork-per-accept-concurrency.md) | Accepted (2026-05-23) |
 | 0008 | [Post header parameters as a struct (pre-1.0 ABI shape)](0008-post-headers-struct.md) | Accepted (2026-05-23) |
 | 0009 | [Door / games subsystem architecture](0009-door-games-subsystem.md) | Accepted (2026-06-07) |
@@ -42,3 +42,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0025 | [Store I/O: regular files only, and an exclusive crash-safe publish](0025-store-io-regular-files-and-publish.md) | Accepted (2026-10-13) — 1.9.0; amends 0002 |
 | 0026 | [The handle index: one claim file per handle](0026-handle-index.md) | Accepted (2026-10-13) — 1.9.0; amends 0006 |
 | 0027 | [The reply index: one verified record file per parent](0027-reply-index.md) | Accepted (2026-10-13) — 1.9.1; amends 0005 |
+| 0028 | [Board policy modes that mean something: members-only, anonymous posting, admins by key](0028-board-policy-modes.md) | Accepted (2026-10-13) — 1.9.2; amends 0006 |

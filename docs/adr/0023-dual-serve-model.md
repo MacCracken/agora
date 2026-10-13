@@ -89,6 +89,22 @@ to line dispatch, or to the arena reset, or to a send-failure path, applies to b
      and `descent_proxy` holds the sweep for a player's whole MUD session (since 1.8.1 it at least
      watches the shutdown signalfd, and a failed connect is not redialled for 30 s).
   3. **A crash cost one connection.** Under poll it costs all 64.
+- **Accepted risk, recorded at 1.9.2 — a slow-but-real typist holds a slot.** Every model caps
+  connections at `MAX_SESS` (64: the poll pool, and since 1.8.1 the fork child cap), and a session is
+  reaped after `SESS_IDLE_MS` (60 s) without a data byte. A client that sends one real data byte every
+  50 s therefore holds a slot indefinitely, and 64 of them hold the server. 1.6.4 closed the cheap
+  version of this (an `IAC NOP` keepalive refreshed the idle timer; now only `EV_DATA` does) and
+  deliberately stopped there. What remains is **indistinguishable from a legitimate very slow typist**,
+  and both bounds that would catch it were weighed and **not taken**:
+  - *a session-lifetime cap* also disconnects the legitimate long sessions a BBS exists for — a QUEST
+    run, an idle chat, a reader working through a board;
+  - *a per-source cap* needs `getpeername`, which **agnos does not have** — it would protect Linux and
+    leave the target that *only* runs poll unprotected — and it mis-fires behind NAT, where a LAN's
+    users share one address.
+  The cost of the attack is 64 TCP connections kept alive by a byte a minute each — a deliberate,
+  sustained, visible effort against a LAN BBS, not a drive-by. The operator's tools are `MAX_SESS` and
+  the network edge (rate-limiting or filtering by address is a firewall's job). Revisit if agnos gains
+  `getpeername` (a per-source cap becomes possible on both targets) or a deployment reports it.
 ### Clean shutdown (added 1.7.0)
 
 Neither model could exit. Both loops declared `var stop = 0;` and looped `while (stop == 0)` with
