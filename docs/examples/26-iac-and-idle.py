@@ -12,6 +12,14 @@
 #      and drops it on the way in (`input_byte_ok`), so neither old content nor
 #      new content can wedge a client.
 #
+#      1.8.0 (ADR 0024) tightened the egress half, and this check moved with it:
+#      `send_text` now sanitizes stored text in UTF-8 mode BEFORE the IAC pass,
+#      and 0xFF is never valid UTF-8, so a stored 0xFF leaves as '?' — no 0xFF
+#      byte reaches the wire at all, doubled or not. The planted wedge
+#      `FF FA 18` (IAC SB TERMINAL-TYPE, no SE) renders as `???`. The doubling
+#      itself is still in `send_text` as defence in depth and is pinned by the
+#      unit test t225; through 1.7.x this smoke asserted `FF FF` on the wire.
+#
 #   2. Idle accounting. `IAC NOP` is consumed by the state machine with no
 #      response and no data byte, and it used to refresh the session's activity
 #      timer — so 64 connections sending 2 bytes a minute could pin the whole
@@ -63,7 +71,7 @@ def connect():
 
 
 def test_iac_egress():
-    """A raw 0xFF already in a stored post must reach the wire DOUBLED."""
+    """A raw 0xFF already in a stored post must never reach the wire as IAC."""
     # Plant a post containing IAC SB TERMINAL-TYPE with no SE — the minimal
     # payload that wedges a conforming client if it arrives undoubled.
     path = os.path.join(STORE, f"{PLANTED_ID}.txt")
@@ -81,14 +89,15 @@ def test_iac_egress():
     if b"before" not in body:
         print(f"  FAIL: planted post did not render ({len(body)} bytes)")
         return False
-    if b"\xff\xff" not in body:
-        print("  FAIL: stored 0xFF was NOT doubled on egress (RFC 854 violation)")
+    # 1.8.0: the wedge is neutralized, not merely escaped — every byte of
+    # `FF FA 18` becomes '?', so no 0xFF at all may appear in the reply.
+    if b"\xff" in body:
+        print("  FAIL: a stored 0xFF reached the wire (RFC 854 wedge / ADR 0024)")
         return False
-    # After removing the legitimate doubled pairs, no bare IAC may remain.
-    if b"\xff" in body.replace(b"\xff\xff", b""):
-        print("  FAIL: a bare IAC survived into the rendered post")
+    if b"before???after" not in body:
+        print(f"  FAIL: the planted IAC SB TERMINAL-TYPE was not neutralized ({body[-60:]!r})")
         return False
-    print("  egress: stored 0xFF arrives as IAC IAC, no bare IAC on the wire")
+    print("  egress: stored IAC SB TERMINAL-TYPE arrives as '???', no 0xFF on the wire")
     return True
 
 
@@ -167,7 +176,7 @@ def main():
         return 1
 
     if FAST:
-        print("OK — IAC doubled on egress, dropped on ingress (--fast: idle half skipped)")
+        print("OK — stored IAC neutralized on egress, dropped on ingress (--fast: idle half skipped)")
         return 0
 
     print("=== idle accounting (takes ~80s: SESS_IDLE_MS is 60s) ===")

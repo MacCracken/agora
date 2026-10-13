@@ -34,6 +34,7 @@
 #   account.cyr — build_user_dir, account_dir_ensure
 #   lib/io.cyr  — file_open/_read_all/_write_all/_exists, O_* flags
 #   lib/chrono.cyr — clock_now_ns (PRNG entropy seed)
+#   lib/darshana.cyr — tty_sgr_buf (emit_sgr's encoder, 1.8.0)
 
 # === Constants ===
 
@@ -306,10 +307,15 @@ fn door_save_read(store, fp16, game, out_buf, cap): i64 {
 
 # === Shared render helpers (used by all door games) ===
 #
-# Self-contained ANSI/text buffer composers — NO darshana dependency,
-# so a game's render layer is exercisable from the unit harness (which
-# does not include darshana). Each writes into a caller buffer at `pos`
+# ANSI/text buffer composers. Each writes into a caller buffer at `pos`
 # and returns the new position. Output is telnet-NVT CRLF.
+#
+# (Through 1.7.x this read "NO darshana dependency, so a game's render
+# layer is exercisable from the unit harness (which does not include
+# darshana)". The premise was false: `cyrius test` prepends every
+# [deps] entry from cyrius.cyml, darshana included, and test.cyr now also
+# includes lib/darshana.cyr explicitly, as main.cyr does. emit_sgr uses it
+# since 1.8.0.)
 #
 # [D3] Bounds backstop: each helper refuses to write past `g_door_emit_cap`
 # (dropping the fragment and returning `pos` unchanged) so a frame that
@@ -335,13 +341,29 @@ fn emit_int(buf, pos, val): i64 {
 }
 
 # ESC [ <code> m  — one SGR escape (e.g. 36 = cyan, 0 = reset).
+#
+# 1.8.0 — the escape is now encoded by darshana's `tty_sgr_buf`, the one SGR
+# encoder the ecosystem shares, and agora keeps only what darshana cannot do:
+# the [D3] capacity gate. darshana's composers take no capacity argument (the
+# caller sizes the buffer), so the escape is composed into a stack scratch and
+# copied only if it fits — the same compose-check-copy shape as emit_int.
+#
+# Equal or better, case by case, and pinned by t222:
+#   - bytes: identical for every code agora can pass, 0..999 (ESC [ digits m);
+#   - an out-of-range code (negative, or > 999) is now DROPPED like an
+#     over-cap fragment. The old encoder formatted it anyway — `ESC [ -5 m`,
+#     or for a large value an `ESC [ m` (reset) with its digits silently
+#     discarded by emit_int's cap check. No call site passes one today;
+#   - the cap check is exact (the escape's real 4-6 bytes) where it was a
+#     16-byte over-estimate, so a frame AT the D3 cap may now keep a colour
+#     change it used to drop. No frame reaches the cap (door_send_frame).
 fn emit_sgr(buf, pos, code): i64 {
-    if (pos + 16 > g_door_emit_cap) { return pos; }   # ESC [ <=3 digits> m fits in 16
-    store8(buf + pos, 27); pos = pos + 1;   # ESC
-    store8(buf + pos, 91); pos = pos + 1;   # '['
-    pos = emit_int(buf, pos, code);
-    store8(buf + pos, 109); pos = pos + 1;  # 'm'
-    return pos;
+    var tmp[8];
+    var n = tty_sgr_buf(&tmp, 0, code);     # <= 6 bytes, or -1 if code is outside [0, 999]
+    if (n < 0) { return pos; }
+    if (pos + n > g_door_emit_cap) { return pos; }
+    memcpy(buf + pos, &tmp, n);
+    return pos + n;
 }
 
 fn emit_reset(buf, pos): i64 {

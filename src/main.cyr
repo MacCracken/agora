@@ -166,6 +166,7 @@ enum DoorRuntime {
     DOOR_FRAME_GUARD = 1024;      # [D3] slack past the cap so a raw-store8 tail can't overrun the alloc
     DOOR_SAVE_CAP  = 32768;       # save/load buffer (Handler registry is the largest)
     DOOR_WORLD_CAP = 8192;        # 1.2.0 Universe shared-world snapshot buffer (largest world fits)
+    LB_ROW_CAP     = 320;         # leaderboard display row: "NN) " + row + CR LF (bounded at 1.8.0)
 }
 
 # 0.7.0 audit M6 — explicit 30 s deadline on a parked login challenge.
@@ -180,7 +181,7 @@ enum AgoraLogin {
 
 fn print_banner(): i64 {
     println("agora — BBS for AGNOS");
-    println("v1.7.1 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
+    println("v1.8.0 — civic-marketplace BBS for AGNOS; chat + Eliza/PARRY + QUEST + Jabberwacky + casino + Olympiad + Ashes of Empire + Descent link + Decode");
     return 0;
 }
 
@@ -251,7 +252,14 @@ fn send_buf(cfd, buf, len): i64 {
 # Copy a cstring (NUL-terminated) into `buf` at `pos`. Returns new
 # pos. Used by render_motd to splice literal MOTD-text segments
 # between SGR escape runs.
+#
+# 1.8.0 — a negative `pos` is passed through untouched, writing nothing. That
+# makes this a link of the same chain as darshana's `_buf` composers, which
+# since darshana 0.9.3 return -1 for a negative `pos` (and for an out-of-range
+# SGR code) instead of writing below the buffer: a -1 from any link now
+# poisons the rest of render_motd's chain rather than being memcpy'd to buf-1.
 fn motd_emit_cstr(buf, pos, s): i64 {
+    if (pos < 0) { return pos; }
     var n = strlen(s);
     memcpy(buf + pos, s, n);
     return pos + n;
@@ -280,30 +288,50 @@ fn motd_emit_cstr(buf, pos, s): i64 {
 # would corrupt the protocol. The split is by intent: protocol bytes go out via
 # send_buf, content bytes via send_text.
 #
-# Escaping is done in bounded chunks into a small stack buffer rather than by
-# allocating a 2x copy: a post body is up to 64 KB and this runs per read.
-# `cap` is deliberately even so a doubled byte can never straddle a flush.
+# 1.8.0 (ADR 0024) — and with every terminal control NEUTRALIZED. Doubling IAC
+# protected the telnet layer, not the reader's terminal: C1 controls (raw 0x9B,
+# UTF-8-encoded C2 9B), and any ESC in a CLI-authored or pre-filter post, went
+# out verbatim and were executed by every reader's terminal. Each chunk now goes
+# through `text_sanitize` (darshana `tty_sanitize_buf`, UTF-8 mode, keeping
+# TAB / CR / LF) before the IAC pass. Well-formed UTF-8 is unchanged.
+#
+# Work is done in bounded chunks on the stack rather than by allocating a copy:
+# a post body is up to 64 KB and this runs per read, on a per-line path where a
+# bare alloc() would leak under poll (ADR 0021). `text_chunk_end` never splits a
+# UTF-8 sequence, so the chunked result is byte-identical to sanitizing the
+# whole input at once. Buffer sizes: a chunk is <= TEXT_CHUNK_MAX (504) bytes in,
+# <= 504 sanitized, <= 1008 after doubling.
 fn send_text(cfd, buf, len): i64 {
-    var out[512];
-    var op = 0;
+    var san[512];
+    var out[1024];
     var i = 0;
     var rc = 0;
-    var done = 0;
-    while (done == 0) {
-        if (i >= len) { done = 1; continue; }
-        var b = load8(buf + i) & 0xFF;
-        store8(&out + op, b); op = op + 1;
-        if (b == 0xFF) { store8(&out + op, 0xFF); op = op + 1; }   # IAC IAC
-        if (op >= 510) {
-            if (send_buf(cfd, &out, op) != 0) { rc = 1; done = 1; }
-            op = 0;
+    while (i < len) {
+        var e = text_chunk_end(buf, i, len, TEXT_CHUNK_MAX);
+        var sn = text_sanitize(&san, buf + i, e - i);
+        if (sn > 0) {
+            var on = text_iac_double(&out, &san, sn);
+            if (send_buf(cfd, &out, on) != 0) { rc = 1; e = len; }
         }
-        i = i + 1;
-    }
-    if (rc == 0) {
-        if (op > 0) { rc = send_buf(cfd, &out, op); }
+        i = e;
     }
     return rc;
+}
+
+# The CLI viewers' twin of `send_text` (1.8.0): `agora read` / `agora list`
+# print other people's posts into the OPERATOR's terminal, and did so raw.
+# Same rule, same chunking, written to `fd` with no IAC pass (stdout is not a
+# telnet stream). The raw post is still on disk for anyone who needs the bytes.
+fn write_text(fd, buf, len): i64 {
+    var san[512];
+    var i = 0;
+    while (i < len) {
+        var e = text_chunk_end(buf, i, len, TEXT_CHUNK_MAX);
+        var sn = text_sanitize(&san, buf + i, e - i);
+        if (sn > 0) { sys_write(fd, &san, sn); }
+        i = e;
+    }
+    return 0;
 }
 
 # Send a NUL-terminated cstring over the socket. Convenience wrapper
@@ -436,7 +464,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             var name_cstr = str_data(entry);
             var pcount = post_list(g_store_buf, name_cstr, idsmain, DIRENT_ID_MAX);
             send_str(cfd, "  ");
-            send_str(cfd, name_cstr);
+            # 1.8.0 — a directory name read off the disk is content, not a
+            # literal: `boards_list` keeps any non-dot directory, and only names
+            # made through `enter` are known to pass `board_name_valid`. It goes
+            # out through `send_text` (IAC doubling + ADR 0024 sanitization) like
+            # every other stored string. A valid name is byte-identical.
+            send_text(cfd, name_cstr, strlen(name_cstr));
             # Pad to 10 columns for visual alignment with "main      "
             var nlen = strlen(name_cstr);
             var pad = 10 - nlen;
@@ -1690,7 +1723,7 @@ fn door_render_leaderboard(cfd, game): i64 {
     var maxe = 256;
     # 1.6.3 — hoisted out of the ranking loop below (one buffer reused per row
     # instead of one allocation per row).
-    var ln = cmd_alloc(320);
+    var ln = cmd_alloc(LB_ROW_CAP);
     var starts = cmd_alloc(maxe * 8);
     var ends   = cmd_alloc(maxe * 8);
     var scores = cmd_alloc(maxe * 8);
@@ -1735,6 +1768,12 @@ fn door_render_leaderboard(cfd, game): i64 {
         store8(ln + p, 32); p = p + 1;    # space
         var s2 = load64(starts + k * 8);
         var e2 = load64(ends + k * 8);
+        # 1.8.0 — bound the copy to the row buffer. A row is a line of a shared
+        # file, copied here with no limit into `ln` (LB_ROW_CAP bytes): rows
+        # agora writes are ~50 bytes, but a damaged or hand-edited leaderboard
+        # with a 400-byte line overran the arena allocation. Longer rows are
+        # truncated for display; the CR LF below always fits.
+        if (e2 - s2 > LB_ROW_CAP - 2 - p) { e2 = s2 + (LB_ROW_CAP - 2 - p); }
         var x = s2;
         while (x < e2) {
             var ch = load8(buf + x) & 0xFF;
@@ -1744,7 +1783,9 @@ fn door_render_leaderboard(cfd, game): i64 {
         }
         store8(ln + p, 13); p = p + 1;
         store8(ln + p, 10); p = p + 1;
-        send_buf(cfd, ln, p);
+        # 1.8.0 — the row is file content (a handle and a score), so it goes out
+        # through `send_text`, not `send_buf`: IAC doubling + ADR 0024.
+        send_text(cfd, ln, p);
         k = k + 1;
     }
     return 0;
@@ -1878,6 +1919,15 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
 # darshana's `tty_sgr_buf` / `tty_sgr_reset_buf` — the `_buf`
 # variants compose into a buffer rather than writing to fd 1, which
 # is exactly what we need to send bytes back over the telnet socket.
+#
+# 1.8.0 (darshana 0.9.0 → 1.3.0) — the -1 audit. darshana 0.9.3 made both
+# composers return -1 for a negative `pos`; `tty_sgr_buf` already did for a
+# code outside [0, 999]. Neither can happen here: `pos` starts at 2 and only
+# grows, and the codes are the in-range TTY_FG_* constants. The chain is now
+# -1-safe anyway — every link after the leading CRLF is a darshana composer or
+# `motd_emit_cstr`, each of which passes a negative `pos` through without
+# writing — so a -1 would yield an empty MOTD (return 0), never a write below
+# `buf`. The bytes are identical to 1.7.x: TTY_FG_CYAN is 36, TTY_FG_YELLOW 33.
 fn render_motd(buf): i64 {
     var pos = 0;
     # Leading CRLF gives the client a clean line after the IAC announce.
@@ -1888,7 +1938,7 @@ fn render_motd(buf): i64 {
     # opening SGR sticks for all five lines, closed by reset after
     # line 5. (Some terminals reset SGR on \n — most don't; the
     # explicit close-after-line-5 keeps the spec.)
-    pos = tty_sgr_buf(buf, pos, 36);
+    pos = tty_sgr_buf(buf, pos, TTY_FG_CYAN);
     pos = motd_emit_cstr(buf, pos, " \x23\x23\x23   \x23\x23\x23\x23  \x23\x23\x23  \x23\x23\x23\x23   \x23\x23\x23 \r\n");
     pos = motd_emit_cstr(buf, pos, "\x23   \x23 \x23     \x23   \x23 \x23   \x23 \x23   \x23\r\n");
     pos = motd_emit_cstr(buf, pos, "\x23\x23\x23\x23\x23 \x23  \x23\x23 \x23   \x23 \x23\x23\x23\x23  \x23\x23\x23\x23\x23\r\n");
@@ -1897,17 +1947,17 @@ fn render_motd(buf): i64 {
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Blank line between banner and metadata.
-    store8(buf + pos, 13); pos = pos + 1;
-    store8(buf + pos, 10); pos = pos + 1;
+    pos = motd_emit_cstr(buf, pos, "\r\n");
 
     # Yellow version line.
-    pos = tty_sgr_buf(buf, pos, 33);
-    pos = motd_emit_cstr(buf, pos, "  agora 1.7.1 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    pos = tty_sgr_buf(buf, pos, TTY_FG_YELLOW);
+    pos = motd_emit_cstr(buf, pos, "  agora 1.8.0 — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode) + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
     pos = motd_emit_cstr(buf, pos, "  Type anything; Ctrl+] then 'quit' to exit.\r\n\r\n");
 
+    if (pos < 0) { return 0; }
     return pos;
 }
 
@@ -2397,8 +2447,32 @@ enum PollRuntime {
 # into an ordinary readable fd, which is exactly the shape both loops already
 # know how to consume — and it is the only form that works on agnos, whose
 # `signal_ignore` is a no-op (no `rt_sigaction`) but which does implement
-# `sigprocmask` (#17) and `signalfd` (#18). darshana 0.9.0's `tty_open_signalfd`
+# `sigprocmask` (#17) and `signalfd` (#18). darshana's `tty_open_signalfd`
 # is the in-ecosystem reference this follows.
+#
+# 1.8.0 (darshana 0.9.0 → 1.3.0) — why agora still does NOT call darshana's
+# signalfd trio (`tty_open_signalfd` / `tty_read_signal` / `tty_close_signalfd`),
+# re-checked against darshana's frozen 1.3.0 surface:
+#   - Its AGNOS peer BLOCKS the signals before creating the fd, as its Linux
+#     peer does. Under mirshi a blocked signal is never delivered through a
+#     signalfd (darshana's own docstring says so, filed with mirshi), so
+#     adopting it would arm a shutdown that can never fire on the one target
+#     that always polls. `shutdown_signals_arm` skips the block there on purpose.
+#   - Its exit mask, TTY_SIGMASK_EXIT, is HUP|INT|TERM. agora shuts down on
+#     INT|TERM only; adding SIGHUP would change what a hangup does to a server.
+#   - The defects the darshana bump was flagged for never reached agora: it
+#     never called darshana's open (this code was always hand-rolled), and its
+#     own failure path below already unblocks and returns exactly -1 — the two
+#     things darshana 0.9.3 fixed. darshana 1.0.2's refinement (roll back only
+#     the bits the call ADDED, so a second live signalfd is not deafened) does
+#     not apply either: agora owns exactly one signalfd, and unblocking INT|TERM
+#     unconditionally — here and in every fork child — is what guarantees an
+#     operator can always kill a server or a session process, even one launched
+#     with those signals already blocked.
+#   - The child-inheritance hazard darshana 1.1.4 documents (a signalfd's block
+#     survives fork AND execve) is handled by `shutdown_signals_child_reset`,
+#     the first call in every fork child. agora never execs, and the SIGPIPE
+#     SIG_IGN that children inherit across fork is wanted (they write sockets).
 
 enum ShutdownSig {
     SIGINFO_BYTES  = 128;     # sizeof(struct signalfd_siginfo) — one read record
@@ -3797,7 +3871,7 @@ fn cmd_list(): i64 {
         sys_write(1, "[", 1);
         if (flen > 0) {
             if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
-                sys_write(1, hbuf, strlen(hbuf));
+                write_text(1, hbuf, strlen(hbuf));
             } else {
                 sys_write(1, "anon", 4);
             }
@@ -3807,7 +3881,8 @@ fn cmd_list(): i64 {
         sys_write(1, "]  ", 3);
         if (flen > 0) {
             var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
-            if (slen > 0) { sys_write(1, sbuf, slen); }
+            # 1.8.0 (ADR 0024) — stored text into the operator's terminal: sanitized.
+            if (slen > 0) { write_text(1, sbuf, slen); }
         }
         println("");
         i = i + 1;
@@ -3849,24 +3924,27 @@ fn cmd_read(): i64 {
     var hbuf = alloc(ACCOUNT_HANDLE_BUF);
     var fpbuf = alloc(ACCOUNT_FP_BUF_BYTES);
     sys_write(1, "From: ", 6);
+    # 1.8.0 (ADR 0024) — every stored field goes to the operator's terminal
+    # through `write_text`: a post body is other people's text, and this printed
+    # it raw (a CLI-authored body can hold any byte, ESC included).
     if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
-        sys_write(1, hbuf, strlen(hbuf));
+        write_text(1, hbuf, strlen(hbuf));
         sys_write(1, " ", 1);
-        sys_write(1, fpbuf, strlen(fpbuf));
+        write_text(1, fpbuf, strlen(fpbuf));
         sys_write(1, "\n", 1);
     } else {
         sys_write(1, "anonymous\n", 10);
     }
     if (slen > 0) {
         sys_write(1, "Subject: ", 9);
-        sys_write(1, sbuf, slen);
+        write_text(1, sbuf, slen);
         sys_write(1, "\n", 1);
     }
     sys_write(1, "\n", 1);
     var body_off = post_body_offset(fbuf, flen);
     var body_len = flen - body_off;
     if (body_len > 0) {
-        sys_write(1, fbuf + body_off, body_len);
+        write_text(1, fbuf + body_off, body_len);
     }
     return 0;
 }
@@ -4041,7 +4119,7 @@ fn cmd_whoami(): i64 {
 }
 
 fn cmd_version(): i64 {
-    println("agora 1.7.1");
+    println("agora 1.8.0");
     return 0;
 }
 

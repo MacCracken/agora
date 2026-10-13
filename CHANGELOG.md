@@ -4,6 +4,154 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-12 (toolchain 6.7.9 + darshana 1.3.0: other people's text stops driving your terminal)
+
+cyrius **6.6.2 → 6.7.9** and darshana **0.9.0 → 1.3.0** — the last consumer off a pre-freeze darshana, onto
+its frozen v1 API. The two pins had to move together: darshana 1.3.0's bundle declares private constants
+with `const`, which cyrius gained in 6.7.2. The payload is a **security fix** the darshana bump made cheap:
+stored text — every post body, subject, author handle, board name and leaderboard row — now leaves the
+server through darshana's `tty_sanitize_buf`, so a terminal control sequence written by one user can no
+longer execute in another user's (or the operator's) terminal ([ADR 0024](docs/adr/0024-egress-text-sanitization.md),
+[audit 2026-10-12](docs/audit/2026-10-12-audit.md)). Everything else a user sees is byte-identical.
+
+**225/225** tests (+4), also **225/225 on aarch64** under qemu; fuzz green, including `--poison` and
+`--poison=ab`; **29/29** example smokes (new: `29-egress-sanitize.py`; 04/05/23 run under both serve
+models, 32 runs). `build/agora` **968,880 → 968,720 B** (1.7.1 on 6.6.2 → 1.8.0 on 6.7.9, both
+`CYRIUS_DCE=1`); `--agnos` **965,280 B**; `--aarch64` **2,348,864 B**.
+
+### Security
+
+- **Stored text carried live terminal control sequences to every reader** (audit **M1**, MEDIUM).
+  agora filtered ingress only, per byte, and `send_text` only doubled IAC. Two classes got through:
+  **C1 controls** — `input_byte_ok` passes 0x80–0xFE so UTF-8 can be posted, which also passes the raw
+  8-bit CSI/OSC/ST (`9B` / `9D` / `9C`) and their UTF-8 encodings (`C2 9B` = U+009B, a CSI to any terminal
+  that honours C1) in bodies and subjects; and **anything the CLI stored** — `agora post` writes its stdin body
+  with no filter at all, ESC included (the `input_byte_ok` comment claimed otherwise), as do pre-filter
+  posts and hand-edited files. `agora read` / `agora list` printed it all raw into the operator's
+  terminal. **Repro**: `AGORA_BIN=<1.7.1 build> docs/examples/29-egress-sanitize.py` — an anonymous
+  reader receives `Subject: subj \xc2\x9b31m red`, `c1 csi: \xc2\x9b2J` (clear screen),
+  `osc52: \xc2\x9d52;c;…\xc2\x9c` (clipboard write) and, from a CLI post, `cli \x1b[2Jesc\x07bel`;
+  **44 failed checks** under both serve models and the CLI. **Fixed**: `send_text` (every wire egress of
+  stored text) and its new stdout twin `write_text` run each chunk through `text_sanitize` —
+  `tty_sanitize_buf` in **UTF-8 mode, keeping TAB / CR / LF** — before the IAC pass. Every control byte
+  or sequence becomes one `?`; well-formed UTF-8 passes byte-for-byte; the post on disk is not rewritten.
+  UTF-8 rather than Latin-1 because an agora session is UTF-8 by construction (no CHARSET negotiation;
+  agora's own MOTD and help are UTF-8) — the reasoning and the Latin-1-terminal limit are in ADR 0024.
+- **Leaderboard rows were copied into a 320-byte buffer with no bound** (audit **L1**, LOW) —
+  `door_render_leaderboard`. agora's own rows are ~50 bytes, but a damaged or hand-edited leaderboard
+  with a long line overran the arena allocation on `scores`, which needs no login. Clamped to
+  `LB_ROW_CAP`; the row now also leaves through `send_text`.
+- **`boards` sent directory names read off the disk raw** (audit **L2**, LOW). `boards_list` keeps any
+  non-dot directory, and only names made through `enter` are known valid; they now go through
+  `send_text`. Closes the roadmap row of the same name.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.7.9`** (`cyrius.cyml`; `build -v` reports
+  `~/.cyrius/versions/6.7.9/bin/cycc`; the local snapshot's 113 stdlib files were checked byte-identical
+  to `git show 6.7.9:lib/…` and its `SOURCE_COMMIT` matches the tag). `lib/` re-vendored from scratch
+  (`rm -rf lib cyrius.lock && cyrius deps`): 53 → 56 files (`alloc_cx`, `poison`, `sys` added by the
+  snapshot's own include graph). **No source change was needed to compile** — agora uses none of the
+  6.7 reserved words (`const`, `true`, `false`, `do`, `dyn`, `trait`), has no lone `!`, no compound
+  assignment, no `~` / unary `-` on a constant and no typed narrow pointer, all checked by grep with
+  strings and comments stripped. What the move did surface, all fixed: **cyrlint's stricter deferral
+  check** now flags four comments the 6.6.2 checker passed (`board.cyr:72`, `descent.cyr:15`,
+  `bench_telnet.bcyr:50-51`) — two real deferrals given a same-line roadmap citation, two false
+  positives ("follow-up subneg") reworded — so the tree-wide count stays **0 untracked**; and one
+  6.6.2 `note:` became a located `warning:` in vendored sigil (see Known limitations). Other named
+  deps: none moved.
+- **darshana `0.9.0` → `1.3.0`** — no API change for agora (the freeze guarantees it), and the SGR bytes
+  are unchanged: a scripted session (IAC salvo, MOTD, `help`, `boards`, `list`, a `play decode` frame,
+  `quit`) is **byte-identical, 3,750 B, under both serve models**, between the released 1.7.1 build and
+  this tree before the version bump. In passing it removes 0.9.0's `var SYS_IOCTL = 16`, which shadowed
+  the stdlib's arch-aware constant program-wide (every `--aarch64` agora build warned
+  `duplicate symbol 'SYS_IOCTL'`; latent, since nothing agora reaches issues an ioctl, but 16 is
+  `fremovexattr` on aarch64). The `[deps.darshana]` comment is rewritten: it described the 0.9.0 pin
+  and a surface agora no longer has.
+- **`emit_sgr` (door.cyr) encodes through `tty_sgr_buf`**, keeping agora's own [D3] capacity gate —
+  darshana's composers take no capacity argument, so the escape is composed into a stack scratch and
+  copied only if it fits, the same shape as `emit_int`. **Byte-identical for every code 0..999** (t222
+  compares against the 1.7.x encoder). Two deliberate differences, neither reachable from a call site
+  today: an out-of-range code is dropped instead of formatted (`ESC[-5m`, or a digit-less `ESC[m` for a
+  huge value), and the cap check is exact instead of a 16-byte over-estimate.
+- **`render_motd` uses `TTY_FG_CYAN` / `TTY_FG_YELLOW`** (same values, same bytes), and its chain is now
+  **-1-safe**: `motd_emit_cstr` passes a negative `pos` through without writing, as darshana's composers
+  do since 0.9.3, so a -1 anywhere yields an empty MOTD rather than a write below the buffer. The audit
+  result for the 0.9.3 `-1` (the roadmap row's open question): **no agora call site can produce one** —
+  `pos` starts at 2 and only grows, the codes are in-range constants, and `emit_sgr` checks its return.
+- **The shutdown signalfd stays hand-rolled — re-checked, not adopted.** darshana's AGNOS
+  `tty_open_signalfd` blocks the signals first, and under mirshi a blocked signal is never delivered
+  through a signalfd (darshana's own docstring; filed with mirshi), so adopting it would arm a shutdown
+  that cannot fire on the target that always polls. `TTY_SIGMASK_EXIT` also adds SIGHUP. The roadmap
+  row's premise ("agora calls `tty_open_signalfd`") was wrong — it never did — and agora's arm already
+  had both fixes darshana 0.9.3 shipped (unblock on failure; exactly -1). **Child signal-block check**:
+  every fork child calls `shutdown_signals_child_reset` first (closes the inherited signalfd, unblocks
+  INT|TERM); agora has no exec / spawn anywhere; smoke 28 on 1.8.0 reads the child's
+  `SigBlk: 0000000000000000` and kills it with SIGTERM. Recorded in the N1 comment block.
+- `src/test.cyr` includes `lib/darshana.cyr` explicitly, as `main.cyr` does (the manifest already
+  prepended it). `door.cyr`'s header claimed the unit harness "does not include darshana" — false.
+- **CLAUDE.md**: the Closeout Pass said a bare `cyrius test` exits 1; since cyrius 6.6.17 it runs the
+  `[build] test` entry (verified, exit 0). The explicit `src/test.cyr` path stays canonical.
+
+### Added
+
+- `text_sanitize`, `text_sanitize_keep`, `text_chunk_end`, `text_iac_double` (board.cyr) — the pure
+  egress rule, unit-testable; `write_text` (main.cyr) for the CLI viewers.
+- **Tests t222–t225** (221 → **225**): `emit_sgr` vs the 1.7.x encoder over 0..999 + drop + exact cap;
+  the sanitize rule case by case; chunked sanitizing byte-identical to one-shot for every cap 4–12 and
+  504 over a corpus and 4 KB of pseudo-random bytes; the IAC pass. Mutation-checked: removing the UTF-8
+  boundary rule, dropping CR from the keep set, Latin-1 mode, or the old 16-byte cap each turns the suite
+  red.
+- **`docs/examples/29-egress-sanitize.py`** — self-contained, both serve models plus the CLI; asserts
+  the stored artifact is untouched. `AGORA_BIN=` A/Bs an older build.
+- [ADR 0024](docs/adr/0024-egress-text-sanitization.md); [docs/audit/2026-10-12-audit.md](docs/audit/2026-10-12-audit.md)
+  (1 MEDIUM, 2 LOW, 4 INFO — closed).
+
+### Behaviour changes (bytes a user sees)
+
+- Stored text with a control byte, a C1 control (raw or UTF-8-encoded) or malformed UTF-8 shows `?` in
+  its place — over the wire and in `agora read` / `agora list`. Clean text, including all well-formed
+  UTF-8, TAB and CR LF, is unchanged.
+- **A stored 0xFF now arrives as `?`, not `IAC IAC`.** It is never valid UTF-8, so the sanitizer
+  neutralizes it before the IAC pass sees it. Smoke 26 was **updated** to pin this: it planted
+  `FF FA 18` (IAC SB TERMINAL-TYPE, no SE) and asserted `FF FF` on the wire; it now asserts no 0xFF at
+  all and `???`. The doubling is still in `send_text` as defence in depth (t225).
+
+### Fixed
+
+- `src/test.cyr`'s output had three wrong literal lengths: the header dropped its newline (52 of 53
+  bytes), both rules wrote their trailing NUL (56 of 55 — the stray byte before `PASS: t01…` and
+  ` tests:`), and `test_fail`'s ` — ` lost its trailing space (4 of 5).
+
+### Verification
+
+- Tests **225/225** (x86_64) and **225/225** via `cyrius test --aarch64` under qemu-aarch64; smoke 29
+  also passes against the `--aarch64` binary under qemu-user (both serve models + CLI) — the first wire
+  smoke ever run on an aarch64 agora. `cyrius fuzz fuzz/telnet_iac.fcyr` **1 passed / 0 failed**, and the same
+  under `--poison` and `--poison=ab` — the N4 re-evaluation moved here from cyrius's roadmap (applicable
+  since 6.6.18; CI unchanged).
+- Example smokes **29/29** (32 runs) via a throwaway harness, with smoke 26 re-run in full after its
+  update. Version-drift check green. Full clean build (`rm -rf build lib cyrius.lock && cyrius deps &&
+  CYRIUS_DCE=1 cyrius build`). `cyrius capacity --check` ok (all caps under 85%).
+- `cyrius lint`, every `src/*.cyr` + fuzz + bench: **178 warnings / 0 untracked deferrals** — the same
+  178 the HEAD tree gets under the 6.7.9 linter (all `line exceeds 120` plus one double blank line);
+  `cyrfmt --check` clean.
+- Benchmarks re-run six times and A/B'd against the 1.7.1 tree on 6.6.2 the same day — within noise of
+  each other; see [`BENCHMARKS.md`](BENCHMARKS.md), which also records an unattributed ~5–15% gap to
+  the August 1.7.0 row.
+
+### Known limitations (recorded, not fixed)
+
+- **cyrius 6.7.x warns on vendored sigil**: `lib/sigil.cyr:28103:12: array local over the per-fn frame
+  budget gets STATIC storage` — `hash_file_into`'s deliberately static, per-thread-banked 256 KB buffer.
+  agora never calls it and must not edit `lib/`; every sigil consumer sees it. Flagged to the owner as
+  a cyrius/sigil item.
+- `warning: large static data` (≈375 KB) is unchanged in kind from 6.6.2 (374,576 → 375,552 B).
+- The test build's `warning: undefined function 'send_str'` is agora's own and pre-existing:
+  `src/test.cyr` compiles `descent.cyr` without `main.cyr` (roadmap § Backlog, the `tests/` split).
+- A **Latin-1 / 8-bit-C1 terminal** is not fully protected — a well-formed UTF-8 character can contain
+  a byte such a terminal reads as C1 (ADR 0024 § Consequences). It already misrenders agora's own output.
+
 ## [1.7.1] - 2026-09-11
 
 ### Changed

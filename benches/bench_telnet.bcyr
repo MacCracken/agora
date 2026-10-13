@@ -47,8 +47,8 @@ fn work_iac_untracked(): i64 {
 # ----------------------------------------------------------------
 # B3 — IAC option exchange for a TRACKED option in the Q machine's
 # "agree" path (him_state Q_NO -> Q_YES, single 3-byte DO reply +
-# possibly a follow-up subneg request). Uses SGA — it agrees without
-# any follow-up subneg, so we measure pure Q-transition cost.
+# possibly a subneg request after it). Uses SGA — it agrees without
+# any subneg at all, so we measure pure Q-transition cost.
 # ----------------------------------------------------------------
 fn work_iac_tracked_agree(): i64 {
     store64(g_ts + TS_STATE, ST_DATA);

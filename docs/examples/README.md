@@ -15,8 +15,8 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 > each of their headers says *"run 02-register-and-post.sh first"*, and that is not advice, it is a
 > prerequisite you must re-satisfy. Separately, **04, 05, 23, 25, 26 and 27 are client-only**: they do not
 > start a server, and each needs one already listening under a specific `AGORA_SERVE` model recorded only in
-> its own header comment (23/25/26/27 want `poll`). 1.7.0 verified all 28 green using a throwaway harness;
-> nothing in the repo reproduces it. This is why smoke 20's breakage went unnoticed for four releases —
+> its own header comment (23/25/26/27 want `poll`). 1.7.0 verified all 28 green using a throwaway harness,
+> and 1.8.0 all 29 (plus 04/05/23 under both models); nothing in the repo reproduces it. This is why smoke 20's breakage went unnoticed for four releases —
 > filed in [roadmap.md](../development/roadmap.md) § Backlog.
 
 | # | Script | Surface | Reads / writes |
@@ -42,6 +42,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 26 | [`26-iac-and-idle.py`](26-iac-and-idle.py) | 1.6.4: IAC (0xFF) doubled on egress + dropped at ingress (RFC 854), and `IAC NOP` keepalives no longer hold a session slot (~80s; `--fast` skips the idle half) | `./bbs/` |
 | 27 | [`27-audit-lows.py`](27-audit-lows.py) | 1.6.5: audit LOWs — over-long `--store` refused, BEL/BS/DEL dropped from a stored post, and echo gated correctly (kept for non-negotiating clients, suppressed after `IAC DONT ECHO`) | `./bbs/`, `./keys/qix` |
 | 28 | [`28-clean-shutdown.py`](28-clean-shutdown.py) | 1.7.0 (roadmap N1): SIGINT/SIGTERM shut both serve models down cleanly (exit 0, not 143/130), a connected poll client is told before its socket closes, and **fork children do not inherit the parent's blocked signal mask** — the regression that made every connection process unkillable. Self-contained: starts and signals its own servers. | `/tmp/agora-shutdown-smoke-$$` |
+| 29 | [`29-egress-sanitize.py`](29-egress-sanitize.py) | 1.8.0 (ADR 0024): stored text reaches readers with every terminal control neutralized — C1 controls (raw and UTF-8-encoded) in a wire post, ESC/BEL in a CLI post, malformed UTF-8 — each shown as `?`, while UTF-8 text, TAB and CR LF arrive byte-for-byte and the post on disk is untouched. Both serve models, plus `agora read` / `agora list` on stdout. Self-contained; `AGORA_BIN=` A/Bs an older build (1.7.1 fails 44 checks). | `/tmp/agora-sanitize-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

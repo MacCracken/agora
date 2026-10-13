@@ -2,7 +2,7 @@
 
 > Telnet-served BBS for AGNOS. Posts, messages, file-share. Cyrius-native.
 
-**Status**: **v1.7.0 — 2026-08-22** closes the pinned roadmap. The server can finally **stop**: SIGINT/SIGTERM shut both serve models down cleanly, draining sessions instead of being killed mid-write. Door saves, the shared world and chat transcripts are now crash-safe (temp + `fsync` + `rename`), the two poll-mode holes are closed, and the IAC parser has a fuzz harness that runs in CI and at release. Toolchain cyrius 6.5.34.
+**Status**: **v1.8.0 — 2026-10-12** — other people's text no longer drives your terminal: every stored post, subject, handle and board name now leaves the server through darshana's output sanitizer (control sequences become `?`, UTF-8 text is untouched), closing a stored-text escape-injection path into every reader's session ([ADR 0024](docs/adr/0024-egress-text-sanitization.md)). Toolchain cyrius 6.7.9, darshana 1.3.0 (its frozen v1 API).
 
 Built on **v1.0.0** (2026-05-23, iron-validated on archaemenid): a multi-user, multi-board threaded BBS with sigil-backed Ed25519 challenge/response auth, per-board posting policy, and full RFC 854 / 1143 / 1073 / 1091 / 1184 conformance — since extended with door games, a persistent shared universe, a live chat area with four chatbots, a casino, a war-game, a code-breaking door, a gateway into the sibling Yeoman's Descent MUD, an AGNOS target, and a single-process poll multiplex.
 
@@ -69,7 +69,7 @@ agora binary (~874 KB static ELF at 1.3.7)
 └── fuzz/telnet_iac.fcyr    IAC-parser fuzz harness (CI + release)
 ```
 
-Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darshana (SGR) + sigil + freelist + bayan + ct (the ed25519 call chain; `bigint` was folded into `bayan` at cyrius 6.2.2). No external deps beyond cyrius.
+Stdlib consumed: net + io + fs + str + vec + alloc + bannermanor (MOTD) + darshana (SGR + output sanitizing) + sigil + freelist + bayan + ct (the ed25519 call chain; `bigint` was folded into `bayan` at cyrius 6.2.2). No external deps beyond cyrius.
 
 ## Docs
 

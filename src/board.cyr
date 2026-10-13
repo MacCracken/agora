@@ -70,8 +70,8 @@ enum BoardCap {
 #
 # Operator sets policy by editing the files directly (`echo known >
 # <store>/<board>/.policy`); no CLI verb at first-cut M6-F. A future
-# bite may add `agora policy set <board> <mode>` if real deployments
-# demand it.
+# bite (roadmap § Backlog, "No operator CLI") may add `agora policy set <board> <mode>`
+# if real deployments demand it.
 
 enum BoardPolicy {
     POLICY_OPEN  = 0;
@@ -163,12 +163,18 @@ fn board_path(store, board, out_buf): i64 {
 #     attack. We strip at ingress; future operator config may add
 #     an opt-in flag for raw-mode posts.
 #
-# Passthrough is TAB, CR, LF, printable ASCII and UTF-8 high bytes
-# (128-255). Everything else in C0, plus DEL and IAC, is dropped — see
+# Passthrough is TAB, CR, LF, printable ASCII and the high bytes
+# 128-254. Everything else in C0, plus DEL and IAC, is dropped — see
 # the per-byte reasoning in the body below. (This header said the
 # opposite until 1.6.5 corrected the body and left the summary behind;
 # BS/DEL no longer reach a post. Making BS *edit* the line for
 # non-LINEMODE clients is still open — roadmap § Backlog, The wire.)
+#
+# ⚠ This filter is per BYTE, so it cannot tell UTF-8 text from the C1
+# controls that share the 128-159 range (0x9B is the 8-bit CSI; C2 9B is
+# the same control UTF-8-encoded). Those are stored, and neutralized at
+# EGRESS by `text_sanitize` below (1.8.0, ADR 0024) — which also covers
+# everything this filter never sees: CLI-written posts and old files.
 fn input_byte_ok(b): i64 {
     if (b == 0)    { return 0; }
     if (b == 0x1B) { return 0; }
@@ -187,8 +193,10 @@ fn input_byte_ok(b): i64 {
     # RFC 854 § "the IAC" actually requires, and which also protects content
     # stored before this filter existed.
     if (b == 0xFF) { return 0; }
-    # 1.6.5 (audit L2) — drop the remaining C0 controls and DEL, so the wire
-    # body matches what the CLI already refuses. TAB (9), CR (13) and LF (10)
+    # 1.6.5 (audit L2) — drop the remaining C0 controls and DEL. (This said
+    # "so the wire body matches what the CLI already refuses". The CLI refuses
+    # them in `--subject` only; a CLI post BODY is stored unfiltered, which is
+    # one reason 1.8.0 sanitizes at egress — ADR 0024.) TAB (9), CR (13) and LF (10)
     # stay: CR/LF are load-bearing here, because this filter runs BEFORE the
     # EOL detection in process_rx — dropping them would break line dispatch
     # entirely. What goes is BEL (7), BS (8), VT/FF (11/12), the rest of C0,
@@ -251,6 +259,97 @@ fn header_text_buf_ok(buf, len): i64 {
 fn header_text_cstr_ok(s): i64 {
     if (s == 0) { return 1; }
     return header_text_buf_ok(s, strlen(s));
+}
+
+# === Egress text sanitization (1.8.0, ADR 0024) ===
+#
+# The filters above run at INGRESS and are not enough on their own. Stored text
+# reaches other users' terminals, and until 1.8.0 two classes got through:
+#
+#   - C1 controls. `input_byte_ok` passes every byte 0x80-0xFE so UTF-8 text can
+#     be posted, and that range holds the C1 controls — raw (0x9B is the 8-bit
+#     CSI) and UTF-8-encoded (C2 9B is U+009B — a CSI to a C1-honouring terminal). A
+#     registered user could post `C2 9B 2 J` and clear every reader's screen, or
+#     an OSC 52 and write their clipboard. Subjects (`header_text_ok`) likewise.
+#   - Anything the CLI stored. `agora post` keeps its stdin body unfiltered, so
+#     a CLI-authored post could carry a plain ESC sequence to every wire
+#     reader. The same holds for posts written before a filter existed and for
+#     any file edited on disk.
+#
+# So stored text is neutralized on the way OUT, where it leaves: darshana's
+# `tty_sanitize_buf` in UTF-8 mode. Every control byte or sequence becomes one
+# '?'; well-formed UTF-8 passes byte-for-byte, so ordinary posts — accents, €,
+# em dashes — read exactly as before. UTF-8 and not Latin-1 because a session
+# IS UTF-8: agora negotiates no CHARSET option and its own output (the MOTD,
+# the help text) is UTF-8, while Latin-1 mode would turn the continuation bytes
+# of most non-ASCII characters into '?'. The stored post is not rewritten — the
+# artifact stays what its author wrote, and fixing the display covers old
+# posts too.
+
+enum TextEgress {
+    TEXT_KEEP_CR   = 0x2000;   # tty_sanitize_buf `keep` bit 13 = CR (darshana names only TAB / LF)
+    TEXT_CHUNK_MAX = 504;      # input bytes per egress pass; callers size their buffers from it
+}
+
+# The C0 bytes kept: TAB, LF and CR. CR LF is the NVT newline (RFC 854) every
+# stored body is written with, so dropping either would turn each line end
+# into '?'. Every other C0 byte is neutralized, and ESC can never be kept,
+# whatever this says.
+fn text_sanitize_keep(): i64 {
+    return TTY_KEEP_TAB | TTY_KEEP_LF | TEXT_KEEP_CR;
+}
+
+# Sanitize `len` bytes at `src` into `out` under agora's egress rule. Returns
+# the number of bytes written — never more than `len` — or -1 if `len` is
+# negative. Pure: no allocation, no syscall.
+fn text_sanitize(out, src, len): i64 {
+    return tty_sanitize_buf(out, 0, src, len, TTY_SANITIZE_UTF8, text_sanitize_keep());
+}
+
+# End (exclusive) of the next egress chunk of `src[i..len)`, at most `cap` bytes
+# long (`cap` >= 4), chosen so that sanitizing chunk by chunk gives exactly the
+# bytes sanitizing the whole input at once would.
+#
+# A cut inside a UTF-8 sequence would hand the sanitizer a truncated sequence,
+# and it would emit '?' for a character that is perfectly valid. The rule: if
+# any of the last three bytes before the cut is a lead byte (>= 0xC0), cut at
+# the earliest such byte instead, so that sequence starts the next chunk whole.
+# That is sufficient because a well-formed sequence is at most four bytes and
+# holds no byte >= 0xC0 after its lead: a sequence that starts earlier ends at
+# or before the cut, and one that would have crossed the cut is malformed
+# either way, so the sanitizer's answer for it does not depend on where the
+# input stops. Returns `len` for the last chunk, and always a value > `i`.
+fn text_chunk_end(src, i, len, cap): i64 {
+    var e = i + cap;
+    if (e >= len) { return len; }
+    var j = e - 3;
+    if (j <= i) { j = i + 1; }
+    var cut = e;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (j >= e) { scanning = 0; continue; }
+        if ((load8(src + j) & 0xFF) >= 0xC0) { cut = j; scanning = 0; continue; }
+        j = j + 1;
+    }
+    return cut;
+}
+
+# Copy `n` bytes from `src` to `out`, doubling every 0xFF (RFC 854: a data byte
+# of 255 goes on the wire as IAC IAC). Returns the bytes written, at most 2·n.
+# After `text_sanitize` in UTF-8 mode no 0xFF can remain — it is never valid
+# UTF-8 — so this is defence in depth, kept so that a change of sanitizing mode
+# cannot quietly re-open the 1.6.4 telnet-command injection.
+fn text_iac_double(out, src, n): i64 {
+    var o = 0;
+    var i = 0;
+    while (i < n) {
+        var b = load8(src + i) & 0xFF;
+        store8(out + o, b);
+        o = o + 1;
+        if (b == 0xFF) { store8(out + o, 0xFF); o = o + 1; }
+        i = i + 1;
+    }
+    return o;
 }
 
 # Re-validate a 16-char lowercase-hex fingerprint cstring. Used by

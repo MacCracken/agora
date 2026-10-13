@@ -1,6 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-08-22 (**1.7.0 — § Now is EMPTY**: N1/N2/N3/N4 all shipped, and the section
+> **Last Updated**: 2026-10-12 (**1.8.0** — cyrius 6.6.2 → 6.7.9 and darshana 0.9.0 → 1.3.0 close the
+> two darshana rows of § Architecture debt; stored text is sanitized at egress (ADR 0024), which closes
+> the `boards_list` row; the sigil-warnings row closes as measured-zero and the `--poison` follow-up moved
+> here from cyrius closes as applicable-and-green. Prior: 2026-08-22, **1.7.0 — § Now is EMPTY**: N1/N2/N3/N4 all shipped, and the section
 > now records what each turned out to be rather than what it asked for, because the findings outlived
 > the items. Also earlier the same day: 1.6.7's toolchain cut discharged the `dir_list` cross-repo
 > block and re-filed it in § Backlog rescoped to the `dir_list_into` half that survives. Prior:
@@ -68,6 +71,8 @@ entry. If an item has no citation it does not belong here.
 | **1.6.6** | **Doc-truth and process** — the non-code half of the 2026-07-26 roadmap sweep, no behavior change. [ADR 0023](../adr/0023-dual-serve-model.md) written (the dual serve model had shipped at 1.6.0 with no ADR at all); **ADR 0007 amended** and the four ADRs citing its "no shared state" premise (0010/0011/0012/0014) corrected; **untracked deferrals 12 → 0 tree-wide** (`cyrius lint` is single-file, so `telnet.cyr`'s five were invisible); ~20 stale comments retired and the unreachable agnos serial-accept branch deleted; CLAUDE.md's Closeout Pass grew three allocator/deferral gates; `CYRIUS_DCE=1` added to CI + release. 221/221; 14,571,744 B. | ✅ 2026-07-26 |
 | **1.6.7** | **Toolchain + dependency cut** (no features, no logic change) — cyrius **6.4.78 → 6.5.33** (42 releases; zero removals/renames/arity changes across agora's 71-function stdlib surface), darshana held at **0.9.0** (verified current). Payload: **cyrius 6.5.11's `is_dir`/`dir_list` fix** — agora's own upstream filing, now archived — ends 4,104 B/call of never-reclaimed bump scratch on a path reachable **unauthenticated** via `enter`; measured A/B **24,467 → 3,495 B/command (−85.7%)** on `boards`/`list`. Separately the bundled **sigil** dropped 46 module-level banked arrays (1,587,782 → 11,358 declared units), collapsing the binary **14,571,744 → 2,010,320 B (−86.2%)** — the ~12.6 MB of unused RSA/bignum `.bss` inherited at the 1.6.0 pin move. Found en route: the local `6.5.33` toolchain snapshot was a **dirty working tree** (two libs + `cycc` off-tag), and `docs/examples/20-descent.sh` had been failing because the sibling MUD (now 1.7.22) needs its zone data. 221/221 unchanged; 27/27 smokes green. | ✅ 2026-08-22 |
 | **1.7.0** | **roadmap § Now closes** — all four pinned items plus cyrius **6.5.33 → 6.5.34**. **N1** clean shutdown on SIGINT/SIGTERM for both serve models via signalfd (neither loop could exit: both declared `stop` and nothing ever assigned it); **N2** the three `file_write_all` sites onto `file_write_atomic` (safe only because every lock is on a separate `.lock` — a rename replaces the inode); **N3** both poll holes (the silent tx-queue drop, fixed at the single `send_buf` choke point; and `session_drain`'s false "non-blocking on both platforms" comment, now **bounded** on agnos since no non-blocking send exists there); **N4** `fuzz/telnet_iac.fcyr` + a CI *and* release fuzz step, mutation-proven on two axes. Found and fixed inside the cut: arming N1 in the fork parent made every connection **child unkillable**. 221/221; **28/28** smokes (new `28-clean-shutdown.py`); 2,010,320 → **2,230,240 B** (+219,920, of which ~215,520 is 6.5.34's bayan 1.4.2 → 1.5.2 security fold). | ✅ 2026-08-22 |
+| **1.7.1** | **Toolchain 6.5.34 → 6.6.2** — the cyrius 6.6.x `Result` value-form migration (every Result producer binds both halves); two first-party files changed. (Neither this table nor `state.md` recorded it at the time.) | ✅ 2026-09-11 |
+| **1.8.0** | **Toolchain 6.6.2 → 6.7.9 + darshana 0.9.0 → 1.3.0, and stored text stops driving readers' terminals.** The darshana bump is the frozen-v1 move (1.3.0 needs cyrius ≥ 6.7.2 for `const`, so the two pins moved together). Its payload is a **security fix**: every stored post, subject, handle, board name and leaderboard row now leaves through `tty_sanitize_buf` (UTF-8 mode, TAB/CR/LF kept — [ADR 0024](../adr/0024-egress-text-sanitization.md)); before it, C1 controls in a wire post and any byte at all in a CLI post (ESC included) reached every reader's terminal live. `emit_sgr` now encodes through `tty_sgr_buf` behind agora's own capacity gate (byte-identical, A/B-verified). 221 → **225** tests (also 225/225 on aarch64 under qemu); new smoke 29; [audit 2026-10-12](../audit/2026-10-12-audit.md): 1 MEDIUM + 2 LOW, all fixed. | ✅ 2026-10-12 |
 
 ---
 
@@ -116,8 +121,7 @@ or a deployment asks.
 | **No `tests/` split, and CI still runs no smoke.** Two halves, one now closed. *Closed at 1.7.0*: CI and the release workflow both run `cyrius fuzz fuzz/telnet_iac.fcyr`, and the release workflow — which previously built and **published** without running a single test — now runs `cyrius test` too. *Still open*: the 28 example smokes remain the only proof of the concurrency, serve-model and shutdown behaviour, and CI runs none of them; and `src/test.cyr` does not include `src/main.cyr`, so nothing in `serve_poll`, the fork loop, the session pool, `sess_tx_enqueue` or the N1 shutdown helpers can be unit-tested at all — N1 and N3 shipped covered by smoke 28 and inspection alone. `cyrius audit` still reports `skip: no tests/ directory`. | `.github/workflows/ci.yml`; `src/test.cyr:10-28` (include block); CHANGELOG [1.7.0] § Known limitations | medium |
 | No regression pin for the 1.6.3 slow-reader close path — a HIGH-severity fix resting on inspection alone. | CHANGELOG [1.6.3] § Security | medium |
 | Four separate ADR "measure before refining" gates can never open because the benchmarks were never written (world-lock contention is the clearest). | ADRs 0010, 0014 | medium |
-| aarch64 is claimed as a supported target and nothing verifies it. | CLAUDE.md § Goal | medium |
-| The ~25 sigil "undefined function" build warnings — a standing "don't re-investigate" note whose premises have changed. | build output | unknown |
+| aarch64 is claimed as a supported target and **CI** verifies nothing. *Partly closed at 1.8.0*: `cyrius build --aarch64` is warning-clean for agora's own code (the darshana 0.9.0 `SYS_IOCTL` shadowing is gone) and `cyrius test --aarch64 src/test.cyr` passes 225/225 under qemu-aarch64, and smoke 29 passes against the aarch64 binary under qemu-user (both serve models + CLI) — by hand. *Still open*: no CI step; the other 28 smokes have not run against an aarch64 binary, and nothing has run on aarch64 hardware. | CLAUDE.md § Goal; CHANGELOG [1.8.0] | small |
 | **The release post-hook that bumps `state.md` does not exist or does not run.** CLAUDE.md § CI/Release says *"the release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state."* **1.6.6 shipped and neither `state.md` nor this file recorded it** — `state.md`'s header, its Released row and the release table here all still read 1.6.5 until 1.6.7 backfilled them by hand, which is the exact failure mode that instruction exists to prevent. `release.yml` has no post-hook step at all. Either write it or retract the instruction; a rule nothing enforces is worse than no rule. | CLAUDE.md § CI/Release; `.github/workflows/release.yml`; CHANGELOG [1.6.7] | small |
 | **Local toolchain provenance is unverifiable.** Two independent defects, both found at 1.6.7: `install.sh --refresh-only` overwrites `~/.cyrius/versions/<ver>/` from whatever the cyrius *working tree* currently holds (this workstation's `6.5.33` snapshot carried an unreleased `bayan.cyr`, `patra.cyr` and `cycc`, inflating the measured binary by 215,520 B), and the versioned wrapper `~/.cyrius/versions/<ver>/bin/cyrius` **does not pin `cycc`** — it invokes whatever is on `PATH` and warns about the drift it just caused. CI is exempt (fresh runner, released tarball). agora's mitigation today is a manual `git show <tag>:lib/<m>.cyr | cmp -` sweep; it should be a scripted pre-cut gate. Upstream has the wrapper half filed at `cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`. | CHANGELOG [1.6.7] § Verification notes; architecture note [002](../architecture/002-lib-sync-same-size-skip.md) | small |
 | **`docs/examples/` has no runner, and its stated ordering contract does not hold.** The README says *"run them in order from a fresh checkout — later examples reuse identity files from earlier ones"*, but 09, 10, 18, 19 and 20 each `rm -rf ./bbs ./keys` on exit, so a strict in-order run leaves 24, 26 and 27 with no registered qix — and six scripts (04, 05, 23, 25, 26, 27) are client-only and need a server started externally with a specific `AGORA_SERVE` model that only their header comments record. 1.6.7 verified all 27 green using a throwaway harness; nothing in the repo reproduces that. This is why smoke 20's breakage went unnoticed. | `docs/examples/README.md`; CHANGELOG [1.6.7] | small |
@@ -143,7 +147,6 @@ or a deployment asks.
 | Reply enumeration is scan-on-read O(n) per read — [ADR 0005](../adr/0005-threading-via-reply-to.md) named a scale trigger that has arguably fired. | ADR 0005 | large |
 | `sort_i64_asc` is an O(n²) insertion sort, run on every `list` and every reply scan. | `src/board.cyr` | small |
 | `account_resolve_handle` is an O(n) directory scan with no early exit; its doc comment is orphaned 265 lines away. | `src/account.cyr` | medium |
-| `boards_list` renders filesystem directory names verbatim — the one content-ish string still reaching the wire without `send_text` (1.6.4's IAC doubling). | `src/board.cyr` | small |
 | The promised `anon-allowed` per-board policy ADR was never written; `open` and `known` are currently **functionally identical** — a documented no-op an operator can set and observe nothing from. | ADR 0006 | medium |
 | `.admins` capped at 4 KB (~120 handles) with no continuation. | `src/board.cyr` | small |
 | No operator CLI — `agora policy set <board> <mode>`, `agora admins {add,rm,list}`. Operators edit files directly. | roadmap (long-standing) | medium |
@@ -226,6 +229,16 @@ Recorded so nobody re-opens them by accident:
   [`CHANGELOG.md`](../../CHANGELOG.md). *This file deliberately no longer restates them.*
 - **The 2026-07-26 audit ledger is closed** — 3 HIGH + 5 MEDIUM + 4 LOW all fixed across 1.6.3–1.6.5;
   one INFO item deliberately open (listed in the backlog). [Report](../audit/2026-07-26-audit.md).
+- **1.8.0 closed five rows** (detail in CHANGELOG `[1.8.0]`): the darshana **0.9.0 pre-freeze pin** (now
+  1.3.0; its premise "agora calls `tty_open_signalfd`" was wrong — agora's shutdown signalfd was always
+  hand-rolled, and already had the two fixes darshana 0.9.3 shipped; every `_buf` call site was audited
+  for the 0.9.3 `-1` and cannot produce one), the **cyrius ≥ 6.7.2 floor** for darshana 1.3.0 (pin now
+  6.7.9), **`boards_list` names reaching the wire raw** (now through `send_text`), the **~25 sigil
+  "undefined function" warnings** (measured **zero** in the main, `--agnos` and `--aarch64` builds at
+  6.7.9 — the one such warning left is agora's own: `src/test.cyr` compiles `descent.cyr` without
+  `main.cyr`'s `send_str`, which is the § Backlog `tests/` split), and the **N4 `--poison`
+  re-evaluation** moved here from cyrius (below). The [2026-10-12 audit](../audit/2026-10-12-audit.md)
+  (1 MEDIUM, 2 LOW) is closed in the same cut.
 
 ---
 
@@ -245,12 +258,12 @@ because a sibling ask shipped — `file_write_atomic` is the clearest, and is no
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door/chatbot backlog.
-- [`docs/adr/`](../adr/) — **23 ADRs (0001–0023)**, all Accepted/Evergreen. 0001–0008 span M1–0.9.0; the
+- [`docs/adr/`](../adr/) — **24 ADRs (0001–0024)**, all Accepted/Evergreen (0024 — egress text sanitization — at 1.8.0). 0001–0008 span M1–0.9.0; the
   1.x arc adds 0009–0020 (doors, Universe, chat, chatbots, wager, war-game, Jabberwacky, Olympiad, Descent
   link, decode engine, decode-as-Handler-lever, door registry); 0021–0022 are the 1.6.x memory work
   (per-command arena, door-state free hook) and **0023 records the dual serve model** (written at 1.6.6,
   amending 0007).
-- [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2, closed at 1.6.5).
+- [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2, closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
 - **Companion project**: [Yeoman's Descent](https://github.com/MacCracken/cyrius-yeomans-descent) — the MUD
@@ -258,11 +271,11 @@ because a sibling ask shipped — `file_write_atomic` is the clearest, and is no
 
 ## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
 
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+cyrius no longer carries this repo's follow-ups; they were moved here. **Resolved at 1.8.0** (pin 6.7.9):
 
-- **(cyrius ≥ 6.6.18)** re-evaluate **N4**: its row says `--poison` is inapplicable because it instruments
-  `fl_alloc` / `fl_free` and the parser is bump-allocated. Since 6.6.18 `cyrius fuzz --poison` goes through an
-  allocator seam — `alloc()`, arenas, `fl_alloc` and any `_a` API (`poison_allocator()`), with redzones and
-  `--poison=ab`; an overwrite exits 86.
+- **(cyrius ≥ 6.6.18) re-evaluate N4's "`--poison` is inapplicable".** It is applicable now — since 6.6.18
+  `cyrius fuzz --poison` reaches `alloc()` and arenas through `poison_allocator()`, which is everything the
+  bump-allocated parser uses — and the harness is **clean under it**: `cyrius fuzz --poison` and
+  `--poison=ab` (two fills, identical output required) both pass `fuzz/telnet_iac.fcyr`. CI still runs the
+  plain `cyrius fuzz` step; adding `--poison=ab` to `ci.yml` / `release.yml` is a one-line change left for
+  the owner (it doubles the fuzz step's runtime).

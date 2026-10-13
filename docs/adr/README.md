@@ -38,3 +38,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0021 | [The per-command scratch arena](0021-per-command-scratch-arena.md) | Accepted (2026-07-25) — 1.6.2 |
 | 0022 | [The door-state free hook (`DD_FREE`)](0022-door-state-free-hook.md) | Accepted (2026-07-26) — 1.6.3 |
 | 0023 | [The dual serve model: fork per accept, or one process polling all sessions](0023-dual-serve-model.md) | Accepted (2026-07-26) — records 1.5.0/1.6.0; amends 0007 |
+| 0024 | [Stored text is sanitized at egress, in UTF-8 mode](0024-egress-text-sanitization.md) | Accepted (2026-10-12) — 1.8.0 |

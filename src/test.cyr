@@ -7,6 +7,11 @@
 # Run with: cyrius test src/test.cyr
 # CI gate: exit 0 on full pass; non-zero on first failure.
 
+# 1.8.0 — explicit, as in main.cyr: board.cyr (text_sanitize) and door.cyr
+# (emit_sgr) call darshana. `cyrius test` already prepends every [deps] entry,
+# and includes are once-only by path, so this costs nothing; it states the
+# dependency where a reader of the include block looks for it.
+include "lib/darshana.cyr"
 include "src/arena.cyr"
 include "src/telnet.cyr"
 include "src/board.cyr"
@@ -43,7 +48,7 @@ fn test_fail(name, why): i64 {
     fail_count = fail_count + 1;
     syscall(1, 2, "FAIL: ", 6);
     syscall(1, 2, name, strlen(name));
-    syscall(1, 2, " — ", 4);
+    syscall(1, 2, " — ", 5);
     syscall(1, 2, why, strlen(why));
     syscall(1, 2, "\n", 1);
     return 0;
@@ -5188,11 +5193,198 @@ fn t221_door_emit_bound(): i64 {
     return 0;
 }
 
+# t222 — 1.8.0: emit_sgr's bytes come from darshana's `tty_sgr_buf` now, and
+# must be byte-identical to the 1.7.x hand-rolled encoder (ESC [ decimal m)
+# for every code agora can pass, 0..999 — every door frame's colours depend on
+# it. Also pins the two deliberate differences: an out-of-range code is
+# dropped (it used to be formatted anyway), and the [D3] cap check is exact.
+fn t222_emit_sgr_darshana(): i64 {
+    var name = "t222_emit_sgr_darshana";
+    var buf = alloc(64);
+    var ref = alloc(64);
+    var code = 0;
+    var bad = 0;
+    while (code <= 999) {
+        memset(buf, 0, 64);
+        var n = emit_sgr(buf, 3, code);
+        store8(ref, 27);
+        store8(ref + 1, 91);
+        var dn = fmt_int_buf(code, ref + 2);
+        store8(ref + 2 + dn, 109);
+        if (n != 3 + 3 + dn) { bad = 1; }
+        if (memeq(buf + 3, ref, 3 + dn) == 0) { bad = 1; }
+        if (load8(buf + 3 + 3 + dn) != 0) { bad = 1; }      # nothing past the escape
+        if (load8(buf + 2) != 0) { bad = 1; }               # nothing before it
+        if (bad != 0) { test_fail(name, "bytes differ from the 1.7.x encoder"); return 1; }
+        code = code + 1;
+    }
+    memset(buf, 0, 64);
+    if (emit_sgr(buf, 5, 1000) != 5)   { test_fail(name, "code 1000 not dropped"); return 1; }
+    if (emit_sgr(buf, 5, 0 - 1) != 5)  { test_fail(name, "code -1 not dropped"); return 1; }
+    if (load8(buf + 5) != 0)           { test_fail(name, "a dropped code wrote bytes"); return 1; }
+    if (emit_reset(buf, 0) != 4)       { test_fail(name, "reset length"); return 1; }
+    if (memeq(buf, "\x1b[0m", 4) == 0) { test_fail(name, "reset bytes"); return 1; }
+    g_door_emit_cap = 9;
+    memset(buf, 0, 64);
+    var fit = emit_sgr(buf, 4, 36);      # ESC[36m is 5 bytes: 4 + 5 = 9, exactly the cap
+    var over = emit_sgr(buf, 5, 36);     # 5 + 5 = 10 > 9 → dropped
+    g_door_emit_cap = DOOR_EMIT_UNBOUNDED;
+    if (fit != 9)            { test_fail(name, "exact fit at the cap refused"); return 1; }
+    if (over != 5)           { test_fail(name, "over-cap escape not dropped"); return 1; }
+    if (load8(buf + 9) != 0) { test_fail(name, "wrote past the cap"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# One text_sanitize case: `src`/`slen` in, `want`/`wlen` expected out. Returns 0
+# on a match; on a mismatch reports `why` against t223 and returns 1.
+fn t223_case(out, src, slen, want, wlen, why): i64 {
+    memset(out, 0, 64);
+    var n = text_sanitize(out, src, slen);
+    var ok = 1;
+    if (n != wlen) { ok = 0; }
+    if (ok == 1) { if (memeq(out, want, wlen) == 0) { ok = 0; } }
+    if (ok == 1) { if (load8(out + wlen) != 0) { ok = 0; } }
+    if (ok == 0) { test_fail("t223_text_sanitize_rule", why); return 1; }
+    return 0;
+}
+
+# t223 — 1.8.0 (ADR 0024): the egress rule. Well-formed UTF-8, TAB, CR and LF
+# pass byte-for-byte; every C0 control (ESC above all), DEL, a C1 control raw
+# or UTF-8-encoded, and every malformed byte becomes one '?'. These are the
+# bytes that, before 1.8.0, reached another user's terminal live.
+fn t223_text_sanitize_rule(): i64 {
+    var o = alloc(64);
+    var nul = alloc(4);
+    store8(nul, 97); store8(nul + 1, 0); store8(nul + 2, 98);          # "a\0b"
+    # é, €, em dash, U+1F600 — the 2-, 3- and 4-byte forms survive unchanged.
+    var utf = "caf\xc3\xa9 \xe2\x82\xac\xe2\x80\x94\xf0\x9f\x98\x80";
+    var f = 0;
+    f = f + t223_case(o, "plain ascii ~!", 14, "plain ascii ~!", 14, "ascii altered");
+    f = f + t223_case(o, utf, 16, utf, 16, "UTF-8 altered");
+    f = f + t223_case(o, "a\tb\r\nc", 6, "a\tb\r\nc", 6, "TAB CR LF not kept");
+    f = f + t223_case(o, "\x1b[2J", 4, "?[2J", 4, "ESC");
+    f = f + t223_case(o, "\x07\x08\x0b\x0c\x7f", 5, "?????", 5, "BEL BS VT FF DEL");
+    f = f + t223_case(o, nul, 3, "a?b", 3, "NUL");
+    f = f + t223_case(o, "\xc2\x9b2J", 4, "?2J", 3, "UTF-8 CSI");
+    f = f + t223_case(o, "\xc2\x9d52;c;x\xc2\x9c", 10, "?52;c;x?", 8, "UTF-8 OSC + ST");
+    f = f + t223_case(o, "\xc2\x80\xc2\x9f", 4, "??", 2, "C1 range ends");
+    f = f + t223_case(o, "\xc2\xa0", 2, "\xc2\xa0", 2, "NBSP is text, not C1");
+    f = f + t223_case(o, "\x9b31m", 4, "?31m", 4, "raw 8-bit CSI");
+    f = f + t223_case(o, "\xc3\x28", 2, "?(", 2, "bad continuation");
+    f = f + t223_case(o, "\xed\xa0\x80", 3, "???", 3, "surrogate");
+    f = f + t223_case(o, "\xc0\xaf", 2, "??", 2, "overlong");
+    f = f + t223_case(o, "\xe2\x82", 2, "??", 2, "truncated at end");
+    f = f + t223_case(o, "\xff\xfe", 2, "??", 2, "0xFF / 0xFE");
+    if (f != 0) { return 1; }
+    test_pass("t223_text_sanitize_rule");
+    return 0;
+}
+
+# Sanitize src[0..len) chunk by chunk with `text_chunk_end(.., cap)` into out;
+# returns the total, or -1 if a chunk boundary broke its contract.
+fn t224_chunked(out, src, len, cap): i64 {
+    var i = 0;
+    var o = 0;
+    while (i < len) {
+        var e = text_chunk_end(src, i, len, cap);
+        if (e <= i)       { return 0 - 1; }
+        if (e - i > cap)  { return 0 - 1; }
+        if (e > len)      { return 0 - 1; }
+        o = o + text_sanitize(out + o, src + i, e - i);
+        i = e;
+    }
+    return o;
+}
+
+# t224 — 1.8.0: send_text / write_text sanitize in bounded stack chunks, and a
+# chunk boundary inside a UTF-8 sequence would turn a valid character into
+# '?'. `text_chunk_end` must make the chunked output byte-identical to the
+# one-shot output: checked for every cap from 4 to 12 and the production cap,
+# over a hand-built corpus and over 4 KB of pseudo-random bytes.
+fn t224_text_chunk_end(): i64 {
+    var name = "t224_text_chunk_end";
+    var corpus = "x\xe2\x82\xac\xe2\x82\xac\xf0\x9f\x98\x80\xc3\xa9\xc2\x9b\xed\xa0\x80\x1b[1m";
+    var tail = "\xe2\x82\xf0\x9f\x98\xc3\r\n\t\xc2\xa0z";
+    var cbuf = alloc(128);
+    var clen = strlen(corpus);
+    memcpy(cbuf, corpus, clen);
+    memcpy(cbuf + clen, tail, strlen(tail));
+    clen = clen + strlen(tail);
+    var rnd = alloc(4096);
+    var seed = 12345;
+    var k = 0;
+    while (k < 4096) {
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+        var b = (seed >> 16) & 0xFF;
+        if ((seed & 3) == 0) { b = 0xE2; }      # bias toward lead bytes so cuts land mid-sequence
+        if (b == 0) { b = 0x82; }
+        store8(rnd + k, b);
+        k = k + 1;
+    }
+    var one = alloc(4096);
+    var chk = alloc(4096);
+    var src = cbuf;
+    var len = clen;
+    var pass = 0;
+    while (pass < 2) {
+        var whole = text_sanitize(one, src, len);
+        var cap = 4;
+        while (cap <= 13) {
+            var c = cap;
+            if (cap == 13) { c = TEXT_CHUNK_MAX; }
+            var got = t224_chunked(chk, src, len, c);
+            if (got != whole)                { test_fail(name, "chunked length differs"); return 1; }
+            if (memeq(chk, one, whole) == 0) { test_fail(name, "chunked bytes differ"); return 1; }
+            cap = cap + 1;
+        }
+        src = rnd;
+        len = 4096;
+        pass = pass + 1;
+    }
+    # A run of 3-byte characters with a 4-byte cap: every cut must land on a
+    # character boundary, so nothing becomes '?'.
+    var euro = alloc(300);
+    k = 0;
+    while (k < 100) {
+        store8(euro + k * 3, 0xE2);
+        store8(euro + k * 3 + 1, 0x82);
+        store8(euro + k * 3 + 2, 0xAC);
+        k = k + 1;
+    }
+    if (t224_chunked(chk, euro, 300, 4) != 300)   { test_fail(name, "euro run length"); return 1; }
+    if (memeq(chk, euro, 300) == 0)               { test_fail(name, "a cut split a character"); return 1; }
+    if (text_chunk_end(euro, 0, 300, 600) != 300) { test_fail(name, "last chunk must end at len"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t225 — 1.8.0: the IAC pass that follows sanitizing (RFC 854: data 0xFF goes
+# out as IAC IAC). Kept as defence in depth even though UTF-8 sanitizing leaves
+# no 0xFF — this pins the doubling itself, which send_text did inline before.
+fn t225_text_iac_double(): i64 {
+    var name = "t225_text_iac_double";
+    var src = alloc(8);
+    var out = alloc(16);
+    memset(out, 0, 16);
+    store8(src, 0x41); store8(src + 1, 0xFF); store8(src + 2, 0x42);
+    store8(src + 3, 0xFF); store8(src + 4, 0xFF);
+    if (text_iac_double(out, src, 5) != 8)                     { test_fail(name, "length"); return 1; }
+    if (memeq(out, "\x41\xff\xff\x42\xff\xff\xff\xff", 8) == 0) { test_fail(name, "bytes"); return 1; }
+    if (text_iac_double(out, src, 0) != 0)                     { test_fail(name, "empty"); return 1; }
+    # And through the full egress chain a stored 0xFF cannot survive at all.
+    var san = alloc(8);
+    if (text_sanitize(san, src, 5) != 5) { test_fail(name, "sanitize length"); return 1; }
+    if (memeq(san, "A?B??", 5) == 0)     { test_fail(name, "0xFF survived sanitizing"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
 
-    syscall(1, 1, "agora telnet tests — RFC 854 + RFC 1184 IAC parser\n", 52);
-    syscall(1, 1, "------------------------------------------------------\n", 56);
+    syscall(1, 1, "agora telnet tests — RFC 854 + RFC 1184 IAC parser\n", 53);
+    syscall(1, 1, "------------------------------------------------------\n", 55);
 
     t01_plain_data();
     t02_iac_iac_literal();
@@ -5428,8 +5620,12 @@ fn main(): i64 {
     t219_th_load_clamp();
     t220_door_parse_int_cap();
     t221_door_emit_bound();
+    t222_emit_sgr_darshana();
+    t223_text_sanitize_rule();
+    t224_text_chunk_end();
+    t225_text_iac_double();
 
-    syscall(1, 1, "------------------------------------------------------\n", 56);
+    syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);
     fmt_int(test_count);
     syscall(1, 1, "  failures: ", 12);

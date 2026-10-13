@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -15,32 +15,39 @@ output = "agora"
 # Pre-1.0 stdlib surface. M0 (0.1.0) scaffolded the binary; M1 (0.2.0)
 # landed the cross-platform telnet listener on lib/net.cyr; M2 is the
 # ANSI BBS aesthetic — M2-A consumes bannermanor (rendered offline),
-# M2-B consumes darshana for SGR / cursor primitives (git dep below).
+# M2-B consumes darshana for SGR primitives, and since 1.8.0 its output
+# sanitizer (git dep below).
 stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "result", "tagged", "vec", "fnptr", "bench", "str", "fs", "chrono", "random", "sigil", "freelist", "ct", "bayan", "thread_local", "keccak", "hashmap", "thread"]
 
 [deps.darshana]
-# SGR primitives for the ANSI BBS aesthetic at M2-B. agora consumes
-# exactly two functions — `tty_sgr_buf` and `tty_sgr_reset_buf`, three
-# call sites each (verified 1.6.7 by grepping `tty_` across src/). Both
-# are `_buf` composers: they write the ANSI escape into a caller-provided
-# buffer instead of to fd 1, so the rendered bytes go out over the telnet
-# socket via send_buf. (`tty_fg_rgb_buf` / `tty_fg_256_buf` were listed
-# here as "what we need" through 1.6.6 and have never been called.)
+# Terminal-output primitives. darshana's API is FROZEN since its v1.0.0
+# (darshana ADR 0003), so a patch/minor bump of this pin cannot rename,
+# re-arity or re-contract anything below, nor change the bytes an emitter
+# writes. agora calls (verified 1.8.0 by grepping `tty_` / `TTY_` across src/):
 #
-# Pinned at 0.9.0 (current tip) — pre-1.0 by version label but the
-# functional surface we need is stable: agora only consumes the `_buf`
-# SGR composers (tty_sgr_buf / tty_sgr_reset_buf), whose signatures are
-# unchanged across 0.5.3→0.9.0. Everything since 0.7.0 has been AGNOS
-# parity work on the termios/signalfd surface agora does not touch —
-# 0.8.0 tty_winsize, 0.8.2 tty_isatty/tty_raw/tty_cooked, 0.9.0
-# tty_open_signalfd/tty_close_signalfd + TTY_SIGMASK_* — all additive
-# `#ifdef CYRIUS_TARGET_AGNOS` peers with no Linux-path or API change.
-# (0.7.0 was the pre-freeze hardening sweep and carried breaking renames
-# — tty_cooked/tty_itoa/tty_clear_to_end/tty_apply_raw_flags — that
-# agora was likewise unaffected by.)
-# Both will re-pin at darshana 1.0 when the API surface freezes.
+#   tty_sgr_buf, tty_sgr_reset_buf   render_motd (main.cyr) + emit_sgr (door.cyr)
+#   TTY_FG_CYAN, TTY_FG_YELLOW       render_motd's two colours
+#   tty_sanitize_buf + TTY_SANITIZE_UTF8, TTY_KEEP_TAB, TTY_KEEP_LF
+#                                    text_sanitize (board.cyr) — every stored
+#                                    string's egress, ADR 0024
+#
+# All are pure `_buf` composers / constants: bytes go into a caller buffer
+# and out over the telnet socket, never to fd 1. agora does NOT use the
+# termios or signalfd surface — its shutdown signalfd is hand-rolled for the
+# agnos/mirshi blocking rule (see the N1 block in src/main.cyr).
+#
+# 1.3.0 since agora 1.8.0 (was 0.9.0, the last pre-freeze tag). 1.3.0 needs
+# cyrius >= 6.7.2 — its bundle declares private constants with `const` — so
+# this pin moved WITH the toolchain pin above. What the 0.9.0 → 1.3.0 span
+# changed for agora: 0.9.2 stopped the bundle shadowing the stdlib's
+# arch-aware SYS_IOCTL with the x86_64 number (every `--aarch64` agora build
+# warned `duplicate symbol 'SYS_IOCTL'`; latent, since nothing agora reaches
+# issues an ioctl, but 16 is fremovexattr on aarch64);
+# 0.9.3 made the `_buf` composers return -1 for a negative `pos` (agora's
+# call sites cannot produce one — see render_motd); 1.2.0 added
+# tty_sanitize_buf. Emitted SGR bytes are unchanged (A/B-verified 1.8.0).
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.9.0"
+tag = "1.3.0"
 modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:

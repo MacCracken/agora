@@ -113,7 +113,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 
 ### Closeout Pass (before every minor/major bump)
 
-1. **Full test suite** — `cyrius test src/test.cyr`, zero failures. There are **no `.tcyr` files and no `tests/` directory**; bare `cyrius test` searches `tests/*.tcyr`, finds nothing and exits 1, so the explicit path is the working form. Also run `cyrius fuzz fuzz/telnet_iac.fcyr` (both are CI + release gates since 1.7.0). The `tests/` split is a backlog item.
+1. **Full test suite** — `cyrius test src/test.cyr`, zero failures. There are **no `.tcyr` files and no `tests/` directory**. The explicit path is what CI runs and stays the canonical form; since cyrius 6.6.17 a bare `cyrius test` runs the `[build] test` entry too (before that it searched `tests/*.tcyr`, found nothing and exited 1). Also run `cyrius fuzz fuzz/telnet_iac.fcyr` (both are CI + release gates since 1.7.0). The `tests/` split is a backlog item.
 2. **Benchmark baseline** — capture parser throughput + accept rate; compare against prior closeout
 3. **Dead code audit** — remove unused functions; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel codepaths accreted

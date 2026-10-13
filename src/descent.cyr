@@ -12,9 +12,9 @@
 # Because the shuttle is byte-transparent, the MUD's own telnet IAC
 # negotiation (RFC 1143 WILL ECHO / SGA, passphrase echo suppression)
 # flows through to the client verbatim — the MUD authenticates the player
-# itself. Sigil identity hand-off across the link is DEFERRED (ADR 0017
-# § Decision): the MUD as built has no external-identity path, so a true
-# hand-off needs an MUD-side protocol — a follow-on bite.
+# itself. Sigil identity hand-off across the link is DEFERRED (roadmap § Cross-repo;
+# ADR 0017 § Decision): the MUD as built has no external-identity path, so a true
+# hand-off needs an MUD-side protocol first.
 #
 # Endpoint is OPERATOR config only (<store>/.descent), never client-
 # supplied, so there is no SSRF surface: a citizen cannot point the proxy
