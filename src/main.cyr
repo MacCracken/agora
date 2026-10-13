@@ -1758,7 +1758,7 @@ fn door_post_score(game): i64 {
     door_leaderboard_path(game, path);
     var line = cmd_alloc(256);
     var n = door_format_score(g_session_handle, score, rank, line);
-    file_append_locked(path, line, n);
+    store_append_locked(path, line, n);
     return 0;
 }
 
@@ -1779,7 +1779,7 @@ fn door_render_leaderboard(cfd, game): i64 {
     var lens = cmd_alloc(LB_TOP * 8);
     var scores = cmd_alloc(LB_TOP * 8);
     var count = 0;
-    var fd = file_open(path, 0, 0);
+    var fd = store_open(path, O_RDONLY);     # 1.9.0: no symlink, no FIFO (arena.cyr)
     if (fd >= 0) {
         var buf = cmd_alloc(LB_CHUNK);
         var have = 0;        # bytes carried over (a partial line) at buf[0..have)
@@ -3615,6 +3615,29 @@ fn cmd_serve_on(port): i64 {
     g_shutdown_sigfd   = shutdown_signals_arm();
     g_shutdown_siginfo = alloc(SIGINFO_BYTES);
 
+    # 1.9.0 — the handle index (account.cyr): built once for a store that
+    # predates it, before any `login` can need it. A failure only means logins
+    # keep scanning `.users/`, as before. On Linux it runs in a short-lived child:
+    # the build is the parent's first use of the per-command arena and the
+    # directory workspace, and every fork-mode connection would inherit both —
+    # built in the parent, a connection child measured 64-68 KB PSS against
+    # 54-66 KB built here (benches/serve-bench.py memory, interleaved, one disk).
+    # A SIGTERM meanwhile stays pending on the signalfd and is honoured once the
+    # loop starts. agnos always polls (one process), so it builds in place.
+    #ifdef CYRIUS_TARGET_AGNOS
+    account_index_prepare(g_store_buf);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ipid = sys_fork();
+    if (ipid == 0) {
+        shutdown_signals_child_reset(g_shutdown_sigfd);
+        account_index_prepare(g_store_buf);
+        sys_exit(0);
+    }
+    if (ipid > 0) { sys_waitpid(ipid, 0, 0); }
+    else { account_index_prepare(g_store_buf); }
+    #endif
+
     # 1.7.1 — cyrius 6.6.x value form: every Result producer below returns a
     # (tag, payload) register pair. A single-variable bind keeps the tag and
     # drops the payload, so each site binds both halves and passes both to
@@ -4477,6 +4500,9 @@ fn cmd_register(): i64 {
         println("agora register: could not lock the user registry");
         return 1;
     }
+    # 1.9.0 — a store that predates the handle index gets it here, under the
+    # same lock, so the check below and the claim account_register writes agree.
+    account_index_ensure(store);
     # Refuse if the handle is taken (different fp).
     var found_fp = alloc(ACCOUNT_FP_BUF_BYTES);
     if (account_resolve_handle(store, handle, found_fp) == 1) {

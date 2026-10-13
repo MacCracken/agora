@@ -19,8 +19,11 @@
 #           0010 flock + read + write-temp + fsync + rename), and no lost update
 #   reply   milliseconds per `read`, whose reply scan (ADR 0005) opens every post
 #           on the board — the number roadmap § 1.9.1's index decision waits on
+#   login   milliseconds per `login <unknown handle>` against N registered users,
+#           and the server's start-to-listening time on a store of that size —
+#           1.9.0's handle index (account.cyr) is built once on that first start
 #
-# Usage: benches/serve-bench.py {accept,memory,world,reply,all} [--runs N] [--store DIR]
+# Usage: benches/serve-bench.py {accept,memory,world,reply,login,all} [--runs N] [--store DIR]
 #        AGORA_BIN=/path/to/agora benches/serve-bench.py ...   (A/B a build)
 # Default store: build/bench-store (a real disk: tmpfs would flatter fsync).
 
@@ -238,9 +241,54 @@ def bench_reply(store, runs):
             nposts, statistics.median(per), "/".join("%.2f" % x for x in per)))
 
 
+def make_users(store, n):
+    """n registered users as `.users/<fp16>/handle` (no keys: login only resolves)."""
+    for i in range(n):
+        d = os.path.join(store, ".users", "%016x" % (0x1000000000000000 + i))
+        os.makedirs(d)
+        with open(os.path.join(d, "handle"), "w") as f:
+            f.write("user%d\n" % i)
+
+
+def bench_login(store, runs):
+    print("login — `login <unknown>` vs registered users (fork, so no poll-sweep wait); start = first serve")
+    for nusers in (300, 3000):
+        lstore = os.path.join(store, "login-%d" % nusers)
+        per, starts = [], []
+        for _ in range(runs):
+            shutil.rmtree(lstore, ignore_errors=True)
+            os.makedirs(lstore)
+            make_users(lstore, nusers)
+            t0 = time.time()
+            p = start("fork", lstore)
+            starts.append((time.time() - t0) * 1000)
+            try:
+                s = socket.create_connection(("127.0.0.1", PORT), timeout=30)
+                buf = b""
+                while b"> " not in buf:
+                    buf += s.recv(65536)
+                n = 50
+                t0 = time.time()
+                for _ in range(n):
+                    s.sendall(b"login nobody\r\n")
+                    buf = b""
+                    while not buf.endswith(b"> "):
+                        d = s.recv(65536)
+                        if not d:
+                            break
+                        buf += d
+                per.append((time.time() - t0) * 1000 / n)
+                s.close()
+            finally:
+                stop(p)
+        print("  %4d users  %7.2f ms per unknown login (runs %s)   first start %6.0f ms (runs %s)" % (
+            nusers, statistics.median(per), "/".join("%.2f" % x for x in per),
+            statistics.median(starts), "/".join("%.0f" % x for x in starts)))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["accept", "memory", "world", "reply", "all"])
+    ap.add_argument("what", choices=["accept", "memory", "world", "reply", "login", "all"])
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--store", default=os.path.join(ROOT, "build", "bench-store"))
     a = ap.parse_args()
@@ -259,6 +307,8 @@ def main():
             bench_world(a.store, a.runs)
         if a.what in ("reply", "all"):
             bench_reply(a.store, a.runs)
+        if a.what in ("login", "all"):
+            bench_login(a.store, a.runs)
     finally:
         shutil.rmtree(a.store, ignore_errors=True)
 

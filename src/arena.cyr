@@ -6,6 +6,13 @@
 # main.cyr, or the test build fails on an undefined `cmd_alloc`.
 #
 # Include it FIRST, before any module that calls cmd_alloc.
+#
+# It also holds the store's file primitives, for the same reason: the storage
+# modules and both entry points share them — `store_write_atomic` (1.7.0, the
+# crash-safe replace) and, since 1.9.0 (ADR 0025), `store_open` and the helpers on
+# it (`store_read_all`, `store_lock_open`, `store_append_locked`), which refuse a
+# store name that is a symlink or not a regular file, and `store_publish`, the
+# exclusive crash-safe create (see the sections at the end).
 
 # === 1.6.2: the per-command scratch arena ===================================
 #
@@ -131,7 +138,13 @@ fn store_write_atomic(path, buf, len): i64 {
     pos = _io_append_dec(tmp, pos, g_atomic_ctr);
     store8(tmp + pos, 0);
 
-    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    # 1.9.0 (audit 1.8.1 I11) — a FRESH regular file, never a planted one: unlink
+    # whatever sits at the temp name (crash debris from a recycled pid, or a symlink
+    # someone with store write access left there), then create it exclusively
+    # without following a final link. O_TRUNC through a planted symlink would have
+    # emptied the link's target, and the write would have filled it.
+    xunlink(tmp);
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0x1A4);
     if (fd < 0) { return fd; }
     var off = 0;
     var rc = 0;
@@ -159,5 +172,190 @@ fn store_write_atomic(path, buf, len): i64 {
     if (cr < 0) { xunlink(tmp); return cr; }
     var rr = file_rename(tmp, path);
     if (rr < 0) { xunlink(tmp); return rr; }
+    return 0;
+}
+
+# --- store opens: regular files only (1.9.0, audit 1.8.1 I11) ------------------
+#
+# Every store file used to be opened like any other path, which trusted whatever
+# a name in the store turned out to be:
+#   - a FIFO named `N.txt`, `.policy`, `.admins` or a lock file BLOCKED the open
+#     (O_RDONLY waits for a writer, O_WRONLY for a reader) — and under poll that
+#     is the whole server, hung on the next `read`, `list` or `post`;
+#   - a symlink was followed: `5.txt -> /etc/passwd` served any file the agora
+#     user can read to anonymous telnet users, and the registration writes'
+#     O_TRUNC emptied and refilled whatever a planted link pointed at.
+# Both need write access to the store, but agora runs as one user while the store
+# may be shared, and "the BBS reads only BBS files" should not depend on it.
+#
+# The rule: the FINAL component must be a regular file reached without a symlink.
+# O_NOFOLLOW refuses the link (-ELOOP), O_NONBLOCK makes a FIFO's open return at
+# once (a no-op for a regular file), and an fstat refuses everything that is not
+# S_IFREG — FIFO, socket, device, directory — with -EINVAL. Directories above the
+# final name are not checked: whoever can replace those can rewrite the store.
+#
+# agnos: AO_NOFOLLOW covers the symlink. It has no O_NONBLOCK, no fstat (#1411
+# answers -1) and no way to make a FIFO (mknodat is ENOSYS), so the type check is
+# Linux-only.
+enum StoreOpen {
+    STORE_E_NOTREG = 22;         # EINVAL: the name exists but is not a regular file
+    STORE_STAT_BYTES = 160;      # ≥ STAT_BUFSZ on every target (Linux 144, agnos 48)
+}
+
+# 1 if the open fd is a regular file; 1 on agnos (no fstat, see above).
+fn store_fd_regular(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[160];   # STORE_STAT_BYTES
+    if (sys_fstat(fd, &st) != 0) { return 0; }
+    if ((load32(&st + STAT_MODE) & 0xF000) == 0x8000) { return 1; }   # S_IFREG
+    return 0;
+    #endif
+}
+
+# Open a store file with `flags` (O_RDONLY, or O_WRONLY | O_CREAT for a lock),
+# adding O_NOFOLLOW, and O_NONBLOCK where it exists, then refuse a non-regular
+# file. Returns the fd, or a negative errno (-ENOENT for a missing name, -ELOOP for
+# a symlink, -STORE_E_NOTREG for a FIFO, device or directory).
+fn store_open(path, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var fd = file_open(path, flags | O_NOFOLLOW, 0x1A4);                 # 0o644 (PERM_FILE)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var fd = file_open(path, flags | O_NOFOLLOW | O_NONBLOCK, 0x1A4);    # 0o644 (PERM_FILE)
+    #endif
+    if (fd < 0) { return fd; }
+    if (store_fd_regular(fd) == 0) {
+        file_close(fd);
+        return 0 - STORE_E_NOTREG;
+    }
+    return fd;
+}
+
+# `file_read_all` for the store: up to `cap` bytes of a regular, non-symlinked
+# file into `buf`. Returns the byte count or a negative errno (store_open's).
+fn store_read_all(path, buf, cap): i64 {
+    var fd = store_open(path, O_RDONLY);
+    if (fd < 0) { return fd; }
+    var total = 0;
+    var reading = 1;
+    while (reading == 1) {
+        if (total >= cap) { reading = 0; continue; }
+        var n = file_read(fd, buf + total, cap - total);
+        if (n < 0) { file_close(fd); return n; }
+        if (n == 0) { reading = 0; continue; }
+        total = total + n;
+    }
+    file_close(fd);
+    return total;
+}
+
+# Open (creating) a store lock file and take its exclusive flock. Returns the fd,
+# or -1. The open cannot block on a FIFO or follow a link (store_open).
+fn store_lock_open(path): i64 {
+    var fd = store_open(path, O_WRONLY | O_CREAT);
+    if (fd < 0) { return 0 - 1; }
+    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
+    return fd;
+}
+
+# The stdlib's `file_append_locked` through store_open: append the whole record
+# under an exclusive flock. Returns `len`, or a negative errno.
+fn store_append_locked(path, buf, len): i64 {
+    var flags = O_WRONLY | O_CREAT;
+    #ifndef CYRIUS_TARGET_AGNOS
+    flags = flags | O_APPEND;
+    #endif
+    var fd = store_open(path, flags);
+    if (fd < 0) { return fd; }
+    file_lock(fd);
+    #ifdef CYRIUS_TARGET_AGNOS
+    xlseek(fd, 0, 2);                  # SEEK_END — agnos AO_APPEND is a kernel TODO
+    #endif
+    var n = _io_write_full(fd, buf, len);
+    file_unlock(fd);
+    file_close(fd);
+    return n;
+}
+
+# 1 if `path` names anything — a file, a directory, a symlink (dangling or not) —
+# without following a final link; else 0. What "the name is taken" means to
+# O_EXCL and link(2).
+fn store_name_exists(path): i64 {
+    var st[160];   # STORE_STAT_BYTES
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_lstat(path, strlen(path), &st) >= 0) { return 1; }
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sys_lstat(path, &st) == 0) { return 1; }
+    return 0;
+    #endif
+}
+
+# fsync the directory `dir`, so a name just linked or renamed into it survives a
+# crash (the file's own fsync does not cover its directory entry). Best effort:
+# returns the fsync result, or the open's negative errno. agnos: xfsync is a
+# whole-filesystem sync there.
+fn store_dir_sync(dir): i64 {
+    var fd = file_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) { return fd; }
+    var r = xfsync(fd);
+    file_close(fd);
+    return r;
+}
+
+# Create `path` (in directory `dir`) holding buf[0..len) — EXCLUSIVELY and
+# CRASH-SAFELY: it is never replaced if it exists, and it is either absent or
+# whole, never partial. The caller holds a lock that serializes every writer in
+# `dir` (the board lock for posts; `.users/.lock` for handle claims). Returns 0,
+# or -1 with nothing created. (1.9.0; posts first, then the handle index.)
+#
+# `durable` 1 fsyncs the file before linking it and the directory after — every
+# post, every registration's claim. 0 skips both, for a bulk writer that makes
+# the whole batch durable at once (the handle-index build, where the two fsyncs
+# measured ~3.5 ms per user — 1.3 s to start a 300-user store; it ends with one
+# sync() instead).
+# Without the file fsync a crash can leave the name holding an EMPTY file —
+# still never a partial one of nonzero length — which that caller must handle.
+#
+# The bytes go to `<dir>/.publish.tmp`, are fsynced, and only then get their
+# name, by link(2) — which, like O_EXCL, refuses a name that exists. Then the
+# temp is removed and the directory fsynced, so the new name survives a crash.
+#
+# The temp name is fixed: the caller's lock means one temp per directory
+# suffices, and a writer that died mid-write leaves debris the next publish
+# simply removes. A dot-name is never a post id ("<digits>.txt") or a handle, so
+# nothing lists it. It is unlinked first and then created O_EXCL, so neither
+# debris nor a planted symlink can redirect the write.
+#
+# A filesystem without hard links (vfat; agnos off ext2) fails link(2) with the
+# name still free; then rename(2) publishes instead — atomic too, and safe from
+# other agora writers because of the lock (a non-agora process creating the same
+# name in between would be replaced; that is the residual).
+fn store_publish(dir, path, buf, len, durable): i64 {
+    var tmpb[528];   # PATH_MAX_BYTES + the temp leaf — stack: the index build calls this per user
+    var tmp = &tmpb;
+    var dlen = strlen(dir);
+    if (dlen + 14 > 528) { return 0 - 1; }      # --store is capped at 448; refuse, never overrun
+    memcpy(tmp, dir, dlen);
+    memcpy(tmp + dlen, "/.publish.tmp", 14);    # incl. NUL
+    xunlink(tmp);
+    var fd = file_create_exclusive(tmp, PERM_FILE);
+    if (fd < 0) { return 0 - 1; }
+    var ok = 1;
+    if (_io_write_full(fd, buf, len) != len) { ok = 0; }
+    if (ok == 1) { if (durable == 1) { if (xfsync(fd) < 0) { ok = 0; } } }
+    if (file_close(fd) < 0) { ok = 0; }
+    if (ok == 0) { xunlink(tmp); return 0 - 1; }
+    if (xlink(tmp, path) == 0) {
+        xunlink(tmp);
+    } else {
+        if (store_name_exists(path) == 1) { xunlink(tmp); return 0 - 1; }   # the id is taken
+        if (file_rename(tmp, path) != 0) { xunlink(tmp); return 0 - 1; }
+    }
+    if (durable == 1) { store_dir_sync(dir); }   # best effort: published either way
     return 0;
 }

@@ -32,7 +32,7 @@ cyrius build src/main.cyr build/agora
 ./build/agora serve 2323     # telnet on localhost:2323
 ```
 
-End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–31; run them all with `docs/examples/run.sh`). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
+End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–32; run them all with `docs/examples/run.sh`). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
 
 ## Architecture
 
@@ -80,7 +80,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + 
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — thirty-one runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`).
+- [`docs/examples/`](docs/examples/) — thirty-two runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (~9 ns/byte hot path, unchanged across every release since M1-close).
 - [`fuzz/`](fuzz/) — the IAC-parser fuzz harness (`cyrius fuzz`), run by CI and at release.
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.

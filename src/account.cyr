@@ -161,10 +161,7 @@ fn account_register_lock(store): i64 {
     var pos = build_users_dir(store, path);
     if (store_ensure(path) != 0) { return 0 - 1; }
     memcpy(path + pos, "/.lock", 7);
-    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
-    return fd;
+    return store_lock_open(path);             # 1.9.0: no symlink, no FIFO (arena.cyr)
 }
 
 # mkdir-ladder <store> -> .users -> .users/<fp16> (EEXIST is success); returns 0 or the failing rc.
@@ -186,13 +183,14 @@ fn account_dir_ensure(store, fp16): i64 {
 # Writes the three per-user files for (pk, handle):
 #   public_key.bin    32 raw bytes
 #   handle            <handle string> + LF
-#   created.iso8601   chrono.iso8601_now() + LF
+#   created.iso8601   iso8601_into(now) + LF
 #
 # Computes the fingerprint from pk and writes it into fp_out (which
 # must be ≥ ACCOUNT_FP_BUF_BYTES). Returns 0 on success, negative
 # on failure (mkdir / open / write errors). Does NOT validate
 # handle uniqueness — caller (M6 register CLI / wire flow) must
-# pre-check via account_resolve_handle.
+# pre-check via account_resolve_handle, holding account_register_lock,
+# which also guards the handle index this maintains (1.9.0).
 fn account_register(store, pk_buf, handle, fp_out): i64 {
     compute_fingerprint(pk_buf, fp_out);
 
@@ -201,43 +199,40 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
 
-    # public_key.bin — 32 raw bytes
-    #
-    # 1.6.3 (audit, MEDIUM) — all three writes below carry O_TRUNC. Without it,
-    # re-registering the SAME key under a shorter handle left the tail of the
-    # previous value in place: `handle` became "qix\nylonghandle\n" and the
-    # account reported the wrong handle from then on. Reproduced end to end
-    # before the fix. Registration is idempotent by design (same key, same
-    # fingerprint directory), so overwriting in place is the intended shape —
-    # it just has to overwrite the WHOLE file.
+    # 1.9.0 — the handle index: claim the new handle FIRST and release the old
+    # one LAST (see the index section), so a crash leaves a stale claim, which a
+    # lookup detects, and never a missing one, which it would trust.
+    var old = cmd_alloc(ACCOUNT_HANDLE_BUF);
+    var oldlen = account_lookup_handle(store, fp_out, old, ACCOUNT_HANDLE_BUF);
+    if (account_index_claim(store, handle, fp_out, 1) != 0) { return 0 - 1; }
+
+    # Registration is idempotent by design (same key, same fingerprint
+    # directory), so each file is REPLACED whole. 1.6.3 added O_TRUNC because a
+    # shorter handle left the old tail behind ("qix\nylonghandle\n"); 1.9.0 makes
+    # each write a store_write_atomic (temp, fsync, rename): a crash mid-write
+    # leaves the old file or the new one, never a truncated handle, and the rename
+    # replaces a planted symlink instead of writing through it (audit 1.8.1 I11 —
+    # O_TRUNC through a link emptied and refilled whatever it pointed at).
     build_user_file(store, fp_out, "public_key.bin", path_buf);
-    var fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    var n = file_write(fd, pk_buf, ACCOUNT_PK_BYTES);
-    file_close(fd);
-    if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
+    if (store_write_atomic(path_buf, pk_buf, ACCOUNT_PK_BYTES) != 0) { return 0 - 1; }
 
     # handle — UTF-8 bytes + LF
-    build_user_file(store, fp_out, "handle", path_buf);
-    fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
+    var line = cmd_alloc(ACCOUNT_HANDLE_BUF + 32);
     var hlen = strlen(handle);
-    if (file_write(fd, handle, hlen) != hlen) { file_close(fd); return 0 - 1; }
-    var lf[1];
-    store8(&lf, 10);
-    file_write(fd, &lf, 1);
-    file_close(fd);
+    memcpy(line, handle, hlen);
+    store8(line + hlen, 10);
+    build_user_file(store, fp_out, "handle", path_buf);
+    if (store_write_atomic(path_buf, line, hlen + 1) != 0) { return 0 - 1; }
 
-    # created.iso8601 — chrono now + LF
+    # created.iso8601 — the registration time + LF
+    var ilen = iso8601_into(clock_epoch_secs(), line);
+    store8(line + ilen, 10);
     build_user_file(store, fp_out, "created.iso8601", path_buf);
-    fd = file_open(path_buf, O_WRONLY | O_CREAT | O_TRUNC, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    var iso = iso8601_now();
-    var ilen = strlen(iso);
-    if (file_write(fd, iso, ilen) != ilen) { file_close(fd); return 0 - 1; }
-    file_write(fd, &lf, 1);
-    file_close(fd);
+    if (store_write_atomic(path_buf, line, ilen + 1) != 0) { return 0 - 1; }
 
+    if (oldlen > 0) {
+        if (streq(old, handle) == 0) { account_index_release(store, old, fp_out); }
+    }
     return 0;
 }
 
@@ -256,7 +251,7 @@ fn account_register(store, pk_buf, handle, fp_out): i64 {
 fn account_lookup_pubkey(store, fp16, pk_out): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_user_file(store, fp16, "public_key.bin", path_buf);
-    var n = file_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);   # callers hold exactly 32
+    var n = store_read_all(path_buf, pk_out, ACCOUNT_PK_BYTES);  # callers hold exactly 32
     if (n != ACCOUNT_PK_BYTES) { return 0 - 1; }
     var fpk[24];
     compute_fingerprint(pk_out, &fpk);
@@ -277,7 +272,7 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
     var raw[34];
     memset(&raw, 0, 34);
     var read_cap = ACCOUNT_HANDLE_MAX + 2;
-    var n = file_read_all(path_buf, &raw, read_cap);
+    var n = store_read_all(path_buf, &raw, read_cap);
     if (n < 0) { return 0 - 1; }
     # Trim trailing CR/LF via flag + continue (CLAUDE.md: no `break`
     # in while loops with `var` declarations).
@@ -565,12 +560,209 @@ fn parse_auth_sig(line, line_len, sig_out): i64 {
     return ACCOUNT_SIG_BYTES;
 }
 
+# === Handle index (1.9.0) ===
+#
+#   <store>/.users/.by-handle/<handle>      "<fp16>\n" — the user who holds it
+#   <store>/.users/.by-handle/.complete     the index covers every user
+#
+# Why. account_resolve_handle read EVERY user's `handle` file on every `login`
+# (audit 1.8.1 H1 / L4): at 301 users one 4 KB packet of `login x` lines held a
+# 1.8.0 poll sweep 626 ms, and an UNKNOWN handle — the case an attacker picks —
+# always paid the whole scan, since nothing lets a miss stop early. With the
+# index a login is one open: a claim, verified against the user's own `handle`
+# file (which stays the source of truth), or — once `.complete` exists — an
+# authoritative "unknown". A handle is a file name here, which is why
+# account_resolve_handle now validates it before building any path.
+#
+# Maintenance, always under `.users/.lock` (account_register_lock):
+#   - account_index_ensure builds it once for a store that predates it (the first
+#     `serve` or `register` after the upgrade): one claim per user in scan order —
+#     the first directory listing a duplicated handle keeps it, as the scan
+#     always answered — then `.complete`;
+#   - account_register claims the new handle BEFORE writing the user's files and
+#     releases the old one AFTER, so a crash in between leaves a STALE claim
+#     (verification fails and the lookup falls back to the scan), never a
+#     missing one.
+# Claims are written by store_publish: whole or absent, never replaced in place.
+# An operator who edits `.users/` by hand deletes `.by-handle/`; the next `serve`
+# or `register` rebuilds it.
+enum AccountIndex {
+    ACCOUNT_CLAIM_CAP = 32;      # bytes of a claim read (16 hex + LF, with room)
+}
+
+# Writes `<store>/.users/.by-handle` (NUL-terminated) into out_buf; returns its length.
+fn account_index_dir(store, out_buf): i64 {
+    var pos = build_users_dir(store, out_buf);
+    memcpy(out_buf + pos, "/.by-handle", 12);   # incl. NUL
+    return pos + 11;
+}
+
+# Writes `<store>/.users/.by-handle/<leaf>` into out_buf; returns its length.
+# `leaf` is a handle_valid handle or ".complete" — never raw client bytes.
+fn account_index_file(store, leaf, out_buf): i64 {
+    var pos = account_index_dir(store, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;             # '/'
+    var l = strlen(leaf);
+    memcpy(out_buf + pos, leaf, l); pos = pos + l;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# Read `handle`'s claim into fp_out (ACCOUNT_FP_BUF_BYTES): 1 if it names a valid
+# fingerprint, 0 if there is no claim, -1 if one exists but is unreadable or
+# malformed (a symlink, a FIFO, a truncated file).
+fn account_claim_read(store, handle, fp_out): i64 {
+    var path[512];   # PATH_MAX_BYTES
+    account_index_file(store, handle, &path);
+    var raw[40];
+    var n = store_read_all(&path, &raw, ACCOUNT_CLAIM_CAP);
+    if (n < 0) {
+        if (store_read_missing(n) == 1) { return 0; }
+        return 0 - 1;
+    }
+    if (n < ACCOUNT_FP_HEX_BYTES) { return 0 - 1; }
+    memcpy(fp_out, &raw, ACCOUNT_FP_HEX_BYTES);
+    store8(fp_out + ACCOUNT_FP_HEX_BYTES, 0);
+    if (fp16_valid(fp_out) == 0) { store8(fp_out, 0); return 0 - 1; }
+    return 1;
+}
+
+# 1 if user `fp16`'s own `handle` file names `handle` — what verifies a claim.
+fn account_holds_handle(store, fp16, handle): i64 {
+    var hb[40];
+    if (account_lookup_handle(store, fp16, &hb, ACCOUNT_HANDLE_BUF) <= 0) { return 0; }
+    if (streq(&hb, handle) != 0) { return 1; }
+    return 0;
+}
+
+# The index's answer for a VALID handle: 1 = found (fp_out set and verified),
+# 0 = an authoritative unknown (no claim, index complete), -1 = no answer the
+# caller may trust (no complete index, or a stale or broken claim) — scan.
+fn account_index_lookup(store, handle, fp_out): i64 {
+    var c = account_claim_read(store, handle, fp_out);
+    if (c == 1) {
+        if (account_holds_handle(store, fp_out, handle) == 1) { return 1; }
+        return 0 - 1;
+    }
+    if (c == 0) {
+        var mk[512];   # PATH_MAX_BYTES
+        account_index_file(store, ".complete", &mk);
+        if (store_name_exists(&mk) == 1) { return 0; }
+    }
+    return 0 - 1;
+}
+
+# Claim `handle` for `fp16` (the caller holds `.users/.lock`). Returns 0 — also
+# when the claim already names fp16 — or -1 when another user really holds the
+# handle or the write fails. A claim naming a user who no longer holds the handle,
+# or an unreadable one, is replaced. `durable` is store_publish's: 1 for a
+# registration, 0 inside account_index_ensure, which syncs the batch itself.
+fn account_index_claim(store, handle, fp16, durable): i64 {
+    var dir[512];   # PATH_MAX_BYTES
+    account_index_dir(store, &dir);
+    if (store_ensure(&dir) != 0) { return 0 - 1; }
+    var path[512];
+    account_index_file(store, handle, &path);
+    var line[24];
+    memcpy(&line, fp16, ACCOUNT_FP_HEX_BYTES);
+    store8((&line) + ACCOUNT_FP_HEX_BYTES, 10);
+    if (store_publish(&dir, &path, &line, ACCOUNT_FP_HEX_BYTES + 1, durable) == 0) { return 0; }
+    var cur[24];
+    if (account_claim_read(store, handle, &cur) == 1) {
+        if (streq(&cur, fp16) != 0) { return 0; }
+        if (account_holds_handle(store, &cur, handle) == 1) { return 0 - 1; }
+    }
+    xunlink(&path);
+    if (store_publish(&dir, &path, &line, ACCOUNT_FP_HEX_BYTES + 1, durable) == 0) { return 0; }
+    return 0 - 1;
+}
+
+# Drop `handle`'s claim if it names `fp16` (the caller holds `.users/.lock`).
+fn account_index_release(store, handle, fp16): i64 {
+    var cur[24];
+    if (account_claim_read(store, handle, &cur) != 1) { return 0; }
+    if (streq(&cur, fp16) == 0) { return 0; }
+    var path[512];   # PATH_MAX_BYTES
+    account_index_file(store, handle, &path);
+    xunlink(&path);
+    return 0;
+}
+
+# Build the index for a store that predates it (the caller holds `.users/.lock`);
+# a no-op once `.complete` exists. Returns 0, or -1 if it could not be completed —
+# lookups then keep scanning, which is slow but right.
+fn account_index_ensure(store): i64 {
+    var mk[512];   # PATH_MAX_BYTES
+    account_index_file(store, ".complete", &mk);
+    if (store_name_exists(&mk) == 1) { return 0; }
+    var users[512];
+    build_users_dir(store, &users);
+    if (store_ensure(&users) != 0) { return 0 - 1; }
+    var dir[512];
+    account_index_dir(store, &dir);
+    if (store_ensure(&dir) != 0) { return 0 - 1; }
+    var n = store_dir_scan(&users);
+    var ok = 1;
+    var hb[40];
+    var cur[24];
+    var i = 0;
+    while (i < n) {
+        var entry = store_dir_name(i);
+        if (strlen(entry) == ACCOUNT_FP_HEX_BYTES) {
+            if (fp16_valid(entry) == 1) {
+                if (account_lookup_handle(store, entry, &hb, ACCOUNT_HANDLE_BUF) > 0) {
+                    # Not yet claimed (or left broken by a crashed build): claim it.
+                    # A valid claim stays — the first user listed keeps a handle.
+                    if (account_claim_read(store, &hb, &cur) != 1) {
+                        if (account_index_claim(store, &hb, entry, 0) != 0) { ok = 0; }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (ok == 0) { return 0 - 1; }
+    # The claims were written without fsync; make them all durable at once, then
+    # the marker that vouches for them (store_publish's `durable`).
+    sys_sync();
+    if (store_publish(&dir, &mk, "complete\n", 9, 1) != 0) {
+        if (store_name_exists(&mk) == 0) { return 0 - 1; }
+    }
+    return 0;
+}
+
+# Take `.users/.lock`, build the index if the store predates it, release.
+# `serve` runs this once before it listens. Returns account_index_ensure's result.
+# A store with no `.users/` has no one to index, and is left untouched: the lock
+# would create the store and `.users/` just because a server started (the first
+# `register` builds the index under its own lock).
+fn account_index_prepare(store): i64 {
+    var users[512];   # PATH_MAX_BYTES
+    build_users_dir(store, &users);
+    if (store_name_exists(&users) == 0) { return 0; }
+    var lk = account_register_lock(store);
+    if (lk < 0) { return 0 - 1; }
+    var r = account_index_ensure(store);
+    store_lock_release(lk);
+    return r;
+}
+
 # Scan `<store>/.users/` for a user whose `handle` file equals `handle`. On a
 # match, writes that user's fingerprint into fp_out (NUL-terminated; >=
 # ACCOUNT_FP_BUF_BYTES) and returns 1; 0 if none (or the directory cannot be
 # listed). O(n) in registered users — a `.users/.by-handle/<handle>` index is
 # roadmap § 1.9.0. (1.8.2: this comment sat orphaned ~265 lines away.)
 fn account_resolve_handle(store, handle, fp_out): i64 {
+    # 1.9.0 — a handle is a file name in the index, so validate it before any
+    # path is built: the wire `login` passes the client's raw bytes. No valid
+    # registration ever produced an invalid handle, so nothing is lost.
+    store8(fp_out, 0);
+    if (handle_valid(handle) == 0) { return 0; }
+    var r = account_index_lookup(store, handle, fp_out);
+    if (r >= 0) { return r; }
+    store8(fp_out, 0);
+
+    # The scan: a store whose index is incomplete, or a stale / broken claim.
     var users_path = cmd_alloc(PATH_MAX_BYTES);
     build_users_dir(store, users_path);
 

@@ -317,7 +317,7 @@ fn door_save_read(store, fp16, game, out_buf, cap): i64 {
     if (game_name_valid(game) == 0) { return 0 - 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     door_save_path(store, fp16, game, path);
-    return file_read_all(path, out_buf, cap);
+    return store_read_all(path, out_buf, cap);
 }
 
 # 1.8.1 (audit D2) — remove a save slot: a FINISHED run's checkpoint. Before
@@ -369,7 +369,7 @@ fn door_play_lock(store, fp16, game): i64 {
     var glen = strlen(game);
     memcpy(path + pos, game, glen); pos = pos + glen;
     memcpy(path + pos, ".lock", 6);
-    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
+    var fd = store_open(path, O_WRONLY | O_CREAT);   # 1.9.0: no symlink, no FIFO
     if (fd < 0) { return 0 - 2; }
     if (file_trylock(fd) != 0) { file_close(fd); return 0 - 1; }
     return fd;
@@ -676,10 +676,7 @@ fn world_lock_acquire(store, game): i64 {
     if (world_dir_ensure(store, game) != 0) { return 0 - 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, ".lock", path);
-    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
-    return fd;
+    return store_lock_open(path);             # 1.9.0: no symlink, no FIFO (arena.cyr)
 }
 
 # Release a world_lock_acquire lock (unlock, close).
@@ -701,7 +698,7 @@ fn world_read(store, game, out_buf, cap): i64 {
     if (game_name_valid(game) == 0) { return 0; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     world_file(store, game, "snapshot", path);
-    var n = file_read_all(path, out_buf, cap);
+    var n = store_read_all(path, out_buf, cap);
     if (n < 0) {
         if (store_read_missing(n) == 1) { return 0; }
         return n;

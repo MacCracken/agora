@@ -5977,25 +5977,58 @@ fn t226_board_policy_parse(): i64 {
     return 0;
 }
 
-# t227 — 1.8.1 (audit S2): an `.admins` file over the read cap keeps only
-# WHOLE lines. The scanner treats end-of-buffer as end-of-line, so before the
-# fix `qixbert` cut at the cap to `qix` admitted handle `qix`.
-fn t227_board_admins_whole(): i64 {
-    var name = "t227_board_admins_whole";
+# t227 — `.admins` is read whole (1.9.0; 1.8.1 audit S2 / M4). It stopped at 4
+# KB, and since 1.8.1 ignored the handles past the cut. Now it is streamed in 4
+# KB windows: a handle past 4 KB is found; a line straddling a window boundary is
+# never matched by its cut-off prefix (`qixbert` is not `qix` — the S2 bug); a
+# line longer than a window is skipped, not read as handles; past the 1 MiB cap
+# the rest is ignored, failing closed. Plus the pure scanner's own rules.
+fn t227_admins(root, body, blen): i64 {
+    var p = alloc(PATH_MAX_BYTES);
+    board_admins_path(root, "adm", p);
+    xunlink(p);
+    file_write_all(p, body, blen);
+    return 0;
+}
+# (t227 body)
+fn t227_board_admins_stream(): i64 {
+    var name = "t227_board_admins_stream";
+    var root = "/tmp/agora-t227-store";
+    t_rmtree(root);
+    board_ensure(root, "adm");
     var buf = alloc(64);
     memcpy(buf, "# ops\npac\nqixbert\n", 18);
-    # Fits: unchanged, and the scan matches whole lines only.
-    if (board_admins_whole(buf, 18, 32) != 18)       { test_fail(name, "fit changed n"); return 1; }
     if (board_admins_scan(buf, 18, "qixbert") != 1)  { test_fail(name, "whole line"); return 1; }
     if (board_admins_scan(buf, 18, "qix") != 0)      { test_fail(name, "prefix matched"); return 1; }
-    # Over a cap of 13 the read stops inside "qixbert": only "# ops\npac\n" survives.
-    var n = board_admins_whole(buf, 14, 13);
-    if (n != 10)                                     { test_fail(name, "cut length"); return 1; }
-    if (board_admins_scan(buf, n, "qix") != 0)       { test_fail(name, "cut prefix admitted"); return 1; }
-    if (board_admins_scan(buf, n, "pac") != 1)       { test_fail(name, "earlier line lost"); return 1; }
-    # No LF inside the cap at all: nothing is trusted.
-    if (board_admins_whole(buf, 40, 4) != 0)         { test_fail(name, "no-LF cut"); return 1; }
-    if (board_admins_scan(buf, 0, "pac") != 0)       { test_fail(name, "empty scan"); return 1; }
+    if (board_admins_lines(buf, 14) != 10)           { test_fail(name, "whole-line prefix"); return 1; }
+    if (board_admins_lines(buf, 4) != 0)             { test_fail(name, "no-LF prefix"); return 1; }
+    # 4,093 bytes of comments, then `qixbert` cut by the 4,096-byte window edge
+    # at exactly `qix`, 5,000 more, then `pac`.
+    var big = alloc(1100000);
+    var n = 0;
+    while (n < 4092) { store8(big + n, 35); n = n + 1; }       # '#'
+    store8(big + n, 10); n = n + 1;                              # 4,093
+    memcpy(big + n, "qixbert\n", 8); n = n + 8;
+    var k = 0;
+    while (k < 50) { memset(big + n, 35, 99); store8(big + n + 99, 10); n = n + 100; k = k + 1; }
+    memcpy(big + n, "pac\n", 4); n = n + 4;
+    t227_admins(root, big, n);
+    if (board_admin_check(root, "adm", "qix") != 0)     { test_fail(name, "a cut prefix admitted qix"); return 1; }
+    if (board_admin_check(root, "adm", "qixbert") != 1) { test_fail(name, "the straddling line"); return 1; }
+    if (board_admin_check(root, "adm", "pac") != 1)     { test_fail(name, "a handle past 4 KB"); return 1; }
+    # An 8,196-byte line — two whole windows and `aaaa` — then `dig`: the long
+    # line is skipped to its LF, so its tail is never read as the handle `aaaa`.
+    memset(big, 97, 8196);
+    memcpy(big + 8196, "\ndig\n", 5);
+    t227_admins(root, big, 8201);
+    if (board_admin_check(root, "adm", "dig") != 1)  { test_fail(name, "the line after a long one"); return 1; }
+    if (board_admin_check(root, "adm", "aaaa") != 0) { test_fail(name, "a long line read as handles"); return 1; }
+    # `jst` past the 1 MiB cap is ignored.
+    n = 0;
+    while (n < 1048600) { memset(big + n, 35, 99); store8(big + n + 99, 10); n = n + 100; }
+    memcpy(big + n, "jst\n", 4);
+    t227_admins(root, big, n + 4);
+    if (board_admin_check(root, "adm", "jst") != 0)  { test_fail(name, "a handle past the cap"); return 1; }
     test_pass(name);
     return 0;
 }
@@ -6271,6 +6304,309 @@ fn t232_loop_helpers_no_arena(): i64 {
     return 0;
 }
 
+# t233 — 1.9.0 (audit 1.8.1 I11): store opens take regular files only. A symlink
+# is refused even when it points at a good post; a FIFO and a directory are
+# refused (-EINVAL) instead of read; a lock open neither opens a FIFO nor creates
+# a dangling link's target; the leaderboard append refuses a link; and a link
+# planted at store_write_atomic's next temp name is replaced, not written through.
+# The FIFO case cannot hang if the old open comes back: the test holds both ends
+# with 5 bytes queued, so a plain open would succeed and read them — a failure.
+fn t233_path(root, leaf): i64 {
+    var p = alloc(256);
+    var rl = strlen(root);
+    memcpy(p, root, rl);
+    store8(p + rl, 47);
+    var ll = strlen(leaf);
+    memcpy(p + rl + 1, leaf, ll);
+    store8(p + rl + 1 + ll, 0);
+    return p;
+}
+# Remove `path` and everything under it (a test store), like tests/serve.tcyr's
+# st_rmtree: the scan workspace is copied first, since recursion reuses it.
+fn t_rmtree(path): i64 {
+    var n = store_dir_scan(path);
+    if (n < 0) { xunlink(path); return 0; }
+    var names = alloc(n * 8 + 8);
+    var i = 0;
+    while (i < n) {
+        var nm = store_dir_name(i);
+        var l = strlen(nm);
+        var c = alloc(l + 1);
+        memcpy(c, nm, l + 1);
+        store64(names + i * 8, c);
+        i = i + 1;
+    }
+    var plen = strlen(path);
+    i = 0;
+    while (i < n) {
+        var e = load64(names + i * 8);
+        var el = strlen(e);
+        var full = alloc(plen + el + 2);
+        memcpy(full, path, plen);
+        store8(full + plen, 47);
+        memcpy(full + plen + 1, e, el + 1);
+        t_rmtree(full);
+        i = i + 1;
+    }
+    xrmdir(path);
+    return 0;
+}
+# (t233 body)
+fn t233_store_open_regular_only(): i64 {
+    var name = "t233_store_open_regular_only";
+    var root = "/tmp/agora-t233-store";
+    store_ensure(root);
+    var reg = t233_path(root, "1.txt");
+    var lnk = t233_path(root, "2.txt");
+    var fifo = t233_path(root, "3.txt");
+    var dir = t233_path(root, "4.txt");
+    var dangle = t233_path(root, ".lock");
+    var victim = t233_path(root, "victim");
+    var snap = t233_path(root, "snapshot");
+    xunlink(reg); xunlink(lnk); xunlink(fifo); xrmdir(dir); xunlink(dangle); xunlink(victim); xunlink(snap);
+    file_write_all(reg, "Subject: s\r\n\r\nbody\r\n", 20);
+    xsymlink(reg, lnk);
+    sys_mknodat(0 - 100, fifo, 0x1000 | 0x1A4, 0);     # AT_FDCWD, S_IFIFO | 0o644
+    xmkdir(dir, PERM_DIR);
+    xsymlink(victim, dangle);
+    var buf = alloc(64);
+    if (store_read_all(reg, buf, 64) != 20)  { test_fail(name, "a regular post was refused"); return 1; }
+    if (store_read_all(lnk, buf, 64) >= 0)   { test_fail(name, "a symlink was followed"); return 1; }
+    if (store_read_all(dir, buf, 64) != (0 - STORE_E_NOTREG)) {
+        test_fail(name, "a directory was not refused");
+        return 1;
+    }
+    var rfd = file_open(fifo, O_RDONLY | O_NONBLOCK, 0);
+    var wfd = file_open(fifo, O_WRONLY | O_NONBLOCK, 0);
+    file_write(wfd, "abcde", 5);
+    var fr = store_read_all(fifo, buf, 5);
+    var fl = store_lock_open(fifo);
+    if (fl >= 0) { file_close(fl); }
+    file_close(wfd);
+    file_close(rfd);
+    if (fr != (0 - STORE_E_NOTREG)) { test_fail(name, "a FIFO was read"); return 1; }
+    if (fl >= 0)                    { test_fail(name, "a FIFO was opened as a lock"); return 1; }
+    if (store_lock_open(dangle) >= 0) { test_fail(name, "a lock opened through a dangling link"); return 1; }
+    if (file_exists(victim) != 0)   { test_fail(name, "the dangling link's target was created"); return 1; }
+    if (store_append_locked(lnk, "x", 1) >= 0) { test_fail(name, "an append went through a link"); return 1; }
+    if (store_read_all(reg, buf, 64) != 20) { test_fail(name, "the link's target changed"); return 1; }
+    var tmp = alloc(256);
+    var sl = strlen(snap);
+    memcpy(tmp, snap, sl);
+    memcpy(tmp + sl, ".cyrtmp.", 8);
+    var pos = _io_append_dec(tmp, sl + 8, _io_pid());
+    store8(tmp + pos, 46);
+    pos = _io_append_dec(tmp, pos + 1, g_atomic_ctr + 1);
+    store8(tmp + pos, 0);
+    xsymlink(victim, tmp);
+    if (store_write_atomic(snap, "new", 3) != 0) { test_fail(name, "the atomic write failed"); return 1; }
+    if (file_exists(victim) != 0)   { test_fail(name, "the atomic write went through a planted link"); return 1; }
+    if (store_read_all(snap, buf, 64) != 3) { test_fail(name, "the atomic write's file"); return 1; }
+    xunlink(reg); xunlink(lnk); xunlink(fifo); xrmdir(dir); xunlink(dangle); xunlink(snap);
+    test_pass(name);
+    return 0;
+}
+
+# t234 — 1.9.0: registration replaces its three files instead of writing
+# through them. A `handle` file planted as a symlink used to be opened O_TRUNC and
+# overwritten — emptying whatever it pointed at; now the rename replaces the link
+# and the target is untouched.
+fn t234_register_replaces_links(): i64 {
+    var name = "t234_register_replaces_links";
+    var root = "/tmp/agora-t234-store";
+    t_rmtree(root);
+    var pk = alloc(32);
+    memset(pk, 7, 32);
+    var fp = alloc(ACCOUNT_FP_BUF_BYTES);
+    compute_fingerprint(pk, fp);
+    account_dir_ensure(root, fp);
+    var victim = t233_path(root, "victim");
+    file_write_all(victim, "keep me", 7);
+    var hpath = alloc(PATH_MAX_BYTES);
+    build_user_file(root, fp, "handle", hpath);
+    xunlink(hpath);
+    xsymlink(victim, hpath);
+    if (account_register(root, pk, "dig", fp) != 0) { test_fail(name, "register failed"); return 1; }
+    var buf = alloc(64);
+    if (store_read_all(victim, buf, 64) != 7) { test_fail(name, "the link's target was rewritten"); return 1; }
+    if (memeq(buf, "keep me", 7) == 0)        { test_fail(name, "the link's target was rewritten"); return 1; }
+    var hb = alloc(ACCOUNT_HANDLE_BUF);
+    if (account_lookup_handle(root, fp, hb, ACCOUNT_HANDLE_BUF) != 3) {
+        test_fail(name, "handle not readable");
+        return 1;
+    }
+    if (streq(hb, "dig") == 0)                { test_fail(name, "wrong handle"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t235 — 1.9.0: posts are published crash-safely — written to `<board>/.publish.tmp`,
+# fsynced, then linked to `N.txt`. What a test can observe of that: debris a dead
+# writer left at the temp name does not block the next post and is not listed; a
+# symlink planted there is not written through; an id that already exists is
+# refused, never replaced; and a successful post leaves no temp behind.
+fn t235_post_publish_crash_safe(): i64 {
+    var name = "t235_post_publish_crash_safe";
+    var root = "/tmp/agora-t235-store";
+    t_rmtree(root);
+    board_ensure(root, "zax");
+    var bdir = t233_path(root, "zax");
+    var tmp = t233_path(bdir, ".publish.tmp");
+    var victim = t233_path(root, "victim");
+    xunlink(victim);
+    xunlink(tmp);
+    file_write_all(tmp, "Subject: half a po", 18);          # a writer died mid-post
+    var ph = alloc(64);
+    memset(ph, 0, 64);
+    var id1 = post_new(root, "zax", ph, "first body", 10);
+    if (id1 <= 0)                        { test_fail(name, "debris at the temp name blocked a post"); return 1; }
+    if (store_name_exists(tmp) != 0)     { test_fail(name, "a temp was left behind"); return 1; }
+    xsymlink(victim, tmp);                                     # a planted link
+    var id2 = post_new(root, "zax", ph, "second body", 11);
+    if (id2 != id1 + 1)                  { test_fail(name, "the post after a planted link"); return 1; }
+    if (file_exists(victim) != 0)        { test_fail(name, "the post went through a planted link"); return 1; }
+    var ids = alloc(16 * 8);
+    if (post_list(root, "zax", ids, 16) != id2) { test_fail(name, "the temp was listed as a post"); return 1; }
+    var buf = alloc(256);
+    var n = post_read(root, "zax", id2, buf, 256);
+    var bo = post_body_offset(buf, n);
+    if (n - bo != 11)                    { test_fail(name, "the post is not whole"); return 1; }
+    var taken = alloc(PATH_MAX_BYTES);
+    build_post_path(root, "zax", id1, taken);
+    if (store_publish(bdir, taken, "Subject: x\r\n\r\nclobber\r\n", 23, 1) == 0) {
+        test_fail(name, "an existing id was replaced");
+        return 1;
+    }
+    n = post_read(root, "zax", id1, buf, 256);
+    bo = post_body_offset(buf, n);
+    if (n - bo != 10)                    { test_fail(name, "an existing post changed"); return 1; }
+    if (store_name_exists(tmp) != 0)     { test_fail(name, "a refused publish left its temp"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t236 — 1.9.0: the handle index (`.users/.by-handle/`). A complete index answers
+# "unknown" without scanning — a user directory copied in by hand without a claim
+# stays unknown until `.complete` goes (then the scan finds it). Re-registering
+# moves the claim; a stale claim is not trusted; an invalid handle builds no path;
+# and building the index for an old store gives the scan's answers, a duplicated
+# handle included.
+fn t236_user(root, fpseed, handle, fp_out): i64 {
+    var pk = alloc(32);
+    memset(pk, fpseed, 32);
+    compute_fingerprint(pk, fp_out);
+    account_dir_ensure(root, fp_out);
+    var path = alloc(PATH_MAX_BYTES);
+    build_user_file(root, fp_out, "handle", path);
+    var hl = strlen(handle);
+    var line = alloc(48);
+    memcpy(line, handle, hl);
+    store8(line + hl, 10);
+    file_write_all(path, line, hl + 1);
+    return 0;
+}
+# (t236 body)
+fn t236_handle_index(): i64 {
+    var name = "t236_handle_index";
+    var root = "/tmp/agora-t236-store";
+    t_rmtree(root);
+    var idx = alloc(PATH_MAX_BYTES);
+    account_index_dir(root, idx);
+    var got = alloc(ACCOUNT_FP_BUF_BYTES);
+    var fa = alloc(ACCOUNT_FP_BUF_BYTES);
+    var fb = alloc(ACCOUNT_FP_BUF_BYTES);
+    var fc = alloc(ACCOUNT_FP_BUF_BYTES);
+    var fd2 = alloc(ACCOUNT_FP_BUF_BYTES);
+    var pk = alloc(32);
+    # A legacy store: three users and a duplicated handle, no index.
+    t236_user(root, 11, "qix", fa);
+    t236_user(root, 12, "jst", fb);
+    t236_user(root, 13, "jst", fc);
+    var scan_jst = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (account_resolve_handle(root, "jst", scan_jst) != 1) { test_fail(name, "scan: jst"); return 1; }
+    if (account_index_ensure(root) != 0)                    { test_fail(name, "index build"); return 1; }
+    if (account_resolve_handle(root, "jst", got) != 1)      { test_fail(name, "index: jst"); return 1; }
+    if (streq(got, scan_jst) == 0) {
+        test_fail(name, "index and scan disagree on a duplicate");
+        return 1;
+    }
+    if (account_resolve_handle(root, "qix", got) != 1)      { test_fail(name, "index: qix"); return 1; }
+    if (streq(got, fa) == 0)                                { test_fail(name, "index: qix's fp"); return 1; }
+    # A user copied in by hand, with no claim: unknown to a complete index.
+    t236_user(root, 14, "pac", fd2);
+    if (account_resolve_handle(root, "pac", got) != 0)      { test_fail(name, "a complete index scanned"); return 1; }
+    var mk = alloc(PATH_MAX_BYTES);
+    account_index_file(root, ".complete", mk);
+    xunlink(mk);
+    if (account_resolve_handle(root, "pac", got) != 1) {
+        test_fail(name, "no fallback scan without .complete");
+        return 1;
+    }
+    account_index_ensure(root);
+    if (account_index_lookup(root, "pac", got) != 1)        { test_fail(name, "the rebuild missed pac"); return 1; }
+    # Re-register qix's key as "zax": the claim moves, "qix" is free.
+    memset(pk, 11, 32);
+    if (account_register(root, pk, "zax", fa) != 0)         { test_fail(name, "re-register"); return 1; }
+    if (account_resolve_handle(root, "zax", got) != 1)      { test_fail(name, "zax after re-register"); return 1; }
+    if (account_resolve_handle(root, "qix", got) != 0)      { test_fail(name, "qix still resolves"); return 1; }
+    if (account_claim_read(root, "qix", got) != 0) {
+        test_fail(name, "the old claim was not released");
+        return 1;
+    }
+    # A stale claim — "dig" naming a user whose handle is "zax" — is not trusted.
+    var claim = alloc(PATH_MAX_BYTES);
+    account_index_file(root, "dig", claim);
+    var line = alloc(24);
+    memcpy(line, fa, 16);
+    store8(line + 16, 10);
+    file_write_all(claim, line, 17);
+    if (account_resolve_handle(root, "dig", got) != 0)      { test_fail(name, "a stale claim was trusted"); return 1; }
+    # Invalid handles build no path.
+    if (account_resolve_handle(root, "../.users", got) != 0) {
+        test_fail(name, "an invalid handle resolved");
+        return 1;
+    }
+    if (account_resolve_handle(root, ".complete", got) != 0) {
+        test_fail(name, "the marker resolved as a handle");
+        return 1;
+    }
+    # A build that crashed before its sync can leave an EMPTY claim (it writes
+    # without fsync); the resumed build replaces it.
+    var pc = alloc(PATH_MAX_BYTES);
+    account_index_file(root, "pac", pc);
+    xunlink(pc);
+    file_write_all(pc, "", 0);
+    xunlink(mk);
+    if (account_index_ensure(root) != 0)                    { test_fail(name, "resumed build"); return 1; }
+    if (account_claim_read(root, "pac", got) != 1) {
+        test_fail(name, "an empty claim survived the rebuild");
+        return 1;
+    }
+    test_pass(name);
+    return 0;
+}
+
+# t237 — 1.9.0: `serve`'s index preparation. A store with no `.users/` is left
+# exactly as it was — a server that starts must not create the store — and a
+# store with users gets its index (`.complete`) built.
+fn t237_index_prepare(): i64 {
+    var name = "t237_index_prepare";
+    var root = "/tmp/agora-t237-store";
+    t_rmtree(root);
+    if (account_index_prepare(root) != 0)  { test_fail(name, "prepare on an empty path"); return 1; }
+    if (store_name_exists(root) != 0)      { test_fail(name, "a starting server created the store"); return 1; }
+    var fp = alloc(ACCOUNT_FP_BUF_BYTES);
+    t236_user(root, 21, "zax", fp);
+    if (account_index_prepare(root) != 0)  { test_fail(name, "prepare on a store with users"); return 1; }
+    var mk = alloc(PATH_MAX_BYTES);
+    account_index_file(root, ".complete", mk);
+    if (store_name_exists(mk) != 1)        { test_fail(name, "the index was not built"); return 1; }
+    var got = alloc(ACCOUNT_FP_BUF_BYTES);
+    if (account_index_lookup(root, "zax", got) != 1) { test_fail(name, "zax not indexed"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -6517,12 +6853,17 @@ fn main(): i64 {
     t224_text_chunk_end();
     t225_text_iac_double();
     t226_board_policy_parse();
-    t227_board_admins_whole();
+    t227_board_admins_stream();
     t228_dir_workspace();
     t229_iso8601_into();
     t230_save_loaders();
     t231_sb_requires_agreement();
     t232_loop_helpers_no_arena();
+    t233_store_open_regular_only();
+    t234_register_replaces_links();
+    t235_post_publish_crash_safe();
+    t236_handle_index();
+    t237_index_prepare();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

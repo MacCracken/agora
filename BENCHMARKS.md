@@ -81,6 +81,10 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
   measurement behind roadmap § 1.11.0's epoll row: a readiness wait would remove the floor.
 - **Fork costs ~5× the memory per session** — a process per connection (~62 KB PSS of private pages per
   child) against a pooled slot whose 128 KB tx queue and 64 KB compose buffer are only touched when used.
+- **Method (found at 1.9.0): fork PSS depends on the binary's filesystem.** The same build measures **54 KB**
+  per child run from tmpfs (`/tmp`) and **62 KB** from ext4 — file-backed text and data pages fault in
+  differently; private dirty memory is identical. Run every A/B build from the same filesystem (the 1.9.0
+  numbers were briefly misread as a 12 KB regression this way).
 
 | Concurrent world writers (ADR 0010 `flock` → read → write temp → fsync → rename), 200 transactions each | txn/s |
 |---|---:|
@@ -110,6 +114,10 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
   for every post on the board). Imperceptible on a few hundred posts, tens of milliseconds past two
   thousand — and under poll that time is the whole server's, one `read` per session per sweep since 1.8.1's
   line budget. This is the measurement roadmap § 1.9.1's index-vs-scan decision was waiting on.
+- **1.9.0: ~0.5 µs more per post** — every store open now `fstat`s the descriptor to refuse a non-regular
+  file (ADR 0025). Interleaved A/B on one machine, 1.8.2 → 1.9.0: **3.38 → 3.71 ms** at 500 posts,
+  **13.1 → 14.2 ms** at 2,000, **27.3 → 29.2 ms** at 4,096 (load average 4–6 during the run, so the absolute
+  numbers sit a little above the 1.8.2 table; the A/B is what holds).
 - **Found by this bench and fixed in 1.8.2: a ~40 ms Nagle stall on every multi-part response under
   fork.** The first run read a flat ~41 ms per `read` at every board size: a fork worker writes a response
   as several small sends, and Nagle held each one after the first until the client's delayed (~40 ms) ACK.
@@ -117,8 +125,22 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
   `TCP_NODELAY` on every accepted socket; the table above is after the fix (500 posts: 41.0 → 3.4 ms).
   Poll was barely affected — it drains a session's queued output in one write — but sets it too.
 
-Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply` individually; `--runs N`;
-`AGORA_BIN=` to A/B a build).
+| `login <unknown handle>` against N registered users (fork) | 1.8.2 (scan) | 1.9.0 (handle index) | first start, 1.9.0 |
+|---|---:|---:|---:|
+| 300 users | 1.78 ms (1.78 / 1.71 / 2.02) | **0.16 ms** (0.16 / 0.15 / 0.16) | 301 ms (vs 251) |
+| 3,000 users | 16.98 ms (17.62 / 16.98 / 16.56) | **0.16 ms** (0.16 / 0.18 / 0.16) | 552 ms (vs 251) |
+
+- **1.9.0 — an unknown handle is one failed open** (ADR 0026): `.users/.by-handle/<handle>` is absent and
+  `.complete` vouches for the index. Before, every `login` read every user's `handle` file and a miss —
+  the attacker's choice — could never stop early: linear, ~5.7 µs per user. "First start" is
+  start-to-listening on a store that predates the index (the one-time build, in a child process: one
+  claim per user, then one `sync()`); later starts check `.complete` and nothing else. The start figures
+  include the bench's fixed 0.2 s settle and 50 ms connect polling.
+- Allocator gate, same release: a poll server on a 300-post, 300-user store grew **0 KB** across 3,000
+  pipelined `login`s, 300 `list`s and 2,000 `read`s (VmRSS and VmData before and after).
+
+Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply`, `login` individually;
+`--runs N`; `AGORA_BIN=` to A/B a build).
 
 ## Notes on what's NOT in this baseline
 
@@ -130,7 +152,7 @@ Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply` i
 
 ```sh
 cyrius bench benches/bench_telnet.bcyr      # parser (this table)
-benches/serve-bench.py all                  # accept rate, per-session memory, world lock (1.8.2)
+benches/serve-bench.py all                  # accept rate, per-session memory, world lock, reply scan, login
 ```
 
 For ongoing tracking across releases, append the output to `bench-history.csv` (not yet scaffolded — earns a slot at the v1.0 close-out alongside any other ongoing perf surfaces). The cyrius repo's `scripts/bench-history.sh` is the reference auto-gen pattern for when this file outgrows hand-maintenance.

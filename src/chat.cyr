@@ -359,10 +359,7 @@ fn chat_lock_acquire(store, channel): i64 {
     if (chat_dir_ensure(store, channel) != 0) { return 0 - 1; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     chat_lock_path(store, channel, path);
-    var fd = file_open(path, O_WRONLY | O_CREAT, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    if (file_lock(fd) != 0) { file_close(fd); return 0 - 1; }
-    return fd;
+    return store_lock_open(path);             # 1.9.0: no symlink, no FIFO (arena.cyr)
 }
 
 # Release a chat_lock_acquire lock (unlock, close).
@@ -378,7 +375,7 @@ fn chat_log_read(store, channel, out, cap): i64 {
     if (chat_channel_valid(channel) == 0) { return 0; }
     var path = cmd_alloc(PATH_MAX_BYTES);
     chat_log_path(store, channel, path);
-    var n = file_read_all(path, out, cap);
+    var n = store_read_all(path, out, cap);
     if (n < 0) { return 0; }
     return n;
 }

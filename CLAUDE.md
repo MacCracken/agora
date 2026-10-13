@@ -53,7 +53,7 @@ cyrius audit                                  # fmt + lint + docs + tests + benc
 - **The wire is the contract** — RFC 854 and RFC 1184 are authoritative. Any deviation is a bug, not a feature. Cite section + line in code comments where behavior is subtle.
 - **Cross-platform from M1** — the listener uses `lib/net.cyr` socket primitives, not raw syscalls. New platform support is a `lib/net.cyr` task, not an agora task.
 - **Pure parsing is testable; socket I/O is wired** — keep the IAC/LINEMODE state machines side-effect-free so `tests/agora.tcyr` can exercise them without binding a port. (The serve layer itself is unit-tested over a socketpair in `tests/serve.tcyr` since 1.8.2.)
-- **Posts are durable artifacts** — once written, a post is immutable from the protocol's perspective; there is no edit path today, and if one is added, edits become new revisions rather than in-place rewrites. ⚠ Note the principle is not yet fully backed: 1.7.0 made door saves, the shared world and chat transcripts crash-safe, but **post writes are still plain `file_write`** (see [ADR 0002](docs/adr/0002-one-file-per-post-storage.md)).
+- **Posts are durable artifacts** — once written, a post is immutable from the protocol's perspective; there is no edit path today, and if one is added, edits become new revisions rather than in-place rewrites. Since 1.9.0 a post is published crash-safely — temp, fsync, `link(2)` into its id, directory fsync — so it is either absent or whole, and the id claim stays exclusive ([ADR 0025](docs/adr/0025-store-io-regular-files-and-publish.md), amending [ADR 0002](docs/adr/0002-one-file-per-post-storage.md)).
 - **Admission control, not identity** — sigil gives us auth (M6); we are not a federated-identity system.
 - Test after EVERY change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
@@ -110,9 +110,10 @@ Every project runs a security audit pass before release — see [first-party-sta
 3. **Syscall review** — `lib/net.cyr` socket calls and `lib/fs.cyr` writes audited per release
 4. **Pointer validation** — no raw pointer dereference of telnet bytes without bounds
 5. **No command injection** — no `sys_system()` with post content; post bodies are inert data
-6. **No path traversal** — board names / thread IDs validated, no `../` escape into the post tree
-7. **Known CVE review** — track BSD telnetd CVEs (CVE-2020-10188, CVE-2011-4862) and verify equivalent defenses
-8. **Document findings** — all issues in `docs/audit/YYYY-MM-DD-audit.md`
+6. **No path traversal** — board names / thread IDs / handles validated before any path is built, no `../` escape into the post tree
+7. **Store opens refuse what is not a store file** — every store file goes through `store_open` (`store_read_all`, `store_lock_open`, `store_append_locked`): no final symlink, never blocks on a FIFO, regular files only. A plain `file_open` / `file_read_all` on a store path is a bug — a FIFO there hangs the whole poll server ([ADR 0025](docs/adr/0025-store-io-regular-files-and-publish.md))
+8. **Known CVE review** — track BSD telnetd CVEs (CVE-2020-10188, CVE-2011-4862) and verify equivalent defenses
+9. **Document findings** — all issues in `docs/audit/YYYY-MM-DD-audit.md`
 
 Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderate effort), **MEDIUM** (specific conditions), **LOW** (defense-in-depth).
 
@@ -124,7 +125,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 4. **Refactor pass** — consolidate the minor's additions where parallel codepaths accreted
 5. **Code review pass** — walk diffs end-to-end for missed guards, off-by-ones, silently-ignored errors
 6. **Cleanup sweep** — stale comments, dead `#ifdef` branches, unused includes, orphaned files
-7. **Security re-scan** — quick grep for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches
+7. **Security re-scan** — quick grep for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches, and any store path opened without `store_open` (`grep -n 'file_read_all\|file_open(' src/*.cyr` — outside `arena.cyr`'s primitives, the only plain opens left are `--motd`, the user's keyfile and `/dev/urandom`)
 8. **Allocator gates** (added 1.6.6 — each is a mitigation an Accepted ADR relies on, and each existed only as a sentence inside that ADR until now):
    - **No bare `alloc()` on a per-line path reachable from `process_rx`** — per-line scratch belongs in the arena ([ADR 0021](docs/adr/0021-per-command-scratch-arena.md)); a bare `alloc()` on a dispatch path is an unbounded leak under `AGORA_SERVE=poll`. **⚠ A `src/`-only grep cannot enforce this.** The allocation may sit inside a *vendored stdlib* function you call: `dir_list` cost 4 KB/call until cyrius 6.5.11, and at 1.7.0 the stdlib's `file_write_atomic` was measured at 64 B/call and would have leaked on every chat `say` had agora not written `store_write_atomic` against the arena instead. **Read the allocations of any stdlib function you put on a per-line path** — at 1.8.1 `dir_list`/`str_from` (per listing), sigil's `hex_decode` (per `auth:`) and chrono's `iso8601_now` (per post) were all still leaking, unauthenticated and pipelinable (audit H1). Known deliberate exceptions: once-per-serve setup allocations, and process-lifetime buffers that grow only by doubling (the directory workspace, `store_dir_scan` in board.cyr). `descent_proxy`'s buffers were listed here as an exception until 1.8.1; they come from the arena now. Both halves of the 1.6.2 arena miss — the unauthenticated `scores` path and the chat idle tick — would have been caught here.
    - **The arena is a budget, not a free list** (added 1.8.1, audit H3). `cmd_alloc` falls back to a bare, never-reclaimed `alloc()` once a command has used `CMD_ARENA_BYTES` (512 KB) — so a helper that takes arena memory on EVERY call must never sit inside a per-post / per-user / per-entry loop. `post_read`'s 512-byte path, called once per post by `list`, spilled the arena on a ~1,500-post board and leaked ~400 KB per anonymous command. Per-iteration scratch goes on the stack (t232 pins the three loop helpers). **Prove a command bounded by measuring it** — a poll-mode heap A/B over a few thousand pipelined repetitions on a large store — not by reading `src/`; that is how both H1 and H3 were found.

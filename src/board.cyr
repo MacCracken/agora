@@ -49,7 +49,8 @@ enum BoardCap {
     POST_HEAD_SCAN = 2048;   # 1.8.1 — bytes replies_to reads per post (headers only)
     BOARD_NAME_MAX = 32;     # ADR 0004 validation: ≤ 32 bytes
     BOARD_LIST_MAX = 256;    # max named boards listed at once
-    BOARD_ADMINS_MAX_BYTES = 4096;  # M6-F: max .admins file we'll read
+    BOARD_ADMINS_CHUNK = 4096;      # .admins read window (1.9.0: was the whole cap)
+    BOARD_ADMINS_FILE_CAP = 1048576; # 1 MiB of .admins read; past it, ignored (fails closed)
 }
 
 # === M6-F: per-board posting policy (ADR 0006 § Specifics) ===
@@ -625,11 +626,7 @@ fn store_lock_acquire(store, board): i64 {
     memcpy(path_buf + blen + 2, "lock", 4);
     store8(path_buf + blen + 6, 0);           # NUL
 
-    var fd = file_open(path_buf, O_WRONLY | O_CREAT, PERM_FILE);
-    if (fd < 0) { return 0 - 1; }
-    var rc = file_lock(fd);
-    if (rc != 0) { file_close(fd); return 0 - 1; }
-    return fd;
+    return store_lock_open(path_buf);         # 1.9.0: no symlink, no FIFO (arena.cyr)
 }
 
 # Release the per-board write lock. Closing the fd also releases
@@ -652,7 +649,7 @@ fn store_lock_release(fd): i64 {
 fn post_read(store, board, id, out_buf, out_cap): i64 {
     var path_buf[512];   # PATH_MAX_BYTES
     build_post_path(store, board, id, &path_buf);
-    return file_read_all(&path_buf, out_buf, out_cap);
+    return store_read_all(&path_buf, out_buf, out_cap);   # 1.9.0: regular files only
 }
 
 # Write "YYYY-MM-DDTHH:MM:SSZ" for `epoch` (seconds, >= 0) into `out`, which
@@ -957,6 +954,14 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
 # Same EXCL + flock semantics as the M5-G claim+write path; format
 # happens outside the lock (pure per-call work), claim+write inside.
 # Returns the assigned ID on success, negative on error.
+#
+# 1.9.0 — "posts are durable artifacts" (CLAUDE.md) was not backed: a post was
+# `file_create_exclusive` + `file_write` straight into its final name, so a crash
+# (or power loss) mid-write left a TRUNCATED post under its id — listed, readable,
+# attributed. (1.8.1 S6 removed it on a write failure the code could see; a crash
+# is a failure it cannot.) `store_publish` (arena.cyr) writes a temp, fsyncs it,
+# and only then links it to `N.txt` — refusing an existing name, so the exclusive
+# id claim of 1.6.4 (audit M4) is kept. A post is either absent or whole.
 fn post_new(store, board, ph, body, body_len): i64 {
     if (body_len <= 0) { return 0 - 1; }
     if (body_len > POST_MAX_BYTES) { return 0 - 1; }
@@ -975,35 +980,11 @@ fn post_new(store, board, ph, body, body_len): i64 {
     var id = post_max_id(store, board) + 1;
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_post_path(store, board, id, path_buf);
-
-    # 1.6.4 (audit M4) — `file_create_exclusive`, not a hand-rolled O_EXCL. The
-    # local BO_EXCL bit is a LINUX value: agnos has no exclusive-create flag, so
-    # `file_open` dropped it silently and this degraded to a plain create —
-    # `post_new` could clobber an existing post file (reachable whenever
-    # post_max_id under-reports, e.g. a restored store with a gap; the flock
-    # serializes writers but does not make the claim exclusive). The stdlib
-    # primitive (cyrius 6.4.57, new since the 1.6.1 pin) is genuinely exclusive
-    # on Linux/macOS and does a best-effort existence check on agnos — not
-    # atomic there, but a refusal instead of silent data loss.
-    var fd = file_create_exclusive(path_buf, PERM_FILE);
-    if (fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
-    # 1.8.1 (audit S6) — write the whole post (write(2) may return short), and
-    # on failure REMOVE it, under the lock, before anyone can list it. A short
-    # write (full disk, RLIMIT_FSIZE) returned -1 but left the truncated post
-    # published under its id with intact headers — listed, readable, attributed —
-    # and a retry made a duplicate. Fully crash-safe posts (temp + link) are
-    # roadmap 1.9.0; this closes the failure the code can see.
-    var off = 0;
-    var wok = 1;
-    while (off < flen) {
-        var n = file_write(fd, fbuf + off, flen - off);
-        if (n <= 0) { wok = 0; off = flen; continue; }
-        off = off + n;
-    }
-    file_close(fd);
-    if (wok == 0) { xunlink(path_buf); }
+    var dir = cmd_alloc(PATH_MAX_BYTES);
+    board_path(store, board, dir);
+    var prc = store_publish(dir, path_buf, fbuf, flen, 1);   # crash-safe, exclusive (arena.cyr)
     store_lock_release(lock_fd);
-    if (wok == 0) { return 0 - 1; }
+    if (prc != 0) { return 0 - 1; }
     return id;
 }
 
@@ -1375,7 +1356,7 @@ fn board_policy_get(store, board): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_policy_path(store, board, path);
     var buf = cmd_alloc(POLICY_FILE_CAP + 1);
-    var n = file_read_all(path, buf, POLICY_FILE_CAP + 1);
+    var n = store_read_all(path, buf, POLICY_FILE_CAP + 1);
     var pol = POLICY_INVALID;
     if (n < 0) {
         if (store_read_missing(n) == 1) { return POLICY_OPEN; }
@@ -1391,24 +1372,6 @@ fn board_policy_get(store, board): i64 {
         return POLICY_ADMIN;
     }
     return pol;
-}
-
-# How many leading bytes of an `.admins` read are WHOLE lines (1.8.1, audit
-# S2). When the file is longer than `cap` the read stops mid-line, and the
-# scanner treats end-of-buffer as end-of-line — so the cut-off PREFIX of the
-# straddling line matched as a complete handle (`qixbert` cut to `qix` let
-# `qix` post to an admin-only board). Over the cap, keep only up to the last LF
-# inside the first `cap` bytes; the handles past it are ignored, which fails
-# closed. Returns `n` unchanged when the file fit. Pure.
-fn board_admins_whole(buf, n, cap): i64 {
-    if (n <= cap) { return n; }
-    var i = cap;
-    var keep = 0;
-    while (i > 0) {
-        if ((load8(buf + i - 1) & 0xFF) == 10) { keep = i; i = 0; continue; }
-        i = i - 1;
-    }
-    return keep;
 }
 
 # Does `handle` appear as an entry in an `.admins` buffer? One handle per line;
@@ -1474,21 +1437,94 @@ fn board_admins_scan(buf, n, handle): i64 {
     return found;
 }
 
+# Bytes of buf[0..n) that are WHOLE lines: the offset just past its last LF, or 0
+# if it has none. Pure.
+fn board_admins_lines(buf, n): i64 {
+    var i = n;
+    var keep = 0;
+    while (i > 0) {
+        if ((load8(buf + i - 1) & 0xFF) == 10) { keep = i; i = 0; continue; }
+        i = i - 1;
+    }
+    return keep;
+}
+
 # Check if `handle` appears in `<store>/<board>/.admins`. Returns 1 if present,
 # 0 otherwise (including a missing or unreadable file — fails closed).
+#
+# 1.9.0 — the whole file is read, in BOARD_ADMINS_CHUNK windows. It stopped at 4
+# KB (~120 handles) with no continuation, and after 1.8.1 (audit S2 / M4) the
+# handles past the cut were ignored with a warning — failing closed, but still a
+# board whose later admins could not post. Each window scans only its WHOLE
+# lines and carries the unfinished one into the next, so a line straddling a
+# window is never matched by its cut-off prefix (the S2 bug: `qixbert` cut to
+# `qix`). A line longer than a window cannot be a handle and is skipped to its
+# LF. Past BOARD_ADMINS_FILE_CAP the rest is ignored, with a warning — the bound
+# on what one `post` can be made to read.
 fn board_admin_check(store, board, handle): i64 {
     var path = cmd_alloc(PATH_MAX_BYTES);
     board_admins_path(store, board, path);
-    var buf = cmd_alloc(BOARD_ADMINS_MAX_BYTES + 1);
-    var n = file_read_all(path, buf, BOARD_ADMINS_MAX_BYTES + 1);
-    if (n <= 0) { return 0; }
-    if (n > BOARD_ADMINS_MAX_BYTES) {
-        eprint("agora: .admins over 4096 bytes, later handles ignored: ", 55);
-        eprint(path, strlen(path));
-        eprint("\n", 1);
+    var fd = store_open(path, O_RDONLY);
+    if (fd < 0) { return 0; }
+    var buf = cmd_alloc(BOARD_ADMINS_CHUNK);
+    var have = 0;        # an unfinished line carried over, at buf[0..have)
+    var skipping = 0;    # inside a line longer than a window: drop to its LF
+    var total = 0;
+    var found = 0;
+    var reading = 1;
+    while (reading == 1) {
+        var want = BOARD_ADMINS_CHUNK - have;
+        if (want > BOARD_ADMINS_FILE_CAP - total) { want = BOARD_ADMINS_FILE_CAP - total; }
+        var n = 0;
+        if (want > 0) { n = file_read(fd, buf + have, want); }
+        else {
+            # At the cap: a byte past it means handles are being ignored.
+            var probe[8];
+            n = file_read(fd, &probe, 1);
+            if (n > 0) {
+                eprint("agora: .admins over 1 MiB, later handles ignored: ", 50);
+                eprint(path, strlen(path));
+                eprint("\n", 1);
+                reading = 0;
+                continue;
+            }
+        }
+        if (n < 0) { reading = 0; continue; }
+        if (n == 0) {
+            # End of file ends the carried line.
+            if (skipping == 0) { if (have > 0) { found = board_admins_scan(buf, have, handle); } }
+            reading = 0;
+            continue;
+        }
+        total = total + n;
+        var end = have + n;
+        var start = 0;
+        if (skipping == 1) {
+            var k = have;
+            start = 0 - 1;
+            while (k < end) {
+                if ((load8(buf + k) & 0xFF) == 10) { start = k + 1; k = end; continue; }
+                k = k + 1;
+            }
+            if (start < 0) { start = end; } else { skipping = 0; }
+        }
+        var w = board_admins_lines(buf + start, end - start);
+        if (w > 0) { found = board_admins_scan(buf + start, w, handle); }
+        var rest = end - start - w;
+        if (rest == BOARD_ADMINS_CHUNK) {
+            skipping = 1;
+            rest = 0;
+        }
+        var c = 0;
+        while (c < rest) {
+            store8(buf + c, load8(buf + start + w + c));
+            c = c + 1;
+        }
+        have = rest;
+        if (found == 1) { reading = 0; }
     }
-    n = board_admins_whole(buf, n, BOARD_ADMINS_MAX_BYTES);
-    return board_admins_scan(buf, n, handle);
+    file_close(fd);
+    return found;
 }
 
 # Single decision point — given a session identity (fp + handle —

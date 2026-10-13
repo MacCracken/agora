@@ -409,7 +409,7 @@ fn descent_run(cfd, store, sess_handle): i64 {
     var path = cmd_alloc(DESCENT_PATH_CAP);
     descent_cfg_path(store, path);
     var cfg = cmd_alloc(DESCENT_CFG_CAP + 1);
-    var n = file_read_all(path, cfg, DESCENT_CFG_CAP);
+    var n = store_read_all(path, cfg, DESCENT_CFG_CAP);
     if (n <= 0) {
         descent_say(cfd, "\r\nNo Descent linked.\r\n");
         descent_say(cfd, "(operator: put 'host:port' or a bare port in <store>/.descent)\r\n");

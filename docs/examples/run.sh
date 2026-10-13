@@ -98,12 +98,19 @@ TABLE="
 29 own    -
 30 own    -
 31 own    -
+32 own    -
 "
 
 pass=0; fail=0; skipped=0; failed=""
 SRV=""
 
-clean()  { rm -rf ./bbs ./keys; }
+# A fork-mode connection child outlives its stopped server long enough to run its
+# close path — 1.8.1's door checkpoint writes ./bbs/.users/<fp>/games/ — so wait
+# for any process still serving ./bbs first, or the next smoke starts on its debris
+# (found at 1.9.0: a jabberwacky.sav landed after the clean and the next run refused).
+clean()  { local k=0
+           while pgrep -f -- '--store \./bbs( |$)' >/dev/null && [ $k -lt 50 ]; do sleep 0.1; k=$((k + 1)); done
+           rm -rf ./bbs ./keys; }
 reg()    { clean; bash "$EX/02-register-and-post.sh" >"$LOGS/register.log" 2>&1; }
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 # A self-starting smoke may still be tearing its own server down on $PORT, and

@@ -4,6 +4,120 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-13 (durable posts + store hardening)
+
+The first release of the 1.9.x storage-and-scale line: the store stops trusting what its names turn out to
+be, a post is finally either absent or whole, `login` no longer reads every account to say "unknown user",
+and `.admins` is read to the end. Four roadmap rows, four sources: audit 1.8.1 I11, CLAUDE.md's "posts are
+durable artifacts", audit 1.8.1 H1 / L4, audit 1.8.1 M4.
+
+**244** tests (237 module + 7 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`; **32**
+example smokes (new: 32), both CI legs green; `cyrius audit` exit 0. `build/agora` **986,152 → 990,320 B**;
+`--agnos` 982,664 → 986,832 B; `--aarch64` 2,415,456 → 2,415,528 B. Two new ADRs: [0025](docs/adr/0025-store-io-regular-files-and-publish.md)
+(amends 0002) and [0026](docs/adr/0026-handle-index.md) (amends 0006).
+
+### Security
+
+- **The store refused nothing (audit 1.8.1 I11; MEDIUM — needs write access to the store).** Every store
+  file was opened like any path, so:
+  - a **FIFO** named `N.txt`, `.policy`, `.admins` or a lock file blocked its open, and under
+    `AGORA_SERVE=poll` that was the whole server — the next `list` / `read` / `post` hung every session, and
+    a new client was never greeted (under fork it hung a child for good);
+  - a **symlink** was followed: `3.txt -> <any file the agora user can read>` was served to anonymous users
+    as a post; registration's `O_TRUNC` writes emptied and refilled a planted link's target; a dangling
+    link at a lock file made `O_CREAT` create its target.
+  Now every store open goes through `store_open` (`src/arena.cyr`): `O_NOFOLLOW | O_NONBLOCK`, then an
+  `fstat` that refuses anything but a regular file (`-EINVAL`). Reads use `store_read_all`, locks
+  `store_lock_open`, the leaderboard `store_append_locked`; registration's three files are
+  `store_write_atomic` writes (a rename replaces a planted link), and that function's own temp is unlinked
+  and created `O_EXCL | O_NOFOLLOW`. agnos: `AO_NOFOLLOW` covers the link; it has no FIFOs, no
+  `O_NONBLOCK` and no `fstat`. Directories above the final name are out of scope (ADR 0025).
+  `docs/examples/32-store-hardening.py` drives both serve models; against a 1.8.2 build it fails 9 of 10
+  checks — the symlinked file is served, and the poll server never answers again.
+
+### Added
+
+- **Crash-safe post writes** — the "posts are durable artifacts" principle is now backed. A post was
+  created and written straight into `<id>.txt`, so a crash or power loss mid-write left a truncated post
+  under its id. `store_publish` (ADR 0025) writes `<board>/.publish.tmp`, fsyncs it, and `link(2)`s it to
+  `<id>.txt` — which, like `O_EXCL`, refuses an existing name, so the exclusive id claim of 1.6.4 (audit M4)
+  stays — then fsyncs the directory. Crash debris at the temp name is removed by the next post (every
+  writer holds the board lock); a filesystem without hard links falls back to `rename`, still under the lock.
+- **The handle index** — `.users/.by-handle/<handle>` holds the owning fingerprint, and `.complete` marks it
+  whole (ADR 0026). `login` read every user's `handle` file, and an unknown handle — the attacker's choice —
+  always read all of them (audit 1.8.1 H1 / L4). Now an unknown handle is **one failed open**:
+  `benches/serve-bench.py login`, fork mode, **0.16 ms per unknown login at 300 users and at 3,000 — was
+  1.78 and 16.98 ms**. A claim is trusted only after the user it names is verified to hold the handle; a
+  stale or broken one falls back to the scan. A store that predates the index gets it on its first `serve`
+  (in a short-lived child) or `register`: ~50 ms at 300 users, ~300 ms at 3,000, once. Registration claims
+  the new handle before writing and releases the old one after, so a crash leaves a detectable stale claim,
+  never a missing one. Handles are validated before any path is built (the wire `login` passed raw bytes).
+- **`.admins` is read to the end** — streamed in 4 KB windows instead of stopping at 4 KB (~120 handles);
+  1.8.1 (audit S2 / M4) had made the cut fail closed, so later admins simply could not post. A line
+  straddling a window is never matched by its cut-off prefix (`qixbert` is not `qix`, the S2 bug); a line
+  longer than a window is skipped; past 1 MiB the rest is ignored, with a warning.
+- `docs/examples/32-store-hardening.py` (above); `benches/serve-bench.py login` (unknown-login latency and
+  first-start time vs registered users).
+- Tests: `t233` store opens (symlink, FIFO, directory, dangling link, planted temp), `t234` registration
+  replaces planted links, `t235` the crash-safe publish (debris, planted link, an existing id never
+  replaced), `t236` the handle index (authoritative miss, fallback scan, re-registration, stale claims,
+  invalid handles, the build matching the scan on a duplicate, a crashed build's empty claim), `t237`
+  `serve`'s index preparation (a store with no users is left untouched — a starting server must not create
+  the store — and one with users is indexed); `t227` rewritten for the streaming `.admins` reader. Every one
+  mutation-checked: each guarded behaviour, broken, turns its test red — 18 mutants, none surviving, none
+  hanging (the FIFO case holds both ends itself, so a regression fails instead of blocking).
+
+### Changed
+
+- `board_admins_whole` is removed — the streaming reader keeps whole lines by construction
+  (`board_admins_lines`); `BOARD_ADMINS_MAX_BYTES` becomes `BOARD_ADMINS_CHUNK` + `BOARD_ADMINS_FILE_CAP`.
+- Registration's `created.iso8601` uses the allocation-free `iso8601_into` (1.8.1 H1's formatter) instead
+  of chrono's `iso8601_now`.
+- `docs/examples/run.sh` waits for any process still serving `./bbs` before deleting it: a fork-mode
+  connection child outlives its stopped server long enough to run its 1.8.1 close-path checkpoint, and a
+  `jabberwacky.sav` landed after a clean, so the next run refused to start. Smoke 32 runs its servers in
+  their own session and reaps the group, so an A/B against an old build does not leave a child blocked on
+  the FIFO.
+- ADRs 0002 and 0006 carry amendment notes pointing at 0025 / 0026; CLAUDE.md's "posts are durable
+  artifacts" principle no longer carries its ⚠.
+
+### Performance
+
+- **The reply scan is ~8–9% slower** — one `fstat` per store open, and ADR 0005's scan opens every post on
+  the board on every `read`: 3.38 → 3.71 ms at 500 posts, 13.1 → 14.2 ms at 2,000, 27.3 → 29.2 ms at
+  4,096 (interleaved A/B, one machine, ~0.5 µs per post). `O_NONBLOCK` alone removes the hang; the check
+  makes "regular files only" true. Roadmap § 1.9.1's reply index replaces the scan.
+- Two fsyncs per post (the file and its board directory).
+- Unchanged, measured: per-command heap growth under poll **0 KB** for 3,000 pipelined `login`s, 300
+  `list`s and 2,000 `read`s on a 300-post, 300-user store (allocator gate); accept rates, poll session
+  memory (12.6 KB), world-lock throughput (~520 txn/s); fork connection children measure the same as
+  1.8.2 (building the index in the parent instead of a child would have added 4–12 KB to every one).
+- **Benchmark method note**: fork-mode PSS per child depends on where the binary lives — the same build
+  measures 54 KB run from tmpfs and 62 KB from ext4 (file-backed pages fault in differently). Compare
+  builds from the same filesystem; BENCHMARKS.md now says so.
+
+### Verification
+
+- `cyrius test`: **237/237** + **7/7**, the same under `cyrius test --aarch64`. Fuzz 1/1 plain and
+  `--poison=ab`. `cyrius audit` **exit 0**. `scripts/check-version-sync.sh` and
+  `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs exactly as CI runs them, on 4 CPUs: **fork 25/25, poll 31/31**
+  (32 smokes; 20 ran against the sibling MUD). Final binary re-checked from a clean `build/` (02, 03, 11,
+  13, 32 under both models).
+- Dead-code audit: 11 agora functions are unreachable from `main` — all accessors only `tests/agora.tcyr`
+  calls (`iabs`, `ipow`, `ol_compete_winner`, `pa_warp_count`, `paw_seed`, `telnet_linemode_mask`,
+  `telnet_term_cols` / `_rows` / `_type` / `_type_len`, `th_registry_count`); none new. `board_admins_whole`
+  removed.
+
+### Known limitations (recorded, not fixed)
+
+- Directory components above a store file are not checked (ADR 0025 § Decision): whoever can replace a
+  board directory can rewrite the store.
+- A user directory copied into `.users/` by hand is unknown to a complete handle index until
+  `.users/.by-handle/` is deleted and rebuilt (ADR 0026).
+- Registration writes its three files one by one: a crash between them leaves an account with an old
+  handle or no `created.iso8601` — each file whole, the set not atomic.
+
 ## [1.8.2] — 2026-10-13 (tooling: the checklist runs itself, and the serve layer is measured)
 
 The roadmap's two tooling slots — 1.8.2 *mechanical gates* and 1.8.3 *measure* — cut as one release. Every

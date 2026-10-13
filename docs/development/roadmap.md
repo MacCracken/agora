@@ -1,10 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.8.2 (tooling) shipped**, folding the planned 1.8.3 into it: the 1.8.x
-> line's planned work is done, and the next slot is **1.9.0**. Its measurements now sit on the rows they were
-> for (§ 1.9.1 reply index, § 1.11.0 epoll). Earlier: 1.8.1 (code audit + repair, 2026-10-12), and the same
-> day's re-plan into 1.8.x → 1.12.x slots — shipped work collapsed to one row per release line (per-tag
-> detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.9.0 (durable posts + store hardening) shipped**, closing the 1.8.x line
+> (its sections are gone; its row is in § Shipped). Next slot: **1.9.1**, the reply index. Earlier the same
+> day: 1.8.2 (tooling), which folded the planned 1.8.3 into it; 1.8.1 (code audit + repair, 2026-10-12) and
+> that day's re-plan into 1.8.x → 1.12.x slots (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -31,10 +30,8 @@ did) and the slots after it shift.
 
 | Slot | Theme | Kind | Status |
 |---|---|---|---|
-| **1.8.1** | Code audit + repair | hardening, no features | ✅ 2026-10-12 |
-| **1.8.2** | Tooling: mechanical gates + measurement (the planned 1.8.2 and 1.8.3, cut as one) | tooling | ✅ 2026-10-13 |
-| **1.9.0** | Storage residue + durable posts | correctness / memory | planned |
-| **1.9.1** | Reply index | scale | planned — the 1.8.2 numbers are in (see § 1.9.1) |
+| **1.9.0** | Durable posts + store hardening | correctness / security | ✅ 2026-10-13 |
+| **1.9.1** | Reply index | scale | planned — the numbers are in (see § 1.9.1) |
 | **1.9.2** | Board policy + operator CLI | feature | planned |
 | **1.10.0** | Telnet conformance | protocol | planned |
 | **1.10.1** | Terminal-aware output | protocol / UX | planned |
@@ -46,44 +43,21 @@ did) and the slots after it shift.
 
 ---
 
-## 1.8.x — hardening and verification (no new features)
-
-### 1.8.1 — Code audit + repair ✅
-
-Shipped 2026-10-12: a six-slice full-tree audit, every finding verified and A/B'd against 1.8.0 — **3 HIGH,
-12 MEDIUM, 26 LOW fixed**, 14 INFO recorded (the open ones are rows below, tagged with their audit ID).
-Report: [`docs/audit/2026-10-12-audit-1.8.1.md`](../audit/2026-10-12-audit-1.8.1.md); summary in CHANGELOG
-`[1.8.1]`. Delete this section when the 1.8.x line closes.
-
-### 1.8.2 — Tooling: mechanical gates + measurement ✅
-
-Shipped 2026-10-13 — the two tooling slots (1.8.2 mechanical gates, 1.8.3 measure) as one cut, every row
-done: an in-repo examples runner and CI smokes under both serve models; `--poison=ab`, aarch64 (qemu-user),
-toolchain provenance and version sync in CI; a slow-reader regression smoke; the version string generated
-from `VERSION`; `cyrius audit` passing and gating; SHA-pinned actions, a tag-pinned installer, least-privilege
-workflows and checksummed multi-target releases; the `tests/` split with a serve-layer unit suite; and the
-first accept-rate, per-session-memory, world-lock and reply-scan baselines. Detail: CHANGELOG `[1.8.2]`.
-Delete this section with 1.8.1's when the 1.8.x line closes.
-
 ## 1.9.x — storage and scale
 
-### 1.9.0 — Durable posts + store hardening
+### 1.9.0 — Durable posts + store hardening ✅
 
-(The `dir_list_into` migration and the O(n²) `sort_i64_asc` planned here shipped early, in 1.8.1 — audit H1
-and L5: the listing residue was an unauthenticated memory-exhaustion path, not a cleanup.)
-
-| Item | Source | Effort |
-|---|---|---:|
-| **Crash-safe post writes.** CLAUDE.md's "posts are durable artifacts" principle is not yet backed — door saves, the shared world and chat went through atomic writes at 1.7.0, but a post is still `file_create_exclusive` + `file_write`. Since 1.8.1 a *short* write is cleaned up (audit L2); a *crash* mid-write still leaves a truncated post under its final id. Temp file + `link()` keeps the exclusive id claim. | CLAUDE.md § Key Principles; [ADR 0002](../adr/0002-one-file-per-post-storage.md); `src/board.cyr` `post_new` | medium |
-| **Store opens follow symlinks and block on FIFOs** — a FIFO named `N.txt`, `.policy` or `.admins` hangs the whole poll server on the next `read` / `list` / `post`. Needs store write access. `O_NOFOLLOW` + `O_NONBLOCK` + an `S_ISREG` check on every store open. | audit 1.8.1 I11 | medium |
-| **A handle index** — `account_resolve_handle` reads every user's `handle` file on every `login` (no early exit is possible for an unknown handle); at 301 users one 4 KB packet of `login x` held a 1.8.0 poll sweep 626 ms (1.8.1's line budget now contains the cross-session effect). `.users/.by-handle/<handle>` claim files created `O_EXCL` would also make registration atomic without the 1.8.1 lock. | audit 1.8.1 H1 / L4; `src/account.cyr` | medium |
-| `.admins` stops at 4 KB (~120 handles) with no continuation — since 1.8.1 it at least fails closed (only whole lines are trusted, with a warning) | `src/board.cyr`; audit 1.8.1 M4 | small |
+Shipped 2026-10-13 — all four rows: store opens refuse symlinks and non-regular files (audit 1.8.1 I11 — a
+FIFO hung the whole poll server; ADR 0025); posts published crash-safely by temp + fsync + `link` (CLAUDE.md
+"posts are durable artifacts", now backed; ADR 0025); the handle index (audit 1.8.1 H1 / L4 — unknown-handle
+login 16.98 → 0.16 ms at 3,000 users; ADR 0026); `.admins` read to the end (audit 1.8.1 M4). Detail:
+CHANGELOG `[1.9.0]`. Delete this section when the 1.9.x line closes.
 
 ### 1.9.1 — Reply index
 
 | Item | Source | Effort |
 |---|---|---:|
-| Reply enumeration is scan-on-read, O(n) per `read`. **Measured at 1.8.2**: 3.4 ms on 500 posts, 13.0 ms on 2,000, 27.7 ms on 4,096 — linear, ~6.7 µs per post (BENCHMARKS.md § Serve-level baselines). Under poll that time is the whole server's (one `read` per session per sweep). An index (a per-board `parent → children` file maintained at post time, under the board lock) earns its slot once boards pass a few thousand posts; below that the scan is cheaper to keep. | ADR 0005; `benches/serve-bench.py reply` | large |
+| Reply enumeration is scan-on-read, O(n) per `read`. **Measured at 1.8.2**: 3.4 ms on 500 posts, 13.0 ms on 2,000, 27.7 ms on 4,096 — linear, ~6.7 µs per post (BENCHMARKS.md § Serve-level baselines); **1.9.0's per-open `fstat` (ADR 0025) adds ~0.5 µs per post**: 3.7 / 14.2 / 29.2 ms. Under poll that time is the whole server's (one `read` per session per sweep). An index (a per-board `parent → children` file maintained at post time, under the board lock) earns its slot once boards pass a few thousand posts; below that the scan is cheaper to keep. | ADR 0005; `benches/serve-bench.py reply` | large |
 
 ### 1.9.2 — Board policy + operator CLI
 
@@ -236,8 +210,9 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door / chatbot backlog.
-- [`docs/adr/`](../adr/) — 24 ADRs (0001–0024). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
-  0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization.
+- [`docs/adr/`](../adr/) — 26 ADRs (0001–0026). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
+  0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization; 0025–0026
+  the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index).
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2,
   closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut), 2026-10-12-audit-1.8.1 (closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).

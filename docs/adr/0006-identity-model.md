@@ -60,6 +60,8 @@ Six load-bearing decisions:
   public_key.bin     # 32 bytes raw Ed25519 pubkey (NOT the secret seed)
   handle             # 1-32 bytes UTF-8; same alphabet as board names (a-z 0-9 - _; first char letter/digit)
   created.iso8601    # registration timestamp via chrono.iso8601_now()
+<store>/.users/.by-handle/<handle>   # 1.9.0: "<fp16>\n" — the handle index, ADR 0026
+<store>/.users/.by-handle/.complete  # 1.9.0: the index covers every user
 ```
 - Dot-prefix on `.users/` dodges `parse_post_id` filter (precedent: `.lock` in ADR 0004).
 - Handle alphabet matches board names (reusing `board_name_valid` semantics with a different reserved set: `anonymous`, `system`, `admin` reserved; `main` is not — board names and handles are different namespaces).
@@ -67,7 +69,7 @@ Six load-bearing decisions:
 
 **Wire login flow**:
 1. Client (in `MODE_COMMAND`, anonymous) sends `login <handle>` over the wire.
-2. Server looks up `<store>/.users/<fp>/handle == <handle>`. If no match, replies `unknown user` and stays in `MODE_COMMAND` anonymous.
+2. Server looks up `<store>/.users/<fp>/handle == <handle>`. If no match, replies `unknown user` and stays in `MODE_COMMAND` anonymous. (1.9.0: through the handle index — one claim file per handle, verified against the user's own `handle` file, and an authoritative miss once the index is complete; [ADR 0026](0026-handle-index.md). It was a scan of every user's `handle` file.)
 3. If match, server generates a 32-byte cryptographic random nonce via `lib/io.cyr` `/dev/urandom`, hex-encodes it (64 chars), replies `challenge: <64-hex>`. Server parks `(fp, nonce, deadline)` in per-connection state, transitions session to `MODE_LOGIN_AWAIT_SIG`.
 4. Client computes `sig = ed25519_sign(secret_key, "agora-login:" + nonce_hex)`, sends `auth: <128-hex-sig>`.
 5. Server hex-decodes sig, fetches `public_key.bin` for the parked fingerprint, calls `ed25519_verify(pk, "agora-login:" + nonce, 76 bytes, sig)`. On verify pass: session binds `(fp, handle)`, sends `welcome, <handle>`, transitions to `MODE_COMMAND` authenticated. On verify fail or `auth:` not received within deadline (default 30 s): session reverts to `MODE_COMMAND` anonymous, sends `login failed`.
