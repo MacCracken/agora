@@ -262,8 +262,10 @@ fn store_lock_open(path): i64 {
 }
 
 # The stdlib's `file_append_locked` through store_open: append the whole record
-# under an exclusive flock. Returns `len`, or a negative errno.
-fn store_append_locked(path, buf, len): i64 {
+# under an exclusive flock. Returns `len`, or a negative errno. `durable` 1
+# fsyncs the file before returning (1.9.1: the reply index's records must be on
+# disk before the post they describe; the leaderboard passes 0).
+fn store_append_locked(path, buf, len, durable): i64 {
     var flags = O_WRONLY | O_CREAT;
     #ifndef CYRIUS_TARGET_AGNOS
     flags = flags | O_APPEND;
@@ -275,6 +277,7 @@ fn store_append_locked(path, buf, len): i64 {
     xlseek(fd, 0, 2);                  # SEEK_END — agnos AO_APPEND is a kernel TODO
     #endif
     var n = _io_write_full(fd, buf, len);
+    if (n == len) { if (durable == 1) { if (xfsync(fd) < 0) { n = 0 - 5; } } }
     file_unlock(fd);
     file_close(fd);
     return n;

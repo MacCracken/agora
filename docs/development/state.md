@@ -6,10 +6,10 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-10-13 — **1.9.0 (durable posts + store hardening) cut**: every store open refuses a
-> symlink or a non-regular file (a FIFO could hang the whole poll server), posts are published crash-safely
-> (temp + fsync + `link`), `login` resolves handles through an index (an unknown handle is one failed open),
-> and `.admins` is read to the end. ADRs 0025 / 0026. **Replace this paragraph each
+> **Last refresh**: 2026-10-13 — **1.9.1 (the reply index) cut**: `read` lists replies from
+> `<board>/.replies/<parent>` (verified against the posts; ADR 0027) instead of opening every post on the board —
+> a post with no replies is 0.18 ms at any board size — and `store_dir_scan` refuses a FIFO where a directory
+> belongs (the directory half of ADR 0025). **Replace this paragraph each
 > release — do not append to it.** History lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
@@ -76,6 +76,13 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
      from tmpfs (`/tmp`) and 62 KB from ext4. Run A/B builds from the same filesystem.
    - **`pkill -f <pattern>` can match the shell running it** — the pattern is in its own command line, and
      it kills the session's shell. Use `pgrep -a` to look, then kill by pid.
+   - **Two indexes trust their own silence** [1.9.0, 1.9.1]: `.users/.by-handle/` and `<board>/.replies/`,
+     each with a `.complete`. Anything written into the store by hand (a user dir, a post) is invisible to
+     them until the index directory is deleted; the next `serve` rebuilds it. Both verify what they DO name.
+   - **`is_dir` takes a `Str`, not a cstring** [1.9.0] (`path_str(p)`), and answers 0 for anything else —
+     silently. Use `store_is_dir` / `store_name_exists` for cstring paths.
+   - **A FIFO left in a test store hangs the next run** — the stdlib's directory listing opens with plain
+     `O_RDONLY`. Tests unlink what they `mknod`; `t_rmtree` unlinks before it lists.
 
 ---
 
@@ -83,18 +90,18 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `1.9.0` (2026-10-13) — durable posts + store hardening: regular-file-only store opens, crash-safe post publish, the handle index, `.admins` read to the end. Previous: `1.8.2` (2026-10-13) — tooling |
-| **In flight** | none — next is **1.9.1** (reply index), see § In-flight slot |
+| **Released** | `1.9.1` (2026-10-13) — the reply index (`read` is O(replies)); directory FIFO guard. Previous: `1.9.0` (2026-10-13) — durable posts + store hardening |
+| **In flight** | none — next is **1.9.2** (board policy + operator CLI), see § In-flight slot |
 | **Toolchain pin** | cyrius `6.7.9` (`cyrius.cyml [package].cyrius`; local snapshot verified byte-identical to the tag at 1.8.0; a 1.8.1 clean `cyrius deps` regenerated an identical `lib/`) |
 | **Source of truth** | `VERSION` at the repo root |
 
 ## Build artifacts
 
-| Artifact | Size (1.9.0) | Build line |
+| Artifact | Size (1.9.1) | Build line |
 |---|---|---|
-| `build/agora` | **990,320 B** (+4,168 vs 1.8.2) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
-| `build/agora-agnos` | 986,832 B | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
-| aarch64 | 2,415,528 B (aarch64 ELF does no DCE compaction) | `cyrius build --aarch64 …` |
+| `build/agora` | **998,552 B** (+8,232 vs 1.9.0) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
+| `build/agora-agnos` | 995,064 B | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
+| aarch64 | 2,415,568 B (aarch64 ELF does no DCE compaction) | `cyrius build --aarch64 …` |
 
 The release workflow publishes all three (`agora-<ver>-x86_64-linux`, `-aarch64-linux`, `-x86_64-agnos`)
 with `SHA256SUMS` since 1.8.2.
@@ -105,23 +112,27 @@ all `.bss`; the build still warns `large static data` (≈375 KB).
 
 ## Tests + benchmarks
 
-| Surface | Status (1.9.0) |
+| Surface | Status (1.9.1) |
 |---|---|
-| `tests/agora.tcyr` | **237** module tests (src/test.cyr until 1.8.2) — also 237/237 under `cyrius test --aarch64` (qemu) |
+| `tests/agora.tcyr` | **239** module tests (src/test.cyr until 1.8.2) — also 239/239 under `cyrius test --aarch64` (qemu) |
 | `tests/serve.tcyr` | **7** serve-layer tests (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
 | `fuzz/telnet_iac.fcyr` | 1 harness, green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2) |
-| `docs/examples/` | **32** smokes; `run.sh`: both CI legs green at 1.9.0 (**fork 25/25, poll 31/31**); CI runs it per model |
+| `docs/examples/` | **33** smokes; `run.sh`: both CI legs green at 1.9.1 (**fork 25/25, poll 32/32**); CI runs it per model |
 | `benches/bench_telnet.bcyr` | 5 parser benchmarks — [`BENCHMARKS.md`](../../BENCHMARKS.md) |
-| `benches/serve-bench.py` | accept rate, per-session memory, world lock, reply scan (first measured 1.8.2), unknown-handle login + first-start time (1.9.0) — BENCHMARKS.md § Serve-level baselines |
+| `benches/serve-bench.py` | accept rate, per-session memory, world lock, reply (`read` with and without replies; 1.9.1 index), unknown-handle login + first-start time (1.9.0) — BENCHMARKS.md § Serve-level baselines |
 | `cyrius audit` | **exit 0** since 1.8.2 — fmt, lint (0 warnings), docs (every function documented), tests, bench — and a CI gate |
 
 ## In-flight slot
 
-**None.** 1.9.0 is cut. Next is **1.9.1 — reply index**: the reply scan opens every post on a board on every
-`read` (O(n); 3.7 ms at 500 posts, 29 ms at 4,096 since 1.9.0's per-open `fstat`). See roadmap § 1.9.1.
+**None.** 1.9.1 is cut. Next is **1.9.2 — board policy + operator CLI** (`open` vs `known` made meaningful or
+collapsed; `agora policy` / `agora admins`; `.admins` keyed on the fingerprint; a cap on chat channels; the
+slow-typist slot risk recorded). See roadmap § 1.9.2.
 
 ## Recent shipped
 
+- **1.9.1** (2026-10-13) — the reply index: `read` 23.7 → 0.18 ms at 4,096 posts for a post with no replies,
+  29.4 → 2.5 ms for a 409-reply thread; replies older than the newest 4,096 posts listed at last; a FIFO where a
+  directory belongs no longer hangs the server. 246 tests, 33 smokes.
 - **1.9.0** (2026-10-13) — durable posts + store hardening: store opens refuse symlinks and non-regular
   files (audit I11 — a FIFO hung the whole poll server), crash-safe post publish (temp + fsync + `link`),
   the handle index (unknown-handle login 16.98 → 0.16 ms at 3,000 users), `.admins` read to the end.
@@ -166,15 +177,15 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | kii / sankoch | M3 inline images / M4 stored-file deltas | — | gates met, no consumer; nothing in `src/` references them |
 | agnos ext4 WRITE | AGNOS-target storage | in flight upstream | not blocking (ADR 0001) |
 
-## Source surface (1.9.0, lines)
+## Source surface (1.9.1, lines)
 
 | File | Lines | Holds |
 |---|---:|---|
-| `src/main.cyr` | 4,608 | argv dispatch + CLI verbs; both serve models (fork / poll), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `write_text`); door / chat / Descent glue, door save lifecycle; N1 shutdown |
+| `src/main.cyr` | 4,625 | argv dispatch + CLI verbs; both serve models (fork / poll), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `write_text`); door / chat / Descent glue, door save lifecycle; N1 shutdown |
 | `src/telnet.cyr` | 765 | RFC 854 IAC parser, RFC 1143 Q-method, NAWS / TERMINAL-TYPE / LINEMODE subnegotiation (only for agreed options) |
-| `src/board.cyr` | 1,557 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading, policy / admins (fail closed; `.admins` streamed), `flock` helpers, the directory workspace (`store_dir_scan`), egress sanitize rule (ADR 0024) |
+| `src/board.cyr` | 1,816 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading + the reply index (ADR 0027), policy / admins (fail closed; `.admins` streamed), `flock` helpers, the directory workspace (`store_dir_scan`, FIFO-guarded), egress sanitize rule (ADR 0024) |
 | `src/account.cyr` | 799 | fingerprint, handle validation, user dirs, keyfiles, nonce / signature parse, From-header extraction, the register lock, the handle index (ADR 0026) |
-| `src/arena.cyr` | 361 | per-command scratch arena (ADR 0021), the store file primitives: `store_write_atomic`, `store_open` / `store_read_all` / `store_lock_open` / `store_append_locked`, `store_publish` (ADR 0025) |
+| `src/arena.cyr` | 364 | per-command scratch arena (ADR 0021), the store file primitives: `store_write_atomic`, `store_open` / `store_read_all` / `store_lock_open` / `store_append_locked`, `store_publish` (ADR 0025) |
 | `src/door.cyr` | 835 | door framework (ADR 0009): PRNG, saves (+ remove / quarantine / play lock), world transactions, leaderboards, `emit_*` render, descriptor registry (ADR 0020), `DD_FREE` (ADR 0022) |
 | `src/smuggler.cyr` · `src/port_authority.cyr` · `src/handler.cyr` | 1,335 · 1,679 · 1,437 | the three 1.1.0 doors + their 1.2.0 Universe layers |
 | `src/quest.cyr` · `src/olympiad.cyr` · `src/ashes.cyr` | 950 · 1,017 · 1,347 | QUEST (LORD homage), Olympiad (`compete()`), Ashes of Empire (async shared-world strategy) |
@@ -183,7 +194,7 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | `src/chat.cyr` | 424 | chat area ring transcript (ADR 0011) |
 | `src/eliza.cyr` · `src/parry.cyr` · `src/jabberwacky.cyr` | 903 · 522 · 559 | the three chatbots (ADR 0012, 0015) |
 | `src/descent.cyr` | 476 | Descent MUD gateway, TCP byte-proxy (ADR 0017) — no longer calls into `main.cyr` |
-| `tests/agora.tcyr` · `tests/serve.tcyr` | 6,881 · 413 | the module suite · the serve-layer suite (includes `main.cyr`) |
+| `tests/agora.tcyr` · `tests/serve.tcyr` | 7,017 · 413 | the module suite · the serve-layer suite (includes `main.cyr`) |
 
 ## Cross-references
 

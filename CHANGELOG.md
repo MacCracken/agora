@@ -4,6 +4,91 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-10-13 (the reply index)
+
+`read` stops paying for the whole board. The replies a post lists ("Replies: 2, 4") came from opening every
+post on the board on every `read` (ADR 0005's scan); now they come from one index file per parent, verified
+against the posts themselves (ADR [0027](docs/adr/0027-reply-index.md), amending 0005). Along the way the
+store's FIFO hardening (1.9.0, ADR 0025) got its directory half.
+
+**246** tests (239 module + 7 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`; **33**
+example smokes (new: 33; 32 extended), both CI legs green; `cyrius audit` exit 0. `build/agora` **990,320 →
+998,552 B**; `--agnos` 986,832 → 995,064 B; `--aarch64` 2,415,528 → 2,415,568 B.
+
+### Security
+
+- **A FIFO where a directory belongs hung the server (MEDIUM — needs write access to the store; the
+  directory half of audit 1.8.1 I11).** The stdlib's `dir_list_into` opens a directory with a plain `O_RDONLY`
+  on Linux, so a FIFO in place of `.users/` (or a board) blocked the listing: with `.users` replaced, a
+  `login` that fell back to scanning the users hung, and under poll so did every session —
+  `32-store-hardening.py` § B, against 1.9.0: `login` never answers and a second client is never greeted.
+  `store_dir_scan` now `stat`s the path and refuses anything that is not a directory before listing it
+  (`store_is_dir`; Linux — agnos has no FIFOs, and its listing already opens with `AO_DIRECTORY`). The residual — a swap between the `stat` and the `open` — closes when the stdlib opens with
+  `O_DIRECTORY`: filed upstream as cyrius
+  `docs/development/issues/2026-10-13-dir-list-opens-directory-without-o-directory.md`. ADR 0025 amended.
+
+### Added
+
+- **The reply index** (ADR 0027) — `<board>/.replies/<parent>` holds one `\n<child>\n` record per reply, and
+  `.replies/.complete` marks a board fully indexed. A `read` opens that one file and verifies each child it
+  names against the child's own `Reply-To:`; the scan remains only for a board not yet indexed.
+  - **Ordering**: a reply's record is appended and fsynced *before* the post is published, so a crash leaves
+    a ghost record (verified away — a failed publish's id may be reused by an unrelated post) and never a reply
+    missing from a complete index, whose silence `read` trusts. If the record cannot be written, `.complete`
+    is removed and reads scan again.
+  - **Build**: every post on the board — not `post_list`'s newest 4,096, so **replies older than that are
+    listed now, which the scan never did** — at `serve` start (in the startup child, with the handle index) and
+    for a board on its next reply. A board written by hand needs `.replies/` deleted to be re-read.
+  - Records are framed so a torn one cannot merge with the next; duplicates (a rebuild over a crashed build)
+    are removed at read.
+- `docs/examples/33-reply-index.py` — the first smoke that checks a `Replies:` line at all: a hand-written
+  board indexed at start, a CLI `--reply-to` listed at once, a hand-added reply NOT listed under a complete
+  index, the rebuild after deleting `.replies/`; both serve models. A 1.9.0 build fails the index checks.
+- `32-store-hardening.py` § B — the directory FIFO above, both serve models.
+- `benches/serve-bench.py reply` now times `read 2` (no replies) beside `read 1` (a tenth of the board).
+- Tests: `t238` the reply index (scan before the build, the build, a complete index's silence trusted,
+  duplicates, ghosts, a torn record, `post_new` indexing a reply, an unreadable index file falling back, the
+  directory guard, no per-post arena use in the build or the read), `t239` the startup build (every board;
+  never creates a missing store). Mutation-checked: 8 mutants, 7 caught — the directory-guard mutant by
+  hanging (exit 124 under `timeout`; CI's 300 s test limit fails it); the survivor removes `reply_index_prepare`'s
+  store-exists guard, which is redundant (the board-lock open cannot create a missing store either).
+
+### Changed
+
+- **The `Replies:` line is composed in 2 KB pieces**: under fork every `send_buf` is a `write(2)`, and sending
+  it id by id (~800 writes for a 409-reply thread) cost more than finding the replies. The wire bytes are
+  identical — byte-compared against 1.9.0 on a 400-reply thread (a 2,038-byte line, across a piece boundary).
+- `store_append_locked` takes a `durable` flag (the reply records are fsynced; the leaderboard passes 0).
+- The test suite's `t_rmtree` unlinks before it lists, so it never opens a FIFO a test left behind.
+
+### Performance
+
+- `benches/serve-bench.py reply`, fork, 1 KB posts, interleaved A/B (load average < 1):
+
+  | Board | `read 2` (no replies), 1.9.0 → 1.9.1 | `read 1` (a tenth of the board replies), 1.9.0 → 1.9.1 |
+  |---|---|---|
+  | 500 posts | 2.83 → **0.18 ms** | 3.73 → **0.49 ms** |
+  | 2,000 posts | 10.99 → **0.18 ms** | 14.11 → **1.30 ms** |
+  | 4,096 posts | 23.74 → **0.18 ms** | 29.39 → **2.46 ms** |
+
+  A post with no replies costs the same at any board size; a thread costs ~5.6 µs per reply (one header read
+  each, the verification). Under poll each of those milliseconds was every session's.
+- A reply costs one more fsync (its record) and a directory fsync; the first `serve` of a store that predates
+  the index reads every post once.
+
+### Verification
+
+- `cyrius test`: **239/239** + **7/7**, the same under `cyrius test --aarch64`. Fuzz plain and `--poison=ab`.
+  `cyrius audit` **exit 0**. `scripts/check-version-sync.sh` and `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs exactly as CI runs them, on 4 CPUs: **fork 25/25, poll 32/32** (33
+  smokes; 20 ran against the sibling MUD).
+
+### Known limitations (recorded, not fixed)
+
+- A post added to a board by hand is not listed as a reply until `<board>/.replies/` is deleted and rebuilt
+  (ADR 0027) — the same rule as the handle index (ADR 0026).
+- The directory guard's `stat`-then-`open` window, until the stdlib's `dir_list_into` opens with `O_DIRECTORY`.
+
 ## [1.9.0] — 2026-10-13 (durable posts + store hardening)
 
 The first release of the 1.9.x storage-and-scale line: the store stops trusting what its names turn out to

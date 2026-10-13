@@ -111,7 +111,7 @@ Every project runs a security audit pass before release — see [first-party-sta
 4. **Pointer validation** — no raw pointer dereference of telnet bytes without bounds
 5. **No command injection** — no `sys_system()` with post content; post bodies are inert data
 6. **No path traversal** — board names / thread IDs / handles validated before any path is built, no `../` escape into the post tree
-7. **Store opens refuse what is not a store file** — every store file goes through `store_open` (`store_read_all`, `store_lock_open`, `store_append_locked`): no final symlink, never blocks on a FIFO, regular files only. A plain `file_open` / `file_read_all` on a store path is a bug — a FIFO there hangs the whole poll server ([ADR 0025](docs/adr/0025-store-io-regular-files-and-publish.md))
+7. **Store opens refuse what is not a store file** — every store file goes through `store_open` (`store_read_all`, `store_lock_open`, `store_append_locked`): no final symlink, never blocks on a FIFO, regular files only. A plain `file_open` / `file_read_all` on a store path is a bug — a FIFO there hangs the whole poll server ([ADR 0025](docs/adr/0025-store-io-regular-files-and-publish.md)). Directories are listed only through `store_dir_scan`, which refuses a non-directory first (the stdlib's `dir_list_into` would block on a FIFO, 1.9.1)
 8. **Known CVE review** — track BSD telnetd CVEs (CVE-2020-10188, CVE-2011-4862) and verify equivalent defenses
 9. **Document findings** — all issues in `docs/audit/YYYY-MM-DD-audit.md`
 

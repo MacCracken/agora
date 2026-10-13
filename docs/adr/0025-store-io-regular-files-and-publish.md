@@ -50,7 +50,15 @@ created exclusively is published crash-safely — written to a temp, fsynced, th
    and why crash debris is simply removed by the next writer. `post_new` publishes through it.
 
 Scope: the **final** path component. Directories above it are not checked — whoever can replace those can
-rewrite the store wholesale. Operator-chosen paths outside the store (`--motd`, the user's `--key` file)
+rewrite the store wholesale.
+
+**1.9.1 — the directory half.** A directory *listing* has a final component too, and the stdlib's
+`dir_list_into` opens it with a plain `O_RDONLY` on Linux, so a FIFO where a directory belongs (`.users/`, a
+board) blocked the scan — under poll, the whole server (`32-store-hardening.py` § B: a 1.9.0 `login` never
+answers). `store_dir_scan` now `stat`s the path and refuses anything that is not `S_IFDIR` before it lists it
+(Linux; agnos has no FIFOs and its listing opens with `AO_DIRECTORY`).
+A swap between the `stat` and the `open` is the residual until the stdlib opens with `O_DIRECTORY` (filed
+upstream: cyrius `docs/development/issues/2026-10-13-dir-list-opens-directory-without-o-directory.md`). Operator-chosen paths outside the store (`--motd`, the user's `--key` file)
 keep plain opens: symlinking them is a legitimate operator choice.
 
 ## Consequences

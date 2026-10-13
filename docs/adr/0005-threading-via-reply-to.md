@@ -1,6 +1,6 @@
 # 0005 — Threading via `Reply-To` header (same-board, ID-only)
 
-> **Status**: Accepted
+> **Status**: Accepted — reply enumeration (p) superseded by [0027](0027-reply-index.md) (1.9.1)
 > **Date**: 2026-05-23
 
 ## Context
@@ -89,3 +89,7 @@ Specifics:
 > **1.8.2 measurement.** `benches/serve-bench.py reply`: a `read` costs **3.4 ms on 500 posts, 13.0 ms on
 > 2,000 and 27.7 ms on 4,096** (fork; 1 KB posts) — linear at ~6.7 µs per post for the header scan. That is
 > the number the scale trigger above was waiting for; the index-vs-scan decision is roadmap § 1.9.1.
+> **1.9.1 — superseded by [ADR 0027](0027-reply-index.md).** Reply enumeration is an index now:
+> `<board>/.replies/<parent>` records, verified against each child's own `Reply-To:` before it is listed,
+> with the scan kept only for a board not yet indexed. A post with no replies: 23.7 → 0.18 ms at 4,096 posts.
+> The encoding ((A) `Reply-To: <id>`, (α) same-board) is unchanged.

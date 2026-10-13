@@ -8,7 +8,10 @@
 #     `read` — the open waits for a writer that never comes, and under poll that
 #     one open is every session's;
 #   - a symlink `3.txt -> <any file the agora user can read>` served that file
-#     to anonymous telnet users as a post.
+#     to anonymous telnet users as a post;
+#   - (1.9.1) a FIFO where a DIRECTORY belongs: the stdlib's directory scan opens
+#     with a plain O_RDONLY, so `.users` replaced by a FIFO hung every `login` that
+#     fell back to scanning the users — under poll, the whole server again.
 #
 # Both need write access to the store, which is not the same as being the
 # operator. 1.9.0 opens every store file O_NOFOLLOW | O_NONBLOCK and refuses
@@ -160,6 +163,37 @@ def store_open_checks(mode):
         stop(p)
 
 
+# ------------------------------------------------------- directory opens
+def dir_fifo_checks(mode):
+    print("B — a FIFO where a directory belongs (`.users`) does not hang `login` (%s)" % mode)
+    global STORE
+    saved = STORE
+    STORE = BASE + "/bbs-dirfifo"
+    shutil.rmtree(STORE, ignore_errors=True)
+    os.makedirs(STORE)
+    os.mkfifo(STORE + "/.users")
+    p = start(mode)
+    try:
+        if not p:
+            check(False, "%s server started" % mode)
+            return
+        a = connect()
+        ok, out = cmd(a, b"login nobody")
+        check(ok and b"unknown user" in out, "%s: `login` answers 'unknown user' at once" % mode)
+        a.close()
+        try:
+            v = socket.create_connection(("127.0.0.1", PORT), timeout=3)
+            got, _ = until(v, b"> ", 3)
+            v.close()
+        except OSError:
+            got = False
+        check(got, "%s: a second client is still greeted" % mode)
+    finally:
+        if p:
+            stop(p)
+        STORE = saved
+
+
 def main():
     if not os.path.exists(BIN):
         print("build first: cyrius build src/main.cyr build/agora")
@@ -168,12 +202,14 @@ def main():
         build_store()
         for mode in ("poll", "fork"):
             store_open_checks(mode)
+        for mode in ("poll", "fork"):
+            dir_fifo_checks(mode)
     finally:
         shutil.rmtree(BASE, ignore_errors=True)
     if fails:
         print("FAIL — %d check(s): %s" % (len(fails), "; ".join(fails)))
         return 1
-    print("OK — the store refuses FIFOs and symlinks")
+    print("OK — the store refuses FIFOs and symlinks, as files and as directories")
     return 0
 
 

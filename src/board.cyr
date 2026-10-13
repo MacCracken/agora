@@ -398,6 +398,24 @@ fn store_ensure(path): i64 {
     return rc;
 }
 
+# 1 if `path` is a directory (following a link: an operator may symlink a board
+# directory); else 0.
+#
+# 1.9.1 — store_dir_scan's guard. The stdlib's `dir_list_into` opens a directory
+# with a plain O_RDONLY on Linux — no O_DIRECTORY — so a FIFO where a directory
+# belongs (`.users/`, a board) BLOCKED the scan, and under poll the whole server:
+# with `.users` replaced by a FIFO, a login that falls back to the handle scan hung
+# every session. (ADR 0025's store-open rule covers files; this is its directory
+# half.) A stat first refuses it; a swap between the stat and the open is the
+# residual until the stdlib opens with O_DIRECTORY (filed upstream). store_dir_scan
+# calls it on Linux only (see there).
+fn store_is_dir(path): i64 {
+    var st[160];   # STORE_STAT_BYTES
+    if (xstat(path, &st) < 0) { return 0; }
+    if ((load32(&st + STAT_MODE) & 0xF000) == 0x4000) { return 1; }   # S_IFDIR
+    return 0;
+}
+
 # Existence check for the (store, board) pair (0.8.3 audit M4).
 # Used by the wire-side `enter` command to gate auto-create on the
 # session's auth state — anonymous sessions can enter existing
@@ -555,6 +573,12 @@ fn path_str(cstr): i64 {
 # entry count (`.` and `..` skipped), or -1 if it could not be opened or read
 # (or outgrew DIR_MAX_ENTRIES). Entries: store_dir_name(0 .. count-1).
 fn store_dir_scan(path): i64 {
+    # 1.9.1 — never open a FIFO as a directory (store_is_dir). Linux only: agnos
+    # has no FIFOs and its dir_list_into opens with AO_DIRECTORY already — and
+    # its own is_dir avoids stat for directories, so this does not lean on it.
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (store_is_dir(path) == 0) { return 0 - 1; }
+    #endif
     if (g_dir_cap == 0) {
         if (store_dir_grow(DIR_INIT_ENTRIES) < 0) { return 0 - 1; }
     }
@@ -980,6 +1004,23 @@ fn post_new(store, board, ph, body, body_len): i64 {
     var id = post_max_id(store, board) + 1;
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     build_post_path(store, board, id, path_buf);
+
+    # 1.9.1 — a reply's index record goes in BEFORE the post (ADR 0027): a crash
+    # in between leaves a ghost record, which `read` verifies away, never a reply
+    # missing from a complete index. A board that predates the index gets it built
+    # here, once. If the record cannot be written, the index is marked incomplete
+    # (reads scan again) rather than left silently wrong.
+    var parent = load64(ph + PH_REPLY_TO);
+    if (parent > 0) {
+        reply_index_ensure(store, board);
+        if (reply_index_add(store, board, parent, id, 1) != 0) {
+            var mk = cmd_alloc(PATH_MAX_BYTES);
+            reply_index_marker(store, board, mk);
+            xunlink(mk);
+            if (store_name_exists(mk) == 1) { store_lock_release(lock_fd); return 0 - 1; }
+        }
+    }
+
     var dir = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, dir);
     var prc = store_publish(dir, path_buf, fbuf, flen, 1);   # crash-safe, exclusive (arena.cyr)
@@ -1017,6 +1058,226 @@ fn post_reply_to(buf, len): i64 {
     return id;
 }
 
+# === Reply index (1.9.1, ADR 0027) ===
+#
+#   <board path>/.replies/<parent>     one "\n<child>\n" record per reply to <parent>
+#   <board path>/.replies/.complete    the index covers every post on the board
+#
+# Why. `read` lists a post's replies, and ADR 0005 found them by opening EVERY post
+# on the board: O(n) per `read` — 3.7 ms on 500 posts, 29 ms on 4,096 at 1.9.0, and
+# under poll that is the whole server's time. It also only saw the newest 4,096
+# posts (post_list's cap), so older replies were never listed. With the index a
+# `read` opens one file plus each listed reply: O(replies), not O(posts).
+#
+# The post files stay the source of truth (ADR 0005's objection to a sidecar was
+# the two-file invariant): every child an index file names is VERIFIED — its own
+# Reply-To must name the parent — before it is listed, so a stale or ghost record
+# is dropped, never shown. Ordering makes the remaining failure impossible: a
+# reply's record is appended and fsynced BEFORE the post is published (post_new),
+# so a crash leaves a ghost (verified away) and never a reply missing from a
+# complete index, whose silence `read` trusts.
+#
+# Records are framed "\n<id>\n" so a record torn by a crash can never merge with
+# the next one; duplicates (a rebuild after a crashed build, an id reused after a
+# failed publish) are removed at read. A board that predates the index keeps the
+# scan until it is built — by `serve` at start (account.cyr's prepare child) or by
+# the board's next reply. An operator who adds or edits posts by hand deletes
+# `.replies/`; the next `serve` or reply rebuilds it.
+enum ReplyIndex {
+    REPLY_INDEX_CAP = 131072;    # bytes of one parent's records read
+    REPLY_INDEX_IDS = 8192;      # records parsed per parent (oldest first)
+}
+
+# `<board path>/.replies` (NUL-terminated) into out_buf; returns its length.
+fn reply_index_dir(store, board, out_buf): i64 {
+    var pos = board_path(store, board, out_buf);
+    memcpy(out_buf + pos, "/.replies", 10);       # incl. NUL
+    return pos + 9;
+}
+
+# `<board path>/.replies/<parent id>` into out_buf; returns its length.
+fn reply_index_path(store, board, parent_id, out_buf): i64 {
+    var pos = reply_index_dir(store, board, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;       # '/'
+    var idbuf[24];
+    var idlen = fmt_int_buf(parent_id, &idbuf);
+    memcpy(out_buf + pos, &idbuf, idlen); pos = pos + idlen;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# `<board path>/.replies/.complete` into out_buf; returns its length.
+fn reply_index_marker(store, board, out_buf): i64 {
+    var pos = reply_index_dir(store, board, out_buf);
+    memcpy(out_buf + pos, "/.complete", 11);      # incl. NUL
+    return pos + 10;
+}
+
+# 1 if the board's reply index is complete (its silence can be trusted).
+fn reply_index_complete(store, board): i64 {
+    var mk[512];   # PATH_MAX_BYTES
+    reply_index_marker(store, board, &mk);
+    return store_name_exists(&mk);
+}
+
+# Append the record "<child> replies to <parent>" (the caller holds the board
+# lock). `durable` 1 fsyncs the record and the `.replies` directory — post_new,
+# before the post exists; 0 inside a build, which syncs once at the end. Returns
+# 0 or -1. Stack buffers only: the build calls this once per reply.
+fn reply_index_add(store, board, parent_id, child_id, durable): i64 {
+    var dir[512];   # PATH_MAX_BYTES
+    reply_index_dir(store, board, &dir);
+    if (store_ensure(&dir) != 0) { return 0 - 1; }
+    var path[512];
+    reply_index_path(store, board, parent_id, &path);
+    var rec[32];
+    store8(&rec, 10);
+    var n = fmt_int_buf(child_id, (&rec) + 1);
+    store8((&rec) + 1 + n, 10);
+    if (store_append_locked(&path, &rec, n + 2, durable) != n + 2) { return 0 - 1; }
+    if (durable == 1) { store_dir_sync(&dir); }
+    return 0;
+}
+
+# Build the board's index from its posts (the caller holds the board lock); a
+# no-op once `.complete` exists. Reads every post's header block — every post, not
+# post_list's newest 4,096 — so replies the scan never saw are indexed too.
+# Returns 0, or -1 if it could not be completed (reads keep scanning).
+fn reply_index_ensure(store, board): i64 {
+    if (reply_index_complete(store, board) == 1) { return 0; }
+    var dir[512];   # PATH_MAX_BYTES
+    reply_index_dir(store, board, &dir);
+    if (store_ensure(&dir) != 0) { return 0 - 1; }
+    var bpath[512];
+    board_path(store, board, &bpath);
+    var n = store_dir_scan(&bpath);
+    if (n < 0) { return 0 - 1; }
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        var id = parse_post_id(store_dir_name(i));
+        if (id > 0) {
+            store64(g_dir_ids + c * 8, id);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    sort_i64_asc(g_dir_ids, c);
+    var head[2048];   # POST_HEAD_SCAN
+    var ok = 1;
+    i = 0;
+    while (i < c) {
+        var cid = load64(g_dir_ids + i * 8);
+        var hl = post_read(store, board, cid, &head, POST_HEAD_SCAN);
+        if (hl > 0) {
+            var parent = post_reply_to(&head, hl);
+            if (parent > 0) {
+                if (reply_index_add(store, board, parent, cid, 0) != 0) { ok = 0; }
+            }
+        }
+        i = i + 1;
+    }
+    if (ok == 0) { return 0 - 1; }
+    sys_sync();        # every record on disk before the marker that vouches for them
+    var mk[512];
+    reply_index_marker(store, board, &mk);
+    if (store_publish(&dir, &mk, "complete\n", 9, 1) != 0) {
+        if (store_name_exists(&mk) == 0) { return 0 - 1; }
+    }
+    return 0;
+}
+
+# Build one board's index under its lock, unless it is already complete.
+fn reply_index_prepare_board(store, board): i64 {
+    if (reply_index_complete(store, board) == 1) { return 0; }
+    var lk = store_lock_acquire(store, board);
+    if (lk < 0) { return 0 - 1; }
+    var r = reply_index_ensure(store, board);
+    store_lock_release(lk);
+    return r;
+}
+
+# Build the reply index of every board that predates it — `serve` runs this
+# once, in its startup child (main.cyr). A store that does not exist is left
+# alone: a server that starts must not create it.
+fn reply_index_prepare(store): i64 {
+    if (store_name_exists(store) == 0) { return 0; }
+    reply_index_prepare_board(store, "main");
+    var names = cmd_alloc(1024 * 8);
+    var nb = boards_list(store, names, 1024);
+    var i = 0;
+    while (i < nb) {
+        reply_index_prepare_board(store, load64(names + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `parent`'s replies from a COMPLETE index into out_ids: ascending, without
+# duplicates, each verified against its own Reply-To; up to max_ids. Returns the
+# count, or -1 when the index cannot answer (not complete, or unreadable) — the
+# caller then scans.
+fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
+    if (reply_index_complete(store, board) == 0) { return 0 - 1; }
+    var path[512];   # PATH_MAX_BYTES
+    reply_index_path(store, board, parent_id, &path);
+    var buf = cmd_alloc(REPLY_INDEX_CAP);
+    var n = store_read_all(&path, buf, REPLY_INDEX_CAP);
+    if (n < 0) {
+        if (store_read_missing(n) == 1) { return 0; }   # no replies
+        return 0 - 1;
+    }
+    var ids = cmd_alloc(REPLY_INDEX_IDS * 8);
+    var c = 0;
+    var cur = 0;
+    var digits = 0;
+    var i = 0;
+    while (i <= n) {
+        var ch = 10;
+        if (i < n) { ch = load8(buf + i) & 0xFF; }
+        if (ch >= 48) {
+            if (ch <= 57) {
+                if (digits < 18) { cur = cur * 10 + (ch - 48); }
+                digits = digits + 1;
+                i = i + 1;
+                continue;
+            }
+        }
+        # any other byte ends a record (a garbled one is dropped by verification)
+        if (digits > 0) {
+            if (digits <= 18) {
+                if (c < REPLY_INDEX_IDS) { store64(ids + c * 8, cur); c = c + 1; }
+            }
+        }
+        cur = 0;
+        digits = 0;
+        i = i + 1;
+    }
+    sort_i64_asc(ids, c);
+    var head[2048];   # POST_HEAD_SCAN
+    var out = 0;
+    var prev = 0;
+    var k = 0;
+    while (k < c) {
+        var cid = load64(ids + k * 8);
+        if (out >= max_ids) { k = c; continue; }
+        if (cid > 0) {
+            if (cid != prev) {
+                var hl = post_read(store, board, cid, &head, POST_HEAD_SCAN);
+                if (hl > 0) {
+                    if (post_reply_to(&head, hl) == parent_id) {
+                        store64(out_ids + out * 8, cid);
+                        out = out + 1;
+                    }
+                }
+            }
+        }
+        prev = cid;
+        k = k + 1;
+    }
+    return out;
+}
+
 # Find every reply (in `board`) whose Reply-To header equals
 # `parent_id`. Writes child IDs (sorted ascending) into out_ids;
 # returns count. O(n) in the board's post count per ADR 0005.
@@ -1029,6 +1290,10 @@ fn post_reply_to(buf, len): i64 {
 # terminator is not inside the scan simply has no Reply-To here (header_get
 # finds no body offset), which is the right answer for a hand-made file.
 fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
+    # 1.9.1 — the reply index answers when it is complete (ADR 0027); the scan
+    # below is for a board whose index has not been built yet.
+    var ri = reply_index_read(store, board, parent_id, out_ids, max_ids);
+    if (ri >= 0) { return ri; }
     var ids = cmd_alloc(DIRENT_ID_MAX * 8);
     var count = post_list(store, board, ids, DIRENT_ID_MAX);
     var fbuf = cmd_alloc(POST_HEAD_SCAN);

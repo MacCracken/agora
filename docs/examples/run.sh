@@ -99,6 +99,7 @@ TABLE="
 30 own    -
 31 own    -
 32 own    -
+33 own    -
 "
 
 pass=0; fail=0; skipped=0; failed=""

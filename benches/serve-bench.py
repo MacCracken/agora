@@ -17,8 +17,9 @@
 #           server, or RSS moves in 2 MB steps)
 #   world   world-lock transactions/s with 1..16 concurrent writers (the ADR
 #           0010 flock + read + write-temp + fsync + rename), and no lost update
-#   reply   milliseconds per `read`, whose reply scan (ADR 0005) opens every post
-#           on the board — the number roadmap § 1.9.1's index decision waits on
+#   reply   milliseconds per `read`: `read 1` (a thread holding a tenth of the
+#           board) and `read 2` (no replies) — the scan (ADR 0005) cost both the
+#           same, O(posts); the 1.9.1 reply index (ADR 0027) costs O(replies)
 #   login   milliseconds per `login <unknown handle>` against N registered users,
 #           and the server's start-to-listening time on a store of that size —
 #           1.9.0's handle index (account.cyr) is built once on that first start
@@ -205,7 +206,7 @@ def bench_world(store, runs):
 
 
 def bench_reply(store, runs):
-    print("reply — `read 1` latency vs board size (ADR 0005 scan-on-read; 1 KB posts; fork, so no poll-sweep wait)")
+    print("reply — `read` latency vs board size (1 KB posts, 1 in 10 a reply to post 1; fork, so no poll-sweep wait)")
     for nposts in (500, 2000, 4096):
         rstore = os.path.join(store, "reply-%d" % nposts)
         shutil.rmtree(rstore, ignore_errors=True)
@@ -215,7 +216,7 @@ def bench_reply(store, runs):
             with open(os.path.join(rstore, "%d.txt" % i), "w") as f:
                 rt = "Reply-To: 1\r\n" if i % 10 == 0 else ""
                 f.write("Subject: post %d\r\n%s\r\n%s\r\n" % (i, rt, body))
-        per = []
+        per = {1: [], 2: []}
         for _ in range(runs):
             p = start("fork", rstore)
             try:
@@ -223,22 +224,24 @@ def bench_reply(store, runs):
                 buf = b""
                 while b"> " not in buf:
                     buf += s.recv(65536)
-                n = 20
-                t0 = time.time()
-                for _ in range(n):
-                    s.sendall(b"read 1\r\n")
-                    buf = b""
-                    while not buf.endswith(b"> "):
-                        d = s.recv(1 << 20)
-                        if not d:
-                            break
-                        buf += d
-                per.append((time.time() - t0) * 1000 / n)
+                for pid in (1, 2):
+                    n = 20
+                    t0 = time.time()
+                    for _ in range(n):
+                        s.sendall(b"read %d\r\n" % pid)
+                        buf = b""
+                        while not buf.endswith(b"> "):
+                            d = s.recv(1 << 20)
+                            if not d:
+                                break
+                            buf += d
+                    per[pid].append((time.time() - t0) * 1000 / n)
                 s.close()
             finally:
                 stop(p)
-        print("  %4d posts  %7.2f ms per read (runs %s)" % (
-            nposts, statistics.median(per), "/".join("%.2f" % x for x in per)))
+        print("  %4d posts  read 1 (%3d replies) %7.2f ms (runs %s)   read 2 (none) %6.2f ms (runs %s)" % (
+            nposts, nposts // 10, statistics.median(per[1]), "/".join("%.2f" % x for x in per[1]),
+            statistics.median(per[2]), "/".join("%.2f" % x for x in per[2])))
 
 
 def make_users(store, n):

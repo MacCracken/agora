@@ -675,21 +675,32 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
         }
 
-        # M5-F: list child reply IDs (one-deep). Enumerated by
-        # scanning the board for posts with Reply-To: <id>.
+        # M5-F: list child reply IDs (one-deep) — from the reply index since
+        # 1.9.1 (ADR 0027), the board scan before it.
+        #
+        # 1.9.1 — the line is composed in 2 KB pieces rather than sent id by id:
+        # under fork every send_buf is a write(2), and a 409-reply thread cost ~800
+        # of them (~5.6 ms) — more than finding the replies. Same bytes on the wire.
         var rbuf = cmd_alloc(DIRENT_ID_MAX * 8);
         var rcount = replies_to(g_store_buf, current_board, id, rbuf, DIRENT_ID_MAX);
         if (rcount > 0) {
-            send_str(cfd, "\r\nReplies: ");
+            var rline[2048];
+            memcpy(&rline, "\r\nReplies: ", 11);
+            var rlp = 11;
             var ri = 0;
             while (ri < rcount) {
-                if (ri > 0) { send_str(cfd, ", "); }
-                var rid_buf[24];
-                var rid_len = fmt_int_buf(load64(rbuf + ri * 8), &rid_buf);
-                send_buf(cfd, &rid_buf, rid_len);
+                if (rlp > 2000) { send_buf(cfd, &rline, rlp); rlp = 0; }
+                if (ri > 0) {
+                    store8((&rline) + rlp, 44);          # ','
+                    store8((&rline) + rlp + 1, 32);      # ' '
+                    rlp = rlp + 2;
+                }
+                rlp = rlp + fmt_int_buf(load64(rbuf + ri * 8), (&rline) + rlp);
                 ri = ri + 1;
             }
-            send_str(cfd, "\r\n");
+            store8((&rline) + rlp, 13);
+            store8((&rline) + rlp + 1, 10);
+            send_buf(cfd, &rline, rlp + 2);
         }
         return MODE_COMMAND;
     }
@@ -1758,7 +1769,7 @@ fn door_post_score(game): i64 {
     door_leaderboard_path(game, path);
     var line = cmd_alloc(256);
     var n = door_format_score(g_session_handle, score, rank, line);
-    store_append_locked(path, line, n);
+    store_append_locked(path, line, n, 0);
     return 0;
 }
 
@@ -3615,9 +3626,10 @@ fn cmd_serve_on(port): i64 {
     g_shutdown_sigfd   = shutdown_signals_arm();
     g_shutdown_siginfo = alloc(SIGINFO_BYTES);
 
-    # 1.9.0 — the handle index (account.cyr): built once for a store that
-    # predates it, before any `login` can need it. A failure only means logins
-    # keep scanning `.users/`, as before. On Linux it runs in a short-lived child:
+    # 1.9.0 — the handle index (account.cyr), and since 1.9.1 the reply index
+    # (board.cyr, ADR 0027): each built once for a store that predates it, before
+    # any `login` or `read` can need it. A failure only means logins scan `.users/`
+    # and reads scan the board, as before. On Linux they run in a short-lived child:
     # the build is the parent's first use of the per-command arena and the
     # directory workspace, and every fork-mode connection would inherit both —
     # built in the parent, a connection child measured 64-68 KB PSS against
@@ -3626,16 +3638,21 @@ fn cmd_serve_on(port): i64 {
     # loop starts. agnos always polls (one process), so it builds in place.
     #ifdef CYRIUS_TARGET_AGNOS
     account_index_prepare(g_store_buf);
+    reply_index_prepare(g_store_buf);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var ipid = sys_fork();
     if (ipid == 0) {
         shutdown_signals_child_reset(g_shutdown_sigfd);
         account_index_prepare(g_store_buf);
+        reply_index_prepare(g_store_buf);
         sys_exit(0);
     }
     if (ipid > 0) { sys_waitpid(ipid, 0, 0); }
-    else { account_index_prepare(g_store_buf); }
+    else {
+        account_index_prepare(g_store_buf);
+        reply_index_prepare(g_store_buf);
+    }
     #endif
 
     # 1.7.1 — cyrius 6.6.x value form: every Result producer below returns a

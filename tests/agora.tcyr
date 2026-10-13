@@ -6324,6 +6324,7 @@ fn t233_path(root, leaf): i64 {
 # Remove `path` and everything under it (a test store), like tests/serve.tcyr's
 # st_rmtree: the scan workspace is copied first, since recursion reuses it.
 fn t_rmtree(path): i64 {
+    if (xunlink(path) == 0) { return 0; }     # a file, a FIFO, a link: never opened
     var n = store_dir_scan(path);
     if (n < 0) { xunlink(path); return 0; }
     var names = alloc(n * 8 + 8);
@@ -6388,7 +6389,7 @@ fn t233_store_open_regular_only(): i64 {
     if (fl >= 0)                    { test_fail(name, "a FIFO was opened as a lock"); return 1; }
     if (store_lock_open(dangle) >= 0) { test_fail(name, "a lock opened through a dangling link"); return 1; }
     if (file_exists(victim) != 0)   { test_fail(name, "the dangling link's target was created"); return 1; }
-    if (store_append_locked(lnk, "x", 1) >= 0) { test_fail(name, "an append went through a link"); return 1; }
+    if (store_append_locked(lnk, "x", 1, 0) >= 0) { test_fail(name, "an append went through a link"); return 1; }
     if (store_read_all(reg, buf, 64) != 20) { test_fail(name, "the link's target changed"); return 1; }
     var tmp = alloc(256);
     var sl = strlen(snap);
@@ -6603,6 +6604,139 @@ fn t237_index_prepare(): i64 {
     if (store_name_exists(mk) != 1)        { test_fail(name, "the index was not built"); return 1; }
     var got = alloc(ACCOUNT_FP_BUF_BYTES);
     if (account_index_lookup(root, "zax", got) != 1) { test_fail(name, "zax not indexed"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t238 — 1.9.1: the reply index (`<board>/.replies/`, ADR 0027). A board of
+# hand-written posts — what a pre-1.9.1 store holds — answers by the scan until
+# the index is built, then by the index; a complete index's silence is trusted (a
+# reply added behind its back is not listed until it is rebuilt, which proves the
+# scan is no longer running); a rebuild's duplicates, ghost records, a torn
+# record and an unreadable index file change nothing; a reply made by post_new is
+# indexed; and the build and the read take no per-iteration arena memory.
+fn t238_post(root, id, reply_to): i64 {
+    var p = alloc(PATH_MAX_BYTES);
+    build_post_path(root, "zax", id, p);
+    var b = alloc(96);
+    var n = 0;
+    memcpy(b, "Subject: s\r\n", 12); n = 12;
+    if (reply_to > 0) {
+        memcpy(b + n, "Reply-To: ", 10); n = n + 10;
+        n = n + fmt_int_buf(reply_to, b + n);
+        memcpy(b + n, "\r\n", 2); n = n + 2;
+    }
+    memcpy(b + n, "\r\nbody\r\n", 8); n = n + 8;
+    file_write_all(p, b, n);
+    return 0;
+}
+# Assert replies_to(root, zax, parent) is exactly the `want` ids (count `wn`).
+fn t238_expect(root, parent, want, wn): i64 {
+    var got = alloc(32 * 8);
+    var c = replies_to(root, "zax", parent, got, 32);
+    if (c != wn) { return 0; }
+    var i = 0;
+    while (i < wn) {
+        if (load64(got + i * 8) != load64(want + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+# (t238 body)
+fn t238_reply_index(): i64 {
+    var name = "t238_reply_index";
+    var root = "/tmp/agora-t238-store";
+    t_rmtree(root);
+    board_ensure(root, "zax");
+    t238_post(root, 1, 0);
+    t238_post(root, 2, 1);
+    t238_post(root, 3, 0);
+    t238_post(root, 4, 1);
+    t238_post(root, 5, 2);
+    var w = alloc(8 * 8);
+    store64(w, 2); store64(w + 8, 4); store64(w + 16, 6); store64(w + 24, 7);
+    var w5 = alloc(8);
+    store64(w5, 5);
+    var got = alloc(32 * 8);
+    if (reply_index_read(root, "zax", 1, got, 32) != (0 - 1)) {
+        test_fail(name, "an unbuilt index answered");
+        return 1;
+    }
+    if (t238_expect(root, 1, w, 2) == 0)       { test_fail(name, "scan before the build"); return 1; }
+    cmd_alloc(8);
+    var before = g_cmd_arena_off;
+    if (reply_index_ensure(root, "zax") != 0)  { test_fail(name, "build"); return 1; }
+    # One 16-byte Str for its one directory scan (store_dir_scan's path_str);
+    # nothing per post — a per-reply allocation would exceed it.
+    if (g_cmd_arena_off - before > 16)         { test_fail(name, "the build took arena memory per post"); return 1; }
+    if (reply_index_complete(root, "zax") != 1) { test_fail(name, "no .complete"); return 1; }
+    if (t238_expect(root, 1, w, 2) == 0)       { test_fail(name, "index: replies to 1"); return 1; }
+    if (t238_expect(root, 2, w5, 1) == 0)      { test_fail(name, "index: replies to 2"); return 1; }
+    if (t238_expect(root, 3, w, 0) == 0)       { test_fail(name, "index: no replies to 3"); return 1; }
+    # A reply written behind the index's back: a complete index does not see it.
+    t238_post(root, 6, 1);
+    if (t238_expect(root, 1, w, 2) == 0)       { test_fail(name, "the scan ran under a complete index"); return 1; }
+    var mk = alloc(PATH_MAX_BYTES);
+    reply_index_marker(root, "zax", mk);
+    xunlink(mk);
+    if (t238_expect(root, 1, w, 3) == 0)       { test_fail(name, "no scan once .complete is gone"); return 1; }
+    # Rebuilt over the old records: duplicates, removed at read.
+    if (reply_index_ensure(root, "zax") != 0)  { test_fail(name, "rebuild"); return 1; }
+    if (t238_expect(root, 1, w, 3) == 0)       { test_fail(name, "duplicates after a rebuild"); return 1; }
+    # Ghosts: post 3 (not a reply to 1), post 99 (no such post), and a torn record.
+    reply_index_add(root, "zax", 1, 3, 0);
+    reply_index_add(root, "zax", 1, 99, 0);
+    var rp = alloc(PATH_MAX_BYTES);
+    reply_index_path(root, "zax", 1, rp);
+    store_append_locked(rp, "\n1", 2, 0);
+    # A real reply through post_new: indexed before it is published.
+    var ph = alloc(64);
+    memset(ph, 0, 64);
+    post_headers_set_reply_to(ph, 1);
+    if (post_new(root, "zax", ph, "reply body", 10) != 7) { test_fail(name, "post_new reply"); return 1; }
+    if (t238_expect(root, 1, w, 4) == 0)       { test_fail(name, "ghosts, a torn record or the new reply"); return 1; }
+    # One read takes its two buffers and nothing per listed reply (the arena is a
+    # per-command budget; process_rx resets it each line, as this does).
+    cmd_scratch_reset();
+    reply_index_read(root, "zax", 1, got, 32);
+    if (g_cmd_arena_off != REPLY_INDEX_CAP + REPLY_INDEX_IDS * 8) {
+        test_fail(name, "the read took arena memory per reply");
+        return 1;
+    }
+    # An unreadable index file (a FIFO) sends the read back to the scan.
+    xunlink(rp);
+    sys_mknodat(0 - 100, rp, 0x1000 | 0x1A4, 0);
+    var fr = reply_index_read(root, "zax", 1, got, 32);
+    var fs = t238_expect(root, 1, w, 4);
+    xunlink(rp);
+    if (fr != (0 - 1))                         { test_fail(name, "a FIFO index file answered"); return 1; }
+    if (fs == 0)                               { test_fail(name, "the scan after an unreadable index"); return 1; }
+    # A FIFO where a DIRECTORY belongs: refused by the stat, never opened.
+    var fd = alloc(PATH_MAX_BYTES);
+    board_path(root, "fifo", fd);
+    sys_mknodat(0 - 100, fd, 0x1000 | 0x1A4, 0);
+    var ds = store_dir_scan(fd);
+    xunlink(fd);
+    if (ds != (0 - 1))                         { test_fail(name, "a FIFO was scanned as a directory"); return 1; }
+    if (store_is_dir(root) != 1)               { test_fail(name, "the store is a directory"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t239 — 1.9.1: `serve`'s reply-index build. A store that does not exist is not
+# created; an existing one gets every board indexed — `main` and named boards.
+fn t239_reply_index_prepare(): i64 {
+    var name = "t239_reply_index_prepare";
+    var root = "/tmp/agora-t239-store";
+    t_rmtree(root);
+    reply_index_prepare(root);
+    if (store_name_exists(root) != 0)            { test_fail(name, "a starting server created the store"); return 1; }
+    board_ensure(root, "zax");
+    board_ensure(root, "pac");
+    reply_index_prepare(root);
+    if (reply_index_complete(root, "main") != 1) { test_fail(name, "main not indexed"); return 1; }
+    if (reply_index_complete(root, "zax") != 1)  { test_fail(name, "zax not indexed"); return 1; }
+    if (reply_index_complete(root, "pac") != 1)  { test_fail(name, "pac not indexed"); return 1; }
     test_pass(name);
     return 0;
 }
@@ -6864,6 +6998,8 @@ fn main(): i64 {
     t235_post_publish_crash_safe();
     t236_handle_index();
     t237_index_prepare();
+    t238_reply_index();
+    t239_reply_index_prepare();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

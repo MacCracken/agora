@@ -1,9 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.9.0 (durable posts + store hardening) shipped**, closing the 1.8.x line
-> (its sections are gone; its row is in § Shipped). Next slot: **1.9.1**, the reply index. Earlier the same
-> day: 1.8.2 (tooling), which folded the planned 1.8.3 into it; 1.8.1 (code audit + repair, 2026-10-12) and
-> that day's re-plan into 1.8.x → 1.12.x slots (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.9.1 (the reply index) shipped**: `read` is O(replies), not O(posts)
+> (ADR 0027). Next slot: **1.9.2**, board policy + operator CLI. Earlier the same day: 1.9.0 (durable posts +
+> store hardening), 1.8.2 (tooling); 1.8.1 (code audit + repair) and the re-plan into 1.8.x → 1.12.x slots on
+> 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -31,7 +31,7 @@ did) and the slots after it shift.
 | Slot | Theme | Kind | Status |
 |---|---|---|---|
 | **1.9.0** | Durable posts + store hardening | correctness / security | ✅ 2026-10-13 |
-| **1.9.1** | Reply index | scale | planned — the numbers are in (see § 1.9.1) |
+| **1.9.1** | Reply index | scale | ✅ 2026-10-13 |
 | **1.9.2** | Board policy + operator CLI | feature | planned |
 | **1.10.0** | Telnet conformance | protocol | planned |
 | **1.10.1** | Terminal-aware output | protocol / UX | planned |
@@ -53,11 +53,12 @@ FIFO hung the whole poll server; ADR 0025); posts published crash-safely by temp
 login 16.98 → 0.16 ms at 3,000 users; ADR 0026); `.admins` read to the end (audit 1.8.1 M4). Detail:
 CHANGELOG `[1.9.0]`. Delete this section when the 1.9.x line closes.
 
-### 1.9.1 — Reply index
+### 1.9.1 — Reply index ✅
 
-| Item | Source | Effort |
-|---|---|---:|
-| Reply enumeration is scan-on-read, O(n) per `read`. **Measured at 1.8.2**: 3.4 ms on 500 posts, 13.0 ms on 2,000, 27.7 ms on 4,096 — linear, ~6.7 µs per post (BENCHMARKS.md § Serve-level baselines); **1.9.0's per-open `fstat` (ADR 0025) adds ~0.5 µs per post**: 3.7 / 14.2 / 29.2 ms. Under poll that time is the whole server's (one `read` per session per sweep). An index (a per-board `parent → children` file maintained at post time, under the board lock) earns its slot once boards pass a few thousand posts; below that the scan is cheaper to keep. | ADR 0005; `benches/serve-bench.py reply` | large |
+Shipped 2026-10-13 — `<board>/.replies/<parent>`, verified against the posts (ADR 0027, amending 0005): a post
+with no replies 23.7 → 0.18 ms at 4,096 posts, a 409-reply thread 29.4 → 2.5 ms, and replies older than the
+newest 4,096 posts listed at last. Also the directory half of the store's FIFO hardening (ADR 0025). Detail:
+CHANGELOG `[1.9.1]`. Delete this section when the 1.9.x line closes.
 
 ### 1.9.2 — Board policy + operator CLI
 
@@ -144,6 +145,7 @@ RFC 854 and RFC 1184 are authoritative; each row is a deviation, and per CLAUDE.
 | **Sigil identity hand-off across the Descent link** — carry `g_session_fp` / handle into the MUD so a citizen does not re-authenticate. The project's long-standing named "next". | Yeoman's Descent has **no external-identity path** (name + passphrase only), so this needs MUD-side protocol work first. Open questions unchanged from [ADR 0017](../adr/0017-descent-link-gateway.md) § Decision: token format, trust model, co-located vs remote. | large |
 | **macOS / Windows ports** | Gated on `lib/net.cyr` backends upstream; the gate has moved since the 1.0.0 note — re-check what actually remains. `$HOME` keyfile resolution (`/proc/self/environ`) is blocked on the same work. | large |
 | **Tell a slow reader from a stalled one by delivered bytes** (fork mode) — today a write that gets no send-buffer room for 60 s drops the client; the exact test is "did the client acknowledge anything in 60 s", which keeps any reader that is still reading however full the kernel's queue | A `lib/net.cyr` primitive for the unacknowledged-byte count (`SIOCOUTQ` / `TCP_INFO`); agora does not issue raw socket syscalls. Found at 1.8.2 (CHANGELOG § Fixed). | small |
+| **Close the directory guard's `stat`-then-`open` window** — `store_dir_scan` refuses a non-directory with a `stat` first, because the stdlib's `dir_list_into` opens with a plain `O_RDONLY` and a FIFO there blocks; the swap race between the two closes when the stdlib opens with `O_DIRECTORY` | cyrius `docs/development/issues/2026-10-13-dir-list-opens-directory-without-o-directory.md` (filed at 1.9.1; CHANGELOG § Security) | small |
 | **Binary strip / DCE-aware emit** — promised three times as a "v1.x close-out concern" | Toolchain-side: `CYRIUS_DCE=1` NOP-fills dead code but keeps its bytes and all `.bss` (the ~375 KB static-data warning). | medium |
 
 ---
@@ -210,9 +212,9 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door / chatbot backlog.
-- [`docs/adr/`](../adr/) — 26 ADRs (0001–0026). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
+- [`docs/adr/`](../adr/) — 27 ADRs (0001–0027). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
   0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization; 0025–0026
-  the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index).
+  the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index); 0027 the reply index.
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2,
   closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut), 2026-10-12-audit-1.8.1 (closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).

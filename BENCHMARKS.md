@@ -118,6 +118,19 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
   file (ADR 0025). Interleaved A/B on one machine, 1.8.2 → 1.9.0: **3.38 → 3.71 ms** at 500 posts,
   **13.1 → 14.2 ms** at 2,000, **27.3 → 29.2 ms** at 4,096 (load average 4–6 during the run, so the absolute
   numbers sit a little above the 1.8.2 table; the A/B is what holds).
+- **1.9.1 — the reply index (ADR 0027) ends the scan.** `read` now opens one index file and verifies each
+  listed reply; the bench times `read 2` (no replies) beside `read 1` (a tenth of the board replies to it).
+  Interleaved A/B, load average < 1:
+
+  | Board | `read 2` (no replies), 1.9.0 → 1.9.1 | `read 1` (n/10 replies), 1.9.0 → 1.9.1 |
+  |---|---:|---:|
+  | 500 posts | 2.83 → **0.18 ms** | 3.73 → **0.49 ms** |
+  | 2,000 posts | 10.99 → **0.18 ms** | 14.11 → **1.30 ms** |
+  | 4,096 posts | 23.74 → **0.18 ms** | 29.39 → **2.46 ms** |
+
+  Flat in board size; ~5.6 µs per listed reply (its verification read). Part of the `read 1` win is the
+  `Replies:` line itself: it went out one `write(2)` per id under fork (~5.6 ms for 409 ids) and is now composed
+  in 2 KB pieces — the bytes unchanged.
 - **Found by this bench and fixed in 1.8.2: a ~40 ms Nagle stall on every multi-part response under
   fork.** The first run read a flat ~41 ms per `read` at every board size: a fork worker writes a response
   as several small sends, and Nagle held each one after the first until the client's delayed (~40 ms) ACK.
