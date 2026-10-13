@@ -1,9 +1,9 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.9.2 (board policy + operator CLI) shipped, closing the 1.9.x line**
-> (its sections are gone; its row is in § Shipped). Next slot: **1.10.0**, telnet conformance. The same day:
-> 1.9.1 (reply index), 1.9.0 (durable posts + store hardening), 1.8.2 (tooling); 1.8.1 and the re-plan into
-> 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.10.0 (telnet conformance) shipped**: the seven RFC 854 / 1184 deviations
+> closed (ADR 0029). Next slot: **1.10.1**, terminal-aware output. The same day: 1.9.2 closed the 1.9.x line;
+> 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in
+> [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -31,7 +31,7 @@ did) and the slots after it shift.
 | Slot | Theme | Kind | Status |
 |---|---|---|---|
 | **1.9.2** | Board policy + operator CLI (closes the 1.9.x line: 1.9.0 store hardening, 1.9.1 reply index) | feature | ✅ 2026-10-13 |
-| **1.10.0** | Telnet conformance | protocol | planned |
+| **1.10.0** | Telnet conformance | protocol | ✅ 2026-10-13 |
 | **1.10.1** | Terminal-aware output | protocol / UX | planned |
 | **1.11.0** | Descent as a poll state + serve-model debt | structure | planned |
 | **1.11.1** | Enforced module invariants | structure | planned |
@@ -43,19 +43,14 @@ did) and the slots after it shift.
 
 ## 1.10.x — the wire
 
-### 1.10.0 — Telnet conformance
+### 1.10.0 — Telnet conformance ✅
 
-RFC 854 and RFC 1184 are authoritative; each row is a deviation, and per CLAUDE.md a deviation is a bug.
-
-| Item | Source | Effort |
-|---|---|---:|
-| **AYT** (Are You There) generates no response; RFC 854 expects visible evidence. No test pins either behaviour. | `src/telnet.cyr` | small |
-| `telnet_announce` never sends **DO LINEMODE** — the Q-method machinery only engages if the client volunteers first | `src/telnet.cyr` | small |
-| The LINEMODE **SLC** arm describes a validation that was never written | `src/telnet.cyr` | small |
-| Unrecognised subnegotiations (STATUS, NEW_ENVIRON, …) are silently dropped "for now" | `src/telnet.cyr` | medium |
-| LINEMODE **FORWARDMASK / SOFT_TAB / LIT_ECHO** — parsed or enumerated, then deferred | `src/telnet.cyr` | medium |
-| **BS/DEL do not edit the line** for clients that never negotiate LINEMODE. 1.6.5 stopped them being *stored*; editing is still open, and will move `t32` again. | 2026-07-26 audit § INFO | small |
-| **NVT newlines on egress** — a CLI-authored body keeps a bare CR or LF-only lines and goes out that way (RFC 854 wants CR LF / CR NUL); wire-authored bodies are always CR LF. Normalize in `send_text`, carrying CR state across chunks. | audit 1.8.1 I12 | small |
+Shipped 2026-10-13 — all seven rows (ADR 0029): AYT answers `[Yes]`; the announce asks DO LINEMODE and agora
+answers MODE (RFC 1184 § 2.2 — a reply it never sent) and SLC (§ 5.5 — validated, bounded, IAC-doubled),
+hands echoing to an editing client, and refuses FORWARDMASK and unagreed subnegotiations by rule; BS / DEL /
+IAC EC / IAC EL edit the line (a whole UTF-8 character at a time); egress text is NVT (CR LF, CR NUL). A real
+`telnet` client negotiates the whole exchange (smoke 35 § G). Detail: CHANGELOG `[1.10.0]`. Delete this
+section when the 1.10.x line closes.
 
 ### 1.10.1 — Terminal-aware output
 
@@ -71,6 +66,7 @@ RFC 854 and RFC 1184 are authoritative; each row is a deviation, and per CLAUDE.
 
 | Item | Source | Effort |
 |---|---|---:|
+| **Returning from Descent does not re-assert agora's telnet options** — the proxy passes the MUD's ECHO (and, since 1.10.0, LINEMODE) negotiation through raw, so the client's echo / editing state can come back out of step with agora's (doubled or missing echo). Re-announce, or track the proxied options, on return. | ADR 0029 § Consequences; `src/descent.cyr` | small |
 | **The Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions for the whole visit, and a blackholed endpoint still costs up to 4 s per connect (1.8.1 added a 30 s redial cooldown and has the proxy watch the shutdown signalfd — audit L19). The fix is making Descent a session *state* in the poll loop rather than a blocking call; write the ADR first. | `src/descent.cyr` (documented, not fixed); [ADR 0017](../adr/0017-descent-link-gateway.md), [ADR 0023](../adr/0023-dual-serve-model.md) | large |
 | `AGORA_SERVE=epoll` is accepted and silently aliased to `poll`; implement it or reject the value. **Measured at 1.8.2**: the poll loop accepts exactly 50 connections/s sequentially — one per 20 ms sweep, because it sleeps instead of waiting for readiness — against fork's ~4,100; a `poll(2)`/epoll readiness wait removes that floor (and the 0–20 ms latency it adds to every poll-mode command). | `src/main.cyr`; BENCHMARKS.md § Serve-level baselines | medium |
 | `PR_SET_PDEATHSIG` for orphan-on-parent-crash under the fork model | ADR 0007 § Out of scope | small |

@@ -113,7 +113,7 @@ def test_l1_store_bound():
 
 
 def test_l2_control_bytes(keypath):
-    """BEL / BS / DEL typed into a post body must not reach storage."""
+    """BEL / BS / DEL typed into a post body must not reach storage (and, since 1.10.0, BS / DEL edit)."""
     s = connect()
     if not login(s, keypath):
         print("  FAIL(L2): could not log in")
@@ -144,10 +144,14 @@ def test_l2_control_bytes(keypath):
         if bytes([b]) in stored:
             print(f"  FAIL(L2): {name} survived into the stored post")
             return False
-    if b"abcd" not in stored:
-        print(f"  FAIL(L2): the printable text did not survive ({stored[-20:]!r})")
+    # 1.10.0 (ADR 0029) — BS and DEL now EDIT the line for a character-mode client
+    # (RFC 854 EC semantics): BS erases the `b`, DEL the `c`, and the BEL is
+    # dropped as before, so the line stored is "ad". Until 1.10.0 BS / DEL were
+    # only dropped and this read "abcd". Either way none of the three is stored.
+    if b"\nad\r\n" not in stored or b"abcd" in stored:
+        print(f"  FAIL(L2): BS / DEL did not edit the line as typed ({stored[-20:]!r})")
         return False
-    print("  L2: BEL / BS / DEL dropped from the stored body, printable text intact")
+    print("  L2: BEL dropped, BS / DEL edited the line, none of the three stored")
     return True
 
 

@@ -4,6 +4,115 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-13 (telnet conformance)
+
+RFC 854 and RFC 1184 are authoritative for agora; by 1.9.2 the roadmap listed seven places it deviated, and
+writing the fixes against the RFC text found more. agora is now the LINEMODE server the RFCs describe — it
+asks for LINEMODE, answers the MODE and SLC negotiations it owes, and hands echoing to an editing client —
+and, for clients that stay in character mode, it edits the line itself. ADR [0029](docs/adr/0029-telnet-conformance.md).
+
+**257** tests (249 module + 8 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab` (with
+two new invariants and 656 new targeted LINEMODE frames); **35** example smokes (new: 35), both CI legs green;
+`cyrius audit` exit 0. `build/agora` **1,008,768 → 1,017,104 B**; `--agnos` 1,005,280 → 1,013,616 B;
+`--aarch64` 2,417,584 → 2,417,728 B. Closeout Pass run (minor bump).
+
+### Security
+
+- **An SLC list overflowed a stack buffer** (MEDIUM — reachable before login, once a client has agreed
+  LINEMODE, which 1.10.0's announce invites). Found by this release's fuzz pass before it shipped: the SLC
+  reply was built in a 256-byte buffer sized for 30 triplets, but a list may hold ~170 (the 512-byte
+  subnegotiation cap), each needing an answer, and every import request appended the 120-byte table again —
+  `SIGSEGV` in the harness. The reply is now bounded (`SLC_REPLY_MAX`, 250 bytes, so it also fits the reply
+  queue whole); processing stops at the first triplet whose answer would not fit, and an import is answered
+  once per list. Never in a release: the SLC answering it guards is new in 1.10.0.
+
+### Added
+
+- **AYT** is answered `\r\n[Yes]\r\n` (RFC 854: "visible (i.e., printable) evidence"); it was silently consumed.
+- **IAC DO LINEMODE** joins the opening salvo (RFC 1184 § 2.1: the server asks). A client that agrees gets
+  `MODE EDIT|TRAPSIG`; one that refuses or never answers stays in character mode.
+- **LINEMODE MODE** per § 2.2: a client's request for a different mode is agreed and **answered** with the
+  mask + MODE_ACK (agora used to store it and reply nothing, leaving the client's request hanging); the current
+  mode is ignored; a MODE_ACK is switched to and never answered; undefined bits are dropped. `SOFT_TAB` /
+  `LIT_ECHO` are accepted when proposed, never requested.
+- **Echo hand-off**: when EDIT comes on agora sends `WONT ECHO` and stops echoing — the client edits and echoes
+  the line (§ 2.2: a client does not echo while the server has WILL ECHO, so the user would have typed blind) —
+  and takes echoing back with `WILL ECHO` if EDIT goes off.
+- **SLC** per § 5.5 — the validation the code described and never had: a list must be whole triplets; an import
+  request gets every function as `func SLC_DEFAULT 0`; an exported value is agreed with SLC_ACK, ignored when
+  unchanged or already ACKed, refused `SLC_NOSUPPORT` past function 30; every IAC octet is doubled.
+- **A line editor for character-mode clients**: BS, DEL and IAC EC erase the last character — a whole UTF-8
+  sequence — and IAC EL the line (RFC 854), each wiped on screen with BS SP BS while agora echoes. A typo could
+  not be corrected at all before: 1.6.5 only stopped BS / DEL being stored.
+- **NVT text on egress** (audit 1.8.1 I12): `send_text` now sends a bare LF as CR LF and a bare CR as CR NUL
+  (RFC 854: "in both directions"), across chunk boundaries — a CLI-authored post no longer staircases.
+- `docs/examples/35-telnet-conformance.py` — every item above through the real server, raw bytes, both serve
+  models; plus § G, a **real GNU inetutils `telnet` 2.8 in a pty** that negotiates the whole LINEMODE exchange
+  and edits `whoamx<DEL>i` into `whoami` (skipped where no `telnet` is installed). A 1.9.2 build fails 18 of 20
+  raw checks.
+- Tests: `t243` AYT (and never a torn reply), `t244` EC / EL events, `t245` MODE negotiation + the echo
+  hand-off, `t246` SLC (import, ACK rules, IAC doubling, a ragged list, function 255, a 170-triplet list),
+  `t247` FORWARDMASK and unagreed subnegotiations refused, `t248` NVT newlines, `t249` UTF-8 erase; serve `s08`
+  the line editor on a live session and the subnegotiation reply drain. Mutation-checked: 11 mutants (the 9
+  reverted fixes and the 2 fuzz finds), 11 caught.
+
+### Fixed
+
+- **A subnegotiation's reply waited for the next byte.** `process_rx` drained the reply queue *before* handling
+  a completed subnegotiation, so a reply it queued (a MODE answer, an SLC ACK) sat unsent until another byte
+  arrived — or for good, if the subnegotiation ended the packet. `s08` pins the order.
+- **The FORWARDMASK arm was dead**: it compared the subnegotiation's second byte with the FORWARDMASK code,
+  but on the wire that byte is the verb (`LINEMODE DO FORWARDMASK …`). A client's FORWARDMASK is now ignored by
+  rule (§ 5.7: only the server negotiates it, and agora — in EDIT mode — never needs one).
+- **A three-byte negotiation reply could be torn**: pushed byte by byte, a full queue kept `IAC <verb>` and
+  dropped the option, and the peer would read the next byte as the option code. Every multi-byte reply is now
+  queued whole or not at all.
+- **The fuzz harness had stopped fuzzing subnegotiation payloads.** Since 1.8.1 a subnegotiation counts only
+  for an agreed option, and the harness never agreed any, so its structured-SB pass and its SLC sequence were
+  rejected at the gate. It now agrees NAWS / TERMINAL-TYPE / LINEMODE first, adds invariants 22 (no torn unit in
+  the reply queue) and 23 (the mode within its defined bits), and drives 400 whole-triplet SLC lists and every
+  MODE byte — which is how the overflow above, and the undoubled function / modifier octets, were found.
+
+### Changed
+
+- Unrecognised subnegotiations (STATUS, NEW-ENVIRON, …) are discarded by rule — RFC 855 allows one only for an
+  enabled option, and agora refuses those — rather than "for now".
+- The LINEMODE mode is stored without its MODE_ACK bit (`telnet_linemode_mask`; `t22` updated).
+- `text_iac_double` is replaced by `text_nvt_iac` (IAC doubling and NVT newlines in one pass; output still
+  ≤ 2 bytes per input byte).
+- The getting-started guide says how line editing works for each kind of client.
+- **Smoke 27 (1.6.5, audit L2) moved with the line editor**: it types `a BEL b BS c DEL d` into a post and
+  expected `abcd` stored, because BS and DEL were dropped; they now edit (erasing `b` and `c`), so the stored
+  line is `ad`. Its guarantee — none of BEL / BS / DEL reaches storage — is unchanged and still checked.
+
+### Performance
+
+- `cyrius bench benches/bench_telnet.bcyr`: `announce_salvo` 132 → ~168 ns (five options instead of four);
+  `plain_byte` 9, `iac_untracked` ~66, `iac_tracked_agree` ~75, `subneg_naws` ~104 ns — unchanged within noise.
+- `benches/serve-bench.py all` (the Closeout baseline): accept fork 4,031 / 11,122 conn/s, poll 50 / 512;
+  per-session memory poll 12.7 KB, fork 63 KB; world lock ~520 txn/s; reply 0.49 / 1.27 / 2.48 ms (0.2 ms with
+  no replies); unknown login 0.16 ms — all as at 1.9.x.
+
+### Verification
+
+- `cyrius test`: **249/249** + **8/8**, the same under `cyrius test --aarch64`. Fuzz plain and `--poison=ab`.
+  `cyrius audit` **exit 0**. `scripts/check-version-sync.sh` and `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs exactly as CI runs them, on 4 CPUs: **fork 25/25, poll 34/34** — smoke
+  27 failed in both on its first run (below) and passes since; 35 smokes, 20 against the sibling MUD.
+- Allocator gate, poll server: 5,000 pipelined AYTs, 3,000 edited lines and 800 SLC + MODE exchanges grew the
+  data segment by **0 KB** (VmData; RSS +24 KB under the AYT flood is the session's preallocated tx queue
+  being touched by 45 KB of `[Yes]` replies).
+- Full build from clean (`rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build`), all three targets.
+- Dead-code audit: the same 11 test-only accessors as 1.9.0 (the four `telnet_term_*` and `telnet_linemode_mask`
+  among them — roadmap § 1.10.1 gives them a consumer); `text_iac_double` removed.
+
+### Known limitations (recorded, not fixed)
+
+- Returning from a Descent session does not re-assert agora's telnet options: the MUD's ECHO (and now LINEMODE)
+  negotiation is proxied raw. Roadmap § 1.11.0.
+- `IP`, `AO`, `BRK`, `EOF`, `SUSP` and `ABORT` are consumed without effect; TOGGLE-FLOW-CONTROL is still
+  refused although RFC 1184 says it "should" accompany LINEMODE.
+
 ## [1.9.2] — 2026-10-13 (board policy + operator CLI)
 
 Closes the 1.9.x line. Every board mode now changes what users can do, admin rights follow the key instead of

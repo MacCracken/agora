@@ -314,8 +314,8 @@ fn t10_announce_salvo(): i64 {
     telnet_announce(ts);
 
     var len = telnet_tx_len(ts);
-    if (len != 12) {
-        test_fail("t10_announce_salvo", "expected 12 bytes (4 × IAC verb opt)");
+    if (len != 15) {
+        test_fail("t10_announce_salvo", "expected 15 bytes (5 × IAC verb opt)");
         return 1;
     }
     var buf = telnet_tx_buf(ts);
@@ -332,6 +332,10 @@ fn t10_announce_salvo(): i64 {
     if ((load8(buf + 9) & 0xFF) != IAC)                    { test_fail("t10_announce_salvo", "byte 9");  return 1; }
     if ((load8(buf + 10) & 0xFF) != DO)                    { test_fail("t10_announce_salvo", "byte 10"); return 1; }
     if ((load8(buf + 11) & 0xFF) != OPT_TERMINAL_TYPE)     { test_fail("t10_announce_salvo", "byte 11"); return 1; }
+    # 1.10.0 — DO LINEMODE (RFC 1184 § 2.1: the server asks).
+    if ((load8(buf + 12) & 0xFF) != IAC)                   { test_fail("t10_announce_salvo", "byte 12"); return 1; }
+    if ((load8(buf + 13) & 0xFF) != DO)                    { test_fail("t10_announce_salvo", "byte 13"); return 1; }
+    if ((load8(buf + 14) & 0xFF) != OPT_LINEMODE)          { test_fail("t10_announce_salvo", "byte 14"); return 1; }
 
     # All four parked in Q_WANTYES on the right side
     if (opt_us(ts, OPT_ECHO) != Q_WANTYES) {
@@ -348,6 +352,10 @@ fn t10_announce_salvo(): i64 {
     }
     if (opt_him(ts, OPT_TERMINAL_TYPE) != Q_WANTYES) {
         test_fail("t10_announce_salvo", "him-TT not WANTYES");
+        return 1;
+    }
+    if (opt_him(ts, OPT_LINEMODE) != Q_WANTYES) {
+        test_fail("t10_announce_salvo", "him-LINEMODE not WANTYES");
         return 1;
     }
 
@@ -658,7 +666,8 @@ fn t21_will_linemode_emits_mode_request(): i64 {
 }
 
 # T22: peer's MODE ACK subneg parses into TS_LM_MODE.
-# IAC SB LINEMODE MODE 0x07 IAC SE  (EDIT|TRAPSIG|MODE_ACK)
+# IAC SB LINEMODE MODE 0x07 IAC SE  (EDIT|TRAPSIG|MODE_ACK). 1.10.0 — the active
+# mode is stored without the ACK bit (0x03), and an ACK is never answered.
 fn t22_linemode_mode_ack_parse(): i64 {
     var ts = telnet_state_new();
     t_agree_him(ts, OPT_LINEMODE);   # 1.8.1 (W4): an SB counts only once the option is agreed
@@ -674,8 +683,12 @@ fn t22_linemode_mode_ack_parse(): i64 {
         return 1;
     }
     telnet_handle_sb(ts);
-    if (telnet_linemode_mask(ts) != 0x07) {
-        test_fail("t22_linemode_mode_ack_parse", "lm_mask should be 0x07");
+    if (telnet_linemode_mask(ts) != 0x03) {
+        test_fail("t22_linemode_mode_ack_parse", "lm_mask should be 0x03 (EDIT|TRAPSIG)");
+        return 1;
+    }
+    if (telnet_tx_len(ts) != 0) {
+        test_fail("t22_linemode_mode_ack_parse", "a MODE with MODE_ACK was answered");
         return 1;
     }
     test_pass("t22_linemode_mode_ack_parse");
@@ -5936,12 +5949,14 @@ fn t225_text_iac_double(): i64 {
     var name = "t225_text_iac_double";
     var src = alloc(8);
     var out = alloc(16);
+    var cr = alloc(8);
+    store64(cr, 0);
     memset(out, 0, 16);
     store8(src, 0x41); store8(src + 1, 0xFF); store8(src + 2, 0x42);
     store8(src + 3, 0xFF); store8(src + 4, 0xFF);
-    if (text_iac_double(out, src, 5) != 8)                     { test_fail(name, "length"); return 1; }
+    if (text_nvt_iac(out, src, 5, cr) != 8)                    { test_fail(name, "length"); return 1; }
     if (memeq(out, "\x41\xff\xff\x42\xff\xff\xff\xff", 8) == 0) { test_fail(name, "bytes"); return 1; }
-    if (text_iac_double(out, src, 0) != 0)                     { test_fail(name, "empty"); return 1; }
+    if (text_nvt_iac(out, src, 0, cr) != 0)                    { test_fail(name, "empty"); return 1; }
     # And through the full egress chain a stored 0xFF cannot survive at all.
     var san = alloc(8);
     if (text_sanitize(san, src, 5) != 5) { test_fail(name, "sanitize length"); return 1; }
@@ -6873,6 +6888,246 @@ fn t242_chat_channel_cap(): i64 {
     return 0;
 }
 
+# === 1.10.0 — telnet conformance (RFC 854 / RFC 1184; ADR 0029) ===
+
+# Feed `IAC SB <payload> IAC SE` (doubling any IAC in the payload, as the wire
+# would) and run telnet_handle_sb on the completed subnegotiation. Returns the
+# event the final SE produced.
+fn t_sb(ts, payload, n): i64 {
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, SB);
+    var i = 0;
+    while (i < n) {
+        var b = load8(payload + i) & 0xFF;
+        telnet_feed(ts, b);
+        if (b == IAC) { telnet_feed(ts, IAC); }
+        i = i + 1;
+    }
+    telnet_feed(ts, IAC);
+    var ev = telnet_feed(ts, SE);
+    if (ev == EV_SB) { telnet_handle_sb(ts); }
+    return ev;
+}
+
+# 1 if the queued replies are exactly buf[0..n).
+fn t_tx_is(ts, buf, n): i64 {
+    if (telnet_tx_len(ts) != n) { return 0; }
+    return memeq(telnet_tx_buf(ts), buf, n);
+}
+
+# t243 — AYT gets visible evidence (RFC 854 p.13), queued whole or not at all.
+fn t243_ayt_visible(): i64 {
+    var name = "t243_ayt_visible";
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    if (telnet_feed(ts, AYT) != EV_NONE)        { test_fail(name, "AYT event"); return 1; }
+    if (t_tx_is(ts, "\r\n[Yes]\r\n", 9) == 0)    { test_fail(name, "no [Yes] reply"); return 1; }
+    # A nearly-full reply buffer takes nothing rather than a torn reply.
+    telnet_tx_consume(ts);
+    store64(ts + TS_TX_LEN, TX_BUF_CAP - 4);
+    telnet_feed(ts, IAC);
+    telnet_feed(ts, AYT);
+    if (telnet_tx_len(ts) != TX_BUF_CAP - 4)     { test_fail(name, "a torn AYT reply was queued"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t244 — EC and EL reach the caller as events (RFC 854 p.13); IP does not.
+fn t244_ec_el_events(): i64 {
+    var name = "t244_ec_el_events";
+    var ts = telnet_state_new();
+    telnet_feed(ts, IAC);
+    if (telnet_feed(ts, EC) != EV_EC)            { test_fail(name, "EC"); return 1; }
+    telnet_feed(ts, IAC);
+    if (telnet_feed(ts, EL) != EV_EL)            { test_fail(name, "EL"); return 1; }
+    telnet_feed(ts, IAC);
+    if (telnet_feed(ts, IP) != EV_NONE)          { test_fail(name, "IP"); return 1; }
+    if (telnet_feed(ts, 0x41) != EV_DATA)        { test_fail(name, "data after"); return 1; }
+    if (telnet_tx_len(ts) != 0)                  { test_fail(name, "a reply to EC/EL/IP"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t245 — LINEMODE MODE per RFC 1184 § 2.2: a client's request for a different
+# mode is answered with the mask + MODE_ACK; the same mode is ignored; a mode
+# with MODE_ACK is switched to and never answered; undefined bits are cleared.
+# EDIT hands echoing to the client (WONT ECHO) and character mode takes it back
+# (WILL ECHO).
+fn t245_linemode_mode_negotiation(): i64 {
+    var name = "t245_linemode_mode_negotiation";
+    var ts = telnet_state_new();
+    t_agree_him(ts, OPT_LINEMODE);
+    opt_set_us(ts, OPT_ECHO, Q_YES);
+    var m = alloc(8);
+    store8(m, OPT_LINEMODE); store8(m + 1, LM_MODE); store8(m + 2, 0x03);
+    t_sb(ts, m, 3);
+    var want = alloc(16);
+    memcpy(want, "\xff\xfa\x22\x01\x07\xff\xf0\xff\xfc\x01", 10);   # MODE 0x07 · WONT ECHO
+    if (t_tx_is(ts, want, 10) == 0)                { test_fail(name, "EDIT request: reply + WONT ECHO"); return 1; }
+    if (telnet_linemode_mask(ts) != 0x03)          { test_fail(name, "mode 0x03"); return 1; }
+    if (opt_us(ts, OPT_ECHO) != Q_NO)              { test_fail(name, "echo not handed to the client"); return 1; }
+    telnet_tx_consume(ts);
+    t_sb(ts, m, 3);
+    if (telnet_tx_len(ts) != 0)                    { test_fail(name, "the current mode was answered"); return 1; }
+    store8(m + 2, 0x00);                            # the client asks for character mode
+    t_sb(ts, m, 3);
+    memcpy(want, "\xff\xfa\x22\x01\x04\xff\xf0\xff\xfb\x01", 10);   # MODE ACK · WILL ECHO
+    if (t_tx_is(ts, want, 10) == 0)                { test_fail(name, "char mode: reply + WILL ECHO"); return 1; }
+    if (opt_us(ts, OPT_ECHO) == Q_NO)              { test_fail(name, "echo not taken back"); return 1; }
+    telnet_tx_consume(ts);
+    store8(m + 2, 0xE7);                            # EDIT|TRAPSIG|ACK + undefined high bits
+    t_sb(ts, m, 3);
+    if (telnet_tx_len(ts) == 0) {
+        test_fail(name, "MODE_ACK switch should hand echo over (WONT ECHO)");
+        return 1;
+    }
+    if (telnet_linemode_mask(ts) != 0x03)          { test_fail(name, "undefined bits kept"); return 1; }
+    store8(m + 2, 0x0B);                            # EDIT|TRAPSIG|SOFT_TAB, no ACK
+    telnet_tx_consume(ts);
+    t_sb(ts, m, 3);
+    memcpy(want, "\xff\xfa\x22\x01\x0f\xff\xf0", 7);
+    if (t_tx_is(ts, want, 7) == 0)                 { test_fail(name, "SOFT_TAB proposal not agreed"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t246 — SLC per RFC 1184 § 5.5: an import request gets every function as
+# `func SLC_DEFAULT 0`; an exported value is agreed with SLC_ACK, then ignored
+# when repeated; an ACK is never answered; IAC is doubled; a function past 30 is
+# refused SLC_NOSUPPORT; a ragged list is dropped whole.
+fn t246_linemode_slc(): i64 {
+    var name = "t246_linemode_slc";
+    var ts = telnet_state_new();
+    t_agree_him(ts, OPT_LINEMODE);
+    var p = alloc(64);
+    store8(p, OPT_LINEMODE); store8(p + 1, LM_SLC);
+    store8(p + 2, 0); store8(p + 3, SLC_DEFAULT); store8(p + 4, 0);
+    t_sb(ts, p, 5);
+    if (telnet_tx_len(ts) != 4 + 90 + 2)           { test_fail(name, "import: 30 triplets"); return 1; }
+    var tx = telnet_tx_buf(ts);
+    if ((load8(tx + 4) & 0xFF) != 1)               { test_fail(name, "import: first function"); return 1; }
+    if ((load8(tx + 5) & 0xFF) != SLC_DEFAULT)     { test_fail(name, "import: DEFAULT level"); return 1; }
+    if ((load8(tx + 4 + 87) & 0xFF) != 30)         { test_fail(name, "import: last function"); return 1; }
+    telnet_tx_consume(ts);
+    store8(p + 2, 3); store8(p + 3, SLC_VALUE); store8(p + 4, 3);           # IP = ^C
+    t_sb(ts, p, 5);
+    var want = alloc(16);
+    memcpy(want, "\xff\xfa\x22\x03\x03\x82\x03\xff\xf0", 9);
+    if (t_tx_is(ts, want, 9) == 0)                 { test_fail(name, "export not ACKed"); return 1; }
+    telnet_tx_consume(ts);
+    t_sb(ts, p, 5);
+    if (telnet_tx_len(ts) != 0)                    { test_fail(name, "the same value was answered again"); return 1; }
+    store8(p + 3, SLC_VALUE | SLC_ACK); store8(p + 4, 4);
+    t_sb(ts, p, 5);
+    if (telnet_tx_len(ts) != 0)                    { test_fail(name, "an ACK was answered"); return 1; }
+    store8(p + 2, 10); store8(p + 3, SLC_VALUE); store8(p + 4, 0xFF);       # EC disabled (255)
+    t_sb(ts, p, 5);
+    memcpy(want, "\xff\xfa\x22\x03\x0a\x82\xff\xff\xff\xf0", 10);
+    if (t_tx_is(ts, want, 10) == 0)                { test_fail(name, "IAC value not doubled"); return 1; }
+    telnet_tx_consume(ts);
+    store8(p + 2, 40); store8(p + 3, SLC_VALUE); store8(p + 4, 1);
+    t_sb(ts, p, 5);
+    memcpy(want, "\xff\xfa\x22\x03\x28\x00\x00\xff\xf0", 9);
+    if (t_tx_is(ts, want, 9) == 0)                 { test_fail(name, "function 40 not refused"); return 1; }
+    telnet_tx_consume(ts);
+    store8(p + 2, 3); store8(p + 3, SLC_VALUE); store8(p + 4, 7); store8(p + 5, 9);
+    t_sb(ts, p, 6);                                 # 4 payload bytes: not whole triplets
+    if (telnet_tx_len(ts) != 0)                    { test_fail(name, "a ragged list was answered"); return 1; }
+    # Found by the 1.10.0 fuzz pass: a function octet of 255 must be doubled too ...
+    store8(p + 2, 0xFF); store8(p + 3, SLC_VALUE); store8(p + 4, 1);
+    t_sb(ts, p, 5);
+    memcpy(want, "\xff\xfa\x22\x03\xff\xff\x00\x00\xff\xf0", 10);
+    if (t_tx_is(ts, want, 10) == 0)                { test_fail(name, "an IAC function octet not doubled"); return 1; }
+    telnet_tx_consume(ts);
+    # ... and a list of 170 triplets that all need an answer (+ import requests) may
+    # not overrun the reply: the answer stays whole and within SLC_REPLY_MAX.
+    var big = alloc(600);
+    store8(big, OPT_LINEMODE); store8(big + 1, LM_SLC);
+    var q = 0;
+    while (q < 170) {
+        var f = (q % 30) + 1;
+        if ((q % 17) == 0) { f = 0; }
+        store8(big + 2 + q * 3, f);
+        store8(big + 3 + q * 3, SLC_VALUE);
+        store8(big + 4 + q * 3, ((q * 7) % 250) + 1);   # a new value each time: each one must be answered
+        q = q + 1;
+    }
+    t_sb(ts, big, 2 + 170 * 3);
+    if (telnet_tx_len(ts) > SLC_REPLY_MAX)         { test_fail(name, "the reply overran SLC_REPLY_MAX"); return 1; }
+    var tb = telnet_tx_buf(ts);
+    var tl = telnet_tx_len(ts);
+    if (tl < 10) {
+        test_fail(name, "a long list got no reply (it overran)");
+        return 1;
+    }
+    if ((load8(tb + tl - 2) & 0xFF) != IAC)        { test_fail(name, "a long list's reply is not closed"); return 1; }
+    if ((load8(tb + tl - 1) & 0xFF) != SE)         { test_fail(name, "a long list's reply is not closed"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t247 — refused by rule: a client's FORWARDMASK (only the server negotiates it,
+# RFC 1184 § 5.7) and subnegotiations for options never agreed (STATUS,
+# NEW-ENVIRON; RFC 855) change nothing and get no reply.
+fn t247_forwardmask_and_unagreed_sb(): i64 {
+    var name = "t247_forwardmask_and_unagreed_sb";
+    var ts = telnet_state_new();
+    t_agree_him(ts, OPT_LINEMODE);
+    var p = alloc(16);
+    store8(p, OPT_LINEMODE); store8(p + 1, DO); store8(p + 2, LM_FORWARDMASK); store8(p + 3, 0x80);
+    if (t_sb(ts, p, 4) != EV_SB)                   { test_fail(name, "FORWARDMASK framing"); return 1; }
+    store8(p + 1, WILL);
+    t_sb(ts, p, 3);
+    store8(p, OPT_STATUS); store8(p + 1, 1);        # STATUS SEND
+    t_sb(ts, p, 2);
+    store8(p, OPT_NEW_ENVIRON); store8(p + 1, 0); store8(p + 2, 0); store8(p + 3, 0x55);
+    t_sb(ts, p, 4);
+    if (telnet_tx_len(ts) != 0)                    { test_fail(name, "a reply was queued"); return 1; }
+    if (telnet_linemode_mask(ts) != 0)             { test_fail(name, "mode changed"); return 1; }
+    if (telnet_feed(ts, 0x42) != EV_DATA)          { test_fail(name, "parser not back in DATA"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t248 — NVT newlines on egress (RFC 854 p.11; audit 1.8.1 I12): bare LF → CR LF,
+# bare CR → CR NUL, CR LF unchanged — also when a chunk boundary splits it — and a
+# CR that ends the text gets its NUL from text_nvt_end.
+fn t248_text_nvt_newlines(): i64 {
+    var name = "t248_text_nvt_newlines";
+    var out = alloc(64);
+    var cr = alloc(8);
+    store64(cr, 0);
+    var n = text_nvt_iac(out, "a\nb\r\nc\rd", 9, cr);
+    if (n != 11)                                   { test_fail(name, "length"); return 1; }
+    if (memeq(out, "a\r\nb\r\nc\r\x00d", 11) == 0) { test_fail(name, "bytes"); return 1; }
+    store64(cr, 0);
+    n = text_nvt_iac(out, "x\r", 2, cr);
+    n = n + text_nvt_iac(out + n, "\ny", 2, cr);
+    if (memeq(out, "x\r\ny", 4) == 0)              { test_fail(name, "CR LF split across chunks"); return 1; }
+    if (n != 4)                                    { test_fail(name, "split length"); return 1; }
+    store64(cr, 0);
+    n = text_nvt_iac(out, "z\r", 2, cr);
+    n = n + text_nvt_end(out + n, cr);
+    if (memeq(out, "z\r\x00", 3) == 0)             { test_fail(name, "trailing CR"); return 1; }
+    store64(cr, 0);
+    n = text_nvt_iac(out, "\n", 1, cr);
+    if (memeq(out, "\r\n", 2) == 0)                { test_fail(name, "leading bare LF"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t249 — the line editor erases a whole UTF-8 character, never half of one.
+fn t249_utf8_erase_last(): i64 {
+    var name = "t249_utf8_erase_last";
+    if (utf8_erase_last("ab", 2) != 1)                 { test_fail(name, "ascii"); return 1; }
+    if (utf8_erase_last("a\xc3\xa9", 3) != 1)          { test_fail(name, "2-byte"); return 1; }
+    if (utf8_erase_last("\xe2\x82\xac", 3) != 0)       { test_fail(name, "3-byte"); return 1; }
+    if (utf8_erase_last("x\xf0\x9f\x98\x80", 5) != 1)  { test_fail(name, "4-byte"); return 1; }
+    if (utf8_erase_last("", 0) != 0)                   { test_fail(name, "empty"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -7135,6 +7390,13 @@ fn main(): i64 {
     t240_policy_modes();
     t241_admins_entries();
     t242_chat_channel_cap();
+    t243_ayt_visible();
+    t244_ec_el_events();
+    t245_linemode_mode_negotiation();
+    t246_linemode_slc();
+    t247_forwardmask_and_unagreed_sb();
+    t248_text_nvt_newlines();
+    t249_utf8_erase_last();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

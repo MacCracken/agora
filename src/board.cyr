@@ -342,22 +342,67 @@ fn text_chunk_end(src, i, len, cap): i64 {
     return cut;
 }
 
-# Copy `n` bytes from `src` to `out`, doubling every 0xFF (RFC 854: a data byte
-# of 255 goes on the wire as IAC IAC). Returns the bytes written, at most 2·n.
+# Copy `n` bytes from `src` to `out` as NVT text: every 0xFF doubled (RFC 854: a
+# data byte of 255 goes on the wire as IAC IAC) and every newline made the NVT's
+# (1.10.0, audit 1.8.1 I12 — RFC 854 p.11: "CR LF" for a new line, "CR NUL" for a
+# bare carriage return, "in both directions"): a bare LF becomes CR LF, a CR not
+# followed by LF becomes CR NUL, CR LF passes unchanged. Wire-authored posts are
+# already CR LF; a CLI-authored body ("line\n") went out LF-only and staircased
+# on a real terminal. `*crp` carries a trailing CR from one chunk to the next, so
+# a CR LF split across chunks is still one newline; the caller emits the NUL for
+# a CR that ends the whole text (text_nvt_end). Returns the bytes written, at
+# most 2·n — each input byte becomes one or two.
+#
 # After `text_sanitize` in UTF-8 mode no 0xFF can remain — it is never valid
-# UTF-8 — so this is defence in depth, kept so that a change of sanitizing mode
-# cannot quietly re-open the 1.6.4 telnet-command injection.
-fn text_iac_double(out, src, n): i64 {
+# UTF-8 — so the doubling is defence in depth, kept so that a change of
+# sanitizing mode cannot quietly re-open the 1.6.4 telnet-command injection.
+fn text_nvt_iac(out, src, n, crp): i64 {
+    var cr = load64(crp);        # the byte before this one (perhaps last chunk's) was a CR
     var o = 0;
     var i = 0;
     while (i < n) {
         var b = load8(src + i) & 0xFF;
-        store8(out + o, b);
-        o = o + 1;
-        if (b == 0xFF) { store8(out + o, 0xFF); o = o + 1; }
+        if (b == 10) {
+            if (cr == 0) { store8(out + o, 13); o = o + 1; }   # bare LF → CR LF
+            store8(out + o, 10); o = o + 1;
+            cr = 0;
+        } else {
+            if (cr == 1) { store8(out + o, 0); o = o + 1; }    # bare CR → CR NUL
+            cr = 0;
+            store8(out + o, b); o = o + 1;
+            if (b == 13) { cr = 1; }
+            if (b == 0xFF) { store8(out + o, 0xFF); o = o + 1; }
+        }
         i = i + 1;
     }
+    store64(crp, cr);
     return o;
+}
+
+# The end of an NVT text: a CR that ended it gets its NUL (CR NUL). Writes 0 or
+# 1 byte to `out`; returns the count.
+fn text_nvt_end(out, crp): i64 {
+    if (load64(crp) == 1) {
+        store64(crp, 0);
+        store8(out, 0);
+        return 1;
+    }
+    return 0;
+}
+
+# Remove the last UTF-8 character from buf[0..len) — every continuation byte
+# (10xxxxxx) and then its lead byte — and return the new length (1.10.0: the line
+# editor's erase; RFC 854's EC deletes "the last preceding undeleted character",
+# not the last byte of one). An empty buffer stays empty. Pure.
+fn utf8_erase_last(buf, len): i64 {
+    var n = len;
+    var going = 1;
+    while (going == 1) {
+        if (n <= 0) { going = 0; continue; }
+        n = n - 1;
+        if (((load8(buf + n) & 0xFF) & 0xC0) != 0x80) { going = 0; }
+    }
+    return n;
 }
 
 # Re-validate a 16-char lowercase-hex fingerprint cstring. Used by

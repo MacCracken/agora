@@ -62,6 +62,21 @@ Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 
 A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sustained-IAC adversarial load (every byte triggers a full exchange) caps below 16M ops/s per core — orders of magnitude above any plausible BBS load.
 
+## Parser — 1.10.0
+
+`cyrius bench benches/bench_telnet.bcyr`, the same harness, after the RFC 854 / 1184 conformance work (ADR 0029):
+
+| Benchmark | 1.9.2 | 1.10.0 |
+|---|---:|---:|
+| `plain_byte` | 9 ns | 9 ns |
+| `iac_untracked` | 65 ns | ~66 ns |
+| `iac_tracked_agree` | 75 ns | ~75 ns |
+| `subneg_naws` | 105 ns | ~104 ns |
+| `announce_salvo` | 132 ns | ~168 ns — five options now (DO LINEMODE), 33.6 ns each as before |
+
+A first cut that staged every three-byte reply through a buffer to make it atomic cost ~10 ns per negotiation
+(74 / 85 ns); a room check before pushing does the same job at the old cost.
+
 ## Serve-level baselines — 1.8.2 (first measured)
 
 `benches/serve-bench.py` (1.8.2) — the accept-rate half of CLAUDE.md § P(-1) step 2 that was asked for since

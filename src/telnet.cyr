@@ -15,9 +15,14 @@
 # 1143's Q method for the options agora prefers — ECHO and SGA on its own
 # side, NAWS, TERMINAL-TYPE and LINEMODE on the client's — and naive-refuses
 # everything else (WILL -> DONT, DO -> WONT). (1.8.1: this header still
-# described the M1 first bite, when EVERY option was naive-refused.) What
-# remains open is that telnet_announce never sends DO LINEMODE, so that
-# machinery only engages if the client volunteers first — roadmap § 1.10.0.
+# described the M1 first bite, when EVERY option was naive-refused.)
+#
+# 1.10.0 (roadmap § 1.10.0, ADR 0029) — the RFC 854 / 1184 deviations closed:
+# AYT answers visibly; EC / EL reach the line editor (EV_EC / EV_EL); the
+# announce asks DO LINEMODE; a LINEMODE MODE request is answered per RFC 1184
+# § 2.2 and EDIT hands echoing to the client; SLC is validated and acknowledged
+# per § 5.5; FORWARDMASK and subnegotiations for options never agreed are
+# refused by rule, not "for now".
 
 # === RFC 854 § 11.2 command byte values ===
 
@@ -51,6 +56,7 @@ enum TelOpt {
     OPT_NAWS              = 31;
     OPT_TERMINAL_SPEED    = 32;
     OPT_LINEMODE          = 34;
+    OPT_NEW_ENVIRON       = 39;
 }
 
 # === Parser states (RFC 854 § 11.2 IAC dispatch) ===
@@ -77,6 +83,8 @@ enum TelEvent {
     EV_NONE = 0;   # Byte consumed by IAC machine; no application data.
     EV_DATA = 1;   # Application data byte ready in TS_DATA_OUT field.
     EV_SB   = 2;   # Subnegotiation complete; sb_buf[0..sb_len] holds it.
+    EV_EC   = 3;   # 1.10.0 — IAC EC: erase the last character of the input line (RFC 854)
+    EV_EL   = 4;   # 1.10.0 — IAC EL: erase the input line back to the last CR LF (RFC 854)
 }
 
 # === TelnetState layout (every field i64, all offsets in bytes) ===
@@ -107,9 +115,10 @@ enum TS {
     TS_TERM_TYPE = 104;   # pointer to (TERM_TYPE_CAP+1)-byte ASCII terminal-type buffer (room for a NUL)
     TS_TERM_TLEN = 112;   # actual length (bytes) of term_type string
 
-    TS_LM_MODE   = 120;   # active LINEMODE MODE mask (RFC 1184); 0 until peer ACKs
+    TS_LM_MODE   = 120;   # active LINEMODE MODE mask (RFC 1184), MODE_ACK bit cleared; 0 until agreed
+    TS_SLC       = 128;   # 1.10.0 — pointer to the SLC table: (level, value) per function, SLC_TABLE_BYTES
 
-    TS_SIZE      = 128;   # total struct size for alloc()
+    TS_SIZE      = 136;   # total struct size for alloc()
 }
 
 # Per-connection terminal-type buffer cap. Real values are short
@@ -142,16 +151,36 @@ enum LMSub {
 #   LM_MODE_ACK  Set in the peer's confirmation reply, NOT in our
 #                requests. RFC mandates the bit but ignores it on
 #                first-from-server transmission.
-#   LM_SOFT_TAB  Client expands TAB locally — deferred, roadmap § 1.10.0.
-#   LM_LIT_ECHO  Echo unprintable bytes literally — deferred, roadmap § 1.10.0.
+#   LM_SOFT_TAB  Client expands TAB locally.
+#   LM_LIT_ECHO  Client echoes unprintable bytes literally.
 #
-# Default-shape mask the server requests: LM_EDIT | LM_TRAPSIG = 3.
+# Default-shape mask the server requests: LM_EDIT | LM_TRAPSIG = 3. 1.10.0 —
+# SOFT_TAB and LIT_ECHO are never requested (they only change how the CLIENT
+# displays what the user types) and are accepted when the client proposes them
+# (RFC 1184 § 2.2: the server may agree to any mode; ADR 0029).
 enum LMMode {
     LM_EDIT     = 0x01;
     LM_TRAPSIG  = 0x02;
     LM_MODE_ACK = 0x04;
     LM_SOFT_TAB = 0x08;
     LM_LIT_ECHO = 0x10;
+    LM_MODE_DEFINED = 0x1B;   # EDIT | TRAPSIG | SOFT_TAB | LIT_ECHO — the bits a mode may carry
+}
+
+# SLC — Set Local Characters (RFC 1184 § 2.4). A triplet is (function, modifier,
+# value); the modifier's low two bits are the level. Functions 1..30 are defined.
+enum LMSlc {
+    SLC_NOSUPPORT  = 0;
+    SLC_CANTCHANGE = 1;
+    SLC_VALUE      = 2;
+    SLC_DEFAULT    = 3;
+    SLC_LEVELBITS  = 3;
+    SLC_FLUSHOUT   = 32;
+    SLC_FLUSHIN    = 64;
+    SLC_ACK        = 128;
+    SLC_MAX_FUNC   = 30;
+    SLC_TABLE_BYTES = 64;    # (level, value) for functions 0..31
+    SLC_REPLY_MAX  = 250;    # an SLC reply, framing included: it must fit the 256-byte tx queue whole
 }
 
 # === RFC 1143 Q-method option state (per option, per side) ===
@@ -193,9 +222,11 @@ fn telnet_state_new(): i64 {
     var ou = alloc(256);
     var oh = alloc(256);
     var tt = alloc(TERM_TYPE_CAP + 1);   # [T3] +1 byte so a full-length type is NUL-terminated in-bounds
+    var slc = alloc(SLC_TABLE_BYTES);
     memset(ou, 0, 256);
     memset(oh, 0, 256);
     memset(tt, 0, TERM_TYPE_CAP + 1);
+    memset(slc, 0, SLC_TABLE_BYTES);
 
     store64(ts + TS_STATE,    ST_DATA);
     store64(ts + TS_VERB,     0);
@@ -218,6 +249,7 @@ fn telnet_state_new(): i64 {
     store64(ts + TS_TERM_TLEN, 0);
 
     store64(ts + TS_LM_MODE, 0);
+    store64(ts + TS_SLC, slc);
 
     return ts;
 }
@@ -239,13 +271,13 @@ fn telnet_state_reset(ts): i64 {
     store64(ts + TS_TERM_ROWS, 0);
     store64(ts + TS_TERM_TLEN, 0);
     store64(ts + TS_LM_MODE,   0);
+    memset(load64(ts + TS_SLC), 0, SLC_TABLE_BYTES);
     return 0;
 }
 
-# Active LINEMODE MODE mask (RFC 1184). 0 until peer confirms via
-# IAC SB LINEMODE MODE <mask> IAC SE — non-zero values include the
-# LM_MODE_ACK bit (0x04) plus whatever subset of EDIT/TRAPSIG/SOFT_TAB/
-# LIT_ECHO the peer accepted.
+# Active LINEMODE MODE mask (RFC 1184): the subset of EDIT / TRAPSIG / SOFT_TAB /
+# LIT_ECHO both sides agreed on, MODE_ACK cleared (1.10.0 — it used to keep the
+# ACK bit). 0 until a mode is agreed.
 fn telnet_linemode_mask(ts): i64 { return load64(ts + TS_LM_MODE); }
 
 # === Terminal capabilities (populated by EV_SB handling) ===
@@ -336,6 +368,25 @@ fn ts_tx_push(ts, b): i64 {
     return 1;
 }
 
+# Free bytes left in the response buffer. A multi-byte reply (a subnegotiation, the
+# AYT text) is queued only if it fits WHOLE: a truncated `IAC SB ...` with no
+# `IAC SE` would leave the peer parsing everything after it as subnegotiation.
+fn ts_tx_room(ts): i64 {
+    return load64(ts + TS_TX_CAP) - load64(ts + TS_TX_LEN);
+}
+
+# Queue buf[0..n) on the response buffer if it fits whole; returns 1, or 0 with
+# nothing queued.
+fn ts_tx_push_all(ts, buf, n): i64 {
+    if (n > ts_tx_room(ts)) { return 0; }
+    var i = 0;
+    while (i < n) {
+        ts_tx_push(ts, load8(buf + i) & 0xFF);
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Push one byte onto the subneg accumulator.
 fn ts_sb_push(ts, b): i64 {
     var len = load64(ts + TS_SB_LEN);
@@ -376,8 +427,11 @@ fn telnet_sb_len(ts): i64 { return load64(ts + TS_SB_LEN); }
 # Read the last emitted data byte (only valid when feed returned EV_DATA).
 fn telnet_data_byte(ts): i64 { return load64(ts + TS_DATA_OUT); }
 
-# Compose a 3-byte IAC response: IAC <verb> <opt>.
+# Compose a 3-byte IAC response: IAC <verb> <opt> — whole or not at all (1.10.0:
+# pushed byte by byte, a full buffer could keep `IAC <verb>` and drop the option,
+# and the peer would read the next byte on the wire as the option code).
 fn ts_emit_iac3(ts, verb, opt): i64 {
+    if (ts_tx_room(ts) < 3) { return 0; }
     ts_tx_push(ts, IAC);
     ts_tx_push(ts, verb & 0xFF);
     ts_tx_push(ts, opt  & 0xFF);
@@ -548,10 +602,22 @@ fn telnet_feed(ts, b): i64 {
             store64(ts + TS_STATE, ST_SB);
             return EV_NONE;
         }
-        # Single-byte commands (NOP, AYT, IP, AO, EC, EL, BRK, DM,
-        # GA, SE-out-of-context) — consume and return to DATA. No
-        # response generated. AYT should answer visibly per RFC 854 — roadmap § 1.10.0.
         store64(ts + TS_STATE, ST_DATA);
+        # 1.10.0 — RFC 854 p.13: on AYT "send back to the NVT some visible (i.e.,
+        # printable) evidence that the AYT was received". `[Yes]` on its own line,
+        # as BSD and netkit telnetd answer.
+        if (b == AYT) {
+            ts_tx_push_all(ts, "\r\n[Yes]\r\n", 9);
+            return EV_NONE;
+        }
+        # 1.10.0 — EC / EL edit the input line (RFC 854 p.13: "delete the last
+        # preceding undeleted character" / "back to, but not including, the last
+        # CR LF"); the line buffer is the caller's, so they come back as events.
+        if (b == EC) { return EV_EC; }
+        if (b == EL) { return EV_EL; }
+        # The other single-byte commands (NOP, IP, AO, BRK, DM, GA, RFC 1184's
+        # EOF / SUSP / ABORT, an SE out of context) are consumed: agora runs no
+        # process to interrupt and holds no output to abort.
         return EV_NONE;
     }
 
@@ -636,6 +702,165 @@ fn ts_on_him_yes(ts, opt): i64 {
     return 0;
 }
 
+# Switch to LINEMODE mode `m` (MODE_ACK and undefined bits cleared), handing
+# echoing to whichever side now does it (RFC 1184 § 2.2, ECHO): with EDIT on the
+# client edits the line and must echo it, so agora says WONT ECHO — had it kept
+# echoing, the client would not echo locally and the user would type blind until
+# Enter. With EDIT off again the server takes echoing back (WILL ECHO).
+fn ts_lm_set_mode(ts, m): i64 {
+    var old = load64(ts + TS_LM_MODE);
+    store64(ts + TS_LM_MODE, m);
+    var was_edit = old & LM_EDIT;
+    var now_edit = m & LM_EDIT;
+    # The ECHO state changes only together with the message that announces it.
+    if (now_edit != 0) {
+        if (was_edit == 0) {
+            if (opt_us(ts, OPT_ECHO) != Q_NO) {
+                if (ts_tx_room(ts) >= 3) {
+                    opt_set_us(ts, OPT_ECHO, Q_NO);
+                    ts_emit_iac3(ts, WONT, OPT_ECHO);
+                }
+            }
+        }
+    } else {
+        if (was_edit != 0) {
+            if (opt_us(ts, OPT_ECHO) == Q_NO) {
+                if (ts_tx_room(ts) >= 3) {
+                    opt_set_us(ts, OPT_ECHO, Q_WANTYES);
+                    ts_emit_iac3(ts, WILL, OPT_ECHO);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+# A LINEMODE MODE from the client (RFC 1184 § 2.2). With MODE_ACK it confirms a
+# mode and the server switches to it — and "a response is never generated to a
+# MODE command that has the MODE_ACK bit set". Without MODE_ACK it is the client
+# asking for a mode: the same as the current one is ignored; a different one is
+# agreed — agora accepts any mode, since EDIT on or off both work (the server-side
+# editor handles char mode) — by switching and replying with the mask and
+# MODE_ACK. Before 1.10.0 the mask was stored and never answered, which leaves a
+# client's request hanging.
+fn ts_lm_mode_recv(ts, mask): i64 {
+    var m = mask & LM_MODE_DEFINED;
+    if ((mask & LM_MODE_ACK) != 0) {
+        if (m != load64(ts + TS_LM_MODE)) { ts_lm_set_mode(ts, m); }
+        return 0;
+    }
+    if (m == load64(ts + TS_LM_MODE)) { return 0; }
+    var rep[8];
+    store8(&rep, IAC);
+    store8((&rep) + 1, SB);
+    store8((&rep) + 2, OPT_LINEMODE);
+    store8((&rep) + 3, LM_MODE);
+    store8((&rep) + 4, m | LM_MODE_ACK);
+    store8((&rep) + 5, IAC);
+    store8((&rep) + 6, SE);
+    if (ts_tx_push_all(ts, &rep, 7) == 1) { ts_lm_set_mode(ts, m); }
+    return 0;
+}
+
+# Append one SLC triplet to an SB reply under construction, doubling EVERY octet
+# that equals IAC (RFC 1184 § 2.4: "If any of the octets in the list of octet
+# triplets is equal to IAC, it must be sent as a double IAC") — the function, the
+# modifier (0x7F | SLC_ACK is 0xFF) and the value. At most 6 bytes. Returns the
+# new length.
+fn slc_put(rep, n, func, modf, val): i64 {
+    n = slc_put1(rep, n, func);
+    n = slc_put1(rep, n, modf);
+    n = slc_put1(rep, n, val);
+    return n;
+}
+
+# One octet of an SB reply, doubled if it is IAC. Returns the new length.
+fn slc_put1(rep, n, b): i64 {
+    store8(rep + n, b & 0xFF);
+    n = n + 1;
+    if ((b & 0xFF) == IAC) { store8(rep + n, IAC); n = n + 1; }
+    return n;
+}
+
+# An SLC list from the client (RFC 1184 § 2.4, § 5.5). agora has no special
+# characters of its own — it lets the client keep its own (EDIT mode does the
+# editing there) — so, per § 5.5:
+#   - `0 SLC_DEFAULT 0` / `0 SLC_VALUE 0` asks for the server's table: reply with
+#     every function, as `func SLC_DEFAULT 0` where agora holds no value ("so that
+#     the client may choose to use its own values");
+#   - any other triplet: ignored if it equals the current setting (rule 1) or
+#     carries SLC_ACK (rule 2 — on the server side an ACK is ignored); otherwise
+#     agreed — stored and echoed back with SLC_ACK set (rule 3). A function past
+#     SLC_MAX_FUNC is refused at the lowest level, `func SLC_NOSUPPORT 0` (rule 4).
+# The list must be whole triplets; a ragged one is malformed and dropped entire
+# (the validation this arm described from the start and never had).
+#
+# The reply is bounded by SLC_REPLY_MAX — it has to fit the tx queue whole — and
+# processing STOPS at the first triplet whose answer would not fit: those after it
+# are neither stored nor acknowledged, so agora's table never claims a value it
+# did not ACK. An import request is answered once per list. (Found by the 1.10.0
+# fuzz pass: sized for 30 triplets, the reply buffer overflowed the stack on a
+# list of ~170, or on repeated import requests — pre-auth, once LINEMODE is on.)
+fn ts_lm_slc_recv(ts, p, n): i64 {
+    if (n <= 0) { return 0; }
+    if ((n % 3) != 0) { return 0; }
+    var tbl = load64(ts + TS_SLC);
+    var rep[256];   # >= SLC_REPLY_MAX
+    store8(&rep, IAC);
+    store8((&rep) + 1, SB);
+    store8((&rep) + 2, OPT_LINEMODE);
+    store8((&rep) + 3, LM_SLC);
+    var rl = 4;
+    var imported = 0;
+    var k = 0;
+    while (k < n) {
+        var func = load8(p + k) & 0xFF;
+        var modf = load8(p + k + 1) & 0xFF;
+        var val = load8(p + k + 2) & 0xFF;
+        # A repeated import request is skipped outright — it needs no room.
+        if (func == 0) { if (imported == 1) { k = k + 3; continue; } }
+        # Room for this triplet's answer (at most 6 bytes, the import 120) and IAC SE.
+        var need = 6;
+        if (func == 0) { need = SLC_MAX_FUNC * 4; }
+        if (rl + need + 2 > SLC_REPLY_MAX) { k = n; continue; }
+        k = k + 3;
+        if (func == 0) {
+            imported = 1;
+            # The client's import request: our whole table.
+            var lvl0 = modf & SLC_LEVELBITS;
+            var f = 1;
+            while (f <= SLC_MAX_FUNC) {
+                if (lvl0 == SLC_DEFAULT) {
+                    store8(tbl + f * 2, SLC_DEFAULT);
+                    store8(tbl + f * 2 + 1, 0);
+                }
+                var tl = load8(tbl + f * 2) & 0xFF;
+                var tv = load8(tbl + f * 2 + 1) & 0xFF;
+                if ((tl & SLC_LEVELBITS) == SLC_NOSUPPORT) { tl = SLC_DEFAULT; tv = 0; }
+                rl = slc_put(&rep, rl, f, tl, tv);
+                f = f + 1;
+            }
+            continue;
+        }
+        if (func > SLC_MAX_FUNC) {
+            rl = slc_put(&rep, rl, func, SLC_NOSUPPORT, 0);
+            continue;
+        }
+        if ((modf & SLC_ACK) != 0) { continue; }
+        var cl = load8(tbl + func * 2) & 0xFF;
+        var cv = load8(tbl + func * 2 + 1) & 0xFF;
+        if (cl == modf) { if (cv == val) { continue; } }
+        store8(tbl + func * 2, modf);
+        store8(tbl + func * 2 + 1, val);
+        rl = slc_put(&rep, rl, func, modf | SLC_ACK, val);
+    }
+    if (rl == 4) { return 0; }           # nothing to say
+    store8((&rep) + rl, IAC); rl = rl + 1;
+    store8((&rep) + rl, SE);  rl = rl + 1;
+    ts_tx_push_all(ts, &rep, rl);
+    return 0;
+}
+
 # Handle a completed subnegotiation (telnet_feed returned EV_SB).
 # sb_buf[0] holds the option code; sb_buf[1..sb_len] holds the
 # payload. Dispatches by option code; unknown subnegs are
@@ -693,44 +918,33 @@ fn telnet_handle_sb(ts): i64 {
     }
 
     if (opt == OPT_LINEMODE) {
-        # RFC 1184 § 1: payload starts with a LINEMODE sub-command
-        # (MODE / FORWARDMASK / SLC), followed by sub-command-specific
-        # data. We consume MODE only; SLC is parsed-and-discarded and its described
-        # validation was never written — roadmap § 1.10.0. SLC is
-        # ignored (the peer's local-character table doesn't drive
-        # any server behavior pre-LINEMODE-aware-input-handling).
+        # RFC 1184 § 1: the payload starts with a LINEMODE sub-command.
         if (len < 2) { return 0; }
         var sub = load8(buf + 1) & 0xFF;
-
         if (sub == LM_MODE) {
-            # MODE reply is a single mask byte (plus LM_MODE_ACK bit
-            # if peer is confirming our request). Anything beyond
-            # is malformed — drop.
+            # Exactly one mask byte; anything else is malformed and dropped.
             if (len != 3) { return 0; }
-            var mask = load8(buf + 2) & 0xFF;
-            store64(ts + TS_LM_MODE, mask);
+            ts_lm_mode_recv(ts, load8(buf + 2) & 0xFF);
             return 0;
         }
-
         if (sub == LM_SLC) {
-            # SLC is a sequence of (func, modifier, value) triplets
-            # — 3-byte units. Peer sends its current local-character
-            # table; we acknowledge by no-op for M1. Validate the
-            # triplet count is plausible (multiple of 3) but don't
-            # mutate state.
+            ts_lm_slc_recv(ts, buf + 2, len - 2);
             return 0;
         }
-
-        if (sub == LM_FORWARDMASK) {
-            # Server-side FORWARDMASK is the client's request to
-            # forward only specific keystrokes verbatim. Deferred — roadmap § 1.10.0.
-            return 0;
-        }
-
+        # `LINEMODE DO|DONT|WILL|WONT FORWARDMASK` (RFC 1184 § 2.3). Only the
+        # server may send DO / DONT FORWARDMASK (§ 5.7), and WILL / WONT answer a
+        # DO — which agora never sends: in EDIT mode the client forwards whole
+        # lines, and nothing here needs a character forwarded early. So every
+        # FORWARDMASK subnegotiation from a client is out of turn and ignored.
+        # (Before 1.10.0 this arm compared byte 1 with LM_FORWARDMASK, which a
+        # FORWARDMASK subnegotiation never carries there — it holds the verb.)
         return 0;
     }
 
-    # Other subnegs (STATUS IS, NEW_ENVIRON, etc.) are dropped — roadmap § 1.10.0.
+    # 1.10.0 — subnegotiations for any other option (STATUS, NEW-ENVIRON, …) are
+    # discarded BY RULE, not "for now": agora refuses those options (WONT / DONT),
+    # and RFC 855 allows a subnegotiation only for an option that is enabled — the
+    # opt_him gate above has already returned for them. Nothing to answer.
     return 0;
 }
 
@@ -748,6 +962,13 @@ fn telnet_handle_sb(ts): i64 {
 #   IAC WILL SUPPRESS_GO_AHEAD   (modern char-at-a-time mode)
 #   IAC DO   NAWS                (we want the window size)
 #   IAC DO   TERMINAL_TYPE       (we want the terminal type)
+#   IAC DO   LINEMODE            (1.10.0 — we would like the client to edit lines)
+#
+# 1.10.0 — DO LINEMODE joined the salvo. RFC 1184 § 2.1: "IAC DO LINEMODE ...
+# should only be sent by the server side", and until now agora only took
+# LINEMODE when a client volunteered WILL — which a client is told not to do
+# first. A client that agrees gets the EDIT | TRAPSIG request (ts_on_him_yes);
+# one that refuses or never answers stays in character mode with server echo.
 fn telnet_announce(ts): i64 {
     opt_set_us(ts, OPT_ECHO, Q_WANTYES);
     ts_emit_iac3(ts, WILL, OPT_ECHO);
@@ -760,6 +981,9 @@ fn telnet_announce(ts): i64 {
 
     opt_set_him(ts, OPT_TERMINAL_TYPE, Q_WANTYES);
     ts_emit_iac3(ts, DO, OPT_TERMINAL_TYPE);
+
+    opt_set_him(ts, OPT_LINEMODE, Q_WANTYES);
+    ts_emit_iac3(ts, DO, OPT_LINEMODE);
 
     return 0;
 }

@@ -378,8 +378,43 @@ fn s07_fork_short_write_fails(): i64 {
     return 0;
 }
 
+# s08 — the line editor and the subnegotiation drain (1.10.0). BS and DEL erase a
+# character — a whole UTF-8 one — and IAC EC / IAC EL a character / the line,
+# each echoed as BS SP BS while agora echoes; before 1.10.0 BS / DEL were only
+# dropped and EC / EL ignored. And a LINEMODE MODE request that ENDS a recv is
+# answered in that recv: the reply used to be queued after the drain and sat
+# there until the next byte arrived.
+fn s08_line_editor_and_sb_reply(): i64 {
+    var name = "s08_line_editor_and_sb_reply";
+    var fds = alloc(16);
+    st_pair(fds);
+    var a = load64(fds);
+    var s = st_session(a);
+    opt_set_us(load64(s + SESS_TS), OPT_ECHO, Q_YES);
+    var line = load64(s + SESS_LINE);
+    st_feed(s, "abc\x08d\x7f", 0);
+    if (load64(s + SESS_LINE_POS) != 2) { st_fail(name, "BS / DEL did not erase"); return 1; }
+    if (memeq(line, "ab", 2) == 0)       { st_fail(name, "wrong line after BS / DEL"); return 1; }
+    if (st_tx_count(s, "\x08 \x08") != 2) { st_fail(name, "erase not echoed"); return 1; }
+    st_feed(s, "\xc3\xa9\x7f", 0);
+    if (load64(s + SESS_LINE_POS) != 2) { st_fail(name, "half a UTF-8 character erased"); return 1; }
+    st_feed(s, "\xff\xf7", 0);
+    if (load64(s + SESS_LINE_POS) != 1) { st_fail(name, "IAC EC did not erase"); return 1; }
+    st_feed(s, "xyz\xff\xf8", 0);
+    if (load64(s + SESS_LINE_POS) != 0) { st_fail(name, "IAC EL did not clear the line"); return 1; }
+    st_feed(s, "\xff\xfb\x22\xff\xfa\x22\x01\x03\xff\xf0", 0);
+    if (st_tx_count(s, "\xff\xfa\x22\x01\x07\xff\xf0") != 1) {
+        st_fail(name, "the MODE reply was not sent in the same recv");
+        return 1;
+    }
+    file_close(a);
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s07, remove the store, print the totals, and return 1 on any failure.
+# run s01..s08, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -398,6 +433,7 @@ fn serve_tests(): i64 {
     s05_door_checkpoint_and_play_lock();
     s06_shutdown_signalfd();
     s07_fork_short_write_fails();
+    s08_line_editor_and_sb_reply();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

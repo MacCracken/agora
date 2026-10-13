@@ -14,7 +14,7 @@ docs/examples/run.sh --fast --skip 01     # skip the slow halves (26's idle wait
 [`run.sh`](run.sh) (1.8.2) knows what each script needs: a clean `./bbs` and `./keys`, a freshly registered
 `qix` (03, 05, 06, 11–13, 15, 24, 26, 27), or a server it must start itself under the requested model (the
 client-only 04, 05, 23, 25, 26, 27). Scripts that start their own server inherit `AGORA_SERVE`, so
-`--model fork|poll|both` covers them too; 24 and 28–34 drive both models internally and run once. 20 skips
+`--model fork|poll|both` covers them too; 24 and 28–35 drive both models internally and run once. 20 skips
 itself unless the sibling `../cyrius-yeomans-descent` repo is present. Logs land in `build/smoke-logs/`.
 **CI runs the whole set on every push, once per serve model.** The runner refuses to start if `./bbs` or
 `./keys` already exist, since the scripts create and delete them (`--force` to override).
@@ -25,7 +25,7 @@ under a model named only in their header. Every release from 1.6.7 to 1.8.1 was 
 harness — the reason smoke 20's breakage went unnoticed for four releases.)
 
 Running one by hand still works: each script's header says what it needs. Defaults: `./build/agora`,
-a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–34 pick their own).
+a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–35 pick their own).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -55,7 +55,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–34 pic
 | 24 | [`24-descent-serve-models.sh`](24-descent-serve-models.sh) | 1.6.2: the Descent byte-proxy forwards client→MUD under BOTH serve models, asserted against a fake MUD that logs what it receives | `./bbs/`, `./keys/qix` |
 | 25 | [`25-door-state-churn.py`](25-door-state-churn.py) | 1.6.3: the DD_FREE release paths under churn — enter/quit across all nine practice doors, quit-then-enter alternation (freed blocks recycled straight into the next game), and repeated disconnect-mid-game so `session_release` frees a live slot | none |
 | 26 | [`26-iac-and-idle.py`](26-iac-and-idle.py) | 1.6.4: IAC (0xFF) doubled on egress + dropped at ingress (RFC 854), and `IAC NOP` keepalives no longer hold a session slot (~80s; `--fast` skips the idle half) | `./bbs/` |
-| 27 | [`27-audit-lows.py`](27-audit-lows.py) | 1.6.5: audit LOWs — over-long `--store` refused, BEL/BS/DEL dropped from a stored post, and echo gated correctly (kept for non-negotiating clients, suppressed after `IAC DONT ECHO`) | `./bbs/`, `./keys/qix` |
+| 27 | [`27-audit-lows.py`](27-audit-lows.py) | 1.6.5: audit LOWs — over-long `--store` refused, BEL/BS/DEL dropped from a stored post (since 1.10.0 BS/DEL edit the line first, so `a BEL b BS c DEL d` stores `ad`), and echo gated correctly (kept for non-negotiating clients, suppressed after `IAC DONT ECHO`) | `./bbs/`, `./keys/qix` |
 | 28 | [`28-clean-shutdown.py`](28-clean-shutdown.py) | 1.7.0 (roadmap N1): SIGINT/SIGTERM shut both serve models down cleanly (exit 0, not 143/130), a connected poll client is told before its socket closes, and **fork children do not inherit the parent's blocked signal mask** — the regression that made every connection process unkillable. Self-contained: starts and signals its own servers. | `/tmp/agora-shutdown-smoke-$$` |
 | 29 | [`29-egress-sanitize.py`](29-egress-sanitize.py) | 1.8.0 (ADR 0024): stored text reaches readers with every terminal control neutralized — C1 controls (raw and UTF-8-encoded) in a wire post, ESC/BEL in a CLI post, malformed UTF-8 — each shown as `?`, while UTF-8 text, TAB and CR LF arrive byte-for-byte and the post on disk is untouched. Both serve models, plus `agora read` / `agora list` on stdout. Self-contained; `AGORA_BIN=` A/Bs an older build (1.7.1 fails 44 checks). | `/tmp/agora-sanitize-smoke-$$` |
 | 30 | [`30-audit-1.8.1.py`](30-audit-1.8.1.py) | 1.8.1 (audit): `.policy` / `.admins` fail closed; CLI 64 KB body refused; `serve --store` without a value exits; poll fairness under 4 pipelining readers; a >128 KB `list` arrives whole under poll; a dropped connection saves door progress and a second session cannot play the same save (both serve models); a public key copied over another user's does not log in as them. Self-contained; `AGORA_BIN=` A/Bs an older build (1.8.0 fails all 11 checks). | `/tmp/agora-audit181-smoke-$$` |
@@ -63,6 +63,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–34 pic
 | 32 | [`32-store-hardening.py`](32-store-hardening.py) | 1.9.0 (audit 1.8.1 I11, ADR 0025): store opens refuse FIFOs and symlinks — a FIFO named `2.txt` must not hang `list` / `read` (under poll it hung the whole server, and a new client was never greeted), and `3.txt -> <a file outside the store>` must not be served as a post. Both serve models; the symlink checks run first so each fails on its own merits. A 1.8.2 build fails 9 of 10. **1.9.1 § B**: a FIFO in place of `.users/` must not hang `login` (a 1.9.0 poll server hangs). Self-contained. | `/tmp/agora-storehard-smoke-$$` |
 | 33 | [`33-reply-index.py`](33-reply-index.py) | 1.9.1 (ADR 0027): the first smoke to check a `Replies:` line — a hand-written board indexed at server start, a CLI `--reply-to` listed at once, a reply added by hand NOT listed under a complete index (the scan no longer runs), and the rebuild after deleting `.replies/`. Both serve models; a 1.9.0 build fails the index checks. Self-contained (own key + store). | `/tmp/agora-replyidx-smoke-$$` |
 | 34 | [`34-board-policy.py`](34-board-policy.py) | 1.9.2 (ADR 0028): `agora policy` / `agora admins`; every mode on the wire — `anon` (an anonymous post, listed `[anon]`), `known` (members only: no anonymous enter / list, `boards` says so), `admin` by fingerprint — and audit I9: after the admin's key renames itself and someone else registers the old handle, the newcomer is not an admin. Both serve models; a 1.9.1 build fails 17 of 35. Self-contained (own keys + store; openssl). | `/tmp/agora-policy-smoke-$$` |
+| 35 | [`35-telnet-conformance.py`](35-telnet-conformance.py) | 1.10.0 (ADR 0029): RFC 854 / 1184 through the real server, raw bytes, both serve models — DO LINEMODE in the greeting, AYT → `[Yes]`, DEL / IAC EC / IAC EL editing in character mode, LINEMODE MODE + the WONT ECHO hand-off, the SLC import reply, NVT newlines (CR LF / CR NUL) on a CLI-authored post — and § G, a real inetutils `telnet` in a pty negotiating the whole exchange (skipped if none is installed). A 1.9.2 build fails 18 of 20 raw checks. | `/tmp/agora-telnet-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

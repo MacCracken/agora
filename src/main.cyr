@@ -337,19 +337,30 @@ fn motd_emit_cstr(buf, pos, s): i64 {
 # UTF-8 sequence, so the chunked result is byte-identical to sanitizing the
 # whole input at once. Buffer sizes: a chunk is <= TEXT_CHUNK_MAX (504) bytes in,
 # <= 504 sanitized, <= 1008 after doubling.
+#
+# 1.10.0 (audit 1.8.1 I12) — and with NVT newlines: `text_nvt_iac` turns a bare LF
+# into CR LF and a bare CR into CR NUL (RFC 854 p.11), carrying a trailing CR
+# across chunks, and a CR that ends the text gets its NUL here. Output stays
+# <= 2 bytes per input byte, so `out` is unchanged.
 fn send_text(cfd, buf, len): i64 {
     var san[512];
     var out[1024];
+    var cr[8];
+    store64(&cr, 0);
     var i = 0;
     var rc = 0;
     while (i < len) {
         var e = text_chunk_end(buf, i, len, TEXT_CHUNK_MAX);
         var sn = text_sanitize(&san, buf + i, e - i);
         if (sn > 0) {
-            var on = text_iac_double(&out, &san, sn);
+            var on = text_nvt_iac(&out, &san, sn, &cr);
             if (send_buf(cfd, &out, on) != 0) { rc = 1; e = len; }
         }
         i = e;
+    }
+    if (rc == 0) {
+        var tn = text_nvt_end(&out, &cr);
+        if (tn > 0) { if (send_buf(cfd, &out, tn) != 0) { rc = 1; } }
     }
     return rc;
 }
@@ -3131,6 +3142,28 @@ fn session_rx_idle(s, n): i64 {
     return 1;
 }
 
+# Erase from the session's input line: the last character (`all` 0 — BS, DEL,
+# IAC EC) or the whole line (`all` 1 — IAC EL, RFC 854: "back to, but not
+# including, the last CR LF"; the line buffer IS the text since then). A character
+# is a whole UTF-8 sequence. While agora is echoing, each erased character is
+# wiped from the screen with BS SP BS. Returns the new length, or -1 when the
+# echo could not be sent (the caller closes, as for any failed send). An empty
+# line is left alone, silently.
+fn line_erase(cfd, ts, line, line_pos, all): i64 {
+    var echo = 0;
+    if (opt_us(ts, OPT_ECHO) != Q_NO) { echo = 1; }
+    var going = 1;
+    while (going == 1) {
+        if (line_pos <= 0) { going = 0; continue; }
+        line_pos = utf8_erase_last(line, line_pos);
+        if (echo == 1) {
+            if (send_buf(cfd, "\x08 \x08", 3) != 0) { return 0 - 1; }
+        }
+        if (all == 0) { going = 0; }
+    }
+    return line_pos;
+}
+
 # Process n bytes already sitting in session `s`'s rxbuf: telnet-decode byte by
 # byte, accumulate lines, dispatch each complete line by mode. This is the exact
 # byte-loop that used to live inline in handle_client — verbatim below. The
@@ -3175,6 +3208,12 @@ fn process_rx(s, start, n, budget): i64 {
         }
         var b = load8(rxbuf + i) & 0xFF;
         var ev = telnet_feed(ts, b);
+        # 1.10.0 — a subnegotiation may queue a reply (LINEMODE MODE / SLC), so it
+        # is handled BEFORE the drain below. It used to run after, so its reply sat
+        # in the buffer until the next byte — or for good, if the SB ended the recv.
+        if (ev == EV_SB) {
+            telnet_handle_sb(ts);
+        }
 
         # Drain any IAC responses queued by the state machine
         # before processing the data byte — keeps on-wire order
@@ -3198,12 +3237,33 @@ fn process_rx(s, start, n, budget): i64 {
             if (txr != 0) { store64(quit, 1); i = n; continue; }
         }
 
-        if (ev == EV_SB) {
-            telnet_handle_sb(ts);
+        # 1.10.0 — the line editor (RFC 854 EC / EL; BS and DEL from a client in
+        # character mode — one in LINEMODE EDIT edits locally and never sends them).
+        # Before 1.10.0 BS and DEL were only dropped (1.6.5), so a typo could not be
+        # corrected at all; EC and EL were consumed and ignored.
+        if (ev == EV_EC) {
+            line_pos = line_erase(cfd, ts, line, line_pos, 0);
+            if (line_pos < 0) { store64(quit, 1); i = n; continue; }
+        }
+        if (ev == EV_EL) {
+            line_pos = line_erase(cfd, ts, line, line_pos, 1);
+            if (line_pos < 0) { store64(quit, 1); i = n; continue; }
         }
 
         if (ev == EV_DATA) {
             var db = telnet_data_byte(ts) & 0xFF;
+            var erase = 0;
+            if (db == 8)   { erase = 1; }
+            if (db == 127) { erase = 1; }
+            if (erase == 1) {
+                # A real keystroke: it refreshes the idle clock like any kept byte.
+                store64(s + SESS_LAST_MS, clock_now_ms());
+                g_chat_idle = 0;
+                line_pos = line_erase(cfd, ts, line, line_pos, 0);
+                if (line_pos < 0) { store64(quit, 1); i = n; continue; }
+                i = i + 1;
+                continue;
+            }
             # M5-H input filter (widened at 1.6.4 / 1.6.5): drop C0 except
             # TAB/CR/LF, DEL and IAC silently before they reach the line
             # buffer or get echoed. See input_byte_ok for the reasoning.

@@ -19,7 +19,7 @@ For the *why* behind any decision below, follow the ADR links — this guide sta
   Confirm: `cyrius --version` matches the pin (a mismatch prints a drift warning).
 
 - **Linux x86_64 or aarch64**, or **AGNOS** (build with `cyrius build --agnos`, served under mirshi with `--net-listen-any`; shipping since 1.5.0 — note agnos always uses the poll serve model, having no `fork`). macOS and Windows follow as cyrius `lib/net.cyr` gains backends ([ADR 0001](../adr/0001-cross-platform-listener-decoupled-from-agnos.md)).
-- **A telnet client.** `telnet`, `nc`, or `socat - TCP:host:port` all work; agora speaks RFC 854 + 1143 + 1073 + 1091 + 1184.
+- **A telnet client.** `telnet`, `nc`, or `socat - TCP:host:port` all work; agora speaks RFC 854 + 1143 + 1073 + 1091 + 1184. Since 1.10.0 a client that speaks LINEMODE (GNU / BSD `telnet`) edits each line locally and sends it on Enter; a character-mode client (`nc`, most BBS clients) is echoed by the server, and Backspace / Delete correct the line there ([ADR 0029](../adr/0029-telnet-conformance.md)).
 - **(Optional)** `openssl` ≥ 3.0 if you want to script telnet authentication — see [Authenticated telnet](#authenticated-telnet) below.
 
 ---

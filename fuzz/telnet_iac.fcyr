@@ -29,7 +29,7 @@
 # below are the only detector this target has.
 #
 # Each invariant exits with a distinct code so a failure names itself:
-#   10 telnet_feed returned a value outside {EV_NONE, EV_DATA, EV_SB}
+#   10 telnet_feed returned a value outside {EV_NONE, EV_DATA, EV_SB, EV_EC, EV_EL}
 #   11 parser state left the ST_DATA..ST_SB_IAC range
 #   12 tx queue length exceeded its capacity
 #   13 subneg accumulator length exceeded its capacity
@@ -39,6 +39,10 @@
 #   17 an option Q-state byte left the 0..255 range
 #   20 a targeted (non-random) adversarial sequence broke an invariant
 #   21 telnet_state_reset left the state dirty
+#   22 (1.10.0) the reply queue holds a torn command or subnegotiation — an
+#      `IAC SB ...` with no `IAC SE`, an `IAC <verb>` with no option, a bare IAC
+#      at the end: the peer would parse later bytes as part of it
+#   23 (1.10.0) the LINEMODE mode left the defined bits (MODE_ACK or undefined)
 #
 # DETERMINISM: the byte stream comes from an in-file xorshift64 PRNG with a
 # fixed seed, so a failure here reproduces exactly on the next run and in CI.
@@ -67,7 +71,7 @@ fn nextb(): i64 {
 # `ev` is telnet_feed's return. Exits the process on the first violation.
 fn check(ts, ev): i64 {
     if (ev < EV_NONE) { syscall(60, 10); }
-    if (ev > EV_SB)   { syscall(60, 10); }
+    if (ev > EV_EL)   { syscall(60, 10); }
 
     var st = load64(ts + TS_STATE);
     if (st < ST_DATA)   { syscall(60, 11); }
@@ -98,6 +102,59 @@ fn check(ts, ev): i64 {
     var rows = load64(ts + TS_TERM_ROWS);
     if (rows < 0)     { syscall(60, 16); }
     if (rows > 65535) { syscall(60, 16); }
+
+    if ((load64(ts + TS_LM_MODE) & (~LM_MODE_DEFINED)) != 0) { syscall(60, 23); }
+    check_tx_frames(ts, 22);
+    return 0;
+}
+
+# 1.10.0 — the reply queue must hold only WHOLE telnet units: a torn one would
+# make the peer read the bytes after it as part of it. Walks the queue: `IAC SB`
+# opens a subnegotiation that only `IAC SE` closes (`IAC IAC` is data inside
+# it); `IAC DO|DONT|WILL|WONT` needs its option byte; every other IAC needs its
+# command byte. Exits with `code` on the first torn unit.
+fn check_tx_frames(ts, code): i64 {
+    var buf = load64(ts + TS_TX_BUF);
+    var len = load64(ts + TS_TX_LEN);
+    var insb = 0;
+    var i = 0;
+    while (i < len) {
+        var b = load8(buf + i) & 0xFF;
+        if (b != IAC) { i = i + 1; continue; }
+        if (i + 1 >= len) { syscall(60, code); }
+        var c = load8(buf + i + 1) & 0xFF;
+        if (insb == 1) {
+            if (c == SE) { insb = 0; i = i + 2; continue; }
+            if (c == IAC) { i = i + 2; continue; }
+            syscall(60, code);
+        }
+        if (c == SB) { insb = 1; i = i + 2; continue; }
+        var verb = 0;
+        if (c == DO)   { verb = 1; }
+        if (c == DONT) { verb = 1; }
+        if (c == WILL) { verb = 1; }
+        if (c == WONT) { verb = 1; }
+        if (verb == 1) {
+            if (i + 2 >= len) { syscall(60, code); }
+            i = i + 3;
+            continue;
+        }
+        i = i + 2;
+    }
+    if (insb == 1) { syscall(60, code); }
+    return 0;
+}
+
+# Agree the client-side options whose subnegotiations agora parses (NAWS,
+# TERMINAL-TYPE, LINEMODE), as a cooperating client would. Since 1.8.1 (audit W4)
+# a subnegotiation counts only for an AGREED option, so without this every
+# structured SB below was dropped at the gate and the payload decoders went
+# unfuzzed (found at 1.10.0).
+fn agree_client_opts(ts): i64 {
+    telnet_feed(ts, IAC); telnet_feed(ts, WILL); telnet_feed(ts, OPT_NAWS);
+    telnet_feed(ts, IAC); telnet_feed(ts, WILL); telnet_feed(ts, OPT_TERMINAL_TYPE);
+    telnet_feed(ts, IAC); telnet_feed(ts, WILL); telnet_feed(ts, OPT_LINEMODE);
+    telnet_tx_consume(ts);
     return 0;
 }
 
@@ -179,6 +236,7 @@ check_optq(ts2);
 var ts3 = telnet_state_new();
 telnet_announce(ts3);
 telnet_tx_consume(ts3);
+agree_client_opts(ts3);
 
 var opts[6];
 store64(&opts + 0,  OPT_NAWS);
@@ -227,7 +285,7 @@ fn feed_seq(ts4, buf, len): i64 {
     while (i < len) {
         var ev4 = telnet_feed(ts4, load8(buf + i));
         if (ev4 < EV_NONE) { syscall(60, 20); }
-        if (ev4 > EV_SB)   { syscall(60, 20); }
+        if (ev4 > EV_EL)   { syscall(60, 20); }
         var st4 = load64(ts4 + TS_STATE);
         if (st4 < ST_DATA)   { syscall(60, 20); }
         if (st4 > ST_SB_IAC) { syscall(60, 20); }
@@ -238,6 +296,7 @@ fn feed_seq(ts4, buf, len): i64 {
             telnet_handle_sb(ts4);
             if (load64(ts4 + TS_TERM_TLEN) > TERM_TYPE_CAP) { syscall(60, 20); }
         }
+        check_tx_frames(ts4, 20);
         telnet_tx_consume(ts4);
         i = i + 1;
     }
@@ -303,7 +362,59 @@ var r = 0;
 while (r < 97) { store8(seq + sf, nextb()); sf = sf + 1; r = r + 1; }   # 97: not a multiple of 3
 store8(seq + sf, IAC); sf = sf + 1;
 store8(seq + sf, SE);  sf = sf + 1;
-feed_seq(telnet_state_new(), seq, sf);
+var tsf = telnet_state_new();
+agree_client_opts(tsf);
+feed_seq(tsf, seq, sf);
+
+# (g) 1.10.0 — SLC lists that ARE whole triplets, random content (an import
+#     request among them, values of 255 that must be doubled), up to 85 triplets:
+#     the longest reply the decoder can build, which must fit whole or not at all.
+var g = 0;
+while (g < 400) {
+    var sg = 0;
+    store8(seq + sg, IAC); sg = sg + 1;
+    store8(seq + sg, SB);  sg = sg + 1;
+    store8(seq + sg, OPT_LINEMODE); sg = sg + 1;
+    store8(seq + sg, LM_SLC); sg = sg + 1;
+    var trip = (nextb() % 85) + 1;
+    var tq = 0;
+    while (tq < trip * 3) {
+        var tb = nextb();
+        if ((nextb() & 7) == 0) { tb = IAC; }
+        store8(seq + sg, tb); sg = sg + 1;
+        if (tb == IAC) { store8(seq + sg, IAC); sg = sg + 1; }
+        tq = tq + 1;
+    }
+    store8(seq + sg, IAC); sg = sg + 1;
+    store8(seq + sg, SE);  sg = sg + 1;
+    var tsg = telnet_state_new();
+    agree_client_opts(tsg);
+    feed_seq(tsg, seq, sg);
+    g = g + 1;
+}
+
+# (h) 1.10.0 — every LINEMODE MODE byte, with and without MODE_ACK, from both
+#     echo states: the reply and the echo hand-off must stay whole and the mode
+#     inside the defined bits.
+var hm = 0;
+while (hm < 256) {
+    var sh = 0;
+    store8(seq + sh, IAC); sh = sh + 1;
+    store8(seq + sh, SB);  sh = sh + 1;
+    store8(seq + sh, OPT_LINEMODE); sh = sh + 1;
+    store8(seq + sh, LM_MODE); sh = sh + 1;
+    store8(seq + sh, hm); sh = sh + 1;
+    if (hm == IAC) { store8(seq + sh, IAC); sh = sh + 1; }
+    store8(seq + sh, IAC); sh = sh + 1;
+    store8(seq + sh, SE);  sh = sh + 1;
+    var tsh = telnet_state_new();
+    telnet_announce(tsh);
+    telnet_tx_consume(tsh);
+    agree_client_opts(tsh);
+    feed_seq(tsh, seq, sh);
+    if ((load64(tsh + TS_LM_MODE) & (~LM_MODE_DEFINED)) != 0) { syscall(60, 23); }
+    hm = hm + 1;
+}
 
 # --- pass 5: state reset ------------------------------------------------------
 # 1.6.0's session pool reuses a TelnetState across connections via
@@ -320,5 +431,5 @@ if (load64(ts3 + TS_TX_LEN)   != 0)       { syscall(60, 21); }
 if (load64(ts3 + TS_TERM_TLEN) != 0)      { syscall(60, 21); }
 check_optq(ts3);
 
-println("fuzz telnet_iac: OK (5 passes, ~1.2M bytes, all invariants held)");
+println("fuzz telnet_iac: OK (5 passes, ~1.2M bytes + 656 targeted LINEMODE frames, all invariants held)");
 syscall(60, 0);
