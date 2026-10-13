@@ -1,11 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-12 — **1.8.1 (code audit + repair) shipped**: 3 HIGH / 12 MEDIUM / 26 LOW fixed
-> ([audit](../audit/2026-10-12-audit-1.8.1.md)). It also closed two rows planned for 1.9.0 (the `dir_list_into`
-> migration and the O(n²) sort — both turned out to be security fixes); the audit's open INFO items are
-> scheduled below with their IDs. Earlier the same day: re-planned into release slots — the backlog that
-> accumulated since the 2026-07-26 sweep was scheduled into the **1.8.x → 1.12.x** minors, and shipped work
-> collapsed to one row per release line (per-tag detail lives in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.8.2 (tooling) shipped**, folding the planned 1.8.3 into it: the 1.8.x
+> line's planned work is done, and the next slot is **1.9.0**. Its measurements now sit on the rows they were
+> for (§ 1.9.1 reply index, § 1.11.0 epoll). Earlier: 1.8.1 (code audit + repair, 2026-10-12), and the same
+> day's re-plan into 1.8.x → 1.12.x slots — shipped work collapsed to one row per release line (per-tag
+> detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -33,10 +32,9 @@ did) and the slots after it shift.
 | Slot | Theme | Kind | Status |
 |---|---|---|---|
 | **1.8.1** | Code audit + repair | hardening, no features | ✅ 2026-10-12 |
-| **1.8.2** | Mechanical gates — CI runs what the cut checklist runs | tooling | planned |
-| **1.8.3** | Measure — `tests/` split + serve-model benchmarks | tooling | planned |
+| **1.8.2** | Tooling: mechanical gates + measurement (the planned 1.8.2 and 1.8.3, cut as one) | tooling | ✅ 2026-10-13 |
 | **1.9.0** | Storage residue + durable posts | correctness / memory | planned |
-| **1.9.1** | Reply index | scale | planned — gated on 1.8.3 numbers |
+| **1.9.1** | Reply index | scale | planned — the 1.8.2 numbers are in (see § 1.9.1) |
 | **1.9.2** | Board policy + operator CLI | feature | planned |
 | **1.10.0** | Telnet conformance | protocol | planned |
 | **1.10.1** | Terminal-aware output | protocol / UX | planned |
@@ -57,34 +55,15 @@ Shipped 2026-10-12: a six-slice full-tree audit, every finding verified and A/B'
 Report: [`docs/audit/2026-10-12-audit-1.8.1.md`](../audit/2026-10-12-audit-1.8.1.md); summary in CHANGELOG
 `[1.8.1]`. Delete this section when the 1.8.x line closes.
 
-### 1.8.2 — Mechanical gates
+### 1.8.2 — Tooling: mechanical gates + measurement ✅
 
-Everything the cut checklist asks a human to do by hand that a script or CI step can do instead.
-
-| Item | Source | Effort |
-|---|---|---:|
-| **Examples runner.** The README's "run them in order" contract does not hold: 09, 10, 18, 19 and 20 `rm -rf ./bbs ./keys` on exit, and six scripts (04, 05, 23, 25, 26, 27) are client-only and need an externally started server with a specific `AGORA_SERVE` model recorded only in their header comments. One runner that gives each smoke its own store/keys and the server it needs. | `docs/examples/README.md`; CHANGELOG [1.6.7] | small |
-| **CI runs the smokes** through that runner, under both serve models. Today the 29 smokes are the only proof of the concurrency, serve-model and shutdown behaviour, and CI runs none of them. | `.github/workflows/ci.yml`; CHANGELOG [1.7.0] § Known limitations | medium |
-| `cyrius fuzz --poison=ab` in CI and release (green by hand at 1.8.0; doubles the fuzz step's runtime) | CHANGELOG [1.8.0] § Verification | small |
-| **aarch64 in CI**: `cyrius build --aarch64` + `cyrius test --aarch64` under qemu. 225/225 by hand at 1.8.0; only smoke 29 has ever run against an aarch64 binary, and nothing has run on aarch64 hardware. | CLAUDE.md § Goal; CHANGELOG [1.8.0] | small |
-| **Toolchain-provenance pre-cut script** — `cmp` the local `~/.cyrius/versions/<ver>/lib` against `git show <tag>:lib/…`. Two defects found at 1.6.7: `install.sh --refresh-only` copies the cyrius *working tree*, and the versioned wrapper does not pin `cycc` (upstream: `cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`). | CHANGELOG [1.6.7] § Verification notes; architecture note [002](../architecture/002-lib-sync-same-size-skip.md) | small |
-| **Slow-reader close-path regression smoke** — a HIGH-severity 1.6.3 fix resting on inspection alone | CHANGELOG [1.6.3] § Security | medium |
-| **State-sync check** — a CI/release step that fails when `state.md` or this file does not name `VERSION`. 1.6.6 and 1.7.1 both shipped without either recording them. | CLAUDE.md § CI / Release; CHANGELOG [1.6.7], [1.8.0] | small |
-| Generated version string — the three version literals in `src/main.cyr` are hand-bumped every cut (since 1.8.1 CI at least checks all three); the generated `version_str.cyr` was promised as a v1.0 close-out item | CHANGELOG [0.2.0]; audit 1.8.1 hygiene H13 | small |
-| **`cyrius audit` exits 1** — 176 lint warnings (all line length) and 358 undocumented public functions; the gate CLAUDE.md § P(-1) lists has never actually passed. Wrap the lines and document the functions, or record which checks are waived and why. | audit 1.8.1 I14 | medium |
-| **CI supply chain** — the installer is fetched from cyrius `main` (unpinned), actions are pinned by tag rather than SHA, and `ci.yml` has no `permissions:` block. (The `curl \| sh` that could fail green was fixed at 1.8.1.) | audit 1.8.1 hygiene H18 | small |
-
-### 1.8.3 — Measure
-
-The numbers that four ADR "measure before refining" gates and the 1.9.1 reply-index decision are waiting on.
-
-| Item | Source | Effort |
-|---|---|---:|
-| **`tests/` split.** `src/test.cyr` does not include `src/main.cyr`, so nothing in the serve loops, the session pool, `sess_tx_enqueue` or the N1 shutdown helpers can be unit-tested; N1 and N3 shipped covered by smoke 28 and inspection alone. Also clears `cyrius audit`'s `skip: no tests/ directory` and the test build's `undefined function 'send_str'` warning. | `src/test.cyr` include block; CHANGELOG [1.7.0] § Known limitations, [1.8.0] § Known limitations | medium |
-| **Accept-loop rate and per-session memory**, both serve models — never benchmarked; CLAUDE.md P(-1) step 2 requires the baseline | CLAUDE.md § P(-1); [`BENCHMARKS.md`](../../BENCHMARKS.md) (parser only) | medium |
-| **World-lock contention** benchmark — opens the ADR 0010 / 0014 "measure before refining" gates | ADRs 0010, 0014 | medium |
-
----
+Shipped 2026-10-13 — the two tooling slots (1.8.2 mechanical gates, 1.8.3 measure) as one cut, every row
+done: an in-repo examples runner and CI smokes under both serve models; `--poison=ab`, aarch64 (qemu-user),
+toolchain provenance and version sync in CI; a slow-reader regression smoke; the version string generated
+from `VERSION`; `cyrius audit` passing and gating; SHA-pinned actions, a tag-pinned installer, least-privilege
+workflows and checksummed multi-target releases; the `tests/` split with a serve-layer unit suite; and the
+first accept-rate, per-session-memory, world-lock and reply-scan baselines. Detail: CHANGELOG `[1.8.2]`.
+Delete this section with 1.8.1's when the 1.8.x line closes.
 
 ## 1.9.x — storage and scale
 
@@ -104,7 +83,7 @@ and L5: the listing residue was an unauthenticated memory-exhaustion path, not a
 
 | Item | Source | Effort |
 |---|---|---:|
-| Reply enumeration is scan-on-read, O(n) per `read`. [ADR 0005](../adr/0005-threading-via-reply-to.md) named a scale trigger that has arguably fired; decide index-vs-scan on the 1.8.3 numbers, not by feel. | ADR 0005 | large |
+| Reply enumeration is scan-on-read, O(n) per `read`. **Measured at 1.8.2**: 3.4 ms on 500 posts, 13.0 ms on 2,000, 27.7 ms on 4,096 — linear, ~6.7 µs per post (BENCHMARKS.md § Serve-level baselines). Under poll that time is the whole server's (one `read` per session per sweep). An index (a per-board `parent → children` file maintained at post time, under the board lock) earns its slot once boards pass a few thousand posts; below that the scan is cheaper to keep. | ADR 0005; `benches/serve-bench.py reply` | large |
 
 ### 1.9.2 — Board policy + operator CLI
 
@@ -149,7 +128,7 @@ RFC 854 and RFC 1184 are authoritative; each row is a deviation, and per CLAUDE.
 | Item | Source | Effort |
 |---|---|---:|
 | **The Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions for the whole visit, and a blackholed endpoint still costs up to 4 s per connect (1.8.1 added a 30 s redial cooldown and has the proxy watch the shutdown signalfd — audit L19). The fix is making Descent a session *state* in the poll loop rather than a blocking call; write the ADR first. | `src/descent.cyr` (documented, not fixed); [ADR 0017](../adr/0017-descent-link-gateway.md), [ADR 0023](../adr/0023-dual-serve-model.md) | large |
-| `AGORA_SERVE=epoll` is accepted and silently aliased to `poll`; implement it or reject the value | `src/main.cyr` | medium |
+| `AGORA_SERVE=epoll` is accepted and silently aliased to `poll`; implement it or reject the value. **Measured at 1.8.2**: the poll loop accepts exactly 50 connections/s sequentially — one per 20 ms sweep, because it sleeps instead of waiting for readiness — against fork's ~4,100; a `poll(2)`/epoll readiness wait removes that floor (and the 0–20 ms latency it adds to every poll-mode command). | `src/main.cyr`; BENCHMARKS.md § Serve-level baselines | medium |
 | `PR_SET_PDEATHSIG` for orphan-on-parent-crash under the fork model | ADR 0007 § Out of scope | small |
 | Accept-loop rate limiting — the never-taken half of 0.7.0 audit M4's fix. Blocked on a syscall agnos does not have; re-check before scheduling. | 0.7.0 audit M4 | large |
 
@@ -248,7 +227,7 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 | P(-1) hardening | 1.4.4 – 1.4.6 | 2026-06-15 audit; send timeout + bounds follow-ups; door descriptor registry | 2026-06-15 |
 | Targets + serve models | 1.5.0 – 1.6.7 | agnos target; single-process poll multiplex (`AGORA_SERVE`); per-command arena; `DD_FREE`; 2026-07-26 audit ledger closed; doc-truth cut; toolchain to 6.5.33 | 2026-08-22 |
 | Durability + egress | 1.7.0 – 1.8.0 | clean shutdown (signalfd); crash-safe door / world / chat writes; poll holes; IAC fuzz harness; `Result` value form; darshana 1.3.0 + egress sanitization (2026-10-12 audit closed) | 2026-10-12 |
-| Audit + repair | 1.8.1 | six-slice audit, 41 fixes: poll fairness + vendored-allocation leaks, fail-closed policy, door save lifecycle, loader bounds, Descent visit bugs, fork caps | 2026-10-12 |
+| Audit + repair, tooling | 1.8.1 – 1.8.2 | six-slice audit, 41 fixes (poll fairness, vendored-allocation leaks, fail-closed policy, door save lifecycle, loader bounds, fork caps); then the Closeout Pass in CI, serve-layer unit tests, generated version string, serve-level baselines | 2026-10-13 |
 
 ---
 

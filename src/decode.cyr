@@ -147,10 +147,12 @@ fn decode_count_mark(marks, len, kind): i64 {
     return n;
 }
 
+# Number of MK_EXACT (green, right-place) marks in a feedback row. Pure.
 fn decode_exact(marks, len): i64 {
     return decode_count_mark(marks, len, MK_EXACT);
 }
 
+# Number of MK_PRESENT (yellow, wrong-place) marks in a feedback row. Pure.
 fn decode_present(marks, len): i64 {
     return decode_count_mark(marks, len, MK_PRESENT);
 }
@@ -322,6 +324,7 @@ fn decode_commit_guess(st, guessbuf): i64 {
 
 # === Construction ===
 
+# Set the transient one-line message: copy `s` into DG_MSG, truncated to 255 bytes + NUL.
 fn decode_msg(st, s): i64 {
     var m = load64(st + DG_MSG);
     var n = strlen(s);
@@ -374,6 +377,7 @@ fn decode_start(st): i64 {
 
 # === Door contract ===
 
+# Door contract: 1 once the game has ended (cracked or burned), else 0.
 fn decode_is_over(st): i64 {
     if (load64(st + DG_OVER) != 0) { return 1; }
     return 0;
@@ -391,6 +395,8 @@ fn decode_final_score(st): i64 {
     return base;
 }
 
+# Title for a final score (thresholds 900 / 600 / 300 / > 0; 0 is "Washed Out"); a static
+# string. Pure.
 fn decode_rank(score): i64 {
     if (score >= 900) { return "Cryptanalyst"; }
     if (score >= 600) { return "Codebreaker"; }
@@ -401,6 +407,7 @@ fn decode_rank(score): i64 {
 
 # === Render ===
 
+# Emit the transient DG_MSG line (green, "> " prefix) if non-empty; returns the new pos.
 fn decode_render_msg(st, buf, pos): i64 {
     var msg = load64(st + DG_MSG);
     if ((load8(msg) & 0xFF) != 0) {
@@ -461,6 +468,8 @@ fn decode_emit_secret(st, buf, pos): i64 {
     return decode_emit_digits(buf, pos, sec, len);
 }
 
+# Door render: the variant picker, or the board (legend, each guess row with its feedback, then
+# the crack/burn banner or the guesses-left prompt) plus the message line; returns the length.
 fn decode_render(st, buf, cap): i64 {
     var pos = 0;
     var screen  = load64(st + DG_SCREEN);
@@ -659,6 +668,8 @@ fn decode_feed(st, line, len): i64 {
 # source of truth, so a save can never carry stale feedback). Runtime
 # fields (screen/msg) are rebuilt.
 
+# Serialize the game as a DECO1 record (layout above) into buf; returns bytes written. cap is
+# not consulted — the worst-case record (10 config i64 + 8 secret + 80 guess bytes) is < 600 B.
 fn decode_save_format(st, buf, cap): i64 {
     memcpy(buf, "DECO1\n", 6);
     var pos = 6;

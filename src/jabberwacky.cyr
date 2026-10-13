@@ -43,7 +43,7 @@
 # The engine itself is PURE: no socket, no disk. main.cyr owns the
 # socket and the on-disk save (same split as every door, ADR 0009) — so
 # the corpus, scorer, learner, and serialisation are all unit-testable
-# in src/test.cyr without binding a port (t167+).
+# in tests/agora.tcyr without binding a port (t167+).
 #
 # State layout keeps the response buffer + length at the SAME struct
 # offsets as ELIZA/PARRY (JW_RESP=8 / JW_RESPLEN=16) so main.cyr's chat
@@ -391,6 +391,8 @@ fn jw_free(st): i64 {
 # response sanitised, so neither can contain TAB or LF — the delimited
 # format is unbreakable and carries no terminal-escape injection.
 
+# Serialize the learned pairs as a JBRW1 record (format above) into buf; returns bytes written.
+# Bounded by cap: emits the oldest-first prefix that fits, and the count line matches it.
 fn jw_save_format(st, buf, cap): i64 {
     var count   = load64(st + JW_COUNT);
     var seedn   = load64(st + JW_SEEDN);
@@ -435,6 +437,10 @@ fn jw_save_format(st, buf, cap): i64 {
     return pos;
 }
 
+# Parse a JBRW1 record: a fresh shell with the seed corpus re-baked, then each learned
+# stim TAB resp LF record re-added (and re-cleaned) via jw_add_pair; tab-less records are
+# skipped, at most the ring's learned capacity is read. Returns the state (DOOR_SOLO), or 0 on a
+# short buffer / bad header.
 fn jw_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "JBRW1\n", 6) == 0) { return 0; }
@@ -489,6 +495,8 @@ fn jw_load_parse(buf, len): i64 {
 
 # === Door contract: new / start / feed / render / is_over ===
 
+# Fresh Jabberwacky: an empty shell plus the baked-in seed corpus (JW_SEEDN marks where learning
+# starts). max_days is the unused door-contract arg. Returns the state.
 fn jw_new(seed, mode, max_days): i64 {
     var st = jw_state_alloc();
     store64(st + JW_SEED, seed);

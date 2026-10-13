@@ -10,103 +10,174 @@ on:
   # — without this, the release-tag run trips on the CI-gate step.
   workflow_call:
 
+# 1.8.2 (audit 1.8.1 hygiene H18) — least privilege: nothing here writes.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Every job installs the toolchain the same way. The pin is read from
+# cyrius.cyml [package].cyrius — the single source of truth per
+# first-party-standards (override with CYRIUS_VERSION for a CI-side rebuild).
+#
+# The installer is fetched from the cyrius TAG that matches the pin (1.8.2 —
+# it came from `main`, so a change to install.sh could alter every agora build
+# without agora changing). It lays out the version-matched snapshot at
+# $HOME/.cyrius/versions/<ver>/lib, which cyrius resolves stdlib modules from
+# since 6.2.x. `shell: bash` runs it with `-eo pipefail` (1.8.1): GitHub's
+# default `bash -e` has no pipefail, so a failed `curl` fed `sh` an empty
+# script and the step went green.
+#
+# Actions are pinned by commit SHA (1.8.2), with the tag they resolved to.
 
 jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
 
       - name: Install Cyrius toolchain
-        # Reads the pinned cyrius version out of cyrius.cyml [package].cyrius
-        # — the single source of truth per first-party-standards. Override
-        # with CYRIUS_VERSION env var if a CI-side rebuild against a
-        # different toolchain is ever needed.
-        #
-        # Uses the UPSTREAM installer (the same one patra / sigil use). Since
-        # 6.2.x, cyrius resolves stdlib modules from the version-matched
-        # snapshot at $HOME/.cyrius/versions/<ver>/lib — NOT a flat
-        # $HOME/.cyrius/lib copy. The old hand-rolled "extract tarball + cp
-        # lib/* into ~/.cyrius/lib" install produced the flat layout, so
-        # `cyrius deps` failed with "pins 6.2.2 but it is not installed at
-        # .../versions/6.2.2/lib" (and could not read sigil's u256/thread
-        # deps). install.sh lays out the versioned snapshot correctly.
-        #
-        # 1.8.1 (audit hygiene H18) — `shell: bash` runs this with
-        # `-eo pipefail`. GitHub's default `bash -e` has no pipefail, so a failed
-        # `curl` fed `sh` an empty script and the step went GREEN; the job then
-        # failed later, at deps or build, mis-attributed.
         shell: bash
         run: |
           set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
         run: cyrius deps
 
+      - name: Toolchain provenance
+        # scripts/check-toolchain.sh (1.8.2): the vendored lib/ matches the
+        # installed snapshot, and the build runs the snapshot's own cycc.
+        # (--no-repo: the snapshot-against-tag half needs a cyrius checkout; it
+        # is the local pre-cut gate, where a dirty snapshot was actually found.)
+        run: scripts/check-toolchain.sh --no-repo
+
       - name: Build
-        # 1.6.6 — CYRIUS_DCE=1 per CLAUDE.md § CI/Release. It was stated as
-        # current practice and was in neither workflow, so CI had been
-        # measuring a different artifact than the one the docs describe
-        # (binary size is a tracked release metric).
-        # Binary name `agora` matches the repo name and cyrius.cyml
-        # [build].output, so no naming-divergence handling needed
-        # (cf. kii / bannermanor's CI which carry an explanatory comment).
+        # CYRIUS_DCE=1 per CLAUDE.md § CI/Release — binary size is a tracked
+        # release metric, so CI measures the artifact the docs describe.
         run: |
           mkdir -p build
           CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
 
-      - name: Version drift check
-        # The version strings in src/main.cyr (print_banner, cmd_version,
-        # connection MOTD) are hand-edited at each milestone close. This
-        # step catches the class of drift where VERSION bumps but the
-        # literal doesn't (or vice versa). Auto-generated literals from
-        # a `version_str.cyr` build-hook are a v1.0 close-out item —
-        # see CHANGELOG [0.2.0] note about the inlined-version-string
-        # technical debt.
-        #
-        # 1.8.1 (audit hygiene H13) — all THREE literals. Only cmd_version was
-        # checked, so the banner (`v<ver>`) and the MOTD line (`agora <ver> —`)
-        # could drift silently.
-        run: |
-          V="$(cat VERSION | tr -d '[:space:]')"
-          EXPECTED="agora $V"
-          ACTUAL=$(./build/agora --version | head -1)
-          test "$ACTUAL" = "$EXPECTED" || { echo "version drift: binary says '$ACTUAL', VERSION says '$EXPECTED'"; exit 1; }
-          grep -q "println(\"v$V " src/main.cyr || { echo "version drift: print_banner literal is not v$V"; exit 1; }
-          grep -q "\"  agora $V " src/main.cyr || { echo "version drift: MOTD literal is not agora $V"; exit 1; }
+      - name: Version sync
+        # scripts/check-version-sync.sh (1.8.2): VERSION is semver and is what
+        # cyrius.cyml, the built binary, CHANGELOG, state.md's Released row and
+        # the roadmap's release row all name, and no hard-coded version literal
+        # has crept back into src/ (the binary's strings come from
+        # CYRIUS_PKG_VERSION since 1.8.2). The state.md / roadmap.md half replaces
+        # the release "post-hook" that never existed: 1.6.6 and 1.7.1 both shipped
+        # without either recording them.
+        run: scripts/check-version-sync.sh
 
       - name: Test
-        # Explicit `src/test.cyr` path — the canonical form (CLAUDE.md §
-        # Closeout Pass). Since cyrius 6.6.17 a bare `cyrius test` also runs
-        # the [build] test entry (before that it searched tests/*.tcyr and
-        # exited 1); the `tests/` split is roadmap 1.8.3. Runs the full unit suite — RFC 854 /
-        # 1143 / 1073 / 1091 / 1184 conformance plus storage, accounts,
-        # policy and every door game. The count lives in
-        # docs/development/state.md, deliberately not here: this comment
-        # said "24-test" from 0.2.0 until 1.7.0, by which point it was 221.
-        run: cyrius test src/test.cyr
+        # A bare `cyrius test` runs every tests/*.tcyr (1.8.2): tests/agora.tcyr,
+        # the module suite — RFC 854 / 1143 / 1073 / 1091 / 1184 conformance plus
+        # storage, accounts, policy and every door game — and tests/serve.tcyr,
+        # src/main.cyr's serve layer over a socketpair. The counts live in
+        # docs/development/state.md, deliberately not here.
+        run: cyrius test
 
       - name: Fuzz the IAC parser
-        # 1.7.0 (roadmap N4) — CLAUDE.md § Key Principles has stated "fuzz every
-        # parser path — IAC sequences are adversarial-by-default" since 0.2.0,
-        # with no harness and no CI step behind it. `fuzz/telnet_iac.fcyr`
-        # drives well over a million bytes through telnet_feed /
-        # telnet_handle_sb across five passes and asserts
-        # its own invariants (state range, buffer bounds, TERMINAL_TYPE length,
-        # option Q-state range, reset cleanliness), exiting with a distinct code
-        # per violated invariant. It is mutation-proven on two independent axes:
-        # deleting the TERM_TYPE_CAP clamp (the CVE-2020-10188 shape) or the
-        # subneg accumulator bound each turns this step RED.
-        #
-        # The PRNG seed is fixed, so a CI failure reproduces locally byte for
-        # byte — `cyrius fuzz fuzz/telnet_iac.fcyr`.
-        run: cyrius fuzz fuzz/telnet_iac.fcyr
+        # 1.7.0 (roadmap N4) — `fuzz/telnet_iac.fcyr` drives well over a million
+        # bytes through telnet_feed / telnet_handle_sb across five passes and
+        # asserts its own invariants, exiting with a distinct code per violated
+        # invariant; mutation-proven (deleting the TERM_TYPE_CAP clamp — the
+        # CVE-2020-10188 shape — or the subneg accumulator bound turns it RED).
+        # 1.8.2 — also under `--poison=ab`: two fills of every freed or fresh
+        # allocation, identical output required (applicable since cyrius 6.6.18;
+        # green by hand since 1.8.0). The PRNG seed is fixed, so a failure
+        # reproduces locally byte for byte.
+        run: |
+          cyrius fuzz fuzz/telnet_iac.fcyr
+          cyrius fuzz --poison=ab fuzz/telnet_iac.fcyr
+
+      - name: Audit (fmt, lint, docs, tests, bench)
+        # 1.8.2 — `cyrius audit` passes for the first time (CLAUDE.md § P(-1)
+        # step 1 had listed it as a gate since 0.2.0; it exited 1 on 178 long
+        # lines and 358 undocumented functions). It is now a gate, so neither
+        # can come back.
+        run: cyrius audit
+
+  smoke:
+    name: Example smokes (${{ matrix.model }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [fork, poll]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+
+      - name: Install Cyrius toolchain
+        shell: bash
+        run: |
+          set -e
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          cyrius deps
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
+
+      - name: Run the example smokes
+        # 1.8.2 — docs/examples/run.sh: every smoke, each with a clean ./bbs and
+        # ./keys and the server it needs, under this leg's serve model. Before
+        # 1.8.2 CI ran NONE of them, though they are the only proof of the
+        # concurrency, serve-model, shutdown and door-lifecycle behaviour.
+        # 01 is skipped (the build-and-test job builds and tests); 20 skips
+        # itself (it needs the sibling Yeoman's Descent repo); the scripts that
+        # drive both models internally (24, 28-31) run once, in the poll leg.
+        run: |
+          if [ "${{ matrix.model }}" = fork ]; then
+            docs/examples/run.sh --model fork --skip 01,24,28,29,30,31
+          else
+            docs/examples/run.sh --model poll --skip 01
+          fi
+
+      - name: Keep the smoke logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        with:
+          name: smoke-logs-${{ matrix.model }}
+          path: build/smoke-logs/
+
+  aarch64:
+    name: aarch64 (qemu-user)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+
+      - name: Install qemu-user
+        # `cyrius test --aarch64` runs each test binary under /usr/bin/qemu-aarch64.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+
+      - name: Install Cyrius toolchain
+        shell: bash
+        run: |
+          set -e
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Build and test for aarch64
+        # 1.8.2 — aarch64 is a supported target (CLAUDE.md § Goal) that CI had
+        # never built. Both suites under qemu-user (verified by hand since 1.8.0).
+        run: |
+          cyrius deps
+          mkdir -p build
+          cyrius build --aarch64 src/main.cyr build/agora-aarch64
+          cyrius test --aarch64

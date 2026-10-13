@@ -167,6 +167,7 @@ fn account_register_lock(store): i64 {
     return fd;
 }
 
+# mkdir-ladder <store> -> .users -> .users/<fp16> (EEXIST is success); returns 0 or the failing rc.
 fn account_dir_ensure(store, fp16): i64 {
     var rc = store_ensure(store);
     if (rc != 0) { return rc; }
@@ -301,16 +302,6 @@ fn account_lookup_handle(store, fp16, out_buf, out_max): i64 {
     return copy_len;
 }
 
-# Scan `<store>/.users/` for a user whose `handle` file equals
-# `handle`. On match, writes the per-user fingerprint into fp_out
-# (NUL-terminated; must be ≥ ACCOUNT_FP_BUF_BYTES) and returns 1.
-# Returns 0 if no match. Returns negative on directory-list error
-# (treated as not-found for caller convenience).
-#
-# O(n) in the number of registered users — same scan-on-read shape
-# as `replies_to` (ADR 0005 § Decision). Fine at v1.0 scale; a
-# `<store>/.users/.by-handle/<handle> → <fp>` index would fix it — roadmap
-# symlink index if a real deployment hits the scale.
 # === From-header parsing (M6-E, ADR 0006) ===
 #
 # `From: <handle> <fp16>\r\n` in the RFC-822 header block. Handle
@@ -574,6 +565,11 @@ fn parse_auth_sig(line, line_len, sig_out): i64 {
     return ACCOUNT_SIG_BYTES;
 }
 
+# Scan `<store>/.users/` for a user whose `handle` file equals `handle`. On a
+# match, writes that user's fingerprint into fp_out (NUL-terminated; >=
+# ACCOUNT_FP_BUF_BYTES) and returns 1; 0 if none (or the directory cannot be
+# listed). O(n) in registered users — a `.users/.by-handle/<handle>` index is
+# roadmap § 1.9.0. (1.8.2: this comment sat orphaned ~265 lines away.)
 fn account_resolve_handle(store, handle, fp_out): i64 {
     var users_path = cmd_alloc(PATH_MAX_BYTES);
     build_users_dir(store, users_path);

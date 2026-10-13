@@ -43,7 +43,7 @@ TAB, LF and CR; the stored artifact is never rewritten.**
   existing IAC pass, and in its stdout twin `write_text`, which `agora read` / `agora list` now use.
   1.8.0 also routes the two stored-string sites that bypassed `send_text` through it: `boards`
   (directory names read off the disk) and leaderboard rows. The rule lives in one pure function,
-  `text_sanitize` (board.cyr), so `src/test.cyr` can pin it.
+  `text_sanitize` (board.cyr), so the module suite (`src/test.cyr`, now `tests/agora.tcyr`) can pin it.
 - **Mode: UTF-8.** An agora session is UTF-8 by construction: agora negotiates no CHARSET option
   (RFC 2066), and its own output — the MOTD's em dash, the help text — is UTF-8. UTF-8 mode passes every
   well-formed UTF-8 sequence byte-for-byte, so posts with accents, `€` or emoji read exactly as before,

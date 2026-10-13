@@ -121,6 +121,14 @@ Two things this cost, both worth recording because neither is obvious:
   the other 63 sessions. Known, documented at `src/descent.cyr`, tracked as roadmap § 1.11.0.
 - **Neutral** — `AGORA_SERVE=epoll` is accepted and aliased to poll. A real epoll loop is a later
   optimisation; the sweep is a `sleep_ms(20)` tick on both platforms today.
+- **Measured at 1.8.2** (`benches/serve-bench.py`; BENCHMARKS.md § Serve-level baselines): poll accepts
+  **50 connections/s sequentially** — exactly one per 20 ms sweep, because the loop sleeps instead of
+  waiting for readiness — and ~520/s with 8 concurrent connectors, against fork's ~4,100 / ~11,400. An idle
+  session costs **12.6 KB** resident under poll and **~62 KB** PSS as a fork child. The same bench found
+  every multi-part fork response stalled ~40 ms by Nagle against the client's delayed ACK; agora sets
+  `TCP_NODELAY` on accepted sockets since 1.8.2 (a `read` on 500 posts: 41 → 3.4 ms). Under fork, a client
+  that stops reading is disconnected within **two** send timeouts (the first timed-out write usually
+  reports a partial count as success), pinned by smoke 31.
 
 ## Relationship to ADR 0007
 

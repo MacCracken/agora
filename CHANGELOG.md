@@ -4,6 +4,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-13 (tooling: the checklist runs itself, and the serve layer is measured)
+
+The roadmap's two tooling slots — 1.8.2 *mechanical gates* and 1.8.3 *measure* — cut as one release. Every
+step of the Closeout Pass that a person used to perform by hand now runs in CI, the serve layer in
+`src/main.cyr` is unit-tested for the first time, and the serve-level numbers four ADRs were waiting on exist.
+One user-visible fix rode along because a new benchmark found it: a ~40 ms Nagle stall on every multi-part
+response under the default fork model.
+
+**238** tests (232 module + 6 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`;
+**31/31** example smokes, **52/52 runs** under both serve models through the new runner; **`cyrius audit`
+exits 0** for the first time. `build/agora` **986,144 → 986,152 B**; `--agnos` 982,656 → 982,664 B; `--aarch64`
+2,415,440 → 2,415,456 B.
+
+### Added
+
+- **`docs/examples/run.sh` — the examples runner.** Each smoke gets a clean `./bbs` / `./keys`, a registered
+  `qix` when it needs one, and — for the client-only scripts — the server it needs under the requested model;
+  scripts that start their own server inherit `AGORA_SERVE`, so `--model fork|poll|both` covers them too.
+  Every release from 1.6.7 to 1.8.1 was verified with a throwaway harness, and the README's "run them in
+  order" contract never held. It refuses to start if `./bbs` or `./keys` already exist.
+- **`tests/serve.tcyr` — `src/main.cyr`'s first unit tests.** `main.cyr` runs its entry point only when
+  `AGORA_TEST` is undefined, so a test can include it. Six tests over a real socketpair: the tx queue's
+  drain-compact-overflow (1.8.1 M8), the per-sweep line budget (H2), compose lines not budgeted, the
+  fork-mode sticky send failure (M10), door checkpoint-on-close plus the play lock (M1), and the shutdown
+  signalfd round trip (1.7.0 N1). Each is mutation-checked (breaking the guarded behaviour turns it red).
+  Also passes under qemu-aarch64.
+- **`docs/examples/31-slow-reader.py`** — the slow-reader close path (1.6.3 / 1.7.0 / 1.8.1), a HIGH fix three
+  times over, pinned at last: a client that asks for ~12 MB and reads nothing is disconnected — under poll at
+  once, with a bystander's echo unaffected; under fork within two send timeouts. A 1.8.0 build fails the fork
+  half. `--fast` skips it.
+- **`benches/serve-bench.py`** — accept rate, per-session memory, world-lock contention and reply-scan latency,
+  per serve model (BENCHMARKS.md § Serve-level baselines). Headlines: fork accepts ~4,100 connections/s
+  sequentially, poll exactly 50 (one per 20 ms sweep — it sleeps rather than waiting for readiness); an idle
+  session costs 12.6 KB under poll and ~62 KB as a fork child; the world lock is **fsync-bound, not
+  contention-bound** (~520 txn/s flat from 1 to 8 writers, no lost update), so ADR 0010 / 0014's "measure
+  before refining" gate stays closed; a `read`'s reply scan is linear at ~6.7 µs per post (27.7 ms at 4,096).
+- **`scripts/check-version-sync.sh`** — VERSION against cyrius.cyml, the built binary, the CHANGELOG header,
+  `state.md`'s Released row and the roadmap's release row (and, with `--tag`, the git tag); refuses a
+  hard-coded version literal in `src/`. CI runs it on every push and the release workflow before publishing —
+  the "post-hook" CLAUDE.md once promised, whose absence let 1.6.6 and 1.7.1 ship unrecorded.
+- **`scripts/check-toolchain.sh`** — the pre-cut provenance gate: the local snapshot's SOURCE_COMMIT and
+  every stdlib file against the cyrius tag, the vendored `lib/` against the snapshot, and the compiler the
+  build actually runs. Mutation-checked with a doctored snapshot. (1.6.7 found a dirty snapshot inflating a
+  measured binary by 215,520 B; the check was a manual `cmp` sweep until now.)
+
+### Changed
+
+- **The version string is generated.** `print_banner`, `cmd_version` and the MOTD read `CYRIUS_PKG_VERSION`,
+  which `cyrius build` derives from cyrius.cyml's `version = "${file:VERSION}"`; VERSION is now the only file a
+  release bumps (promised as a generated `version_str.cyr` since 0.2.0). Output is byte-identical.
+- **`src/test.cyr` → `tests/agora.tcyr`**, and `cyrius.cyml` drops `[build] test`: a bare `cyrius test` runs
+  every `tests/*.tcyr`. `cyrius audit` now finds and runs the tests (it reported `skip: no tests/ directory`).
+- **`cyrius audit` passes** — 176 over-long lines wrapped and ~378 undocumented functions documented across
+  `src/`, `tests/`, `fuzz/` and `benches/` (each function's comment written from its body). No behaviour change:
+  every file was diffed comment- and whitespace-blind against its pre-edit copy; strings split for length are
+  emitted by consecutive calls, and a scripted session, `help` and `--version` were A/B'd byte-identical. Two
+  lines carry lint's per-line `#skip-lint`: the 2,660-byte word table in `decode_words.cyr` (a fixed-stride
+  blob cannot be split) and Ashes' 158-byte help line (`ash_msg` overwrites, so it cannot be emitted in two).
+  One test helper builds four 128-hex auth lines (`t_auth_line`), byte-compared with the literals it replaced.
+- **CI** (`ci.yml`): least-privilege `permissions: contents: read`; actions pinned by commit SHA; the cyrius
+  installer fetched from the tag matching the pin instead of `main`; new steps — toolchain provenance, version
+  sync, fuzz `--poison=ab`, `cyrius audit`; a **smoke job per serve model** (logs uploaded on failure); an
+  **aarch64 job** (build + both suites under qemu-user). **Release** (`release.yml`): gates on all of CI, runs
+  the version sync with `--tag`, and publishes x86_64 Linux, aarch64 Linux and x86_64 AGNOS binaries with
+  `SHA256SUMS` (it published only x86_64, unsigned and unsummed).
+- CLAUDE.md: Quick Start, Closeout Pass steps 1/2/7/11/12 and § CI / Release rewritten around the new tools.
+- ADRs 0005, 0010, 0014, 0023 record the measurements; roadmap re-scoped (1.8.2 + 1.8.3 shipped as 1.8.2;
+  the 1.9.1 reply-index and 1.11.0 epoll rows carry their numbers).
+
+### Fixed
+
+- **A ~40 ms stall on every multi-part response in the default (fork) serve model** — found by the reply-scan
+  bench, which read a flat ~41 ms per `read` at every board size. A fork worker writes a reply as several small
+  sends, and Nagle held each one after the first until the client's delayed (~40 ms) ACK; with the client
+  acknowledging immediately the same read took 2.6 ms. Accepted sockets now get `TCP_NODELAY` (both models; a
+  no-op decline on agnos): `read` on 500 posts **41.0 → 3.4 ms**, fork accept rate 3,771 → 4,077 conn/s.
+- `docs/examples/run.sh` waits for the smoke port to be free before starting a server: a self-starting smoke
+  still tearing down its own server on 2323 made a failed bind look like a started server (found on its own
+  first full run).
+
+### Verification
+
+- `cyrius test`: **232/232** (tests/agora.tcyr) + **6/6** (tests/serve.tcyr), the same under
+  `cyrius test --aarch64` (qemu). Fuzz 1/1 plain, `--poison`, `--poison=ab`. `cyrius audit` **exit 0** (fmt,
+  lint, docs, tests, bench). `scripts/check-version-sync.sh` and `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`: **52 passed, 0 failed, 0 skipped** (31 smokes; 20 ran against the sibling MUD), on
+  the build before the `TCP_NODELAY` change; after it, the connection-heavy subset (04, 05, 07, 11, 15, 20,
+  23–28, 30, 31) re-run under both models.
+- The new CI and release workflows were validated as YAML and by running each step's commands locally; they
+  have not yet run on GitHub — the first push is their first real run.
+
+### Known limitations (recorded, not fixed)
+
+- Poll-mode latency floor of 0–20 ms per command and 50 sequential accepts/s — the sweep sleeps rather than
+  waiting for readiness (roadmap § 1.11.0).
+- aarch64 runs under qemu-user only; still nothing on aarch64 hardware. The wire smokes do not run under qemu.
+- Under fork a non-reading client costs up to two send timeouts (~120 s) before its child stops — deliberately
+  not one: a "60 s per call" rule would also drop a legitimately slow reader (a client emulating 2400 baud).
+
 ## [1.8.1] — 2026-10-12 (code audit + repair: one client can no longer starve or exhaust the server)
 
 A full-tree audit of 1.8.0 in six parallel slices — the wire; storage and identity; serve loops and

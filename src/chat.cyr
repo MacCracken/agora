@@ -365,6 +365,7 @@ fn chat_lock_acquire(store, channel): i64 {
     return fd;
 }
 
+# Release a chat_lock_acquire lock (unlock, close).
 fn chat_lock_release(fd): i64 {
     file_unlock(fd);
     file_close(fd);

@@ -582,6 +582,7 @@ fn store_dir_name(i): i64 {
     return g_dir_names + load64(g_dir_offs + i * 8);
 }
 
+# Highest post id in (store, board), 0 if none — the next post is this + 1 (under store_lock).
 fn post_max_id(store, board): i64 {
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, path_buf);
@@ -860,11 +861,13 @@ fn post_headers_new(): i64 {
     return ph;
 }
 
+# Set the Subject header (NUL-terminated; 0 = none).
 fn post_headers_set_subject(ph, subject_cstr): i64 {
     store64(ph + PH_SUBJECT, subject_cstr);
     return 0;
 }
 
+# Set the Reply-To parent id (0 = not a reply).
 fn post_headers_set_reply_to(ph, parent_id): i64 {
     store64(ph + PH_REPLY_TO, parent_id);
     return 0;
@@ -1249,6 +1252,7 @@ fn board_policy_path(store, board, out_buf): i64 {
     return pos;
 }
 
+# `<board path>/.admins` into out_buf; returns its length.
 fn board_admins_path(store, board, out_buf): i64 {
     var pos = board_path(store, board, out_buf);
     store8(out_buf + pos, 47); pos = pos + 1;          # '/'

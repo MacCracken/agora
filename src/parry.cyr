@@ -197,6 +197,7 @@ fn py_scan_flags(norm, nlen): i64 {
 
 # === Affect update ===
 
+# Clamp an affect value into [0, PY_AFF_MAX]. Pure.
 fn py_clampv(v): i64 {
     if (v < 0)          { return 0; }
     if (v > PY_AFF_MAX) { return PY_AFF_MAX; }
@@ -269,6 +270,7 @@ fn py_mood(fear, anger, mistrust): i64 {
 
 # === Rotation counters ===
 
+# Rotation counter for `slot` (a PySlot): return its current value, then increment it.
 fn py_next(st, slot): i64 {
     var ctrs = load64(st + PY_CTRS);
     var c = load64(ctrs + slot * 8);
@@ -278,6 +280,7 @@ fn py_next(st, slot): i64 {
 
 # === Response pools (cyclic; original-phrasing homage) ===
 
+# MOOD_CALM pool: 3 cyclic canned replies selected by `rot`; returns length.
 fn py_calm(rot, out): i64 {
     var m = rot % 3;
     if (m == 0) { return ez_canned(out, "I'm getting by."); }
@@ -285,6 +288,7 @@ fn py_calm(rot, out): i64 {
     return ez_canned(out, "I don't have much to say to you.");
 }
 
+# MOOD_WARY pool: 4 cyclic canned replies selected by `rot`; returns length.
 fn py_wary(rot, out): i64 {
     var m = rot % 4;
     if (m == 0) { return ez_canned(out, "Why do you ask?"); }
@@ -293,6 +297,7 @@ fn py_wary(rot, out): i64 {
     return ez_canned(out, "People who ask that usually have a reason.");
 }
 
+# MOOD_FEARFUL pool (shutting down): 4 cyclic canned replies by `rot`; returns length.
 fn py_fearful(rot, out): i64 {
     var m = rot % 4;
     if (m == 0) { return ez_canned(out, "I'd rather not get into that here."); }
@@ -301,6 +306,7 @@ fn py_fearful(rot, out): i64 {
     return ez_canned(out, "You're making me nervous.");
 }
 
+# MOOD_HOSTILE pool (lashing out): 4 cyclic canned replies by `rot`; returns length.
 fn py_hostile(rot, out): i64 {
     var m = rot % 4;
     if (m == 0) { return ez_canned(out, "Don't tell me what to think."); }
@@ -309,6 +315,8 @@ fn py_hostile(rot, out): i64 {
     return ez_canned(out, "I don't have to answer to you.");
 }
 
+# A probe in a non-calm mood: 3 cyclic "why do you want to know" deflections by `rot`;
+# returns length.
 fn py_probe_deflect(rot, out): i64 {
     var m = rot % 3;
     if (m == 0) { return ez_canned(out, "Why do you want to know that?"); }
@@ -316,6 +324,8 @@ fn py_probe_deflect(rot, out): i64 {
     return ez_canned(out, "You ask a lot of questions for someone I just met.");
 }
 
+# Off-topic input while the delusion is latched: 3 cyclic redirects back to the story by `rot`;
+# returns length.
 fn py_steerback(rot, out): i64 {
     var m = rot % 3;
     if (m == 0) { return ez_canned(out, "I don't care about that. What I'm telling you is they're after me."); }
@@ -348,7 +358,9 @@ fn py_beat(idx, rot, out): i64 {
         return ez_canned(out, "They follow me. I see the same faces. They always know where I am.");
     }
     if (idx == 5) {
-        if (v == 0) { return ez_canned(out, "I went to the police for protection. I thought that's what they were for."); }
+        if (v == 0) {
+            return ez_canned(out, "I went to the police for protection. I thought that's what they were for.");
+        }
         return ez_canned(out, "I tried to get help. I told the cops everything.");
     }
     if (idx == 6) {
@@ -356,8 +368,12 @@ fn py_beat(idx, rot, out): i64 {
         return ez_canned(out, "The police are no good to me -- some of them are in on it.");
     }
     if (idx == 7) {
-        if (v == 0) { return ez_canned(out, "They put me in here so no one would listen to me. And now you're asking all these questions."); }
-        return ez_canned(out, "I ended up locked away where it's easy to get to me. Why are you really asking me all this?");
+        if (v == 0) {
+            return ez_canned(out,
+              "They put me in here so no one would listen to me. And now you're asking all these questions.");
+        }
+        return ez_canned(out,
+          "I ended up locked away where it's easy to get to me. Why are you really asking me all this?");
     }
     return ez_canned(out, "I've said too much already.");
 }
@@ -435,6 +451,8 @@ fn py_respond(st, line, len, out): i64 {
 
 # === Door contract (ADR 0009 shape) ===
 
+# Allocate a fresh PARRY: affects at their (wary) baselines, story unlatched, counters zeroed.
+# seed/mode/max_days are door-contract args, unused (PARRY is deterministic). Returns the state.
 fn py_new(seed, mode, max_days): i64 {
     # 1.6.3 (ADR 0022) — freelist, so py_free can give it back. PARRY is
     # practice-only (no save/load), so this is the only constructor.
@@ -465,6 +483,7 @@ fn py_free(st): i64 {
     return 0;
 }
 
+# Seed PARRY's guarded opening line into the response buffer. Returns 0.
 fn py_start(st): i64 {
     var resp = load64(st + PY_RESP);
     var n = ez_puts(resp, "I don't know you, and I'm not sure why you want to talk to me.");
@@ -488,6 +507,7 @@ fn py_feed(st, line, len): i64 {
     return 0;
 }
 
+# Render the frame: "PARRY: <reply>" + a blank line + prompt; returns the length.
 fn py_render(st, buf, cap): i64 {
     var pos = 0;
     pos = emit_cstr(buf, pos, "PARRY: ");

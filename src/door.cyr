@@ -84,11 +84,13 @@ enum DoorGame {
 # are f64-only and not even in cyrius.cyml deps). Games run on pure
 # integer economy math for determinism + cross-arch reproducibility.
 
+# The smaller of a and b. Pure.
 fn imin(a, b): i64 {
     if (a < b) { return a; }
     return b;
 }
 
+# The larger of a and b. Pure.
 fn imax(a, b): i64 {
     if (a > b) { return a; }
     return b;
@@ -102,12 +104,14 @@ fn idx_ok(i, n): i64 {
     return 1;
 }
 
+# x limited to [lo, hi]. Pure.
 fn iclamp(x, lo, hi): i64 {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
 }
 
+# |x| (unit tests only; the doors use imin/imax/iclamp). Pure.
 fn iabs(x): i64 {
     if (x < 0) { return 0 - x; }
     return x;
@@ -241,6 +245,7 @@ fn door_games_dir(store, fp16, out_buf): i64 {
     return pos;
 }
 
+# `<store>/.users/<fp16>/games/<game>.sav` into out_buf (NUL-terminated); returns its length.
 fn door_save_path(store, fp16, game, out_buf): i64 {
     var pos = door_games_dir(store, fp16, out_buf);
     store8(out_buf + pos, 47); pos = pos + 1;          # '/'
@@ -398,6 +403,7 @@ fn door_play_unlock(fd): i64 {
 # into their own large buffers and are unaffected at the default.
 var g_door_emit_cap = 2000000000;   # = DOOR_EMIT_UNBOUNDED; effectively no bound
 
+# Append NUL-terminated s at pos, unless it would pass g_door_emit_cap ([D3]); returns the new pos.
 fn emit_cstr(buf, pos, s): i64 {
     var n = strlen(s);
     if (pos + n > g_door_emit_cap) { return pos; }
@@ -405,6 +411,7 @@ fn emit_cstr(buf, pos, s): i64 {
     return pos + n;
 }
 
+# Append decimal val at pos, within g_door_emit_cap; returns the new pos.
 fn emit_int(buf, pos, val): i64 {
     var tmp[24];
     var n = fmt_int_buf(val, &tmp);
@@ -439,10 +446,12 @@ fn emit_sgr(buf, pos, code): i64 {
     return pos + n;
 }
 
+# Append the SGR reset (ESC [ 0 m); returns the new pos.
 fn emit_reset(buf, pos): i64 {
     return emit_sgr(buf, pos, 0);
 }
 
+# Append CR LF, within g_door_emit_cap; returns the new pos.
 fn emit_crlf(buf, pos): i64 {
     if (pos + 2 > g_door_emit_cap) { return pos; }
     store8(buf + pos, 13); pos = pos + 1;
@@ -602,6 +611,7 @@ fn save_get_i64(buf, len, cur_ptr): i64 {
 # `game` is validated (game_name_valid) at every entry point — it is
 # the only path-traversal guard, same as the save-file paths above.
 
+# `<store>/.games` into out_buf; returns its length.
 fn world_games_root(store, out_buf): i64 {
     var slen = strlen(store);
     memcpy(out_buf, store, slen);
@@ -612,6 +622,7 @@ fn world_games_root(store, out_buf): i64 {
     return pos;
 }
 
+# `<store>/.games/<game>` into out_buf; returns its length.
 fn world_game_dir(store, game, out_buf): i64 {
     var pos = world_games_root(store, out_buf);
     store8(out_buf + pos, 47); pos = pos + 1;
@@ -671,6 +682,7 @@ fn world_lock_acquire(store, game): i64 {
     return fd;
 }
 
+# Release a world_lock_acquire lock (unlock, close).
 fn world_lock_release(fd): i64 {
     file_unlock(fd);
     file_close(fd);

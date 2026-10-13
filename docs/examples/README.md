@@ -2,22 +2,30 @@
 
 Runnable smoke scripts for each major agora surface. Each example begins with a top-of-file comment explaining *why* it exists (per [first-party-documentation § Examples](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#examples)) and what it should output on success.
 
-All examples assume:
+## Running them — `run.sh`
 
-- agora is built at `./build/agora` (`cyrius build src/main.cyr build/agora`).
-- A scratch store at `./bbs/` (delete between runs for a clean slate: `rm -rf ./bbs`).
-- The serve examples **default** to port 2323 (unprivileged; no root needed), but several pick their own so they can run without colliding — 11–15 use 2324–2328, and 24 uses two agora ports plus two more for its fake MUD. Check the script before assuming 2323.
+```sh
+CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
+docs/examples/run.sh                      # every smoke, under both serve models
+docs/examples/run.sh --model poll 26 27   # just these, poll only
+docs/examples/run.sh --fast --skip 01     # skip the slow halves (26's idle wait, 31's fork wait)
+```
 
-Run them in order from a fresh checkout — later examples reuse identity files from earlier ones.
+[`run.sh`](run.sh) (1.8.2) knows what each script needs: a clean `./bbs` and `./keys`, a freshly registered
+`qix` (03, 05, 06, 11–13, 15, 24, 26, 27), or a server it must start itself under the requested model (the
+client-only 04, 05, 23, 25, 26, 27). Scripts that start their own server inherit `AGORA_SERVE`, so
+`--model fork|poll|both` covers them too; 24 and 28–31 drive both models internally and run once. 20 skips
+itself unless the sibling `../cyrius-yeomans-descent` repo is present. Logs land in `build/smoke-logs/`.
+**CI runs the whole set on every push, once per serve model.** The runner refuses to start if `./bbs` or
+`./keys` already exist, since the scripts create and delete them (`--force` to override).
 
-> **⚠ That contract does not actually hold, and there is no runner.** Examples **09, 10, 18, 19 and 20** each
-> `rm -rf ./bbs ./keys` on exit, so a strict in-order run leaves **24, 26 and 27** with no registered `qix` —
-> each of their headers says *"run 02-register-and-post.sh first"*, and that is not advice, it is a
-> prerequisite you must re-satisfy. Separately, **04, 05, 23, 25, 26 and 27 are client-only**: they do not
-> start a server, and each needs one already listening under a specific `AGORA_SERVE` model recorded only in
-> its own header comment (23/25/26/27 want `poll`). 1.7.0 verified all 28 green using a throwaway harness,
-> 1.8.0 all 29 (plus 04/05/23 under both models), and 1.8.1 all 30; nothing in the repo reproduces it yet. This is why smoke 20's breakage went unnoticed for four releases —
-> scheduled in [roadmap.md](../development/roadmap.md) § 1.8.2 (examples runner + CI smokes).
+(Until 1.8.2 there was no runner, and the README's old "run them in order" contract did not hold: 09, 10,
+18, 19 and 20 delete `./bbs ./keys` on exit, and the client-only scripts each needed a server started by hand
+under a model named only in their header. Every release from 1.6.7 to 1.8.1 was verified with a throwaway
+harness — the reason smoke 20's breakage went unnoticed for four releases.)
+
+Running one by hand still works: each script's header says what it needs. Defaults: `./build/agora`,
+a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–31 pick their own).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -51,6 +59,7 @@ Run them in order from a fresh checkout — later examples reuse identity files 
 | 28 | [`28-clean-shutdown.py`](28-clean-shutdown.py) | 1.7.0 (roadmap N1): SIGINT/SIGTERM shut both serve models down cleanly (exit 0, not 143/130), a connected poll client is told before its socket closes, and **fork children do not inherit the parent's blocked signal mask** — the regression that made every connection process unkillable. Self-contained: starts and signals its own servers. | `/tmp/agora-shutdown-smoke-$$` |
 | 29 | [`29-egress-sanitize.py`](29-egress-sanitize.py) | 1.8.0 (ADR 0024): stored text reaches readers with every terminal control neutralized — C1 controls (raw and UTF-8-encoded) in a wire post, ESC/BEL in a CLI post, malformed UTF-8 — each shown as `?`, while UTF-8 text, TAB and CR LF arrive byte-for-byte and the post on disk is untouched. Both serve models, plus `agora read` / `agora list` on stdout. Self-contained; `AGORA_BIN=` A/Bs an older build (1.7.1 fails 44 checks). | `/tmp/agora-sanitize-smoke-$$` |
 | 30 | [`30-audit-1.8.1.py`](30-audit-1.8.1.py) | 1.8.1 (audit): `.policy` / `.admins` fail closed; CLI 64 KB body refused; `serve --store` without a value exits; poll fairness under 4 pipelining readers; a >128 KB `list` arrives whole under poll; a dropped connection saves door progress and a second session cannot play the same save (both serve models); a public key copied over another user's does not log in as them. Self-contained; `AGORA_BIN=` A/Bs an older build (1.8.0 fails all 11 checks). | `/tmp/agora-audit181-smoke-$$` |
+| 31 | [`31-slow-reader.py`](31-slow-reader.py) | 1.8.2: the slow-reader close path (1.6.3 / 1.7.0 / 1.8.1) pinned — a client that asks for ~12 MB and reads nothing is disconnected: under poll promptly with a bystander unaffected, under fork within two send timeouts. Self-contained; `--fast` skips the ~2.5 min fork half; a 1.8.0 build fails the fork half. | `/tmp/agora-slowreader-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 
@@ -58,7 +67,7 @@ Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avo
 
 ## What these are not
 
-- **Not a test suite** — `cyrius test src/test.cyr` is the conformance harness, and `cyrius fuzz fuzz/telnet_iac.fcyr` is the IAC-parser fuzz harness (new at 1.7.0; both run in CI and at release). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
+- **Not a test suite** — `cyrius test` (tests/agora.tcyr + tests/serve.tcyr) is the conformance harness, and `cyrius fuzz fuzz/telnet_iac.fcyr` is the IAC-parser fuzz harness (new at 1.7.0; both run in CI and at release). These scripts exercise the *binary* end-to-end; tests exercise the *units* in isolation.
 - **Not benchmarks** — those live in [`benches/bench_telnet.bcyr`](../../benches/bench_telnet.bcyr).
 - **Not a tutorial** — the prose tutorial is [`docs/guides/getting-started.md`](../guides/getting-started.md). Read that first if you've never run agora.
 

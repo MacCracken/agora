@@ -109,6 +109,7 @@ enum TH {
 
 # === Tables ===
 
+# Display name of city c (0..TH_CITIES-1); "?" for an out-of-range index. Pure.
 fn th_city_name(c): i64 {
     if (c == 0) { return "PRAGUE"; }
     if (c == 1) { return "VIENNA"; }
@@ -117,6 +118,7 @@ fn th_city_name(c): i64 {
     return "?";
 }
 
+# Codename of agent i (0..TH_AGENTS-1); "?" for an out-of-range index. Pure.
 fn th_agent_name(i): i64 {
     if (i == 0) { return "AMBER"; }
     if (i == 1) { return "COBALT"; }
@@ -126,6 +128,7 @@ fn th_agent_name(i): i64 {
     return "?";
 }
 
+# Header label for cable kind k (CB_KIND 0..3); "CABLE" for any other value. Pure.
 fn th_kind_name(k): i64 {
     if (k == 0) { return "FIELD REPORT"; }
     if (k == 1) { return "EXPENSE FILING"; }
@@ -136,20 +139,25 @@ fn th_kind_name(k): i64 {
 
 # === Accessors ===
 
+# Address of agent i's AG_SIZE record. Unchecked: the caller passes 0 <= i < TH_AGENTS.
 fn th_agent(st, i): i64 {
     return load64(st + TH_AGENTS_P) + i * AG_SIZE;
 }
 
+# Address of registry slot i's CB_SIZE record. Unchecked: the caller passes 0 <= i < TH_REG_MAX.
 fn th_cable_at(st, i): i64 {
     return load64(st + TH_REG_P) + i * CB_SIZE;
 }
 
+# Cables filed in the registry so far (0..TH_REG_MAX).
 fn th_registry_count(st): i64 {
     return load64(st + TH_REGCOUNT);
 }
 
 # === Construction ===
 
+# A fresh campaign on the freelist (release with th_free): day 1, the starting confidence / budget /
+# points, five agents rolled from `seed`, a mole TH_MOLE_CHANCE% of the time. No cables until th_start.
 fn th_new(seed, mode, max_days): i64 {
     var st = fl_alloc(TH_SIZE);
     memset(st, 0, TH_SIZE);
@@ -346,6 +354,7 @@ enum THSave {
     TH_SAVE_CAP = 32768;
 }
 
+# Set the message shown under the next frame: copies NUL-terminated s into TH_MSG, cut at 255 bytes.
 fn th_msg(st, s): i64 {
     var m = load64(st + TH_MSG);
     var n = strlen(s);
@@ -369,6 +378,7 @@ fn th_today_count(st): i64 {
     return c;
 }
 
+# Registry index of the idx-th (0-based) cable filed today, or -1 past the end of the queue.
 fn th_nth_today(st, idx): i64 {
     var day = load64(st + TH_DAY);
     var n = load64(st + TH_REGCOUNT);
@@ -388,6 +398,7 @@ fn th_nth_today(st, idx): i64 {
 # === Dispatch actions ===
 # Status: 0 ok / -1 bad arg / -2 no points / -3 no budget / -4 agent not active.
 
+# Relocate an active agent to `city` for TH_MOVE_COST credits and one dispatch point.
 fn th_order_move(st, agent, city): i64 {
     if (agent < 0)          { return 0 - 1; }
     if (agent >= TH_AGENTS) { return 0 - 1; }
@@ -403,6 +414,7 @@ fn th_order_move(st, agent, city): i64 {
     return 0;
 }
 
+# Pull an active agent out of the field (AGS_EXTRACTED) for TH_EXTRACT_COST and one dispatch point.
 fn th_order_extract(st, agent): i64 {
     if (agent < 0)          { return 0 - 1; }
     if (agent >= TH_AGENTS) { return 0 - 1; }
@@ -561,6 +573,7 @@ fn th_next_day(st): i64 {
 
 # === Win / score / rank ===
 
+# 1 once the campaign has ended (quarter finished or recalled), else 0.
 fn th_is_over(st): i64 {
     if (load64(st + TH_OVER) != 0) { return 1; }
     return 0;
@@ -583,6 +596,7 @@ fn th_score(st): i64 {
     return s;
 }
 
+# Standing title for a final network value (th_score), Probationary up to Director's Chair. Pure.
 fn th_rank(score): i64 {
     if (score < 150) { return "Probationary"; }
     if (score < 350) { return "Handler"; }
@@ -593,6 +607,8 @@ fn th_rank(score): i64 {
 
 # === Save / load ===
 
+# Serialize the durable state (header, agents, registry) into buf as "THDG1\n" + one decimal per
+# line. Returns bytes written, or -1 if the registry would overrun `cap`. Runtime fields stay out.
 fn th_save_format(st, buf, cap): i64 {
     var pos = 0;
     memcpy(buf + pos, "THDG1\n", 6); pos = pos + 6;
@@ -646,6 +662,8 @@ fn th_save_format(st, buf, cap): i64 {
     return pos;
 }
 
+# Inverse of th_save_format: a new freelist state, or 0 on a bad header or an out-of-range index
+# (th_load_indexes_ok). The cable count is clamped to TH_REG_MAX; the caller still runs th_start.
 fn th_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "THDG1\n", 6) == 0) { return 0; }
@@ -735,6 +753,8 @@ fn th_load_indexes_ok(st): i64 {
 
 # === Runtime init ===
 
+# Per-session runtime init after th_new / th_load_parse: allocates the message line and the cracked
+# bitset, files day 1's traffic on a fresh campaign, and opens on the main (or case-closed) screen.
 fn th_start(st): i64 {
     store64(st + TH_PEND, 0);
     store64(st + TH_CURSOR, 0);
@@ -773,6 +793,7 @@ fn th_free(st): i64 {
 
 # === Render ===
 
+# Append the header block: title, day, confidence, audit, budget, dispatch points. Returns the new pos.
 fn th_render_status(st, buf, pos): i64 {
     pos = emit_sgr(buf, pos, 36);
     pos = emit_cstr(buf, pos, "== THE HANDLER ==");
@@ -795,6 +816,8 @@ fn th_render_status(st, buf, pos): i64 {
     return pos;
 }
 
+# Append one line per agent (number, codename, city, trust, cover, and a HOT / OUT / BURNED /
+# FLAGGED tag). Returns the new pos.
 fn th_render_roster(st, buf, pos): i64 {
     var i = 0;
     while (i < TH_AGENTS) {
@@ -822,6 +845,7 @@ fn th_render_roster(st, buf, pos): i64 {
     return pos;
 }
 
+# Append the cross-reference table: each agent's discrepant / filed cable counts. Returns the new pos.
 fn th_render_xref(st, buf, pos): i64 {
     pos = emit_cstr(buf, pos, "CROSS-REFERENCE  (discrepant / filed):");
     pos = emit_crlf(buf, pos);
@@ -839,6 +863,7 @@ fn th_render_xref(st, buf, pos): i64 {
     return pos;
 }
 
+# Append today's cable queue numbered from 1 (sender and kind per line). Returns the new pos.
 fn th_render_cables(st, buf, pos): i64 {
     pos = emit_cstr(buf, pos, "CABLE QUEUE - day ");
     pos = emit_int(buf, pos, load64(st + TH_DAY));
@@ -859,6 +884,8 @@ fn th_render_cables(st, buf, pos): i64 {
     return pos;
 }
 
+# Append cable cb's routing header (NR, sender, kind, relay, day + stale flag, cipher, amount).
+# Shows only what the paperwork claims, never CB_TRUECITY or CB_ANOM. Returns the new pos.
 fn th_render_cable(st, buf, pos, cb): i64 {
     pos = emit_cstr(buf, pos, "-----------------------------------------");
     pos = emit_crlf(buf, pos);
@@ -905,6 +932,7 @@ fn th_cracked_get(st, ri): i64 {
     return load8(load64(st + TH_CRACKED) + ri) & 0xFF;
 }
 
+# Mark registry slot ri cracked; an out-of-range ri is ignored.
 fn th_cracked_set(st, ri): i64 {
     if (ri < 0)            { return 0; }
     if (ri >= TH_REG_MAX)  { return 0; }
@@ -959,8 +987,6 @@ fn th_apply_decrypt(st, ri): i64 {
     return 0;
 }
 
-# The READ-screen line under a cable: the cryptanalysis verdict once cracked,
-# else the "[D] break the cipher" prompt (cost-gated).
 # 1 if cable `cb` is a deliberate plant: flagged anomalous AND filed by the
 # mole. The second test also corrects saves from before 1.8.1, whose CB_ANOM
 # was set for honest agents' clerical errors too (audit D9). Pure.
@@ -972,6 +998,8 @@ fn th_cable_is_plant(st, cb): i64 {
     return 1;
 }
 
+# The READ-screen line under a cable: the cryptanalysis verdict once cracked,
+# else the "[D] break the cipher" prompt (cost-gated). Returns the new pos.
 fn th_render_decrypt_line(st, buf, pos, ri): i64 {
     if (th_cracked_get(st, ri) == 1) {
         var cb = th_cable_at(st, ri);
@@ -991,6 +1019,8 @@ fn th_render_decrypt_line(st, buf, pos, ri): i64 {
     return pos;
 }
 
+# Render the current screen into buf: the decode frame during a crack, else the status header, the
+# screen's body and prompt, and any pending message. Returns bytes written.
 fn th_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + TH_SCREEN);
@@ -1104,6 +1134,7 @@ fn th_render(st, buf, cap): i64 {
 
 # === Feed-line screen machine ===
 
+# Main-menu key: open a sub-screen, [E]nd the day (reporting overnight burns), or [Q]uit (returns 1).
 fn th_feed_main(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 113) { return 1; }                                       # q
@@ -1126,6 +1157,7 @@ fn th_feed_main(st, line, len): i64 {
     return 0;
 }
 
+# Cable-queue key: 1-9 opens that cable in the reader; x or a bare Enter returns to the main menu.
 fn th_feed_cables(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1142,6 +1174,8 @@ fn th_feed_cables(st, line, len): i64 {
     return 0;
 }
 
+# Reader key: [N]ext cable (back to the queue after the last), [D]ecrypt for one dispatch point,
+# anything else back to the queue.
 fn th_feed_read(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 110) {
@@ -1197,16 +1231,19 @@ fn th_feed_decrypt(st, line, len): i64 {
     return 0;
 }
 
+# Roster view: any line returns to the main menu.
 fn th_feed_roster(st, line, len): i64 {
     store64(st + TH_SCREEN, HSCR_MAIN);
     return 0;
 }
 
+# Cross-reference view: any line returns to the main menu.
 fn th_feed_xref(st, line, len): i64 {
     store64(st + TH_SCREEN, HSCR_MAIN);
     return 0;
 }
 
+# Order-target key: 1-5 picks the agent (TH_PEND) and opens its action menu; x / Enter backs out.
 fn th_feed_orders(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1220,6 +1257,8 @@ fn th_feed_orders(st, line, len): i64 {
     return 0;
 }
 
+# Action key for agent TH_PEND: [M]ove opens the city list, [E]xtract orders it at once, [F]und
+# asks for an amount; x backs out.
 fn th_feed_agentact(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1238,6 +1277,7 @@ fn th_feed_agentact(st, line, len): i64 {
     return 0;
 }
 
+# City key: 1-4 orders agent TH_PEND there and reports the result; x / Enter backs out.
 fn th_feed_movecity(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1255,6 +1295,8 @@ fn th_feed_movecity(st, line, len): i64 {
     return 0;
 }
 
+# Credit amount for agent TH_PEND: authorizes it and reports the result; a line with no digits
+# cancels.
 fn th_feed_fundamt(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1267,6 +1309,8 @@ fn th_feed_fundamt(st, line, len): i64 {
     return 0;
 }
 
+# Accusation key: 1-5 flags that agent as the mole (th_accuse) and reports the verdict, closing the
+# case if confidence hit 0; x / Enter backs out.
 fn th_feed_accuse(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + TH_SCREEN, HSCR_MAIN); return 0; }
@@ -1329,9 +1373,12 @@ enum THWOff {
     THW_OFF_ALERT   = 1;
 }
 
+# Snapshot length in i64 words: the version cell plus one alert cell per city.
 fn thw_word_count(): i64 { return THW_OFF_ALERT + TH_CITIES; }
+# Snapshot length in bytes, the exact size thw_valid requires.
 fn thw_byte_size(): i64  { return thw_word_count() * 8; }
 
+# A zeroed snapshot (every city at alert 0) stamped THW_VERSION, in command-lifetime scratch.
 fn thw_new(): i64 {
     var n = thw_word_count();
     var w = cmd_alloc(n * 8);
@@ -1340,6 +1387,7 @@ fn thw_new(): i64 {
     return w;
 }
 
+# 1 if buf[0..len) is a well-formed snapshot (exact size, current version), else 0. Pure.
 fn thw_valid(buf, len): i64 {
     if (len != thw_byte_size()) { return 0; }
     if (load64(buf + THW_OFF_VERSION * 8) != THW_VERSION) { return 0; }
@@ -1353,17 +1401,20 @@ fn thw_alert(w, c): i64 {
     return load64(w + (THW_OFF_ALERT + c) * 8);
 }
 
+# Set city c's alert to v clamped to 0..THW_ALERT_MAX; an out-of-range c writes nothing.
 fn thw_set_alert(w, c, v): i64 {
     if (idx_ok(c, TH_CITIES) == 0) { return 0; }
     store64(w + (THW_OFF_ALERT + c) * 8, iclamp(v, 0, THW_ALERT_MAX));
     return 0;
 }
 
+# Shift city c's alert by delta (negative to cool it), clamped to 0..THW_ALERT_MAX.
 fn thw_add_alert(w, c, delta): i64 {
     thw_set_alert(w, c, thw_alert(w, c) + delta);
     return 0;
 }
 
+# Sum of every city's alert level (0..TH_CITIES * THW_ALERT_MAX). Pure.
 fn thw_total_alert(w): i64 {
     var t = 0;
     var c = 0;
@@ -1379,6 +1430,7 @@ fn th_alert_drain(total_alert): i64 {
     return total_alert / THW_DRAIN_DIV;
 }
 
+# 1 if this campaign runs in Universe mode (shares the city-alert snapshot), else 0.
 fn th_is_universe(st): i64 {
     if (load64(st + TH_MODE) == DOOR_UNIVERSE) { return 1; }
     return 0;

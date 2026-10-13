@@ -101,6 +101,8 @@ fn work_announce_salvo(): i64 {
     return 0;
 }
 
+# Allocate the shared TelnetState, run the five telnet workloads (B1-B5) in
+# batches of 10,000 x 10 rounds, and print every result.
 fn main(): i64 {
     alloc_init();
     g_ts = telnet_state_new();

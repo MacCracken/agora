@@ -1,7 +1,7 @@
 # src/arena.cyr — the per-command scratch arena (1.6.2).
 #
 # Its own module because BOTH entry points need it: src/main.cyr (the server)
-# and src/test.cyr (the unit harness, which links board.cyr / account.cyr
+# and tests/agora.tcyr (the module suite, which links board.cyr / account.cyr
 # WITHOUT main.cyr). A facility used by the storage layer cannot live in
 # main.cyr, or the test build fails on an undefined `cmd_alloc`.
 #
@@ -117,6 +117,7 @@ fn cmd_scratch_reset(): i64 {
 # temp path. `g_atomic_ctr` disambiguates repeat calls within one process.
 var g_atomic_ctr = 0;
 
+# Crash-safe write of buf[0..len) to path (temp, fsync, rename); 0 on success, negative on failure.
 fn store_write_atomic(path, buf, len): i64 {
     var plen = strlen(path);
     var tmp = cmd_alloc(plen + 48);

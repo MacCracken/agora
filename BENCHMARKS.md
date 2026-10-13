@@ -62,17 +62,75 @@ Numbers are per-iteration (one full exchange-of-interest), not per-byte.
 
 A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sustained-IAC adversarial load (every byte triggers a full exchange) caps below 16M ops/s per core — orders of magnitude above any plausible BBS load.
 
+## Serve-level baselines — 1.8.2 (first measured)
+
+`benches/serve-bench.py` (1.8.2) — the accept-rate half of CLAUDE.md § P(-1) step 2 that was asked for since
+0.2.0 and never taken, per-session memory, world-lock contention and the reply scan. Workstation, Linux x86_64, ext4 on
+`/dev/sda2`, `CYRIUS_DCE=1` build, three runs each (world lock: five), medians with the runs in parentheses.
+
+| Measurement | `AGORA_SERVE=fork` | `AGORA_SERVE=poll` |
+|---|---:|---:|
+| accept → greeting → close, **sequential** | **4,077 conn/s** (4,091 / 4,077 / 4,008) | **50 conn/s** (50 / 50 / 50) |
+| … **8 concurrent** connectors | **11,431 conn/s** (11,723 / 11,210 / 11,431) | **520 conn/s** (548 / 513 / 520) |
+| resident memory per idle, greeted session (THP off) | **62.0 KB** PSS per child (66 / 62 / 62), 32 sessions | **12.6 KB** server RSS growth (12.6 ×3), 64 sessions |
+
+- **Poll's accept rate is the sweep's sleep, not the work.** Sequential connections land at exactly one per
+  20 ms sweep (`POLL_MS`): the loop paces itself with a fixed `sleep_ms(20)` rather than waiting in
+  `poll(2)` for readiness, so a new connection waits out the rest of the sleep. Concurrent connectors are
+  accepted ~10 per sweep. Irrelevant at human pace (a 20 ms greeting delay), but it is the first
+  measurement behind roadmap § 1.11.0's epoll row: a readiness wait would remove the floor.
+- **Fork costs ~5× the memory per session** — a process per connection (~62 KB PSS of private pages per
+  child) against a pooled slot whose 128 KB tx queue and 64 KB compose buffer are only touched when used.
+
+| Concurrent world writers (ADR 0010 `flock` → read → write temp → fsync → rename), 200 transactions each | txn/s |
+|---|---:|
+| 1 | **525** (521 / 523 / 525 / 525 / 525) |
+| 2 | **525** (534 / 524 / 525 / 519 / 534) |
+| 4 | **520** (91 / 510 / 524 / 520 / 522) |
+| 8 | **496** (484 / 496 / 521 / 522 / 458) |
+| 16 | **487** (516 / 487 / 462 / 465 / 493) |
+
+- **The world lock is fsync-bound, not contention-bound.** Throughput is flat at ~520 transactions/s
+  (≈1.9 ms each — one fsync on this disk) from one writer to eight, and gives back only ~7% at sixteen. Every
+  run's final count was exact: **no lost update at any concurrency.** The occasional slow run (91 at four
+  writers; a 52 and a 214 in an earlier sample) is disk-latency spikes, not the lock. **ADR 0010 / 0014's
+  "measure before refining" gate therefore stays closed**: per-sector or per-territory locks would remove
+  contention the system does not have, and buy lock-ordering hazards; the ceiling is the durability write,
+  ~520 universe-door lines per second for the whole server. (The bench world is 8 bytes; Ashes' 3,048-byte
+  map adds one page to each write, which cannot move a ~1.9 ms fsync-bound transaction materially —
+  inferred, not separately measured.)
+
+| `read 1` on a board of N one-KB posts (fork, so no poll-sweep wait; 1 in 10 posts a reply) | ms per read |
+|---|---:|
+| 500 posts | **3.39** (3.43 / 3.35 / 3.39) |
+| 2,000 posts | **12.96** (13.33 / 12.96 / 12.85) |
+| 4,096 posts | **27.67** (27.67 / 27.86 / 27.13) |
+
+- **The reply scan is linear at ~6.7 µs per post** (ADR 0005 scan-on-read: open, 2 KB header read, close,
+  for every post on the board). Imperceptible on a few hundred posts, tens of milliseconds past two
+  thousand — and under poll that time is the whole server's, one `read` per session per sweep since 1.8.1's
+  line budget. This is the measurement roadmap § 1.9.1's index-vs-scan decision was waiting on.
+- **Found by this bench and fixed in 1.8.2: a ~40 ms Nagle stall on every multi-part response under
+  fork.** The first run read a flat ~41 ms per `read` at every board size: a fork worker writes a response
+  as several small sends, and Nagle held each one after the first until the client's delayed (~40 ms) ACK.
+  With the client acknowledging immediately (`TCP_QUICKACK`) the same read took 2.6 ms. agora now sets
+  `TCP_NODELAY` on every accepted socket; the table above is after the fix (500 posts: 41.0 → 3.4 ms).
+  Poll was barely affected — it drains a session's queued output in one write — but sets it too.
+
+Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply` individually; `--runs N`;
+`AGORA_BIN=` to A/B a build).
+
 ## Notes on what's NOT in this baseline
 
-- **Accept-loop rate** — not benched for either serve model. Since 1.7.0 `AGORA_SERVE=fork` (the Linux default) waits in `poll(2)` over {listener, signalfd} on a non-blocking listener rather than blocking in `accept`; `AGORA_SERVE=poll` drains accepts non-blocking once per ~20 ms sweep. Benching it requires a paired client process and is deferred to its own dedicated bench file (`benches/bench_accept.bcyr` or a shell harness). Plausible target: > 10k accepts/sec on this host based on raw socket cost.
 - **End-to-end echo latency** — wall-clock from client send to client receive over `127.0.0.1`. Requires a paired process; meaningful target is < 1 ms p99.
-- **Memory pressure** — each telnet parser draws ~1.7 KB of heap (a 128 B `TelnetState` plus tx 256 + sb 512 + opt_us 256 + opt_him 256 + term_type 257). Under fork that is per child; under poll it is **per slot, allocated once for all 64 and reused** ([ADR 0023](docs/adr/0023-dual-serve-model.md)), so the poll model's parser memory is bounded at ~107 KB regardless of churn. Not exercised here — per-session memory has never been benchmarked, which is a roadmap item.
+- **Memory pressure (parser)** — each telnet parser draws ~1.7 KB of heap (a 128 B `TelnetState` plus tx 256 + sb 512 + opt_us 256 + opt_him 256 + term_type 257). Under fork that is per child; under poll it is **per slot, allocated once for all 64 and reused** ([ADR 0023](docs/adr/0023-dual-serve-model.md)). Whole-session memory is measured above (1.8.2).
 - **DCE-built variants** — all numbers above are `cyrius bench` defaults (non-DCE). The release path is `CYRIUS_DCE=1 cyrius build` which should shave the parser code path slightly via dead-call elimination but not change the hot paths measured.
 
 ## Regeneration
 
 ```sh
-cyrius bench benches/bench_telnet.bcyr
+cyrius bench benches/bench_telnet.bcyr      # parser (this table)
+benches/serve-bench.py all                  # accept rate, per-session memory, world lock (1.8.2)
 ```
 
 For ongoing tracking across releases, append the output to `bench-history.csv` (not yet scaffolded — earns a slot at the v1.0 close-out alongside any other ongoing perf surfaces). The cyrius repo's `scripts/bench-history.sh` is the reference auto-gen pattern for when this file outgrows hand-maintenance.

@@ -28,7 +28,7 @@ echo "agora $got — matches VERSION"
 
 echo
 echo "=== test suite ==="
-cyrius test src/test.cyr
+cyrius test
 
 echo
 echo "OK — build + tests green at $got"

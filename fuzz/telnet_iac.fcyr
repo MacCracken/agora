@@ -54,6 +54,8 @@ alloc_init();
 # failure that cannot be reproduced is a rumour, not a bug report.
 var rng = 0x2545F4914F6CDD1D;
 
+# Advance the xorshift64 state (shifts 13 / 7 / 17) and return its low byte as
+# the next fuzz input byte.
 fn nextb(): i64 {
     rng = rng ^ (rng << 13);
     rng = rng ^ (rng >> 7);

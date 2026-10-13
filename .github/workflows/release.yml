@@ -4,68 +4,75 @@ on:
   push:
     tags: ['[0-9]*']
 
+# 1.8.2 — read by default; only the publishing job below gets write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
     name: CI Gate
+    # The whole of ci.yml — build, tests, fuzz (plain + --poison=ab), audit,
+    # both example-smoke legs and the aarch64 job — must pass on the tag.
     uses: ./.github/workflows/ci.yml
 
   release:
     name: Build & Release
     needs: [ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify version
-        # VERSION (file), cyrius.cyml [package].version (via ${file:VERSION}),
-        # and the git tag must all agree before a release artifact ships.
-        # Mismatch fails the run.
-        run: |
-          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
 
       - name: Install Cyrius toolchain
-        # Upstream installer (lays out the version-matched snapshot at
-        # $HOME/.cyrius/versions/<ver>/lib — required since 6.2.x, see ci.yml).
-        # `shell: bash` = -eo pipefail, so a failed curl fails this step (1.8.1).
+        # The installer from the cyrius tag matching the pin, run with pipefail
+        # (see ci.yml for both reasons).
         shell: bash
         run: |
           set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Build
-        # 1.6.6 — CYRIUS_DCE=1 per CLAUDE.md § CI/Release. It was stated as
-        # current practice and was in neither workflow, so CI had been
-        # measuring a different artifact than the one the docs describe
-        # (binary size is a tracked release metric).
+      - name: Build all targets
+        # CYRIUS_DCE=1 per CLAUDE.md § CI/Release. 1.8.2 — the release carries
+        # all three targets agora supports, not only x86_64 Linux.
         run: |
           cyrius deps
           mkdir -p build
           CYRIUS_DCE=1 cyrius build src/main.cyr build/agora
+          CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos
+          cyrius build --aarch64 src/main.cyr build/agora-aarch64
+
+      - name: Verify version
+        # VERSION, cyrius.cyml, the built binary, CHANGELOG, state.md, roadmap.md
+        # and the git tag must all agree before anything is published
+        # (scripts/check-version-sync.sh --tag, 1.8.2).
+        run: scripts/check-version-sync.sh --tag "${GITHUB_REF_NAME}"
 
       - name: Test
-        # 1.7.0 — the release workflow built and PUBLISHED without running a
-        # single test. CI ran them on push, but a tag could be cut from any
-        # commit, so nothing structurally prevented shipping a red tree; the
-        # Closeout Pass's "full test suite" gate lived only in CLAUDE.md prose.
-        run: cyrius test src/test.cyr
+        # 1.7.0 — the release workflow once built and PUBLISHED without running a
+        # single test. The CI gate above runs everything; this re-runs the suites
+        # against the exact tree being packaged.
+        run: |
+          cyrius test
+          cyrius fuzz fuzz/telnet_iac.fcyr
+          cyrius fuzz --poison=ab fuzz/telnet_iac.fcyr
 
-      - name: Fuzz the IAC parser
-        # 1.7.0 (roadmap N4) — same gate as ci.yml. See that file for why this
-        # harness has teeth (mutation-proven on two axes) and how to reproduce
-        # a failure locally.
-        run: cyrius fuzz fuzz/telnet_iac.fcyr
+      - name: Package
+        # 1.8.2 — named per target, with SHA-256 checksums.
+        run: |
+          V="$(tr -d '[:space:]' < VERSION)"
+          mkdir -p dist
+          cp build/agora         "dist/agora-$V-x86_64-linux"
+          cp build/agora-aarch64 "dist/agora-$V-aarch64-linux"
+          cp build/agora-agnos   "dist/agora-$V-x86_64-agnos"
+          (cd dist && sha256sum agora-* > SHA256SUMS && cat SHA256SUMS)
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65   # v2.6.2
         with:
           generate_release_notes: true
-          files: build/*
+          files: dist/*

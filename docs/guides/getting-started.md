@@ -44,7 +44,7 @@ Live binary size lives in [`docs/development/state.md`](../development/state.md)
 ## Run the tests
 
 ```sh
-cyrius test src/test.cyr
+cyrius test
 ```
 
 Expect **0 failures** (the suite was 80 tests at 0.9.0 and has grown with every cut; `docs/development/state.md` carries the current count). The suite covers the IAC parser (t01–t24, RFCs 854 / 1143 / 1073 / 1091 / 1184), post storage + threading (t25–t49), accounts (t50–t63), the From header + per-board policy (t64–t70), and the 0.7.0 audit regressions (t71–t78). t79 + t80 are the 0.8.x audit-followup regressions (keyfile mode bits + board existence).

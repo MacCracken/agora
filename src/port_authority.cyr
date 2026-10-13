@@ -48,6 +48,7 @@ enum GX {
     GX_SIZE  = 16;
 }
 
+# Display name of commodity c (0..PA_COMM-1); "?" for an out-of-range index.
 fn pa_comm_name(c): i64 {
     if (c == 0) { return "Reactor Ore"; }
     if (c == 1) { return "Biomass"; }
@@ -56,6 +57,8 @@ fn pa_comm_name(c): i64 {
     return "?";
 }
 
+# Floor of commodity c's price band (credits/unit), also its net-worth floor
+# value; 1 for an out-of-range index.
 fn pa_comm_min(c): i64 {
     if (c == 0) { return 10; }
     if (c == 1) { return 25; }
@@ -64,6 +67,7 @@ fn pa_comm_min(c): i64 {
     return 1;
 }
 
+# Ceiling of commodity c's price band (credits/unit); 1 for an out-of-range index.
 fn pa_comm_max(c): i64 {
     if (c == 0) { return 40; }
     if (c == 1) { return 90; }
@@ -72,6 +76,8 @@ fn pa_comm_max(c): i64 {
     return 1;
 }
 
+# i64 cells per sector in the GX_PORTS table: has_port + (flag, price) per
+# commodity. Pure.
 fn pa_port_stride(): i64 {
     return 1 + PA_COMM * 2;
 }
@@ -142,18 +148,25 @@ fn pa_galaxy_new(seed): i64 {
 
 # === Galaxy accessors ===
 
+# 1 if `sector` has a trade port, else 0. Unchecked index — sector must be in range.
 fn pa_has_port(gx, sector): i64 {
     return load64(load64(gx + GX_PORTS) + sector * pa_port_stride() * 8);
 }
 
+# Trade-flag (PF_NONE / PF_SELLS / PF_BUYS) for commodity c at `sector`'s port.
+# Unchecked indexes.
 fn pa_port_flag(gx, sector, c): i64 {
     return load64(load64(gx + GX_PORTS) + (sector * pa_port_stride() + 1 + c * 2) * 8);
 }
 
+# Static galaxy base price of commodity c at `sector` (0 where not traded).
+# Unchecked indexes.
 fn pa_port_price(gx, sector, c): i64 {
     return load64(load64(gx + GX_PORTS) + (sector * pa_port_stride() + 2 + c * 2) * 8);
 }
 
+# Destination sector of warp slot w (0..PA_MAX_WARPS-1) out of `sector`, or -1 for
+# an unused slot. Unchecked indexes.
 fn pa_warp(gx, sector, w): i64 {
     return load64(load64(gx + GX_WARPS) + (sector * PA_MAX_WARPS + w) * 8);
 }
@@ -211,6 +224,9 @@ enum PA {
     PA_SIZE     = 192;
 }
 
+# Allocate a fresh ship on the freelist (pa_free releases it): day 1 at the HQ spire
+# (sector 0), starting credits/holds/fighters/shields, no planet, combat PRNG seeded
+# from `seed`. Runtime fields are unset — call pa_start next.
 fn pa_new(seed, mode, max_days): i64 {
     var st = fl_alloc(PA_SIZE);
     memset(st, 0, PA_SIZE);
@@ -232,15 +248,18 @@ fn pa_new(seed, mode, max_days): i64 {
 
 # === Cargo accounting ===
 
+# Units of commodity c in the holds. Unchecked index — c must be 0..PA_COMM-1.
 fn pa_cargo(st, c): i64 {
     return load64(st + PA_CARGO + c * 8);
 }
 
+# Set the hold count of commodity c to v. Unchecked index; returns 0.
 fn pa_set_cargo(st, c, v): i64 {
     store64(st + PA_CARGO + c * 8, v);
     return 0;
 }
 
+# Total units carried across all commodities.
 fn pa_cargo_used(st): i64 {
     var t = 0;
     var i = 0;
@@ -251,6 +270,7 @@ fn pa_cargo_used(st): i64 {
     return t;
 }
 
+# Empty cargo holds: capacity (PA_HOLDS) minus units carried.
 fn pa_holds_free(st): i64 {
     return load64(st + PA_HOLDS) - pa_cargo_used(st);
 }
@@ -294,6 +314,8 @@ fn pa_buy(st, c, qty): i64 {
     return 0;
 }
 
+# Sell qty of commodity c to the current port (it must BUY c) at the static price:
+# credits up, cargo down. Status codes as above; Universe routes to pa_sell_u.
 fn pa_sell(st, c, qty): i64 {
     if (pa_is_universe(st) == 1) { return pa_sell_u(st, c, qty); }
     if (c < 0)        { return 0 - 1; }
@@ -355,6 +377,8 @@ enum PASave {
 
 # === Runtime helpers ===
 
+# Set the transient one-line status message (rendered under the screen),
+# truncated to 255 bytes. Returns 0.
 fn pa_msg(st, s): i64 {
     var m = load64(st + PA_MSG);
     var n = strlen(s);
@@ -494,6 +518,8 @@ fn pa_flee(st): i64 {
 
 # === HQ upgrade dock (sector 0) ===
 
+# HQ dock: buy PA_HOLD_BLOCK cargo holds at PA_HOLD_COST each (the caller gates
+# this to sector 0). 0 ok / -5 not enough credits.
 fn pa_buy_holds(st): i64 {
     var cost = PA_HOLD_COST * PA_HOLD_BLOCK;
     if (cost > load64(st + PA_CREDITS)) { return 0 - 5; }
@@ -502,6 +528,8 @@ fn pa_buy_holds(st): i64 {
     return 0;
 }
 
+# HQ dock: buy PA_FIGHTER_BLOCK fighters at PA_FIGHTER_COST each.
+# 0 ok / -5 not enough credits.
 fn pa_buy_fighters(st): i64 {
     var cost = PA_FIGHTER_COST * PA_FIGHTER_BLOCK;
     if (cost > load64(st + PA_CREDITS)) { return 0 - 5; }
@@ -510,6 +538,8 @@ fn pa_buy_fighters(st): i64 {
     return 0;
 }
 
+# HQ dock: buy PA_SHIELD_BLOCK shield points at PA_SHIELD_COST each.
+# 0 ok / -5 not enough credits.
 fn pa_buy_shields(st): i64 {
     var cost = PA_SHIELD_COST * PA_SHIELD_BLOCK;
     if (cost > load64(st + PA_CREDITS)) { return 0 - 5; }
@@ -533,6 +563,8 @@ fn pa_establish_planet(st): i64 {
     return 0;
 }
 
+# Move amt credits from the ship into the planet vault (the caller checks you
+# are at the planet). 0 ok / -1 no planet or amt <= 0 / -2 not enough credits.
 fn pa_planet_deposit(st, amt): i64 {
     if (load64(st + PA_PLANET) < 0)    { return 0 - 1; }
     if (amt <= 0)                      { return 0 - 1; }
@@ -542,6 +574,8 @@ fn pa_planet_deposit(st, amt): i64 {
     return 0;
 }
 
+# Move amt credits from the planet vault back to the ship.
+# 0 ok / -1 no planet or amt <= 0 / -2 the vault holds less.
 fn pa_planet_withdraw(st, amt): i64 {
     if (load64(st + PA_PLANET) < 0)      { return 0 - 1; }
     if (amt <= 0)                        { return 0 - 1; }
@@ -553,16 +587,19 @@ fn pa_planet_withdraw(st, amt): i64 {
 
 # === Win / score / rank ===
 
+# 1 if the run has ended (quarter closed or ship destroyed), else 0.
 fn pa_is_over(st): i64 {
     if (load64(st + PA_OVER) != 0) { return 1; }
     return 0;
 }
 
+# Final score: net worth, or 0 if the ship was destroyed (PA_OVER == 2).
 fn pa_final_score(st): i64 {
     if (load64(st + PA_OVER) == 2) { return 0; }
     return pa_net_worth(st);
 }
 
+# Rank title for a final score (static string, "Bilge Runner" .. "Star Sovereign"). Pure.
 fn pa_rank(score): i64 {
     if (score < 3000)    { return "Bilge Runner"; }
     if (score < 15000)   { return "Free Trader"; }
@@ -574,6 +611,9 @@ fn pa_rank(score): i64 {
 
 # === Save / load ===
 
+# Serialize the durable ship fields: the PADG1 header line, then 18 decimal i64
+# lines in pa_load_parse's order. Returns bytes written; `cap` is not checked
+# (the fixed layout fits PA_SAVE_CAP). Runtime fields are not saved.
 fn pa_save_format(st, buf, cap): i64 {
     var pos = 0;
     memcpy(buf + pos, "PADG1\n", 6); pos = pos + 6;
@@ -642,6 +682,8 @@ fn pa_load_parse(buf, len): i64 {
 
 # === Render (pure → buffer) ===
 
+# Emit the status header (title, day/sector/turns, credits/holds,
+# fighters/shields) at pos. Returns the new pos.
 fn pa_render_status(st, buf, pos): i64 {
     pos = emit_sgr(buf, pos, 36);
     pos = emit_cstr(buf, pos, "== PORT AUTHORITY ==");
@@ -671,6 +713,8 @@ fn pa_render_status(st, buf, pos): i64 {
     return pos;
 }
 
+# Emit the current sector at pos: HQ banner, the port's price board (live quotes
+# in Universe), and any garrison here (Universe). Returns the new pos.
 fn pa_render_sector(st, buf, pos): i64 {
     var gx = load64(st + PA_GX);
     var sector = load64(st + PA_SECTOR);
@@ -727,6 +771,8 @@ fn pa_render_sector(st, buf, pos): i64 {
     return pos;
 }
 
+# Emit the "Warps:" line — live warps numbered 1..n with their destination
+# sectors. Returns the new pos.
 fn pa_render_warps(st, buf, pos): i64 {
     var gx = load64(st + PA_GX);
     var sector = load64(st + PA_SECTOR);
@@ -748,6 +794,8 @@ fn pa_render_warps(st, buf, pos): i64 {
     return pos;
 }
 
+# Emit the "Cargo:" line (each held commodity x count, or "(empty)").
+# Returns the new pos.
 fn pa_render_cargo(st, buf, pos): i64 {
     pos = emit_cstr(buf, pos, "Cargo:");
     var any = 0;
@@ -768,6 +816,9 @@ fn pa_render_cargo(st, buf, pos): i64 {
     return pos;
 }
 
+# Render the full frame for the current screen into buf from offset 0 (status,
+# screen body, message line); returns its byte length. `cap` is unused here — emit
+# bounds come from g_door_emit_cap.
 fn pa_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + PA_SCREEN);
@@ -917,6 +968,8 @@ fn pa_render(st, buf, cap): i64 {
 
 # === Feed-line screen machine (one handler per screen) ===
 
+# PSCR_MAIN: route a menu key to its screen (dock only at sector 0, garrison only
+# in Universe); [N] ends the day. Returns 1 on q (quit), else 0.
 fn pa_feed_main(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 113) { return 1; }                                      # q
@@ -945,6 +998,8 @@ fn pa_feed_main(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_BUY: pick commodity 1-4 the port SELLS and park it in PA_PEND for
+# PSCR_BUYQTY; x / Enter backs out. Returns 0.
 fn pa_feed_buy(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -952,8 +1007,16 @@ fn pa_feed_buy(st, line, len): i64 {
     if (k >= 49) { if (k <= 52) {
             var c = k - 49;
             var gx = load64(st + PA_GX);
-            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_SELLS) { pa_msg(st, "Port doesn't sell that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) {
+                pa_msg(st, "No port here.");
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
+            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_SELLS) {
+                pa_msg(st, "Port doesn't sell that.");
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
             store64(st + PA_PEND, c);
             store64(st + PA_SCREEN, PSCR_BUYQTY);
             return 0;
@@ -962,6 +1025,8 @@ fn pa_feed_buy(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_BUYQTY: buy the entered quantity of the PA_PEND commodity and report the
+# outcome; a blank/garbage line cancels. Back to PSCR_MAIN; returns 0.
 fn pa_feed_buyqty(st, line, len): i64 {
     var qty = door_parse_int(line, len);
     if (qty < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -976,6 +1041,8 @@ fn pa_feed_buyqty(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_SELL: pick commodity 1-4 the port BUYS and park it in PA_PEND for
+# PSCR_SELLQTY; x / Enter backs out. Returns 0.
 fn pa_feed_sell(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -983,8 +1050,16 @@ fn pa_feed_sell(st, line, len): i64 {
     if (k >= 49) { if (k <= 52) {
             var c = k - 49;
             var gx = load64(st + PA_GX);
-            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) { pa_msg(st, "No port here."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
-            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_BUYS) { pa_msg(st, "Port doesn't buy that."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (pa_has_port(gx, load64(st + PA_SECTOR)) == 0) {
+                pa_msg(st, "No port here.");
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
+            if (pa_port_flag(gx, load64(st + PA_SECTOR), c) != PF_BUYS) {
+                pa_msg(st, "Port doesn't buy that.");
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
             store64(st + PA_PEND, c);
             store64(st + PA_SCREEN, PSCR_SELLQTY);
             return 0;
@@ -993,6 +1068,8 @@ fn pa_feed_sell(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_SELLQTY: sell the entered quantity of the PA_PEND commodity and report the
+# outcome; a blank/garbage line cancels. Back to PSCR_MAIN; returns 0.
 fn pa_feed_sellqty(st, line, len): i64 {
     var qty = door_parse_int(line, len);
     if (qty < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1006,6 +1083,9 @@ fn pa_feed_sellqty(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_MOVE: take live warp 1-6 (spends a turn), then resolve arrival — any hostile
+# garrison in Universe, else the raider roll (may park PSCR_COMBAT). x / Enter
+# backs out. Returns 0.
 fn pa_feed_move(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1016,13 +1096,21 @@ fn pa_feed_move(st, line, len): i64 {
             var dest = pa_nth_warp(gx, load64(st + PA_SECTOR), idx);
             if (dest < 0) { pa_msg(st, "No such warp."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
             var rc = pa_move(st, dest);
-            if (rc == (0 - 2)) { pa_msg(st, "Out of turns - end the day."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+            if (rc == (0 - 2)) {
+                pa_msg(st, "Out of turns - end the day.");
+                store64(st + PA_SCREEN, PSCR_MAIN);
+                return 0;
+            }
             if (rc != 0)       { pa_msg(st, "Can't warp there."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
             if (pa_is_universe(st) == 1) {
                 # Universe: fight any hostile garrison left in the new sector
                 # (async PvP), not the NPC raider roll.
                 pa_arrival_universe(st);
-                if (load64(st + PA_OVER) == 2) { pa_msg(st, "Your ship is debris. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+                if (load64(st + PA_OVER) == 2) {
+                    pa_msg(st, "Your ship is debris. Game over.");
+                    store64(st + PA_SCREEN, PSCR_OVER);
+                    return 0;
+                }
                 store64(st + PA_SCREEN, PSCR_MAIN);
                 return 0;
             }
@@ -1035,6 +1123,8 @@ fn pa_feed_move(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_DOCK: buy a block of [H]olds, [F]ighters or [S]hields, then back to
+# PSCR_MAIN; x / Enter backs out. Returns 0.
 fn pa_feed_dock(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1061,6 +1151,8 @@ fn pa_feed_dock(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_PLANET: [E]stablish a planet in this sector, or open [D]eposit / [W]ithdraw
+# (only while at your planet); x / Enter backs out. Returns 0.
 fn pa_feed_planet(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 120) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1075,12 +1167,20 @@ fn pa_feed_planet(st, line, len): i64 {
         return 0;
     }
     if (k == 100) {
-        if (load64(st + PA_PLANET) != load64(st + PA_SECTOR)) { pa_msg(st, "You must be at your planet."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+        if (load64(st + PA_PLANET) != load64(st + PA_SECTOR)) {
+            pa_msg(st, "You must be at your planet.");
+            store64(st + PA_SCREEN, PSCR_MAIN);
+            return 0;
+        }
         store64(st + PA_SCREEN, PSCR_PLANETDEP);
         return 0;
     }
     if (k == 119) {
-        if (load64(st + PA_PLANET) != load64(st + PA_SECTOR)) { pa_msg(st, "You must be at your planet."); store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
+        if (load64(st + PA_PLANET) != load64(st + PA_SECTOR)) {
+            pa_msg(st, "You must be at your planet.");
+            store64(st + PA_SCREEN, PSCR_MAIN);
+            return 0;
+        }
         store64(st + PA_SCREEN, PSCR_PLANETWD);
         return 0;
     }
@@ -1088,6 +1188,8 @@ fn pa_feed_planet(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_PLANETDEP: deposit the entered credits in the planet vault; a
+# blank/garbage line cancels. Back to PSCR_MAIN; returns 0.
 fn pa_feed_planetdep(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1098,6 +1200,8 @@ fn pa_feed_planetdep(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_PLANETWD: withdraw the entered credits from the planet vault; a
+# blank/garbage line cancels. Back to PSCR_MAIN; returns 0.
 fn pa_feed_planetwd(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1108,6 +1212,8 @@ fn pa_feed_planetwd(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_GARRISON (Universe): deploy the entered number of fighters as this
+# sector's garrison; a blank/garbage line cancels. Back to PSCR_MAIN; returns 0.
 fn pa_feed_garrison(st, line, len): i64 {
     var n = door_parse_int(line, len);
     if (n < 0) { store64(st + PA_SCREEN, PSCR_MAIN); return 0; }
@@ -1120,11 +1226,17 @@ fn pa_feed_garrison(st, line, len): i64 {
     return 0;
 }
 
+# PSCR_COMBAT: [F]ight or f[L]ee the parked raider wing; a destroyed ship goes
+# to PSCR_OVER, otherwise back to PSCR_MAIN. Returns 0.
 fn pa_feed_combat(st, line, len): i64 {
     var k = door_key(line, len);
     if (k == 102) {
         var won = pa_fight(st);
-        if (load64(st + PA_OVER) == 2) { pa_msg(st, "Your ship is debris. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+        if (load64(st + PA_OVER) == 2) {
+            pa_msg(st, "Your ship is debris. Game over.");
+            store64(st + PA_SCREEN, PSCR_OVER);
+            return 0;
+        }
         if (won == 1) { pa_msg(st, "Raiders destroyed. Salvage collected."); }
         else          { pa_msg(st, "You took heavy fire but held."); }
         store64(st + PA_SCREEN, PSCR_MAIN);
@@ -1132,7 +1244,11 @@ fn pa_feed_combat(st, line, len): i64 {
     }
     if (k == 108) {
         var esc = pa_flee(st);
-        if (load64(st + PA_OVER) == 2) { pa_msg(st, "Caught in the open. Game over."); store64(st + PA_SCREEN, PSCR_OVER); return 0; }
+        if (load64(st + PA_OVER) == 2) {
+            pa_msg(st, "Caught in the open. Game over.");
+            store64(st + PA_SCREEN, PSCR_OVER);
+            return 0;
+        }
         if (esc == 1) { pa_msg(st, "You jumped clear."); }
         else          { pa_msg(st, "They raked you as you ran."); }
         store64(st + PA_SCREEN, PSCR_MAIN);
@@ -1274,8 +1390,11 @@ enum PAWOff {
 # Section base offsets + the full word count of the snapshot (all in i64
 # units). The deploy (garrison) section is 2 cells per sector.
 fn paw_planet_base(): i64 { return PAW_OFF_STOCK + PA_SECTORS * PA_COMM; }
+# First garrison cell (i64 index): just past the PA_SECTORS planet-owner cells.
 fn paw_deploy_base(): i64 { return paw_planet_base() + PA_SECTORS; }
+# Snapshot length in i64 words: header + stock + planets + 2 garrison cells/sector.
 fn paw_word_count(): i64 { return paw_deploy_base() + PA_SECTORS * 2; }
+# Snapshot length in bytes — the exact size paw_valid demands.
 fn paw_byte_size(): i64  { return paw_word_count() * 8; }
 
 # === Construction ===
@@ -1306,6 +1425,7 @@ fn paw_valid(buf, len): i64 {
 
 # === Accessors ===
 
+# Galaxy seed recorded in world snapshot w.
 fn paw_seed(w): i64 { return load64(w + PAW_OFF_SEED * 8); }
 
 # 1.8.1 (audit D3) — every accessor refuses an out-of-range sector or
@@ -1319,6 +1439,8 @@ fn paw_stock(w, s, c): i64 {
     return load64(w + (PAW_OFF_STOCK + s * PA_COMM + c) * 8);
 }
 
+# Set port stock for (sector s, commodity c) to v; an out-of-range index writes
+# nothing. Returns 0.
 fn paw_set_stock(w, s, c, v): i64 {
     if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     if (idx_ok(c, PA_COMM) == 0)    { return 0; }
@@ -1326,11 +1448,14 @@ fn paw_set_stock(w, s, c, v): i64 {
     return 0;
 }
 
+# Planet owner fp for sector s (0 = unclaimed, or s out of range).
 fn paw_planet_owner(w, s): i64 {
     if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     return load64(w + (paw_planet_base() + s) * 8);
 }
 
+# Record fp as sector s's planet owner; an out-of-range s writes nothing.
+# Returns 0.
 fn paw_set_planet_owner(w, s, fp): i64 {
     if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     store64(w + (paw_planet_base() + s) * 8, fp);
@@ -1343,11 +1468,14 @@ fn paw_garrison_owner(w, s): i64 {
     return load64(w + (paw_deploy_base() + s * 2) * 8);
 }
 
+# Fighter count of sector s's garrison (0 if none, or s out of range).
 fn paw_garrison_fighters(w, s): i64 {
     if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     return load64(w + (paw_deploy_base() + s * 2 + 1) * 8);
 }
 
+# Overwrite sector s's garrison owner fp + fighter count ((0, 0) clears it);
+# an out-of-range s writes nothing. Returns 0.
 fn paw_set_garrison(w, s, owner, fighters): i64 {
     if (idx_ok(s, PA_SECTORS) == 0) { return 0; }
     store64(w + (paw_deploy_base() + s * 2) * 8, owner);
@@ -1463,6 +1591,8 @@ fn pa_clash_loss(active, other, roll): i64 {
 # pure paw_* transforms; here we just apply the credit/cargo effect to
 # the ship and keep the same status codes the solo path returns.
 
+# 1 if this ship plays the shared Universe galaxy (PA_MODE == DOOR_UNIVERSE),
+# else 0.
 fn pa_is_universe(st): i64 {
     if (load64(st + PA_MODE) == DOOR_UNIVERSE) { return 1; }
     return 0;
@@ -1478,6 +1608,9 @@ fn pa_shown_price(st, gx, sector, c): i64 {
     return pa_port_price(gx, sector, c);
 }
 
+# Universe pa_buy: paw_buy on the PA_WORLD snapshot (stock-adjusted price, drains
+# stock), then debit credits + load cargo. pa_buy's status codes; -2 also means no
+# world loaded, -7 the port's stock is short.
 fn pa_buy_u(st, c, qty): i64 {
     var w = load64(st + PA_WORLD);
     if (w == 0) { return 0 - 2; }
@@ -1489,6 +1622,9 @@ fn pa_buy_u(st, c, qty): i64 {
     return 0;
 }
 
+# Universe pa_sell: paw_sell on the PA_WORLD snapshot (stock-adjusted price, refills
+# stock), then credit the proceeds + unload cargo. pa_sell's status codes; -2 also
+# means no world loaded.
 fn pa_sell_u(st, c, qty): i64 {
     var w = load64(st + PA_WORLD);
     if (w == 0) { return 0 - 2; }

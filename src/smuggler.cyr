@@ -14,7 +14,7 @@
 # encounter + upgrade + render + input + save layer lands in bite 2.
 #
 # No socket or filesystem here — every function is testable from
-# src/test.cyr without binding a port (CLAUDE.md: pure is testable).
+# tests/agora.tcyr without binding a port (CLAUDE.md: pure is testable).
 # Depends on door.cyr (rng_*, iclamp, ...) included before this file.
 
 # === Config ===
@@ -61,6 +61,9 @@ enum SL {
 
 # === Construction ===
 
+# Allocate a fresh run on the freelist (sl_free releases it): day 1 in The Docks with
+# the opening stake, the shark's debt and full health; seeds the encounter PRNG.
+# Runtime fields are unset — call sl_start next.
 fn sl_new(seed, mode, max_days): i64 {
     var st = fl_alloc(SL_SIZE);
     memset(st, 0, SL_SIZE);
@@ -86,6 +89,7 @@ fn sl_new(seed, mode, max_days): i64 {
 # dear, each with a [min,max] street-price band. Names are flavor and
 # trivially swappable.
 
+# Display name of good i (0..SL_GOODS-1); "?" for an out-of-range index.
 fn sl_good_name(i): i64 {
     if (i == 0) { return "loosies"; }    # cut/loose cigarettes
     if (i == 1) { return "hooch"; }      # untaxed liquor
@@ -98,6 +102,7 @@ fn sl_good_name(i): i64 {
     return "?";
 }
 
+# Floor of good i's street-price band (cash/unit); 1 for an out-of-range index.
 fn sl_good_min(i): i64 {
     if (i == 0) { return 15; }
     if (i == 1) { return 40; }
@@ -110,6 +115,7 @@ fn sl_good_min(i): i64 {
     return 1;
 }
 
+# Ceiling of good i's street-price band (cash/unit); 1 for an out-of-range index.
 fn sl_good_max(i): i64 {
     if (i == 0) { return 60; }
     if (i == 1) { return 180; }
@@ -122,6 +128,7 @@ fn sl_good_max(i): i64 {
     return 1;
 }
 
+# Display name of district i (0..SL_DISTRICTS-1); "?" for an out-of-range index.
 fn sl_district_name(i): i64 {
     if (i == 0) { return "The Docks"; }
     if (i == 1) { return "Rustline"; }
@@ -136,15 +143,18 @@ fn sl_district_name(i): i64 {
 
 # === Inventory / accounting ===
 
+# Units of `good` carried. Unchecked index — good must be 0..SL_GOODS-1.
 fn sl_inv(st, good): i64 {
     return load64(st + SL_INV + good * 8);
 }
 
+# Set the carried count of `good` to v. Unchecked index; returns 0.
 fn sl_set_inv(st, good, v): i64 {
     store64(st + SL_INV + good * 8, v);
     return 0;
 }
 
+# Total units carried across all goods.
 fn sl_capacity_used(st): i64 {
     var total = 0;
     var i = 0;
@@ -155,6 +165,7 @@ fn sl_capacity_used(st): i64 {
     return total;
 }
 
+# Free stash room: capacity (SL_CAP) minus units carried.
 fn sl_capacity_free(st): i64 {
     return load64(st + SL_CAP) - sl_capacity_used(st);
 }
@@ -175,6 +186,8 @@ fn sl_net_worth(st): i64 {
 #   (0 - 4) bad quantity / good unavailable (price <= 0)
 #   (0 - 5) selling more than held
 
+# Buy qty of `good` at `price` each: cash down, stash up. Status per the table
+# above: 0 / (0-1) / (0-2) / (0-3) / (0-4).
 fn sl_buy(st, good, price, qty): i64 {
     if (good < 0)         { return 0 - 1; }
     if (good >= SL_GOODS) { return 0 - 1; }
@@ -188,6 +201,8 @@ fn sl_buy(st, good, price, qty): i64 {
     return 0;
 }
 
+# Sell qty of `good` at `price` each: cash up, stash down. Status per the table
+# above: 0 / (0-1) / (0-4) / (0-5).
 fn sl_sell(st, good, price, qty): i64 {
     if (good < 0)         { return 0 - 1; }
     if (good >= SL_GOODS) { return 0 - 1; }
@@ -204,6 +219,8 @@ fn sl_sell(st, good, price, qty): i64 {
 # Bank protects cash from muggings (no interest). The shark's debt
 # compounds every day you carry it.
 
+# Move amt from cash into the bank vault.
+# 0 ok / (0-1) amt <= 0 / (0-2) not that much cash on hand.
 fn sl_deposit(st, amt): i64 {
     if (amt <= 0)                    { return 0 - 1; }
     if (amt > load64(st + SL_CASH))  { return 0 - 2; }
@@ -212,6 +229,8 @@ fn sl_deposit(st, amt): i64 {
     return 0;
 }
 
+# Move amt from the bank vault back to cash.
+# 0 ok / (0-1) amt <= 0 / (0-2) the vault holds less.
 fn sl_withdraw(st, amt): i64 {
     if (amt <= 0)                    { return 0 - 1; }
     if (amt > load64(st + SL_BANK))  { return 0 - 2; }
@@ -413,14 +432,18 @@ fn sl_free(st): i64 {
 
 # === Shop offers + mutators (the fixer) ===
 
+# Fixer's price for the next +SL_CAP_STEP of capacity: 6 x current capacity
+# (it climbs as you upgrade).
 fn sl_offer_cap_cost(st): i64 {
     return load64(st + SL_CAP) * 6;
 }
 
+# Fixer's flat price for one more gun. Pure.
 fn sl_offer_gun_cost(): i64 {
     return 500;
 }
 
+# Fixer's price to heal to full: 15 per missing HP (0 at full health).
 fn sl_offer_heal_cost(st): i64 {
     return (100 - load64(st + SL_HEALTH)) * 15;
 }
@@ -579,6 +602,7 @@ fn sl_run(st): i64 {
 
 # === Win / score / rank ===
 
+# 1 if the run has ended (out of days or dead), else 0.
 fn sl_is_over(st): i64 {
     if (load64(st + SL_OVER) != 0) { return 1; }
     return 0;
@@ -590,6 +614,7 @@ fn sl_final_score(st): i64 {
     return sl_net_worth(st);
 }
 
+# Rank title for a final score (static string; negative = "Busted Flat"). Pure.
 fn sl_rank(score): i64 {
     if (score < 0)      { return "Busted Flat"; }
     if (score < 5000)   { return "Corner Hustler"; }
@@ -601,6 +626,9 @@ fn sl_rank(score): i64 {
 
 # === Save / load (positional text via door framework) ===
 
+# Serialize the durable run fields: the SLDG1 header line, then 21 decimal i64
+# lines in sl_load_parse's order. Returns bytes written; `cap` is not checked
+# (the fixed layout fits SL_SAVE_CAP). Runtime fields are not saved.
 fn sl_save_format(st, buf, cap): i64 {
     var pos = 0;
     memcpy(buf + pos, "SLDG1\n", 6); pos = pos + 6;
@@ -657,6 +685,8 @@ fn sl_load_parse(buf, len): i64 {
 
 # === Render (pure → buffer; main.cyr send_buf's it) ===
 
+# Emit the status header (title, day/district, cash/bank/debt, HP/guns/coat)
+# at pos. Returns the new pos.
 fn sl_render_status(st, buf, pos): i64 {
     pos = emit_sgr(buf, pos, 36);
     pos = emit_cstr(buf, pos, "== SMUGGLER'S LEDGER ==");
@@ -688,6 +718,8 @@ fn sl_render_status(st, buf, pos): i64 {
     return pos;
 }
 
+# Emit today's market table at pos: number, good, price ("--" = not on the
+# street), units held. Returns the new pos.
 fn sl_render_market(st, buf, pos): i64 {
     var prices = load64(st + SL_PRICES);
     pos = emit_sgr(buf, pos, 33);
@@ -714,6 +746,8 @@ fn sl_render_market(st, buf, pos): i64 {
     return pos;
 }
 
+# Emit the numbered district list at pos, marking the current one "(here)".
+# Returns the new pos.
 fn sl_render_districts(st, buf, pos): i64 {
     var i = 0;
     while (i < SL_DISTRICTS) {
@@ -728,6 +762,9 @@ fn sl_render_districts(st, buf, pos): i64 {
     return pos;
 }
 
+# Render the full frame for the current screen into buf from offset 0 (status,
+# screen body, message line); returns its byte length. `cap` is unused here — emit
+# bounds come from g_door_emit_cap.
 fn sl_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + SL_SCREEN);
@@ -872,6 +909,7 @@ fn sl_render(st, buf, cap): i64 {
 # vars are function-scoped — reusing a name across branches in one
 # function collides).
 
+# SCR_MAIN: route a menu key to its sub-screen. Returns 1 on q (quit), else 0.
 fn sl_feed_main(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 113) { return 1; }                                    # q quit
@@ -886,6 +924,8 @@ fn sl_feed_main(st, line, len): i64 {
     return 0;
 }
 
+# SCR_BUY: pick good 1-8 (must be on the street today) and park it in SL_PEND for
+# SCR_BUYQTY; x / Enter backs out. Returns 0.
 fn sl_feed_buy(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -906,6 +946,8 @@ fn sl_feed_buy(st, line, len): i64 {
     return 0;
 }
 
+# SCR_BUYQTY: buy the entered quantity of the SL_PEND good at today's price; a
+# blank/garbage line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_buyqty(st, line, len): i64 {
     var qty = door_parse_int(line, len);
     if (qty < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -920,6 +962,8 @@ fn sl_feed_buyqty(st, line, len): i64 {
     return 0;
 }
 
+# SCR_SELL: pick a held good 1-8 and park it in SL_PEND for SCR_SELLQTY;
+# x / Enter backs out. Returns 0.
 fn sl_feed_sell(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -939,6 +983,8 @@ fn sl_feed_sell(st, line, len): i64 {
     return 0;
 }
 
+# SCR_SELLQTY: sell the entered quantity of the SL_PEND good at today's price; a
+# blank/garbage line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_sellqty(st, line, len): i64 {
     var qty = door_parse_int(line, len);
     if (qty < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -952,6 +998,8 @@ fn sl_feed_sellqty(st, line, len): i64 {
     return 0;
 }
 
+# SCR_JET: travel to district 1-8 (burns a day; may end the run), then roll the
+# arrival encounter — cops park SCR_ENC. x / Enter backs out. Returns 0.
 fn sl_feed_jet(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -967,8 +1015,16 @@ fn sl_feed_jet(st, line, len): i64 {
             if (load64(st + SL_OVER) != 0) { store64(st + SL_SCREEN, SCR_OVER); return 0; }
             var enc = sl_roll_encounter(st);
             if (enc == 1) { sl_msg(st, "The cops have eyes on you!"); return 0; }
-            if (enc == 2) { sl_msg(st, "You got jumped - they grabbed some cash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
-            if (enc == 3) { sl_msg(st, "Lucky find - someone ditched a stash."); store64(st + SL_SCREEN, SCR_MAIN); return 0; }
+            if (enc == 2) {
+                sl_msg(st, "You got jumped - they grabbed some cash.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
+            if (enc == 3) {
+                sl_msg(st, "Lucky find - someone ditched a stash.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
             store64(st + SL_SCREEN, SCR_MAIN);
             return 0;
         } }
@@ -976,6 +1032,7 @@ fn sl_feed_jet(st, line, len): i64 {
     return 0;
 }
 
+# SCR_SHARK: open the [P]ay or [B]orrow prompt; x / Enter backs out. Returns 0.
 fn sl_feed_shark(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -986,6 +1043,8 @@ fn sl_feed_shark(st, line, len): i64 {
     return 0;
 }
 
+# SCR_SHARKPAY: repay the entered amount of debt from cash; a blank/garbage
+# line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_sharkpay(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -996,6 +1055,8 @@ fn sl_feed_sharkpay(st, line, len): i64 {
     return 0;
 }
 
+# SCR_SHARKBOR: borrow the entered amount (cash and debt both rise); a
+# blank/garbage line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_sharkbor(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -1005,6 +1066,8 @@ fn sl_feed_sharkbor(st, line, len): i64 {
     return 0;
 }
 
+# SCR_BANK: open the [D]eposit or [W]ithdraw prompt; x / Enter backs out.
+# Returns 0.
 fn sl_feed_bank(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -1015,6 +1078,8 @@ fn sl_feed_bank(st, line, len): i64 {
     return 0;
 }
 
+# SCR_BANKDEP: move the entered amount from cash into the vault; a
+# blank/garbage line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_bankdep(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -1025,6 +1090,8 @@ fn sl_feed_bankdep(st, line, len): i64 {
     return 0;
 }
 
+# SCR_BANKWD: move the entered amount from the vault to cash; a
+# blank/garbage line cancels. Back to SCR_MAIN; returns 0.
 fn sl_feed_bankwd(st, line, len): i64 {
     var amt = door_parse_int(line, len);
     if (amt < 0) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -1035,6 +1102,8 @@ fn sl_feed_bankwd(st, line, len): i64 {
     return 0;
 }
 
+# SCR_FIXER: buy [C]apacity, a [G]un or a [H]eal, then back to SCR_MAIN;
+# x / Enter backs out. Returns 0.
 fn sl_feed_fixer(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 120) { store64(st + SL_SCREEN, SCR_MAIN); return 0; }
@@ -1066,11 +1135,17 @@ fn sl_feed_fixer(st, line, len): i64 {
     return 0;
 }
 
+# SCR_ENC: [F]ight or [R]un from the cops; death goes to SCR_OVER, otherwise
+# back to SCR_MAIN. Returns 0.
 fn sl_feed_enc(st, line, len): i64 {
     var k = sl_key(line, len);
     if (k == 102) {
         var won = sl_fight(st);
-        if (load64(st + SL_OVER) == 2) { sl_msg(st, "You bled out in the gutter."); store64(st + SL_SCREEN, SCR_OVER); return 0; }
+        if (load64(st + SL_OVER) == 2) {
+            sl_msg(st, "You bled out in the gutter.");
+            store64(st + SL_SCREEN, SCR_OVER);
+            return 0;
+        }
         if (won == 1) { sl_msg(st, "You shook them off."); }
         else          { sl_msg(st, "They worked you over and took a cut."); }
         store64(st + SL_SCREEN, SCR_MAIN);
@@ -1078,7 +1153,11 @@ fn sl_feed_enc(st, line, len): i64 {
     }
     if (k == 114) {
         var esc = sl_run(st);
-        if (load64(st + SL_OVER) == 2) { sl_msg(st, "You didn't make it."); store64(st + SL_SCREEN, SCR_OVER); return 0; }
+        if (load64(st + SL_OVER) == 2) {
+            sl_msg(st, "You didn't make it.");
+            store64(st + SL_SCREEN, SCR_OVER);
+            return 0;
+        }
         if (esc == 1) { sl_msg(st, "You lost them in the alleys."); }
         else          { sl_msg(st, "They caught you - you dropped product."); }
         store64(st + SL_SCREEN, SCR_MAIN);
@@ -1088,8 +1167,6 @@ fn sl_feed_enc(st, line, len): i64 {
     return 0;
 }
 
-# Dispatch one input line to the current screen. Returns 0 to stay in
-# the game, 1 to exit back to the BBS.
 # Name of a dice outcome by its index (0 LOW / 1 HIGH).
 fn sl_dice_name(i): i64 {
     if (i == 0) { return "LOW"; }
@@ -1152,6 +1229,8 @@ fn sl_feed_dice(st, line, len): i64 {
     return 0;
 }
 
+# Dispatch one input line to the current screen. Returns 0 to stay in
+# the game, 1 to exit back to the BBS.
 fn sl_feed(st, line, len): i64 {
     sl_msg(st, "");
     var screen = load64(st + SL_SCREEN);
@@ -1200,9 +1279,13 @@ enum SLWOff {
     SLW_OFF_HEAT    = 1;
 }
 
+# Snapshot length in i64 words: the version cell + one heat cell per district.
 fn slw_word_count(): i64 { return SLW_OFF_HEAT + SL_DISTRICTS; }
+# Snapshot length in bytes — the exact size slw_valid demands.
 fn slw_byte_size(): i64  { return slw_word_count() * 8; }
 
+# A fresh heat snapshot: current SLW_VERSION, every district at 0 heat. Returns the
+# flat buffer (slw_byte_size() bytes, per-command scratch via cmd_alloc).
 fn slw_new(): i64 {
     var n = slw_word_count();
     var w = cmd_alloc(n * 8);
@@ -1211,6 +1294,7 @@ fn slw_new(): i64 {
     return w;
 }
 
+# 1 if buf is exactly slw_byte_size() bytes and carries SLW_VERSION, else 0.
 fn slw_valid(buf, len): i64 {
     if (len != slw_byte_size()) { return 0; }
     if (load64(buf + SLW_OFF_VERSION * 8) != SLW_VERSION) { return 0; }
@@ -1224,12 +1308,15 @@ fn slw_heat(w, d): i64 {
     return load64(w + (SLW_OFF_HEAT + d) * 8);
 }
 
+# Set district d's heat to v, clamped to [0, SLW_HEAT_MAX]; an out-of-range d
+# writes nothing. Returns 0.
 fn slw_set_heat(w, d, v): i64 {
     if (idx_ok(d, SL_DISTRICTS) == 0) { return 0; }
     store64(w + (SLW_OFF_HEAT + d) * 8, iclamp(v, 0, SLW_HEAT_MAX));
     return 0;
 }
 
+# Add delta to district d's heat (clamped by slw_set_heat). Returns 0.
 fn slw_add_heat(w, d, delta): i64 {
     slw_set_heat(w, d, slw_heat(w, d) + delta);
     return 0;
@@ -1241,6 +1328,7 @@ fn sl_heat_chance(base, heat): i64 {
     return iclamp(base + heat / 3, base, 80);
 }
 
+# 1 if this run is in the shared Universe (SL_MODE == DOOR_UNIVERSE), else 0.
 fn sl_is_universe(st): i64 {
     if (load64(st + SL_MODE) == DOOR_UNIVERSE) { return 1; }
     return 0;

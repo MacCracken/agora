@@ -327,6 +327,7 @@ fn ol_day_advance(st): i64 {
 
 # === Owner construction ===
 
+# Set the status-line message: copies NUL-terminated s into OL_MSG, cut at 255 bytes.
 fn ol_msg(st, s): i64 {
     var m = load64(st + OL_MSG);
     var n = strlen(s);
@@ -391,6 +392,7 @@ fn ol_free(st): i64 {
 
 # === Flavour name tables ===
 
+# Display name of circus faction f (OLFaction); any unknown id reads as "White". Pure.
 fn ol_faction_name(f): i64 {
     if (f == FAC_BLUE)  { return "Blue"; }
     if (f == FAC_GREEN) { return "Green"; }
@@ -489,6 +491,8 @@ fn ol_build_chariot_field(st): i64 {
     return n;
 }
 
+# Drop the pending wager (lane and stake to 0): on entering a race, scratching out of one, and
+# after ol_run_race settles it.
 fn ol_clear_bet(st): i64 {
     store64(st + OL_BETLANE, 0);
     store64(st + OL_BETSTAKE, 0);
@@ -620,6 +624,8 @@ fn ol_emit_odds(buf, pos, ox100): i64 {
 # field). Runtime-only fields (screen / cursor / msg / race scratch / bet)
 # are rebuilt on load, never serialized.
 
+# Write the OLYM1 save described above into buf; returns bytes written. `cap` is unchecked: the
+# stable never exceeds OL_STABLE_MAX, which bounds a save at 1,581 bytes (21 per field).
 fn ol_save_format(st, buf, cap): i64 {
     memcpy(buf, "OLYM1\n", 6);
     var pos = 6;
@@ -693,6 +699,7 @@ fn ol_load_parse(buf, len): i64 {
 
 # === Door contract ===
 
+# 1 once the campaign has ended (OL_OVER nonzero; today only the crown sets it), else 0.
 fn ol_is_over(st): i64 {
     if (load64(st + OL_OVER) != 0) { return 1; }
     return 0;
@@ -703,6 +710,7 @@ fn ol_final_score(st): i64 {
     return load64(st + OL_CROWNS) * 1000000 + load64(st + OL_MONEY);
 }
 
+# Leaderboard title for an ol_final_score (crowns x 1,000,000 + denarii). Pure.
 fn ol_rank(score): i64 {
     if (score >= 3000000) { return "Editor of the Games"; }
     if (score >= 1000000) { return "Champion Owner"; }

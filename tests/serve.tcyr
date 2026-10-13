@@ -1,0 +1,383 @@
+# tests/serve.tcyr — unit tests for src/main.cyr: the serve loops' building
+# blocks, the session pool, the send path and the door glue.
+#
+# Until 1.8.2 none of this could be unit-tested: main.cyr ran its entry point
+# on inclusion, so the module suite (tests/agora.tcyr) stopped at the modules
+# main.cyr includes, and the serve layer was covered by the example smokes
+# alone — N1 (1.7.0) and most of the 1.8.1 audit fixes shipped that way.
+# main.cyr now runs `main()` only when AGORA_TEST is undefined.
+#
+# Each test drives the real functions over a real AF_UNIX socketpair — the
+# session's fd is one end, the test holds the other — in a scratch store under
+# /tmp that is removed at the end. Linux (x86_64, and aarch64 under qemu).
+#
+# Run with: cyrius test tests/serve.tcyr   (or a bare `cyrius test`)
+
+#define AGORA_TEST
+include "src/main.cyr"
+
+var st_count = 0;
+var st_fails = 0;
+
+# Record a pass: count the test and print "PASS: <name>" to stdout.
+fn st_pass(name): i64 {
+    st_count = st_count + 1;
+    syscall(1, 1, "PASS: ", 6);
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+# Record a failure: count the test and the failure, and print
+# "FAIL: <name> - <why>" to stderr.
+fn st_fail(name, why): i64 {
+    st_count = st_count + 1;
+    st_fails = st_fails + 1;
+    syscall(1, 2, "FAIL: ", 6);
+    syscall(1, 2, name, strlen(name));
+    syscall(1, 2, " - ", 3);
+    syscall(1, 2, why, strlen(why));
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# An AF_UNIX stream socketpair: fds into out[0] / out[1] (8 bytes each).
+fn st_pair(out): i64 {
+    var fds[8];
+    var r = sys_socketpair(1, 1, 0, &fds);   # AF_UNIX, SOCK_STREAM
+    if (r < 0) { return r; }
+    store64(out, load32(&fds) & 0xFFFFFFFF);
+    store64(out + 8, load32((&fds) + 4) & 0xFFFFFFFF);
+    return 0;
+}
+
+# A fresh session slot on `fd`, made the active session (globals loaded).
+fn st_session(fd): i64 {
+    var s = session_alloc();
+    session_reset(s, fd);
+    sess_load(s);
+    return s;
+}
+
+# Bind a session to an identity the way a successful login does (the slot's
+# fp / handle buffers), without the challenge round.
+fn st_login(s, fp, handle): i64 {
+    memcpy(load64(s + SESS_SESSION_FP), fp, 16);
+    store8(load64(s + SESS_SESSION_FP) + 16, 0);
+    var hl = strlen(handle);
+    memcpy(load64(s + SESS_SESSION_HANDLE), handle, hl);
+    store8(load64(s + SESS_SESSION_HANDLE) + hl, 0);
+    sess_load(s);
+    return 0;
+}
+
+# Put `line` in the session's recv buffer and run it, as one sweep would:
+# load, process_rx with `budget`, save. Returns process_rx's result.
+fn st_feed(s, line, budget): i64 {
+    var n = strlen(line);
+    memcpy(load64(s + SESS_RXBUF), line, n);
+    sess_load(s);
+    var r = process_rx(s, 0, n, budget);
+    sess_save(s);
+    return r;
+}
+
+# Run the remainder the line budget parked, if any. Returns 1 if it ran.
+fn st_resume(s, budget): i64 {
+    var off = load64(s + SESS_RX_OFF);
+    var len = load64(s + SESS_RX_LEN);
+    if (off >= len) { return 0; }
+    sess_load(s);
+    process_rx(s, off, len, budget);
+    sess_save(s);
+    return 1;
+}
+
+# Occurrences of `needle` in the session's queued (unsent) output.
+fn st_tx_count(s, needle): i64 {
+    var tx = load64(s + SESS_TX);
+    var len = load64(s + SESS_TX_LEN);
+    var nl = strlen(needle);
+    var c = 0;
+    var i = load64(s + SESS_TX_OFF);
+    while (i + nl <= len) {
+        if (memeq(tx + i, needle, nl) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Remove a scratch tree (files and directories) — test cleanup only.
+fn st_rmtree(path): i64 {
+    var n = store_dir_scan(path);
+    if (n < 0) { xunlink(path); return 0; }
+    var names = alloc(n * 8 + 8);
+    var i = 0;
+    while (i < n) {
+        var nm = store_dir_name(i);
+        var l = strlen(nm);
+        var c = alloc(l + 1);
+        memcpy(c, nm, l + 1);
+        store64(names + i * 8, c);
+        i = i + 1;
+    }
+    var plen = strlen(path);
+    i = 0;
+    while (i < n) {
+        var e = load64(names + i * 8);
+        var el = strlen(e);
+        var full = alloc(plen + el + 2);
+        memcpy(full, path, plen);
+        store8(full + plen, 47);
+        memcpy(full + plen + 1, e, el + 1);
+        st_rmtree(full);
+        i = i + 1;
+    }
+    sys_rmdir(path);
+    return 0;
+}
+
+# s01 — the poll tx queue (1.8.1, audit M8 / 1.7.0 N3-B). An enqueue that would
+# overflow first drains what the socket takes and compacts, so a command's
+# output may exceed SESS_TX_CAP while the peer reads; a peer that reads NOTHING
+# still overflows (sticky SESS_TX_OVF), and the bytes that did reach the socket
+# arrive complete and in order.
+fn s01_tx_queue_drain_compact_overflow(): i64 {
+    var name = "s01_tx_queue_drain_compact_overflow";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    var a = load64(fds);
+    var b = load64(fds + 8);
+    sock_set_nonblocking(a);
+    sock_set_nonblocking(b);
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(a);
+    var chunk = alloc(16384);
+    var k = 0;
+    var accepted = 0;
+    var going = 1;
+    while (going == 1) {
+        if (k >= 400) { going = 0; continue; }
+        memset(chunk, k & 0xFF, 16384);
+        if (sess_tx_enqueue(s, chunk, 16384) != 0) { going = 0; continue; }
+        accepted = accepted + 1;
+        k = k + 1;
+    }
+    if (accepted <= SESS_TX_CAP / 16384) { st_fail(name, "no drain before overflow"); return 1; }
+    if (k >= 400)                        { st_fail(name, "a non-reading peer never overflowed"); return 1; }
+    if (load64(s + SESS_TX_OVF) != 1)    { st_fail(name, "overflow not sticky"); return 1; }
+    if (sess_tx_enqueue(s, chunk, 1) != 1) { st_fail(name, "enqueue after overflow accepted"); return 1; }
+    # Every byte the socket holds is chunk p / 16384, in order.
+    var rb = alloc(65536);
+    var pos = 0;
+    var reading = 1;
+    while (reading == 1) {
+        var r = sys_read(b, rb, 65536);
+        if (r <= 0) { reading = 0; continue; }
+        var j = 0;
+        while (j < r) {
+            if ((load8(rb + j) & 0xFF) != ((pos + j) / 16384) & 0xFF) {
+                st_fail(name, "socket bytes out of order");
+                return 1;
+            }
+            j = j + 1;
+        }
+        pos = pos + r;
+    }
+    if (pos <= 0) { st_fail(name, "nothing reached the socket"); return 1; }
+    file_close(a);
+    file_close(b);
+    st_pass(name);
+    return 0;
+}
+
+# s02 — the per-sweep line budget (1.8.1, audit H2). Three pipelined commands
+# with a budget of 1 run one per pass, the rest parked in the slot; with no
+# budget (the fork worker) they all run at once.
+fn s02_line_budget_parks_the_rest(): i64 {
+    var name = "s02_line_budget_parks_the_rest";
+    var fds = alloc(16);
+    st_pair(fds);
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(load64(fds));
+    st_feed(s, "whoami\r\nwhoami\r\nwhoami\r\n", 1);
+    if (st_tx_count(s, "anonymous") != 1) { st_fail(name, "budget 1 ran more than one line"); return 1; }
+    if (load64(s + SESS_RX_OFF) >= load64(s + SESS_RX_LEN)) { st_fail(name, "nothing parked"); return 1; }
+    var passes = 0;
+    var going = 1;
+    while (going == 1) {
+        if (passes >= 10) { going = 0; continue; }
+        var before = st_tx_count(s, "anonymous");
+        if (st_resume(s, 1) == 0) { going = 0; continue; }
+        if (st_tx_count(s, "anonymous") - before > 1) { st_fail(name, "a pass ran two lines"); return 1; }
+        passes = passes + 1;
+    }
+    if (st_tx_count(s, "anonymous") != 3) { st_fail(name, "lines lost across passes"); return 1; }
+    var s2 = st_session(load64(fds + 8));
+    st_feed(s2, "whoami\r\nwhoami\r\nwhoami\r\n", 0);
+    if (st_tx_count(s2, "anonymous") != 3)   { st_fail(name, "budget 0 did not run every line"); return 1; }
+    if (load64(s2 + SESS_RX_LEN) != 0)       { st_fail(name, "budget 0 parked something"); return 1; }
+    st_pass(name);
+    return 0;
+}
+
+# s03 — compose lines do not count against the budget (1.8.1, H2): pasting a
+# post must not crawl at one line per sweep. `post` is counted; the subject,
+# the body and the `.` that commits it all run in the next single pass.
+fn s03_compose_lines_not_counted(): i64 {
+    var name = "s03_compose_lines_not_counted";
+    var fds = alloc(16);
+    st_pair(fds);
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(load64(fds));
+    st_login(s, "0123456789abcdef", "qix");
+    st_feed(s, "post\r\nsubj\r\nline one\r\nline two\r\n.\r\n", 1);
+    if (post_max_id(g_store_buf, "main") != 0) { st_fail(name, "post committed in the first pass"); return 1; }
+    st_resume(s, 1);
+    if (load64(s + SESS_RX_LEN) != 0)          { st_fail(name, "compose lines were budgeted"); return 1; }
+    if (post_max_id(g_store_buf, "main") != 1) { st_fail(name, "post not committed"); return 1; }
+    var fb = alloc(4096);
+    var fl = post_read(g_store_buf, "main", 1, fb, 4096);
+    var found = 0;
+    var i = 0;
+    while (i + 8 <= fl) {
+        if (memeq(fb + i, "line two", 8) == 1) { found = 1; }
+        i = i + 1;
+    }
+    if (found == 0) { st_fail(name, "body lost"); return 1; }
+    st_pass(name);
+    return 0;
+}
+
+# s04 — a failed fork-mode send is sticky (1.8.1, audit M10): later sends are
+# refused at once instead of each waiting out SO_SNDTIMEO, and the session runs
+# nothing more.
+fn s04_fork_send_failure_is_sticky(): i64 {
+    var name = "s04_fork_send_failure_is_sticky";
+    signal_ignore(SIGPIPE);
+    var fds = alloc(16);
+    st_pair(fds);
+    var a = load64(fds);
+    file_close(load64(fds + 8));               # the peer is gone
+    g_serve_mode = SERVE_FORK;
+    var s = st_session(a);
+    if (send_buf(a, "x", 1) != 1) {
+        st_fail(name, "write to a dead peer succeeded");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    if (load64(s + SESS_TX_OVF) != 1) {
+        st_fail(name, "failure not latched");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    # The latch, not the dead peer, must refuse what follows: a send to a HEALTHY
+    # socket is refused too, and nothing reaches its far end.
+    var ok2 = alloc(16);
+    st_pair(ok2);
+    sock_set_nonblocking(load64(ok2 + 8));
+    if (send_buf(load64(ok2), "y", 1) != 1) {
+        st_fail(name, "send after the latch not refused");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    var probe = alloc(8);
+    if (sys_read(load64(ok2 + 8), probe, 8) > 0) {
+        st_fail(name, "a byte was written after the latch");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    file_close(load64(ok2));
+    file_close(load64(ok2 + 8));
+    var q = st_feed(s, "whoami\r\n", 0);
+    g_serve_mode = SERVE_POLL;
+    if (q != 1) { st_fail(name, "session kept running after the latch"); return 1; }
+    file_close(a);
+    st_pass(name);
+    return 0;
+}
+
+# s05 — door saves on close, and the play lock (1.8.1, audit M1). A session that
+# ends without `q` is checkpointed like `q`; a second session under the same
+# identity cannot open the same saved game until the first one is released, and
+# then resumes exactly where the first left off.
+fn s05_door_checkpoint_and_play_lock(): i64 {
+    var name = "s05_door_checkpoint_and_play_lock";
+    var fds = alloc(16);
+    st_pair(fds);
+    var fds2 = alloc(16);
+    st_pair(fds2);
+    g_serve_mode = SERVE_POLL;
+    var fp = "fedcba9876543210";
+    var s = st_session(load64(fds));
+    st_login(s, fp, "pac");
+    st_feed(s, "play port solo\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_DOOR) { st_fail(name, "door did not open"); return 1; }
+    st_feed(s, "n\r\n", 0);                    # next day: Day 2
+    var s2 = st_session(load64(fds2));
+    st_login(s2, fp, "pac");
+    st_feed(s2, "play port solo\r\n", 0);
+    if (st_tx_count(s2, "already playing") != 1) { st_fail(name, "second session not refused"); return 1; }
+    session_door_checkpoint(s);                # the close path, before release
+    if (door_save_exists(g_store_buf, fp, "port") != 1) { st_fail(name, "no checkpoint on close"); return 1; }
+    session_release(s);
+    st_feed(s2, "play port solo\r\n", 0);
+    if (load64(s2 + SESS_MODE) != MODE_DOOR) { st_fail(name, "lock not released with the session"); return 1; }
+    if (st_tx_count(s2, "Day 2/") < 1)       { st_fail(name, "progress not resumed"); return 1; }
+    sess_load(s2);
+    session_door_free(s2);
+    st_pass(name);
+    return 0;
+}
+
+# s06 — clean shutdown's signalfd (1.7.0, roadmap N1): arming routes SIGTERM to
+# the signalfd instead of killing the process, the sweep's poll reads it as
+# pending, and the fork child's reset unblocks it again. (Arming wrong — the
+# 1.7.0 trap — kills this test process with the signal itself.)
+fn s06_shutdown_signalfd(): i64 {
+    var name = "s06_shutdown_signalfd";
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sigfd = shutdown_signals_arm();
+    if (sigfd < 0) { st_fail(name, "arm failed"); return 1; }
+    sys_kill(sys_getpid(), SIGTERM);
+    var info = alloc(SIGINFO_BYTES);
+    var got = shutdown_signal_pending(sigfd, info);
+    shutdown_signals_child_reset(sigfd);
+    if (got != 1) { st_fail(name, "SIGTERM not seen on the signalfd"); return 1; }
+    #endif
+    st_pass(name);
+    return 0;
+}
+
+# Entry point: make a per-pid scratch store under /tmp, register the doors,
+# run s01..s06, remove the store, print the totals, and return 1 on any failure.
+fn serve_tests(): i64 {
+    alloc_init();
+    syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
+    var root = alloc(64);
+    memcpy(root, "/tmp/agora-serve-tests-", 23);
+    var pl = fmt_int_buf(sys_getpid(), root + 23);
+    store8(root + 23 + pl, 0);
+    store_ensure(root);
+    g_store_buf = root;
+    door_registry_init();
+
+    s01_tx_queue_drain_compact_overflow();
+    s02_line_budget_parks_the_rest();
+    s03_compose_lines_not_counted();
+    s04_fork_send_failure_is_sticky();
+    s05_door_checkpoint_and_play_lock();
+    s06_shutdown_signalfd();
+
+    st_rmtree(root);
+    syscall(1, 1, "tests: ", 7);
+    fmt_int(st_count);
+    syscall(1, 1, "  failures: ", 12);
+    fmt_int(st_fails);
+    syscall(1, 1, "\n", 1);
+    if (st_fails > 0) { return 1; }
+    return 0;
+}
+
+var st_rc = serve_tests();
+sys_exit(st_rc);

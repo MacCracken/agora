@@ -71,7 +71,7 @@ parser's name→id line) — not an edit to eighteen scattered functions.
   poll**, where nothing frees it because nothing exits ([ADR 0023](0023-dual-serve-model.md)).
   Function addresses are valid across `fork` (same binary image). Binary `+1,120 B` over 1.4.5 (the registry machinery net of the
   removed if-chains). Test count unchanged at 221 — the registry is dispatch glue
-  validated by the smoke suite, not unit-testable from `src/test.cyr` (which does
+  validated by the smoke suite, not unit-testable from the module suite (`src/test.cyr`, now `tests/agora.tcyr`, which does
   not link `main.cyr`).
 
 ## Alternatives considered

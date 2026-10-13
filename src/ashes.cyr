@@ -150,8 +150,11 @@ enum ASHWVer { ASHW_VERSION = 3; }
 # Section base offsets + sizing (all in i64 words). The orders section
 # (norders + ASH_MAXORD records) follows the map; the pact table follows that.
 fn ashw_orders_base(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
+# Word offset of the pact table: past the order count and its ASH_MAXORD order records.
 fn ashw_pacts_base(): i64  { return ashw_orders_base() + 1 + ASH_MAXORD * ASH_ORDCELLS; }
+# Total snapshot length in i64 words (header + map + orders + pact table).
 fn ashw_word_count(): i64  { return ashw_pacts_base() + ASH_MAXPACT * ASH_PACTCELLS; }
+# Total snapshot length in bytes, the exact size ashw_valid requires.
 fn ashw_byte_size(): i64   { return ashw_word_count() * 8; }
 
 # === Terrain (derived from seed, not stored) ===
@@ -166,6 +169,7 @@ fn ash_terrain(seed, t): i64 {
     return rng_below(cell, 4);
 }
 
+# Display name of a terrain kind (ASHTerr); anything unrecognized reads as "plains". Pure.
 fn ash_terrain_name(terr): i64 {
     if (terr == ASH_HILL)   { return "hills"; }
     if (terr == ASH_FOREST) { return "forest"; }
@@ -255,22 +259,31 @@ fn ashw_valid(buf, len): i64 {
 
 # === Accessors ===
 
+# The map seed that terrain and neutral garrisons regenerate from.
 fn ashw_seed(w): i64 { return load64(w + ASHW_OFF_SEED * 8); }
+# Turns resolved so far (ash_resolve_turn bumps it).
 fn ashw_turn(w): i64 { return load64(w + ASHW_OFF_TURN * 8); }
+# Overwrite the resolved-turn counter.
 fn ashw_set_turn(w, v): i64 { store64(w + ASHW_OFF_TURN * 8, v); return 0; }
+# Epoch-window index of the last resolved batch (0 = never resolved).
 fn ashw_last_window(w): i64 { return load64(w + ASHW_OFF_WINDOW * 8); }
+# Record `v` as the last resolved window (ashw_window_tick's marker).
 fn ashw_set_last_window(w, v): i64 { store64(w + ASHW_OFF_WINDOW * 8, v); return 0; }
 
+# Owner fp of province t (0 = neutral). Unchecked: the caller passes 0 <= t < ASH_TERR.
 fn ashw_owner(w, t): i64 {
     return load64(w + (ASHW_OFF_MAP + t * ASH_CELLS) * 8);
 }
+# Hand province t to owner fp (0 makes it neutral). Unchecked t, as ashw_owner.
 fn ashw_set_owner(w, t, fp): i64 {
     store64(w + (ASHW_OFF_MAP + t * ASH_CELLS) * 8, fp);
     return 0;
 }
+# Army count garrisoning province t. Unchecked t, as ashw_owner.
 fn ashw_army(w, t): i64 {
     return load64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8);
 }
+# Set province t's garrison to v, stored as given (no ASH_ARMY_CAP clamp here). Unchecked t.
 fn ashw_set_army(w, t, v): i64 {
     store64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8, v);
     return 0;
@@ -345,15 +358,22 @@ fn ash_adjacent(a, b): i64 {
 # queue in the snapshot (they outlive the issuing session) and are resolved as
 # one batch when the window rolls over, then cleared.
 
+# March orders queued this window (0..ASH_MAXORD once ashw_valid has passed the snapshot).
 fn ashw_norders(w): i64 { return load64(w + ashw_orders_base() * 8); }
+# Overwrite the queued-order count; the order records themselves are left as they are.
 fn ashw_set_norders(w, v): i64 { store64(w + ashw_orders_base() * 8, v); return 0; }
 
+# Word offset of field f (0 owner / 1 src / 2 dst / 3 qty) of order i; `w` is unused. Pure.
 fn ashw_ord_cell(w, i, f): i64 {
     return (ashw_orders_base() + 1 + i * ASH_ORDCELLS + f);
 }
+# Owner fp of queued order i.
 fn ashw_ord_owner(w, i): i64 { return load64(w + ashw_ord_cell(w, i, 0) * 8); }
+# Source province of queued order i.
 fn ashw_ord_src(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 1) * 8); }
+# Destination province of queued order i.
 fn ashw_ord_dst(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 2) * 8); }
+# Armies queued order i marches.
 fn ashw_ord_qty(w, i): i64   { return load64(w + ashw_ord_cell(w, i, 3) * 8); }
 
 # Append a march order. Returns 1 if queued, 0 if the queue is full. Order
@@ -371,6 +391,7 @@ fn ashw_order_push(w, owner, src, dst, qty): i64 {
     return 1;
 }
 
+# Empty the order queue (count back to 0) once a window resolves.
 fn ashw_orders_clear(w): i64 { ashw_set_norders(w, 0); return 0; }
 
 # 1.8.1 (audit G6) — queued orders owned by `fp` this window. Pure.
@@ -412,9 +433,13 @@ fn ash_order_share(w, fp): i64 {
 # ATTACK at resolution instead of a reinforcement — the treachery falls out of
 # re-checking allied status when the window resolves.
 
+# Word offset of field f (0 lo fp / 1 hi fp / 2 status) of pact slot p. Pure.
 fn ashw_pact_cell(p, f): i64 { return (ashw_pacts_base() + p * ASH_PACTCELLS + f); }
+# Lower fp of pact slot p's player pair.
 fn ashw_pact_lo(w, p): i64     { return load64(w + ashw_pact_cell(p, 0) * 8); }
+# Higher fp of pact slot p's player pair.
 fn ashw_pact_hi(w, p): i64     { return load64(w + ashw_pact_cell(p, 1) * 8); }
+# ASHPact status of pact slot p (ASH_PACT_NONE = an empty slot).
 fn ashw_pact_status(w, p): i64 { return load64(w + ashw_pact_cell(p, 2) * 8); }
 
 # Find the pact slot for the unordered pair {a,b}, or (0-1) if none exists.
@@ -862,6 +887,8 @@ enum AE {
 
 enum ASHScr { ASCR_MAP = 0; }
 
+# Set the player's message line: copies NUL-terminated s into AE_MSG, cut at 255 bytes. A no-op
+# when the buffer is unallocated.
 fn ash_msg(st, s): i64 {
     var m = load64(st + AE_MSG);
     if (m == 0) { return 0; }
@@ -872,12 +899,15 @@ fn ash_msg(st, s): i64 {
     return 0;
 }
 
+# Blank the message line (a no-op when AE_MSG is unallocated).
 fn ash_msg_clear(st): i64 {
     var m = load64(st + AE_MSG);
     if (m != 0) { store8(m, 0); }
     return 0;
 }
 
+# A fresh per-player session on the freelist (release with ash_free): mode, an empty message buffer,
+# the map screen. `seed` is unused (the map is shared); main.cyr sets AE_FP and AE_WORLD.
 fn ash_new(seed, mode): i64 {
     var st = fl_alloc(AE_BYTES);
     memset(st, 0, AE_BYTES);
@@ -897,6 +927,7 @@ fn ash_free(st): i64 {
     return 0;
 }
 
+# Door start hook: open on the map screen with a blank message line.
 fn ash_start(st): i64 {
     store64(st + AE_SCREEN, ASCR_MAP);
     ash_msg_clear(st);
@@ -980,6 +1011,7 @@ fn ash_arrival_notice(st): i64 {
 
 # === Rendering ===
 
+# Append province t's holder: "open", "YOU", or "rival#" + the fp's low 16 bits. Returns the new pos.
 fn ash_emit_owner(buf, pos, w, t, me): i64 {
     var o = ashw_owner(w, t);
     if (o == 0)  { return emit_cstr(buf, pos, "open      "); }
@@ -989,13 +1021,17 @@ fn ash_emit_owner(buf, pos, w, t, me): i64 {
     return pos;
 }
 
+# Append the player's queued marches under a heading (nothing if they have none). Returns the new pos.
 fn ash_emit_my_orders(buf, pos, w, me): i64 {
     var no = ashw_norders(w);
     var any = 0;
     var i = 0;
     while (i < no) {
         if (ashw_ord_owner(w, i) == me) {
-            if (any == 0) { pos = emit_cstr(buf, pos, "  your pending orders (resolve at the turn boundary):\r\n"); any = 1; }
+            if (any == 0) {
+                pos = emit_cstr(buf, pos, "  your pending orders (resolve at the turn boundary):\r\n");
+                any = 1;
+            }
             pos = emit_cstr(buf, pos, "    march ");
             pos = emit_int(buf, pos, ashw_ord_qty(w, i));
             pos = emit_cstr(buf, pos, " from ");
@@ -1009,6 +1045,8 @@ fn ash_emit_my_orders(buf, pos, w, me): i64 {
     return pos;
 }
 
+# Append the player's pacts (partner as rival#NNNN, ALLIED or offer pending) under a heading;
+# nothing if they have none. Returns the new pos.
 fn ash_emit_my_pacts(buf, pos, w, me): i64 {
     var p = 0;
     var any = 0;
@@ -1036,6 +1074,8 @@ fn ash_emit_my_pacts(buf, pos, w, me): i64 {
     return pos;
 }
 
+# Render the Ashes frame into buf: turn + holdings header, any message, then (world loaded) the
+# province table, your orders and pacts, and the command line. Returns bytes written.
 fn ash_render(st, buf, cap): i64 {
     var w = load64(st + AE_WORLD);
     var me = load64(st + AE_FP);
@@ -1169,7 +1209,7 @@ fn ash_feed(st, line, len): i64 {
     if (ash_cmd_is(line, len, "exit") == 1) { return 1; }
     if (ash_cmd_is(line, len, "q") == 1)    { return 1; }
     if (ash_cmd_is(line, len, "help") == 1) {
-        ash_msg(st, "march <src> <dst> <n>: send armies (you must hold src; it must neighbour dst). ally/break <prov>: diplomacy with that province's holder. quit: leave.");
+        ash_msg(st, "march <src> <dst> <n>: send armies (you must hold src; it must neighbour dst). ally/break <prov>: diplomacy with that province's holder. quit: leave.");   #skip-lint
         return 0;
     }
     if (ash_cmd_is(line, len, "map") == 1)  { ash_msg_clear(st); return 0; }
@@ -1265,12 +1305,14 @@ fn ash_is_over(st): i64 {
     return 0;
 }
 
+# Leaderboard score: 100 per province held (0 with no world loaded).
 fn ash_final_score(st): i64 {
     var w = load64(st + AE_WORLD);
     if (w == 0) { return 0; }
     return ashw_holdings(w, load64(st + AE_FP)) * 100;
 }
 
+# Leaderboard title for an ash_final_score, Pretender up to Imperator (all twelve). Pure.
 fn ash_rank(score): i64 {
     if (score >= 1200) { return "Imperator"; }
     if (score >= 600)  { return "Consul"; }
@@ -1292,6 +1334,7 @@ fn ash_save_format(st, buf, cap): i64 {
     return pos;
 }
 
+# Inverse of ash_save_format: a fresh session carrying the saved watermark, or 0 on a bad header.
 fn ash_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "ASHES\n", 6) == 0) { return 0; }

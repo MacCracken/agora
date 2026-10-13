@@ -3,7 +3,7 @@
 #
 # Why: 1.8.1 is a code audit + repair cut (docs/audit/2026-10-12-audit-1.8.1.md),
 # and most of what it fixed lives in src/main.cyr — the serve loops, the door
-# glue, the CLI — which the unit suite cannot reach (src/test.cyr does not
+# glue, the CLI — which the unit suite could not reach at 1.8.1 (src/test.cyr did not
 # include main.cyr). This smoke pins the wire- and CLI-visible fixes. It has
 # TEETH: against a 1.8.0 binary (AGORA_BIN=...) every check below fails.
 #

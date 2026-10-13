@@ -74,3 +74,10 @@ Start narrow (framework + one depletable-stock slice) and get a concurrency smok
 > unreadable snapshot is no longer treated as "no world" and re-minted over the real one, and an invalid
 > one is set aside as `snapshot.bad`; a failed snapshot write is reported to the player. The real-time
 > daily-turn cadence described above is not enforced for these games (see ADR 0009's note).
+
+> **1.8.2 measurement — the "coarse lock first … wait for evidence" gate.** `benches/serve-bench.py world`:
+> ~520 world transactions/s with 1, 2, 4 or 8 concurrent writers and ~490 with 16 (ext4 workstation,
+> five runs each), every run exact — no lost update at any concurrency. Throughput is flat because each
+> transaction is one fsync (~1.9 ms): the cost is the durability write, not lock contention. **The gate stays
+> closed** — finer locks would remove contention the system does not have and add lock-ordering hazards.
+> Numbers: BENCHMARKS.md § Serve-level baselines.

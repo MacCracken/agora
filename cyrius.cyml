@@ -8,8 +8,10 @@ cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
-test = "src/test.cyr"
 output = "agora"
+# 1.8.2 — no `test =` entry: a bare `cyrius test` runs every tests/*.tcyr —
+# tests/agora.tcyr (the module suite, src/test.cyr until 1.8.2) and
+# tests/serve.tcyr (src/main.cyr's serve layer, new in 1.8.2).
 
 [deps]
 # Pre-1.0 stdlib surface. M0 (0.1.0) scaffolded the binary; M1 (0.2.0)

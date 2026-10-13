@@ -250,26 +250,34 @@ fn telnet_linemode_mask(ts): i64 { return load64(ts + TS_LM_MODE); }
 
 # === Terminal capabilities (populated by EV_SB handling) ===
 
+# Columns the client reported via NAWS (0 = never reported).
 fn telnet_term_cols(ts): i64 { return load64(ts + TS_TERM_COLS); }
+# Rows the client reported via NAWS (0 = never reported).
 fn telnet_term_rows(ts): i64 { return load64(ts + TS_TERM_ROWS); }
+# The TERMINAL-TYPE string buffer (NUL-terminated; empty = never reported).
 fn telnet_term_type(ts): i64 { return load64(ts + TS_TERM_TYPE); }
+# Length of the TERMINAL-TYPE string.
 fn telnet_term_type_len(ts): i64 { return load64(ts + TS_TERM_TLEN); }
 
 # === Per-option Q-state accessors ===
 
+# Our side's RFC 1143 Q-state for option opt (Q_NO / Q_WANTYES / Q_YES).
 fn opt_us(ts, opt): i64 {
     return load8(load64(ts + TS_OPT_US) + (opt & 0xFF)) & 0xFF;
 }
 
+# The client's side's RFC 1143 Q-state for option opt.
 fn opt_him(ts, opt): i64 {
     return load8(load64(ts + TS_OPT_HIM) + (opt & 0xFF)) & 0xFF;
 }
 
+# Set our side's Q-state for option opt.
 fn opt_set_us(ts, opt, state): i64 {
     store8(load64(ts + TS_OPT_US) + (opt & 0xFF), state & 0xFF);
     return 0;
 }
 
+# Set the client's side's Q-state for option opt.
 fn opt_set_him(ts, opt, state): i64 {
     store8(load64(ts + TS_OPT_HIM) + (opt & 0xFF), state & 0xFF);
     return 0;
@@ -354,6 +362,7 @@ fn telnet_tx_consume(ts): i64 {
 # Read pending response bytes — caller writes ts.tx_buf[0..tx_len]
 # onto the socket, then calls telnet_tx_consume().
 fn telnet_tx_buf(ts): i64 { return load64(ts + TS_TX_BUF); }
+# Bytes of queued negotiation replies waiting in telnet_tx_buf.
 fn telnet_tx_len(ts): i64 { return load64(ts + TS_TX_LEN); }
 
 # Read subneg payload — caller inspects ts.sb_buf[0..sb_len] when
@@ -361,6 +370,7 @@ fn telnet_tx_len(ts): i64 { return load64(ts + TS_TX_LEN); }
 # code; remaining bytes are the subneg payload (excluding IAC SB
 # and IAC SE framing).
 fn telnet_sb_buf(ts): i64 { return load64(ts + TS_SB_BUF); }
+# Length of the last completed subnegotiation in telnet_sb_buf (option byte included).
 fn telnet_sb_len(ts): i64 { return load64(ts + TS_SB_LEN); }
 
 # Read the last emitted data byte (only valid when feed returned EV_DATA).

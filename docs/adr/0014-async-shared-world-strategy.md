@@ -73,3 +73,9 @@ The sequencing is the decision. The wager module (1.3.4) and its integrations (1
   the former ally simply re-evaluates as an attack at resolution (t206 pins the with/without contrast).
 
 This is the last rehearsal before the MUD's harder real-time concurrency in 1.4.0. Every open question above is one we would rather answer on a door we fully control, on the proven `flock`'d framework, than discover live in the Descent link.
+
+> **1.8.2 measurement — "measure before refining" (coarse vs fine locking).** The world lock is
+> fsync-bound, not contention-bound: ~520 transactions/s flat from 1 to 8 writers, ~490 at 16, no lost
+> update (ADR 0010's note; BENCHMARKS.md). The bench world is 8 bytes; Ashes' 3,048-byte map adds one page to
+> each write, which cannot move a ~1.9 ms fsync-bound transaction materially (inferred, not separately
+> measured). The coarse single-world `flock` stands; per-territory locks stay rejected.

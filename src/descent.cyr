@@ -39,7 +39,7 @@ enum DescentConst {
     DESCENT_POLLIN     = 1;
     DESCENT_POLLDEAD   = 24;
     # EAGAIN. Named locally rather than reusing main.cyr's EWOULDBLOCK_ERR
-    # because src/test.cyr links descent.cyr WITHOUT main.cyr — a cross-file
+    # because tests/agora.tcyr links descent.cyr WITHOUT main.cyr — a cross-file
     # constant reference builds in the binary and breaks the test harness.
     DESCENT_EAGAIN     = 11;
     # 1.6.3 — bound on the non-blocking write retry (see descent_write_all).
@@ -60,7 +60,7 @@ enum DescentConst {
 # needs those bytes, and it is the only consumer, so `process_rx` publishes the
 # remainder of the buffer here before each dispatch and `descent_run` claims it.
 #
-# Declared HERE rather than in main.cyr because src/test.cyr links this module
+# Declared HERE rather than in main.cyr because tests/agora.tcyr links this module
 # WITHOUT main.cyr — the same constraint that put DESCENT_EAGAIN above. It also
 # reads better next to its only consumer: main.cyr writes, descent.cyr claims.
 #

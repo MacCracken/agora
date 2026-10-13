@@ -38,8 +38,13 @@ Project structure follows the first-party scaffold. Source files only need proje
 cyrius build src/main.cyr build/agora        # build
 ./build/agora help                            # exercise dispatch
 ./build/agora version                         # version stamp
-cyrius test src/test.cyr                      # unit tests (parser, IAC sequences)
-cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also in CI + release)
+cyrius test                                   # unit tests: tests/agora.tcyr (modules) + tests/serve.tcyr (main.cyr's serve layer)
+cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also --poison=ab; both in CI + release)
+docs/examples/run.sh [--model fork|poll] [NN] # the example smokes, each with the server it needs (CI runs both models)
+benches/serve-bench.py all                    # accept rate, per-session memory, world-lock contention
+scripts/check-version-sync.sh                 # VERSION vs cyrius.cyml / binary / CHANGELOG / state.md / roadmap
+scripts/check-toolchain.sh                    # the local toolchain snapshot vs its cyrius tag (pre-cut)
+cyrius audit                                  # fmt + lint + docs + tests + bench (a CI gate since 1.8.2)
 ./build/agora serve                           # start telnet listener; Ctrl-C exits cleanly (1.7.0)
 ```
 
@@ -47,7 +52,7 @@ cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also in CI 
 
 - **The wire is the contract** — RFC 854 and RFC 1184 are authoritative. Any deviation is a bug, not a feature. Cite section + line in code comments where behavior is subtle.
 - **Cross-platform from M1** — the listener uses `lib/net.cyr` socket primitives, not raw syscalls. New platform support is a `lib/net.cyr` task, not an agora task.
-- **Pure parsing is testable; socket I/O is wired** — keep the IAC/LINEMODE state machines side-effect-free so `src/test.cyr` can exercise them without binding a port.
+- **Pure parsing is testable; socket I/O is wired** — keep the IAC/LINEMODE state machines side-effect-free so `tests/agora.tcyr` can exercise them without binding a port. (The serve layer itself is unit-tested over a socketpair in `tests/serve.tcyr` since 1.8.2.)
 - **Posts are durable artifacts** — once written, a post is immutable from the protocol's perspective; there is no edit path today, and if one is added, edits become new revisions rather than in-place rewrites. ⚠ Note the principle is not yet fully backed: 1.7.0 made door saves, the shared world and chat transcripts crash-safe, but **post writes are still plain `file_write`** (see [ADR 0002](docs/adr/0002-one-file-per-post-storage.md)).
 - **Admission control, not identity** — sigil gives us auth (M6); we are not a federated-identity system.
 - Test after EVERY change, not after the feature is "done"
@@ -76,7 +81,7 @@ cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also in CI 
 ### P(-1): Hardening (before any new features, and at minor / v1.0 cuts)
 
 1. **Cleanliness** — `cyrius build`, `cyrius lint`, `cyrius audit`; all tests pass
-2. **Benchmark baseline** — capture parser throughput + accept-loop rate for comparison
+2. **Benchmark baseline** — `cyrius bench benches/bench_telnet.bcyr` (parser) + `benches/serve-bench.py all` (accept rate, per-session memory, world-lock contention), for comparison
 3. **Internal deep review** — gaps, optimizations, correctness, docs
 4. **External research** — re-read RFC 854 + RFC 1184; check against canonical telnet implementations (BSD telnetd, Linux net-tools)
 5. **Security audit** — every IAC sequence path bounds-checked, no buffer overflows, no path traversal in post storage. File findings in `docs/audit/YYYY-MM-DD-audit.md`
@@ -93,7 +98,7 @@ cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also in CI 
 4. **Internal review** — protocol-conformance, memory, correctness, edge cases
 5. **Security check** — any new external-input path, buffer allocation, syscall usage
 6. **Documentation** — update CHANGELOG, roadmap, `docs/development/state.md`, any ADR the change earned, refresh `docs/doc-health.md` row
-7. **Version check** — `VERSION`, `cyrius.cyml`, CHANGELOG header in sync
+7. **Version check** — `scripts/check-version-sync.sh` (VERSION is the only place to bump: the binary's strings come from `CYRIUS_PKG_VERSION` since 1.8.2)
 8. **Return to step 1**
 
 ### Security Hardening (before every release)
@@ -113,8 +118,8 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 
 ### Closeout Pass (before every minor/major bump)
 
-1. **Full test suite** — `cyrius test src/test.cyr`, zero failures. There are **no `.tcyr` files and no `tests/` directory**. The explicit path is what CI runs and stays the canonical form; since cyrius 6.6.17 a bare `cyrius test` runs the `[build] test` entry too (before that it searched `tests/*.tcyr`, found nothing and exited 1). Also run `cyrius fuzz fuzz/telnet_iac.fcyr` (both are CI + release gates since 1.7.0). The `tests/` split is a backlog item.
-2. **Benchmark baseline** — capture parser throughput + accept rate; compare against prior closeout
+1. **Full test suite** — a bare `cyrius test`, zero failures: it runs every `tests/*.tcyr` — `tests/agora.tcyr` (the module suite; `src/test.cyr` until 1.8.2) and `tests/serve.tcyr` (main.cyr's serve layer, which includes `src/main.cyr` under `#define AGORA_TEST`). Also `cyrius fuzz fuzz/telnet_iac.fcyr`, plain and `--poison=ab`, and the example smokes via `docs/examples/run.sh` (all CI + release gates since 1.8.2).
+2. **Benchmark baseline** — `cyrius bench benches/bench_telnet.bcyr` + `benches/serve-bench.py all`; compare against the prior closeout in BENCHMARKS.md. **Run `scripts/check-toolchain.sh` first** — a dirty local toolchain snapshot once moved a measured binary by 215 KB
 3. **Dead code audit** — remove unused functions; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel codepaths accreted
 5. **Code review pass** — walk diffs end-to-end for missed guards, off-by-ones, silently-ignored errors
@@ -127,8 +132,8 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
    - **Deferral check, TREE-WIDE.** `cyrius lint` takes ONE file, so linting `main.cyr` alone under-reports: at 1.6.5 it said 2 while the tree had 12. Loop every `src/*.cyr`. Note the checker is per-line and treats any line mentioning `CHANGELOG` / `roadmap` / `docs/` / `issue` / `See ` as tracked — **citing a doc is not the same as being tracked in one**, so verify the cited entry actually exists.
 9. **Downstream check** — none yet (agora has no consumers); will track at M5+ when other tools start scripting agora
 10. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`, `docs/doc-health.md`, CLAUDE.md (if durable content changed)
-11. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header, intended git tag all match
-12. **Full build from clean** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
+11. **Version verify** — `scripts/check-version-sync.sh --tag <intended tag>`: VERSION, cyrius.cyml, the binary, the CHANGELOG header, state.md's Released row and the roadmap's release row all agree (the release workflow runs the same check)
+12. **Full build from clean** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean, and `cyrius audit` exits 0 (fmt, lint, docs, tests, bench)
 
 ### Task Sizing
 
@@ -163,8 +168,11 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 - **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml [package]`. No separate `.cyrius-toolchain` file.
 - **Dead code elimination**: every `cyrius build` in CI and release runs with `CYRIUS_DCE=1`. Binary size is a release metric — track it in `state.md`.
 - **Tag filter**: release workflow triggers on `tags: ['[0-9]*']` — semver-only.
-- **Version-verify gate**: release asserts `VERSION == cyrius.cyml version == git tag` before building.
-- **State sync**: `docs/development/state.md` is refreshed **by hand** at every release. There is no post-hook — this line used to claim one, and **1.6.6 shipped without either `state.md` or `roadmap.md` recording it**, which is exactly the failure the claim was meant to prevent. Writing the hook is a roadmap item; until it exists, the refresh is a required manual step of the Closeout Pass, not an automated one.
+- **Version**: `VERSION` is the only file a release bumps. `cyrius.cyml` reads it (`${file:VERSION}`) and the binary's banner / `--version` / MOTD read `CYRIUS_PKG_VERSION`, which `cyrius build` derives from the manifest (1.8.2 — they were three hand-edited literals).
+- **Version-sync gate**: `scripts/check-version-sync.sh` runs on every CI push, and with `--tag` in the release workflow before anything is published: VERSION, cyrius.cyml, the built binary, the CHANGELOG header, `state.md`'s Released row and the roadmap's release row must agree.
+- **State sync**: `docs/development/state.md` and `roadmap.md` are still refreshed **by hand** at every release — there is no post-hook (1.6.6 and 1.7.1 both shipped without either recording them) — but since 1.8.2 CI fails when they do not name `VERSION`, so the omission can no longer ship silently.
+- **CI gates** (1.8.2): build (DCE), toolchain provenance (`--no-repo`), version sync, `cyrius test`, fuzz plain + `--poison=ab`, `cyrius audit`, the example smokes under BOTH serve models (`docs/examples/run.sh`), and an aarch64 build + test under qemu-user. The release workflow gates on all of it, then builds x86_64 / aarch64 / agnos binaries and publishes them with `SHA256SUMS`.
+- **Supply chain**: the cyrius installer is fetched from the tag matching the pin, never `main`; GitHub actions are pinned by commit SHA; workflows default to `contents: read`.
 
 ## Docs
 
