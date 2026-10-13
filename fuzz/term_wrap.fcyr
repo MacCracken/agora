@@ -1,0 +1,378 @@
+# term_wrap.fcyr — fuzz the 1.10.1 word wrap (src/term.cyr, ADR 0030).
+#
+# WHY THIS EXISTS
+# CLAUDE.md: "Fuzz every parser path". term.cyr parses text that is adversarial
+# by default — post bodies, subjects, chat lines, handles, all written by anyone
+# who can post — measuring it character by character (UTF-8, TAB stops, escape
+# sequences) and copying it out in chunks of whatever size the caller has. A
+# slip there loses or duplicates bytes, splits an escape sequence (sending a
+# reader's terminal half a command), runs past a buffer, or loops forever on the
+# shared poll loop. As with telnet_iac.fcyr, random input on its own proves
+# nothing, so this harness carries its own invariants and exits non-zero on the
+# first one that breaks:
+#
+#   30 the output outgrew its bound (a runaway: an endless break, a lost cap)
+#   31 a byte other than whitespace or CR / LF was lost, added or reordered —
+#      wrapping may only drop the whitespace at a break and insert CR LF + hang
+#   32 the output depended on the chunk size (`cap` 1 vs a random cap vs large)
+#   33 a text whose every line fits came out changed
+#   34 a row is wider than the width without being one unbreakable word
+#   35 an escape sequence was split: the input's and the output's sequences
+#      (read by the harness's own parser, not term.cyr's) differ in count or in
+#      total length
+#   36 a chunk wrote past its cap, or returned more than it was given
+#   37 a break replaced something other than whitespace (a word or a UTF-8
+#      character was cut), or something other than whitespace was dropped —
+#      checked by walking input and output side by side
+#
+# DETERMINISM: a fixed-seed xorshift64, as in telnet_iac.fcyr — a failure
+# reproduces byte for byte on the next run and in CI.
+
+include "src/term.cyr"
+
+alloc_init();
+
+var rng = 0x6A09E667F3BCC909;
+
+# The next 64-bit xorshift value, non-negative.
+fn nextr(): i64 {
+    rng = rng ^ (rng << 13);
+    rng = rng ^ (rng >> 7);
+    rng = rng ^ (rng << 17);
+    return rng & 0x7FFFFFFFFFFFFFFF;
+}
+
+# A value in [0, n).
+fn below(n): i64 {
+    if (n <= 1) { return 0; }
+    return nextr() % n;
+}
+
+var SRC_CAP = 2048;
+var OUT_CAP = 1048576;
+var g_src = 0;
+var g_out1 = 0;
+var g_out2 = 0;
+var g_out3 = 0;
+var g_chunk = 0;
+var g_a = 0;
+var g_b = 0;
+
+# Write one token of wrap-relevant noise at g_src + o and return its length:
+# a letter, a space, a TAB, an LF / CR LF / bare CR, an SGR sequence, a CSI with
+# a SPACE intermediate, a lone ESC, well-formed UTF-8 of 2 / 3 (wide) / 4 (wide)
+# bytes, a malformed byte, or a raw random byte.
+fn gen_token(o): i64 {
+    var p = g_src + o;
+    var k = below(20);
+    if (k < 7) { store8(p, 97 + below(26)); return 1; }
+    if (k < 10) { store8(p, 32); return 1; }
+    if (k == 10) { store8(p, 9); return 1; }
+    if (k == 11) {
+        var t = below(3);
+        if (t == 0) { store8(p, 10); return 1; }
+        if (t == 1) { store8(p, 13); store8(p + 1, 10); return 2; }
+        store8(p, 13);
+        return 1;
+    }
+    if (k == 12) {
+        store8(p, 27); store8(p + 1, 91); store8(p + 2, 48 + below(10)); store8(p + 3, 109);
+        return 4;
+    }
+    if (k == 13) {
+        store8(p, 27); store8(p + 1, 91); store8(p + 2, 49); store8(p + 3, 32);   # intermediate SPACE
+        store8(p + 4, 64 + below(63));
+        return 5;
+    }
+    if (k == 14) { store8(p, 27); return 1; }                                      # cut-off / lone ESC
+    if (k == 15) { store8(p, 0xC3); store8(p + 1, 0xA9); return 2; }
+    if (k == 16) { store8(p, 0xE6); store8(p + 1, 0xBC); store8(p + 2, 0xA2); return 3; }
+    if (k == 17) { store8(p, 0xF0); store8(p + 1, 0x9F); store8(p + 2, 0x98); store8(p + 3, 0x80); return 4; }
+    if (k == 18) { store8(p, 0x80 + below(0x7F)); return 1; }                      # malformed
+    store8(p, below(256));
+    return 1;
+}
+
+# Fill g_src with about `n` bytes of tokens (gen_token); returns the length.
+fn gen(n): i64 {
+    var o = 0;
+    while (o < n - 8) { o = o + gen_token(o); }
+    return o;
+}
+
+# Wrap g_src[0..n) into `out` in chunks of `cap`; exits 30 on a runaway and 36
+# on a chunk that breaks its cap. Returns the output length.
+fn wrap_all(out, n, col0, hang, flags, width, cap): i64 {
+    var st[104];
+    term_wrap_init(&st, g_src, n, col0, hang, flags, width);
+    var bound = 64 * n + 4096;
+    var o = 0;
+    var k = 1;
+    while (k > 0) {
+        store8(g_chunk + cap, 0x5A);
+        k = term_wrap_chunk(&st, g_chunk, cap);
+        if (k < 0) { syscall(60, 36); }
+        if (k > cap) { syscall(60, 36); }
+        if ((load8(g_chunk + cap) & 0xFF) != 0x5A) { syscall(60, 36); }
+        if (o + k > bound) { syscall(60, 30); }
+        memcpy(out + o, g_chunk, k);
+        o = o + k;
+    }
+    return o;
+}
+
+# Copy buf[0..n) to dst without spaces, TABs, CR and LF; returns the length.
+fn strip_ws(dst, buf, n): i64 {
+    var o = 0;
+    var i = 0;
+    while (i < n) {
+        var b = load8(buf + i) & 0xFF;
+        var drop = 0;
+        if (b == 32) { drop = 1; }
+        if (b == 9) { drop = 1; }
+        if (b == 13) { drop = 1; }
+        if (b == 10) { drop = 1; }
+        if (drop == 0) { store8(dst + o, b); o = o + 1; }
+        i = i + 1;
+    }
+    return o;
+}
+
+# The harness's OWN reading of an escape sequence at buf[i] — written from the
+# ECMA-48 shape, not by calling term.cyr, so a wrong term_esc_len cannot agree
+# with itself: ESC '[' then bytes 0x20-0x3F then one final byte 0x40-0x7E;
+# otherwise ESC and the byte after it. A CR or LF is never part of one.
+fn h_esc_len(buf, i, n): i64 {
+    if (i + 1 >= n) { return 1; }
+    if ((load8(buf + i + 1) & 0xFF) != 91) { return 2; }
+    var j = i + 2;
+    var going = 1;
+    while (going == 1) {
+        if (j >= n) { going = 0; continue; }
+        var b = load8(buf + j) & 0xFF;
+        if (b < 0x20) { going = 0; continue; }
+        if (b > 0x3F) { going = 0; continue; }
+        j = j + 1;
+    }
+    if (j < n) {
+        var f = load8(buf + j) & 0xFF;
+        if (f >= 0x40) { if (f <= 0x7E) { j = j + 1; } }
+    }
+    return j - i;
+}
+
+# Escape sequences in buf[0..n) by h_esc_len: stores the count at `cp` and
+# returns their total bytes. A break inside one ends it early (a CR), so a
+# split shows up as a different total.
+fn esc_total(buf, n, cp): i64 {
+    var count = 0;
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 27) {
+            var l = h_esc_len(buf, i, n);
+            count = count + 1;
+            total = total + l;
+            i = i + l;
+        } else {
+            i = i + 1;
+        }
+    }
+    store64(cp, count);
+    return total;
+}
+
+# 1 if row buf[s..e) is one unbreakable word after its leading whitespace.
+# Steps by whole characters, as the wrap does: a space inside an escape
+# sequence (a CSI intermediate byte) is not a place to break.
+fn one_word(buf, s, e): i64 {
+    var nb[8];
+    var p = term_skip_ws(buf, s, e);
+    while (p < e) {
+        if (term_is_ws(load8(buf + p) & 0xFF) == 1) { return 0; }
+        term_step(buf, p, e, 0, &nb);
+        p = p + load64(&nb);
+    }
+    return 1;
+}
+
+# Every row of out[0..n) fits `width` columns (the first from col0), or is a
+# single unbreakable word; the first row may also be empty when col0 leaves no
+# room (it breaks first). Exits 34 otherwise.
+fn check_rows(out, n, col0, width, raw_lf_rows): i64 {
+    var ls = 0;
+    var first = 1;
+    var i = 0;
+    while (i <= n) {
+        var at = 0;
+        if (i == n) { at = 1; }
+        else { if ((load8(out + i) & 0xFF) == 10) { at = 1; } }
+        if (at == 1) {
+            var e = i;
+            if (e > ls) { if ((load8(out + e - 1) & 0xFF) == 13) { e = e - 1; } }
+            var c0 = 0;
+            if (first == 1) { c0 = col0; }
+            var w = term_cols(out, ls, e, c0);
+            if (w > width) {
+                var ok = one_word(out, ls, e);
+                if (first == 1) { if (e == ls) { ok = 1; } }
+                if (ok == 0) { syscall(60, 34); }
+            }
+            first = 0;
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The first index at or after o in out[o..m) that is not a space.
+fn skip_sp(out, o, m): i64 {
+    var p = o;
+    var going = 1;
+    while (going == 1) {
+        if (p >= m) { going = 0; continue; }
+        if ((load8(out + p) & 0xFF) != 32) { going = 0; continue; }
+        p = p + 1;
+    }
+    return p;
+}
+
+var g_dbg = 0;
+# Report a 37 with the case and the bytes around the mismatch (FUZZ_DEBUG builds).
+fn fail37(out, m, n, i, o): i64 {
+    if (g_dbg != 0) {
+        syscall(1, 1, "37 at i=", 8); fmt_int(i); syscall(1, 1, " o=", 3); fmt_int(o);
+        syscall(1, 1, " n=", 3); fmt_int(n); syscall(1, 1, " m=", 3); fmt_int(m);
+        syscall(1, 1, "\nin : ", 7);
+        var a = i - 12; if (a < 0) { a = 0; }
+        var k = a;
+        while (k < i + 12) { if (k < n) { fmt_int(load8(g_src + k) & 0xFF); syscall(1, 1, " ", 1); } k = k + 1; }
+        syscall(1, 1, "\nout: ", 7);
+        a = o - 12; if (a < 0) { a = 0; }
+        k = a;
+        while (k < o + 12) { if (k < m) { fmt_int(load8(out + k) & 0xFF); syscall(1, 1, " ", 1); } k = k + 1; }
+        syscall(1, 1, "\n", 1);
+    }
+    syscall(60, 37);
+    return 0;
+}
+
+# Walk input g_src[0..n) and output out[0..m) side by side: equal bytes match;
+# otherwise the input must be at whitespace that the output either dropped at a
+# line end or replaced with a break (CR LF + hang spaces). With col0 > 0 the
+# output may also open with a break (nothing fit after col0). Exits 37 on
+# anything else.
+fn check_align(out, m, n, col0): i64 {
+    var i = 0;
+    var o = 0;
+    if (col0 > 0) {
+        if (m >= 2) {
+            if ((load8(out) & 0xFF) == 13) {
+                if ((load8(out + 1) & 0xFF) == 10) {
+                    var lead_crlf = 0;
+                    if (n >= 2) {
+                        if ((load8(g_src) & 0xFF) == 13) { if ((load8(g_src + 1) & 0xFF) == 10) { lead_crlf = 1; } }
+                    }
+                    if (lead_crlf == 0) {
+                        o = 2;
+                        o = skip_sp(out, o, m);
+                        i = term_skip_ws(g_src, 0, n);
+                    }
+                }
+            }
+        }
+    }
+    while (i < n) {
+        var a = load8(g_src + i) & 0xFF;
+        if (o < m) {
+            if (a == (load8(out + o) & 0xFF)) { i = i + 1; o = o + 1; continue; }
+        }
+        if (term_is_ws(a) == 0) { fail37(out, m, n, i, o); }
+        var j = term_skip_ws(g_src, i, n);
+        var at_end = 0;
+        if (j == n) { at_end = 1; }
+        else {
+            # A line ends at LF or CR LF; a bare CR is text (it went out as is).
+            var c = load8(g_src + j) & 0xFF;
+            if (c == 10) { at_end = 1; }
+            if (c == 13) {
+                if (j + 1 < n) { if ((load8(g_src + j + 1) & 0xFF) == 10) { at_end = 1; } }
+            }
+        }
+        if (at_end == 1) {
+            var same = 0;
+            if (o == m) { if (j == n) { same = 1; } }
+            if (o < m) { if (j < n) { if ((load8(out + o) & 0xFF) == (load8(g_src + j) & 0xFF)) { same = 1; } } }
+            if (same == 1) { i = j; continue; }
+        }
+        if (o + 1 >= m) { fail37(out, m, n, i, o); }
+        if ((load8(out + o) & 0xFF) != 13) { fail37(out, m, n, i, o); }
+        if ((load8(out + o + 1) & 0xFF) != 10) { fail37(out, m, n, i, o); }
+        o = o + 2;
+        o = skip_sp(out, o, m);
+        i = j;
+    }
+    if (o != m) { fail37(out, m, n, i, o); }
+    return 0;
+}
+
+g_src = alloc(SRC_CAP + 16);
+g_out1 = alloc(OUT_CAP);
+g_out2 = alloc(OUT_CAP);
+g_out3 = alloc(OUT_CAP);
+g_chunk = alloc(4096 + 16);
+g_a = alloc(OUT_CAP);
+g_b = alloc(OUT_CAP);
+
+var iter = 0;
+var bytes_in = 0;
+while (iter < 6000) {
+    var n = gen(16 + below(SRC_CAP - 16));
+    bytes_in = bytes_in + n;
+    var width = 1 + below(120);
+    var col0 = below(width + 8);
+    var hang = below(60);
+    var flags = below(8);
+    var big = wrap_all(g_out1, n, col0, hang, flags, width, 4096);
+
+    # 32: chunk-size independence.
+    var one = wrap_all(g_out2, n, col0, hang, flags, width, 1);
+    var rc = wrap_all(g_out3, n, col0, hang, flags, width, 1 + below(600));
+    if (one != big) { syscall(60, 32); }
+    if (rc != big) { syscall(60, 32); }
+    if (memeq(g_out2, g_out1, big) == 0) { syscall(60, 32); }
+    if (memeq(g_out3, g_out1, big) == 0) { syscall(60, 32); }
+
+    # 31: nothing but whitespace dropped, nothing but CR LF + spaces added.
+    var la = strip_ws(g_a, g_src, n);
+    var lb = strip_ws(g_b, g_out1, big);
+    if (la != lb) { syscall(60, 31); }
+    if (memeq(g_a, g_b, la) == 0) { syscall(60, 31); }
+
+    # 35: escape sequences whole.
+    var ca[8];
+    var cb[8];
+    var ea = esc_total(g_src, n, &ca);
+    var eb = esc_total(g_out1, big, &cb);
+    if (ea != eb) { syscall(60, 35); }
+    if (load64(&ca) != load64(&cb)) { syscall(60, 35); }
+
+    # 34: rows fit, or are one unbreakable word.
+    check_rows(g_out1, big, col0, width, 0);
+
+    # 37: breaks replace whitespace only.
+    check_align(g_out1, big, n, col0);
+
+    # 33: identity when nothing needs to wrap.
+    var wide = wrap_all(g_out2, n, 0, hang, flags, 1000000, 1 + below(600));
+    if (wide != n) { syscall(60, 33); }
+    if (memeq(g_out2, g_src, n) == 0) { syscall(60, 33); }
+
+    iter = iter + 1;
+}
+
+syscall(1, 1, "term_wrap fuzz: 6000 texts, ", 28);
+fmt_int(bytes_in);
+syscall(1, 1, " bytes, each wrapped 4 ways — all invariants held\n", 52);
+syscall(60, 0);

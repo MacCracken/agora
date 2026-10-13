@@ -1,6 +1,6 @@
 # agora — Post-v1.0 Roadmap (v2.x sovereignty layer)
 
-> **Last Updated**: 2026-10-12 (shipped door / chatbot work trimmed out — the 1.2.0 Universe, QUEST's
+> **Last Updated**: 2026-10-13 (terminal awareness beyond the window width added after 1.10.1). 2026-10-12: (shipped door / chatbot work trimmed out — the 1.2.0 Universe, QUEST's
 > single-player climb and Jabberwacky all shipped; only what is still unbuilt remains below. The full
 > QUEST design narrative, now implemented in `src/quest.cyr`, is in this file's git history before
 > 2026-10-12. Pillars unchanged since 2026-05-23.)
@@ -20,6 +20,21 @@ Shipped and out of this file: the door subsystem (1.1.0, ADR 0009), the **Persis
 - **The Handler — global world-event track + persistent legacy ranks** across campaigns (the slow-burn crisis layer + Probationary → Director's-Chair progression posted on the board), and the v2 community layer (intercepted rival traffic, inter-section sabotage).
 - **Port Authority — deep endgame**: planet citadels + mining tiers, alliances, the full ship-upgrade tree beyond holds / fighters / shields.
 - **The Handler — 2400-baud teletype effect** (slow-print cables + spacebar-skip), deferred since 1.1.0; needs a raw-mode input path (the server is char-at-a-time + line-mode today).
+
+---
+
+## Terminal awareness — beyond the window width
+
+1.10.1 gave the client's window width its first consumer: output is wrapped to it
+([ADR 0030](../adr/0030-terminal-aware-output.md)). The rest of what agora negotiates still has none. Unpinned
+until a user wants it:
+
+- **Paging by window height** (NAWS rows): a `--More--` stop on a long `list` or `read`. It changes the input
+  model in the middle of output (a key that continues or quits), and under poll it means parking a command's
+  output across sweeps.
+- **Colour by terminal type** (TERMINAL-TYPE, RFC 1091): no SGR for a terminal that names itself `DUMB` or
+  `UNKNOWN`. The greeting carries most of agora's colour and goes out before the type can arrive, so this also
+  means holding the greeting until negotiation settles, as many BBSes do.
 
 ---
 

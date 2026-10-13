@@ -16,6 +16,7 @@
 include "lib/darshana.cyr"
 include "src/arena.cyr"
 include "src/telnet.cyr"
+include "src/term.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
@@ -7128,6 +7129,158 @@ fn t249_utf8_erase_last(): i64 {
     return 0;
 }
 
+# === 1.10.1 — terminal-aware output (term.cyr, ADR 0030) ===
+
+# Wrap `n` bytes of `src` into `out` in chunks of at most `cap` bytes; returns
+# the total length (the out buffer must be large enough for the result).
+fn t_wrap(out, src, n, col0, hang, flags, width, cap): i64 {
+    var st[104];
+    term_wrap_init(&st, src, n, col0, hang, flags, width);
+    var o = 0;
+    var k = 1;
+    while (k > 0) {
+        k = term_wrap_chunk(&st, out + o, cap);
+        o = o + k;
+    }
+    return o;
+}
+
+# 1 if wrapping `src` gives exactly `want`, in chunks of 1, 3, 7 and 4096 bytes
+# alike (the output must not depend on the chunk size), else 0.
+fn t_wrap_is(src, col0, hang, flags, width, want): i64 {
+    var out = alloc(4096);
+    var caps[32];
+    store64(&caps, 1);
+    store64((&caps) + 8, 3);
+    store64((&caps) + 16, 7);
+    store64((&caps) + 24, 4096);
+    var wl = strlen(want);
+    var ok = 1;
+    var c = 0;
+    while (c < 4) {
+        var n = t_wrap(out, src, strlen(src), col0, hang, flags, width, load64((&caps) + c * 8));
+        if (n != wl) { ok = 0; }
+        else { if (memeq(out, want, wl) == 0) { ok = 0; } }
+        c = c + 1;
+    }
+    return ok;
+}
+
+# t250 — display columns (term.cyr): the NAWS width rule, UTF-8 by character
+# (1 column, 2 for wide CJK / emoji, 0 for a combining mark), TAB stops of 8,
+# an SGR sequence zero-width and one step long, a malformed byte one column.
+fn t250_term_columns(): i64 {
+    var name = "t250_term_columns";
+    if (term_wrap_width(0) != 0)   { test_fail(name, "no NAWS width must mean no wrap"); return 1; }
+    if (term_wrap_width(1) != 1)   { test_fail(name, "1 column"); return 1; }
+    if (term_wrap_width(80) != 79) { test_fail(name, "80 columns wrap at 79"); return 1; }
+    if (term_cols("hello", 0, 5, 0) != 5)                  { test_fail(name, "ascii"); return 1; }
+    if (term_cols("caf\xc3\xa9", 0, 5, 0) != 4)            { test_fail(name, "e-acute is one column"); return 1; }
+    if (term_cols("\xe6\xbc\xa2\xe5\xad\x97", 0, 6, 0) != 4) { test_fail(name, "CJK is two columns"); return 1; }
+    if (term_cols("e\xcc\x81", 0, 3, 0) != 1)              { test_fail(name, "combining mark is zero"); return 1; }
+    if (term_cols("\xf0\x9f\x98\x80", 0, 4, 0) != 2)       { test_fail(name, "emoji is two columns"); return 1; }
+    if (term_cols("\t", 0, 1, 0) != 8)                     { test_fail(name, "TAB from 0"); return 1; }
+    if (term_cols("ab\t", 0, 3, 0) != 8)                   { test_fail(name, "TAB from 2"); return 1; }
+    if (term_cols("\t", 0, 1, 8) != 16)                    { test_fail(name, "TAB from 8"); return 1; }
+    if (term_cols("\x1b[1;31mred\x1b[0m", 0, 14, 0) != 3)  { test_fail(name, "SGR is zero-width"); return 1; }
+    var nb[8];
+    term_step("\x1b[1;31mx", 0, 8, 0, &nb);
+    if (load64(&nb) != 7)                                  { test_fail(name, "SGR is one step"); return 1; }
+    if (term_cols("\x80", 0, 1, 0) != 1)                   { test_fail(name, "stray continuation"); return 1; }
+    if (term_cols("\xe6\xbc", 0, 2, 0) != 2) { test_fail(name, "cut-off sequence: a column a byte"); return 1; }
+    if (term_cols("\xe6\xbc\xa2", 0, 1, 0) != 1) { test_fail(name, "a sequence read past the end"); return 1; }
+    if (term_cols("\xe6\x41\x42", 0, 3, 0) != 3) { test_fail(name, "a malformed sequence decoded"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t251 — where a row ends (term_row_end): the whole rest when it fits, else the
+# whitespace after the last word that fits; a word wider than a fresh row whole,
+# never cut; nothing on a row that already holds text; leading spaces never a
+# break; an escape sequence never split.
+fn t251_term_row_end(): i64 {
+    var name = "t251_term_row_end";
+    if (term_row_end("aaa bbb", 0, 7, 0, 7, 1) != 7)         { test_fail(name, "fits"); return 1; }
+    if (term_row_end("aaa bbb ccc", 0, 11, 0, 7, 1) != 7)    { test_fail(name, "break after bbb"); return 1; }
+    if (term_row_end("aaa bbb ccc", 0, 11, 0, 6, 1) != 3)    { test_fail(name, "break after aaa"); return 1; }
+    if (term_row_end("abcdefghij kl", 0, 13, 0, 5, 1) != 10) { test_fail(name, "long word whole"); return 1; }
+    if (term_row_end("abcdefghij kl", 0, 13, 3, 5, 0) != 0)  { test_fail(name, "break first"); return 1; }
+    if (term_row_end("   abcdef", 0, 9, 0, 4, 1) != 9)       { test_fail(name, "leading spaces"); return 1; }
+    if (term_row_end("\x1b[31maaaa bbb", 0, 13, 0, 4, 1) != 9) { test_fail(name, "SGR counted zero"); return 1; }
+    if (term_row_end("ab \x1b[1 mcd", 0, 10, 0, 4, 1) != 2)  { test_fail(name, "escape with a space split"); return 1; }
+    if (term_row_end("abcdefgh\x1b[1 mij kl", 0, 18, 0, 5, 1) != 15) {
+        test_fail(name, "a long word's escape sequence was split"); return 1;
+    }
+    test_pass(name);
+    return 0;
+}
+
+# t252 — the wrap itself, byte for byte, in chunks of 1 / 3 / 7 / 4096 bytes:
+# identity when every line fits (terminators, a bare CR, tabs and trailing spaces
+# untouched), CR LF + hang at a break with the break's whitespace dropped, a
+# first row starting at col0, TW_AUTO and TW_TAG hangs, the hang cap, a long
+# word on a row of its own, SGR carried across a break, wide characters.
+fn t252_term_wrap(): i64 {
+    var name = "t252_term_wrap";
+    if (t_wrap_is("ab cd\r\nef\tg  \nh\ri", 0, 0, 0, 20, "ab cd\r\nef\tg  \nh\ri") == 0) {
+        test_fail(name, "a text that fits must come out unchanged"); return 1;
+    }
+    if (t_wrap_is("one two three four", 0, 0, 0, 9, "one two\r\nthree\r\nfour") == 0) {
+        test_fail(name, "plain word wrap"); return 1;
+    }
+    if (t_wrap_is("one two   three\r\nx", 0, 0, 0, 9, "one two\r\nthree\r\nx") == 0) {
+        test_fail(name, "the whitespace at a break is dropped, the terminator kept"); return 1;
+    }
+    if (t_wrap_is("aa bb cc dd", 4, 4, 0, 10, "aa bb\r\n    cc dd") == 0) {
+        test_fail(name, "col0 + explicit hang"); return 1;
+    }
+    if (t_wrap_is("  aaa bbb ccc\r\nx", 0, 0, TW_AUTO, 9, "  aaa bbb\r\n  ccc\r\nx") == 0) {
+        test_fail(name, "TW_AUTO keeps the line's indent"); return 1;
+    }
+    if (t_wrap_is("<qix> hello there world", 0, 0, TW_TAG, 14,
+        "<qix> hello\r\n      there\r\n      world") == 0) {
+        test_fail(name, "TW_TAG aligns after the speaker"); return 1;
+    }
+    if (t_wrap_is("aa bb cc", 0, 30, 0, 5, "aa bb\r\n  cc") == 0) {
+        test_fail(name, "the hang is capped at half the width"); return 1;
+    }
+    if (t_wrap_is("see https://x.example/aaaaaaaaaa ok", 0, 0, 0, 10,
+        "see\r\nhttps://x.example/aaaaaaaaaa\r\nok") == 0) {
+        test_fail(name, "a long word goes out whole on its own row"); return 1;
+    }
+    if (t_wrap_is("abcdef gh", 8, 2, 0, 10, "\r\n  abcdef\r\n  gh") == 0) {
+        test_fail(name, "nothing fits after col0: break first"); return 1;
+    }
+    if (t_wrap_is("\x1b[31maaa bbb\x1b[0m", 0, 0, TW_RAW, 5, "\x1b[31maaa\r\nbbb\x1b[0m") == 0) {
+        test_fail(name, "SGR across a break"); return 1;
+    }
+    if (t_wrap_is("\xe6\xbc\xa2\xe5\xad\x97 \xe6\xbc\xa2\xe5\xad\x97 \xe6\xbc\xa2\xe5\xad\x97", 0, 0, 0, 9,
+        "\xe6\xbc\xa2\xe5\xad\x97 \xe6\xbc\xa2\xe5\xad\x97\r\n\xe6\xbc\xa2\xe5\xad\x97") == 0) {
+        test_fail(name, "wide characters count two columns"); return 1;
+    }
+    if (t_wrap_is("", 0, 0, 0, 10, "") == 0) { test_fail(name, "empty"); return 1; }
+    if (t_wrap_is("aaaa bbbb", 0, 0, 0, 9, "aaaa bbbb") == 0) { test_fail(name, "exactly the width fits"); return 1; }
+    if (t_wrap_is("aaaa bbbbb", 0, 0, 0, 9, "aaaa\r\nbbbbb") == 0) {
+        test_fail(name, "one column over the width wraps"); return 1;
+    }
+    if (t_wrap_is("a\tb\tc", 0, 0, 0, 9, "a\tb\r\nc") == 0) {
+        test_fail(name, "a short line whose TABs overflow the row wraps"); return 1;
+    }
+    if (t_wrap_is("aaaa\r\nbbbbbb cc", 4, 0, 0, 10, "aaaa\r\nbbbbbb cc") == 0) {
+        test_fail(name, "col0 applies to the first line only"); return 1;
+    }
+    # A chunk never writes past `cap`, and returns 0 only at the end.
+    var g = alloc(16);
+    memset(g, 120, 16);
+    var gst[104];
+    term_wrap_init(&gst, "abcdefgh ij", 11, 0, 0, 0, 5);
+    var gk = term_wrap_chunk(&gst, g, 3);
+    if (gk != 3)                            { test_fail(name, "a chunk must fill its cap"); return 1; }
+    if ((load8(g + 3) & 0xFF) != 120)       { test_fail(name, "a chunk wrote past its cap"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -7397,6 +7550,9 @@ fn main(): i64 {
     t247_forwardmask_and_unagreed_sb();
     t248_text_nvt_newlines();
     t249_utf8_erase_last();
+    t250_term_columns();
+    t251_term_row_end();
+    t252_term_wrap();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

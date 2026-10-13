@@ -32,7 +32,7 @@ cyrius build src/main.cyr build/agora
 ./build/agora serve 2323     # telnet on localhost:2323
 ```
 
-End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–35; run them all with `docs/examples/run.sh`). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
+End-to-end walkthrough in [`docs/guides/getting-started.md`](docs/guides/getting-started.md); runnable examples in [`docs/examples/`](docs/examples/) (01–36; run them all with `docs/examples/run.sh`). Cyrius toolchain pinned in `cyrius.cyml` (`[package].cyrius`).
 
 ## Architecture
 
@@ -45,6 +45,8 @@ agora binary (~874 KB static ELF at 1.3.7)
 │                           + clean shutdown via signalfd (SIGINT/SIGTERM)
 ├── src/telnet.cyr          RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS
 │                           + RFC 1091 TT + RFC 1184 LINEMODE
+├── src/term.cyr            display width + word wrap to the client's
+│                           window (NAWS) for every text egress (ADR 0030)
 ├── src/board.cyr           post storage + threading + flock + board layout
 │                           + per-board policy (ADRs 0002 / 0003 / 0004 / 0005)
 │                           + PostHeaders struct (ADR 0008)
@@ -67,7 +69,8 @@ agora binary (~874 KB static ELF at 1.3.7)
 ├── src/arena.cyr           per-command scratch arena + crash-safe store write
 ├── tests/agora.tcyr        module suite (count in docs/development/state.md)
 ├── tests/serve.tcyr        serve-layer suite (includes src/main.cyr under AGORA_TEST)
-└── fuzz/telnet_iac.fcyr    IAC-parser fuzz harness (CI + release)
+├── fuzz/telnet_iac.fcyr    IAC-parser fuzz harness (CI + release)
+└── fuzz/term_wrap.fcyr     word-wrap fuzz harness (CI + release)
 ```
 
 Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + ct (the ed25519 call chain; `bigint` was folded into `bayan` at cyrius 6.2.2); first-party git dep: darshana (SGR + output sanitizing). The MOTD banner was rendered offline with bannermanor and baked in — bannermanor is not a build dep. No external deps beyond cyrius.
@@ -80,7 +83,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + 
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — thirty-five runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`).
+- [`docs/examples/`](docs/examples/) — thirty-six runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (~9 ns/byte hot path, unchanged across every release since M1-close).
 - [`fuzz/`](fuzz/) — the IAC-parser fuzz harness (`cyrius fuzz`), run by CI and at release.
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.

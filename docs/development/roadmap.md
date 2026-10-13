@@ -1,9 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.10.0 (telnet conformance) shipped**: the seven RFC 854 / 1184 deviations
-> closed (ADR 0029). Next slot: **1.10.1**, terminal-aware output. The same day: 1.9.2 closed the 1.9.x line;
-> 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in
-> [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.10.1 (terminal-aware output) shipped**: door frames, `list`, `read`, chat and
+> `help` wrapped to the window the client reports (NAWS), byte-identical without one (ADR 0030). That closes the
+> 1.10.x line. Next slot: **1.11.0**, Descent as a poll state + serve-model debt. The same day: 1.10.0 (telnet
+> conformance, ADR 0029), 1.9.2 closed the 1.9.x line; 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into 1.8.x →
+> 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -32,31 +33,12 @@ did) and the slots after it shift.
 |---|---|---|---|
 | **1.9.2** | Board policy + operator CLI (closes the 1.9.x line: 1.9.0 store hardening, 1.9.1 reply index) | feature | ✅ 2026-10-13 |
 | **1.10.0** | Telnet conformance | protocol | ✅ 2026-10-13 |
-| **1.10.1** | Terminal-aware output | protocol / UX | planned |
+| **1.10.1** | Terminal-aware output (closes the 1.10.x line) | protocol / UX | ✅ 2026-10-13 |
 | **1.11.0** | Descent as a poll state + serve-model debt | structure | planned |
 | **1.11.1** | Enforced module invariants | structure | planned |
 | **1.12.0** | Olympiad events + door content | content | planned |
 | **1.12.1** | Wager audit trail | content / fairness | planned |
 | 1.x | Cross-repo and toolchain-blocked work | — | blocked — see § Unscheduled |
-
----
-
-## 1.10.x — the wire
-
-### 1.10.0 — Telnet conformance ✅
-
-Shipped 2026-10-13 — all seven rows (ADR 0029): AYT answers `[Yes]`; the announce asks DO LINEMODE and agora
-answers MODE (RFC 1184 § 2.2 — a reply it never sent) and SLC (§ 5.5 — validated, bounded, IAC-doubled),
-hands echoing to an editing client, and refuses FORWARDMASK and unagreed subnegotiations by rule; BS / DEL /
-IAC EC / IAC EL edit the line (a whole UTF-8 character at a time); egress text is NVT (CR LF, CR NUL). A real
-`telnet` client negotiates the whole exchange (smoke 35 § G). Detail: CHANGELOG `[1.10.0]`. Delete this
-section when the 1.10.x line closes.
-
-### 1.10.1 — Terminal-aware output
-
-| Item | Source | Effort |
-|---|---|---:|
-| Negotiated terminal state (NAWS cols/rows, TERMINAL-TYPE, the LINEMODE mask) has **zero consumers** outside `telnet.cyr` — parsed and stored, never used to size or adapt output. First consumer: door frames and `list` wrapped to NAWS cols. | M2-D deferral | medium |
 
 ---
 
@@ -66,7 +48,7 @@ section when the 1.10.x line closes.
 
 | Item | Source | Effort |
 |---|---|---:|
-| **Returning from Descent does not re-assert agora's telnet options** — the proxy passes the MUD's ECHO (and, since 1.10.0, LINEMODE) negotiation through raw, so the client's echo / editing state can come back out of step with agora's (doubled or missing echo). Re-announce, or track the proxied options, on return. | ADR 0029 § Consequences; `src/descent.cyr` | small |
+| **Returning from Descent does not re-assert agora's telnet options** — the proxy passes the MUD's ECHO (and, since 1.10.0, LINEMODE) negotiation through raw, so the client's echo / editing state can come back out of step with agora's (doubled or missing echo). Since 1.10.1 the window width is affected too: a resize during the visit is reported to the MUD, so agora wraps to the stale width until the client next reports. Re-announce, or track the proxied options, on return (a DONT / DO NAWS cycle asks for a fresh report). | ADR 0029 § Consequences, ADR 0030 § Neutral; `src/descent.cyr` | small |
 | **The Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions for the whole visit, and a blackholed endpoint still costs up to 4 s per connect (1.8.1 added a 30 s redial cooldown and has the proxy watch the shutdown signalfd — audit L19). The fix is making Descent a session *state* in the poll loop rather than a blocking call; write the ADR first. | `src/descent.cyr` (documented, not fixed); [ADR 0017](../adr/0017-descent-link-gateway.md), [ADR 0023](../adr/0023-dual-serve-model.md) | large |
 | `AGORA_SERVE=epoll` is accepted and silently aliased to `poll`; implement it or reject the value. **Measured at 1.8.2**: the poll loop accepts exactly 50 connections/s sequentially — one per 20 ms sweep, because it sleeps instead of waiting for readiness — against fork's ~4,100; a `poll(2)`/epoll readiness wait removes that floor (and the 0–20 ms latency it adds to every poll-mode command). | `src/main.cyr`; BENCHMARKS.md § Serve-level baselines | medium |
 | `PR_SET_PDEATHSIG` for orphan-on-parent-crash under the fork model | ADR 0007 § Out of scope | small |
@@ -171,6 +153,7 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 | Durability + egress | 1.7.0 – 1.8.0 | clean shutdown (signalfd); crash-safe door / world / chat writes; poll holes; IAC fuzz harness; `Result` value form; darshana 1.3.0 + egress sanitization (2026-10-12 audit closed) | 2026-10-12 |
 | Audit + repair, tooling | 1.8.1 – 1.8.2 | six-slice audit, 41 fixes (poll fairness, vendored-allocation leaks, fail-closed policy, door save lifecycle, loader bounds, fork caps); then the Closeout Pass in CI, serve-layer unit tests, generated version string, serve-level baselines | 2026-10-13 |
 | Storage, scale, policy | 1.9.0 – 1.9.2 | store opens refuse symlinks and FIFOs (files and directories); crash-safe post publish; the handle index (unknown login O(1)); the reply index (`read` O(replies)); `.admins` read whole and keyed on fingerprints; four board modes that each mean something (members-only, anonymous posting); `agora policy` / `agora admins`; chat channel cap; the slot risk recorded (ADRs 0025–0028) | 2026-10-13 |
+| The wire | 1.10.0 – 1.10.1 | RFC 854 / 1184 conformance — agora as the LINEMODE server (MODE and SLC answered, echo handed to an editing client), AYT, a line editor for character-mode clients, NVT egress; then output wrapped to the client's NAWS width (door frames, `list`, `read`, chat, `help`), byte-identical without one; a second fuzz harness (ADRs 0029–0030) | 2026-10-13 |
 
 ---
 
@@ -178,10 +161,10 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door / chatbot backlog.
-- [`docs/adr/`](../adr/) — 28 ADRs (0001–0028). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
+- [`docs/adr/`](../adr/) — 30 ADRs (0001–0030). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
   0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization; 0025–0026
   the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index); 0027 the reply index;
-  0028 the board policy modes.
+  0028 the board policy modes; 0029 telnet conformance; 0030 terminal-aware output.
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2,
   closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut), 2026-10-12-audit-1.8.1 (closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).

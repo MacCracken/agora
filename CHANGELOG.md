@@ -4,6 +4,110 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-10-13 (terminal-aware output)
+
+agora has asked every client for its window size since M1 (NAWS, RFC 1073) and stored the answer, and until now
+nothing read it. Every line went out as written, so anything wider than the reader's terminal broke wherever
+the terminal ran out of columns, mid-word. That covered door menus, `list` subjects, long post lines, chat,
+`help` (143 columns) and the greeting (149). Output is now wrapped to the reported width, between words. A client
+that reports no width gets exactly the bytes it got before. Closes the 1.10.x line. ADR
+[0030](docs/adr/0030-terminal-aware-output.md).
+
+**262** tests (252 module + 10 serve-layer), also on aarch64 under qemu; **two** fuzz harnesses (new:
+`fuzz/term_wrap.fcyr`), each plain and `--poison=ab`; **36** example smokes (new: 36), both CI legs green;
+`cyrius audit` exit 0. `build/agora` **1,017,104 → 1,029,584 B**; `--agnos` 1,013,616 → 1,026,096 B;
+`--aarch64` 2,417,728 → 2,483,464 B (+17,464 B of code; the rest is the data segment moving to the next 64 KB
+alignment step).
+
+### Added
+
+- **Output wrapped to the client's window.** Once a client reports a width (`WILL NAWS` + `SB NAWS`), lines wider
+  than width − 1 break at the last space or TAB that fits. The whitespace at the break is dropped, and each
+  continuation row starts with CR LF and a hang:
+  - door frames: each line's own indent;
+  - `list`: under the subject (`1  [qix]  `);
+  - `read`: the `Subject:` line under itself, the body keeping each line's indent, the `Replies:` list between
+    ids under the first id;
+  - chat, scrollback and live tail: after `<handle> `;
+  - the chat-couch bots: after `ELIZA: `;
+  - `help`: under the description column.
+
+  A word wider than a whole row (a URL, a hash) is never cut: it goes out on a row of its own and the terminal
+  wraps it, so a copy of it stays whole. A resized window applies on the next command. A width of 0 ("no width
+  is being sent", RFC 1073) means no wrap. One column is left free for terminals without the VT100 last-column
+  flag.
+- **`src/term.cyr`** — pure display width and word wrap. Widths are counted in characters: UTF-8 as one column,
+  East Asian Wide / Fullwidth and emoji as two, combining marks as none, TAB to the next multiple of 8, escape
+  sequences as none and never split. The wrap is a resumable state machine with no allocation, writing chunks of
+  any size. `send_wrapped` (`main.cyr`) drives it; stored and user text is sanitized (ADR 0024) **before** it is
+  measured, then gets NVT newlines and IAC doubling as in `send_text`.
+- **The greeting fits 80 columns.** Its 149-column tagline is laid out for 80, because it goes out before any
+  NAWS can arrive (+3 bytes).
+- `fuzz/term_wrap.fcyr` — 6,000 adversarial texts (6.1 MB: words, TABs, CR / LF / CR LF, SGR, a CSI with a space
+  inside, lone ESC, 2–4-byte and wide UTF-8, malformed bytes), each wrapped four ways at random widths, hangs,
+  start columns and chunk sizes. Seven invariants: nothing but whitespace dropped and breaks only at whitespace
+  (an input/output alignment walk); no escape sequence split (by the harness's own CSI parser, not term.cyr's);
+  output independent of the chunk size; rows within the width unless one unbreakable word; identity when
+  everything fits; no chunk past its cap; no runaway. In CI and the release workflow beside the IAC harness.
+- `benches/bench_term.bcyr`; `docs/examples/36-terminal-width.py`. Smoke 36 drives the real server under both
+  models with raw bytes (§ A–F) and a **real inetutils `telnet` in a 40x24 pty** whose own NAWS fits `read` to
+  39 columns (§ G). A 1.10.0 build fails 15 of its 24 checks.
+- Tests: `t250` display columns, `t251` row ends, `t252` the wrap byte for byte in chunks of 1 / 3 / 7 / 4096;
+  serve `s09` (wrapping on a live session over the wire: `read`, `list`, a door frame, the reply list, chat,
+  `help`, a resize; still sanitized and CR LF) and `s10` (the greeting at 80 columns). Mutation-checked:
+  25 `term.cyr` mutants, all caught by the module suite; 13 wiring mutants in `main.cyr`, all caught by the
+  serve suite.
+
+### Changed
+
+- **`list` composes each row and sends it once** (it was seven sends: id, `  [`, handle, `]  `, subject, CR LF).
+  The bytes are unchanged. Under fork it is one `write(2)` per row instead of seven (see § Performance).
+- CI and release run both fuzz harnesses; CLAUDE.md's Quick Start and Closeout Pass name both.
+- The getting-started guide says what a window-reporting client gets.
+
+### Performance
+
+- `cyrius bench benches/bench_term.bcyr`: a door frame that fits takes **2.9 µs**, wrapped at 40 columns
+  **3.8 µs**; a 4 KB body that fits **19 µs**, wrapped **40 µs**. A line with no TAB whose bytes fit is copied
+  without being measured; the first cut, which measured every character through a call, took 8.7 / 8.9 / 63 /
+  64 µs.
+- `read` of a 60 KB post, poll-server CPU per command: no NAWS 1.0 ms (unchanged — the old path);
+  70-column lines 1.3 ms at 80 columns, 2.1 ms at 40; 950-column paragraphs 1.7 ms at either width.
+- **`list` of 300 posts under fork: 16.1 → 4.3 ms** (median of 40), with or without NAWS. Poll: ~23.2 ms
+  either way (one sweep).
+- `bench_telnet.bcyr` unchanged (`src/telnet.cyr` is untouched): 8 / ~64 / ~73 / ~102 / ~165 ns.
+
+### Verification
+
+- `cyrius test`: **252/252** + **10/10**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
+  `--poison=ab`. `cyrius audit` **exit 0** (fmt, lint 0 warnings, docs, tests, bench).
+  `scripts/check-version-sync.sh --tag 1.10.1` and `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them, on 4 CPUs: **fork 25/25, poll 35/35**.
+- **No NAWS, no change**: one session's `help`, `boards`, `enter`, `list`, `read` (UTF-8 and CJK subject, TABs,
+  a bare CR, 40 replies) and an unknown command are byte-identical to a `git archive` 1.10.0 build. Only the
+  greeting differs, as intended.
+- Allocator gate, poll server with a 40-column window: 1,500 pipelined `read`s of a long post, 600 `list`s and
+  2,000 `help`s grew the data segment by **0 KB**. Smuggler moves add 64 KB once, on the first door session, the
+  same as 1.10.0; a run four times longer adds 0.
+- Buffer review of the new path: `send_wrapped` (stack: state 104 B, chunk 2,048, NVT output 4,096 = 2 × chunk);
+  the `list` row (316 B max in 320: the handle clamped to 32, the subject to 256); the `Replies:` composer (flush
+  at 2,000 of 2,048; one id + its break ≤ 32 B); the read subject (267 in 272); `help`'s `play` line (143 in
+  192); the greeting's tagline (~153 in 256). `term.cyr` reads only inside `[0, n)` and checks every multi-byte
+  sequence against its end.
+- Full build from clean (`rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build`), all three targets.
+- Dead-code audit: **10** test-only accessors, down from 11 — `telnet_term_cols` has its first caller.
+  `telnet_term_rows` / `_type` / `_type_len` and `telnet_linemode_mask` remain test-only (below).
+
+### Known limitations (recorded, not fixed)
+
+- **NAWS rows and TERMINAL-TYPE still have no consumer**: no paging, and colour regardless of terminal type.
+  Unscheduled, in `roadmap-future.md` § Terminal awareness.
+- **A resize during a Descent visit** is reported to the MUD, not agora, so agora wraps to the stale width until
+  the client next reports. Folded into roadmap § 1.11.0's "re-assert options on return".
+- The width table approximates `wcwidth` by Unicode block (terminals do not agree on it either), so a character
+  it gets wrong makes a row one column too wide or too narrow.
+- The CLI viewers (`agora list` / `read` on stdout) are not wrapped.
+
 ## [1.10.0] — 2026-10-13 (telnet conformance)
 
 RFC 854 and RFC 1184 are authoritative for agora; by 1.9.2 the roadmap listed seven places it deviated, and

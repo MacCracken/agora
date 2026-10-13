@@ -12,6 +12,7 @@
 include "lib/darshana.cyr"
 include "src/arena.cyr"
 include "src/telnet.cyr"
+include "src/term.cyr"
 include "src/board.cyr"
 include "src/account.cyr"
 include "src/door.cyr"
@@ -365,6 +366,75 @@ fn send_text(cfd, buf, len): i64 {
     return rc;
 }
 
+# The width to wrap the active session's output to (term.cyr): from the NAWS
+# window width the client reported (RFC 1073), or 0 — do not wrap — when it has
+# reported none. Read at every send, so a resized window takes effect on the
+# next command.
+fn session_wrap_width(): i64 {
+    if (g_active_sess == 0) { return 0; }
+    var ts = load64(g_active_sess + SESS_TS);
+    if (ts == 0) { return 0; }
+    return term_wrap_width(telnet_term_cols(ts));
+}
+
+# 1.10.1 (ADR 0030) — send text laid out for the client's window: lines wider
+# than the NAWS width break between words (term.cyr). `col0` is the column the
+# text starts at (text already sent on the row); continuation rows indent by
+# `hang`, plus the line's own leading whitespace under TW_AUTO, or its leading
+# "<tag> " under TW_TAG.
+#
+# Without TW_RAW the text is content — stored or user-derived — and gets exactly
+# `send_text`'s treatment: sanitized (ADR 0024), then NVT newlines and IAC
+# doubling. ⚠ It is sanitized IN PLACE, before the wrap measures it, so the
+# columns counted are the ones the reader sees: `buf` must be the caller's
+# scratch, never a literal or a stored copy it reads again. With TW_RAW the bytes
+# are trusted and already wire-ready (a door frame's SGR and CR LF, a literal):
+# wrapped and sent as they are, through `send_buf`.
+#
+# A session with no width (no NAWS, or a width of 0) takes the old path, so its
+# bytes are exactly what they were before 1.10.1. Returns 0, or 1 if a send
+# failed.
+fn send_wrapped(cfd, buf, len, col0, hang, flags): i64 {
+    var width = session_wrap_width();
+    var raw = 0;
+    if ((flags & TW_RAW) != 0) { raw = 1; }
+    if (width == 0) {
+        if (raw == 1) { return send_buf(cfd, buf, len); }
+        return send_text(cfd, buf, len);
+    }
+    if (len <= 0) { return 0; }
+    var n = len;
+    if (raw == 0) {
+        n = text_sanitize(buf, buf, len);
+        if (n < 0) { return 1; }
+    }
+    var st[104];                 # WS_SIZE
+    var chunk[2048];
+    var out[4096];               # <= 2 x chunk after text_nvt_iac
+    var cr[8];
+    store64(&cr, 0);
+    term_wrap_init(&st, buf, n, col0, hang, flags, width);
+    var rc = 0;
+    var going = 1;
+    while (going == 1) {
+        var k = term_wrap_chunk(&st, &chunk, 2048);
+        if (k <= 0) { going = 0; continue; }
+        if (raw == 1) {
+            if (send_buf(cfd, &chunk, k) != 0) { rc = 1; going = 0; }
+        } else {
+            var on = text_nvt_iac(&out, &chunk, k, &cr);
+            if (send_buf(cfd, &out, on) != 0) { rc = 1; going = 0; }
+        }
+    }
+    if (rc == 0) {
+        if (raw == 0) {
+            var tn = text_nvt_end(&out, &cr);
+            if (tn > 0) { if (send_buf(cfd, &out, tn) != 0) { rc = 1; } }
+        }
+    }
+    return rc;
+}
+
 # The CLI viewers' twin of `send_text` (1.8.0): `agora read` / `agora list`
 # print other people's posts into the OPERATOR's terminal, and did so raw.
 # Same rule, same chunking, written to `fd` with no IAC pass (stdout is not a
@@ -407,6 +477,12 @@ fn send_prompt(cfd, current_board): i64 {
     send_str(cfd, "[");
     send_str(cfd, current_board);
     return send_str(cfd, "] > ");
+}
+
+# One `help` entry (a literal ending CR LF), wrapped to the client's window with
+# its description continuing under the description column (1.10.1).
+fn send_help_line(cfd, s): i64 {
+    return send_wrapped(cfd, s, strlen(s), 0, 18, TW_RAW);
 }
 
 # `input_byte_ok` lives in board.cyr (storage-policy layer). It's
@@ -477,23 +553,32 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     if (len == 0) { return MODE_COMMAND; }
 
     if (line_has_prefix(line, len, "help") != 0) {
+        # 1.10.1 (ADR 0030) — each entry wrapped to the client's window, its
+        # description continuing under the description column (18).
         send_str(cfd, "\r\nCommands:\r\n");
-        send_str(cfd, "  boards          list all boards (main + named)\r\n");
-        send_str(cfd, "  enter <name>    switch to a named board (auto-creates)\r\n");
-        send_str(cfd, "  leave           return to main\r\n");
-        send_str(cfd, "  list            list post IDs in the current board\r\n");
-        send_str(cfd, "  read <id>       read a post by ID (with reply list)\r\n");
-        send_str(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
-        send_str(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
-        send_str(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
-        send_str(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
-        send_str(cfd, "  play <game>     door: smuggler | port | handler | eliza | parry | quest");
-        send_str(cfd, " | jabberwacky | olympiad | ashes | decode  [practice|solo|universe]\r\n");
-        send_str(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
-        send_str(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
-        send_str(cfd, "  descent         step through the portal into the Yeoman's Descent MUD\r\n");
-        send_str(cfd, "  help            this message\r\n");
-        send_str(cfd, "  quit            close the session\r\n\r\n");
+        send_help_line(cfd, "  boards          list all boards (main + named)\r\n");
+        send_help_line(cfd, "  enter <name>    switch to a named board (auto-creates)\r\n");
+        send_help_line(cfd, "  leave           return to main\r\n");
+        send_help_line(cfd, "  list            list post IDs in the current board\r\n");
+        send_help_line(cfd, "  read <id>       read a post by ID (with reply list)\r\n");
+        send_help_line(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
+        send_help_line(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
+        send_help_line(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
+        send_help_line(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
+        var play[192];
+        var pa = "  play <game>     door: smuggler | port | handler | eliza | parry | quest";
+        var pb = " | jabberwacky | olympiad | ashes | decode  [practice|solo|universe]\r\n";
+        var pal = strlen(pa);
+        var pbl = strlen(pb);
+        memcpy(&play, pa, pal);
+        memcpy((&play) + pal, pb, pbl);
+        send_wrapped(cfd, &play, pal + pbl, 0, 18, TW_RAW);
+        send_help_line(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
+        send_help_line(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
+        send_help_line(cfd, "  descent         step through the portal into the Yeoman's Descent MUD\r\n");
+        send_help_line(cfd, "  help            this message\r\n");
+        send_help_line(cfd, "  quit            close the session\r\n");
+        send_str(cfd, "\r\n");
         return MODE_COMMAND;
     }
 
@@ -636,33 +721,50 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             var sbuf = cmd_alloc(SUBJECT_MAX_BYTES);
             var hbuf = cmd_alloc(ACCOUNT_HANDLE_BUF);
             var fpbuf = cmd_alloc(ACCOUNT_FP_BUF_BYTES);
+            # 1.10.1 (ADR 0030) — each row is composed whole and sent wrapped to
+            # the client's window, the subject's continuation rows aligned under
+            # the subject: `<id>  [<handle>|anon]  <subject>`. One send per row
+            # (it was seven — each a write(2) under fork). The handle is
+            # sanitized as it is copied, so the hang is measured on what the
+            # reader sees; send_wrapped sanitizes the subject. The row is stack
+            # scratch, per iteration (t232's rule: no arena take inside a loop).
             var idx = 0;
             while (idx < count) {
                 var id = load64(ids + idx * 8);
-                var idbuf[24];
-                var idlen = fmt_int_buf(id, &idbuf);
-                send_buf(cfd, &idbuf, idlen);
-                send_str(cfd, "  ");
+                var row[320];          # 20 id + 3 + 32 handle + 3 + 256 subject + 2 = 316
+                var rl = fmt_int_buf(id, &row);
+                memcpy((&row) + rl, "  [", 3);
+                rl = rl + 3;
                 var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
                 # M6-E: [<handle>|anon] before subject.
-                send_str(cfd, "[");
+                var named = 0;
                 if (flen > 0) {
                     if (post_from(fbuf, flen, hbuf, ACCOUNT_HANDLE_BUF, fpbuf, ACCOUNT_FP_BUF_BYTES) == 1) {
-                        send_text(cfd, hbuf, strlen(hbuf));
-                    } else {
-                        send_str(cfd, "anon");
+                        named = 1;
                     }
-                } else {
-                    send_str(cfd, "anon");
                 }
-                send_str(cfd, "]  ");
+                if (named == 1) {
+                    var hl = strlen(hbuf);
+                    if (hl > ACCOUNT_HANDLE_MAX) { hl = ACCOUNT_HANDLE_MAX; }
+                    rl = rl + text_sanitize((&row) + rl, hbuf, hl);
+                } else {
+                    memcpy((&row) + rl, "anon", 4);
+                    rl = rl + 4;
+                }
+                memcpy((&row) + rl, "]  ", 3);
+                rl = rl + 3;
+                var hang = term_cols(&row, 0, rl, 0);
                 if (flen > 0) {
                     var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+                    if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
                     if (slen > 0) {
-                        send_text(cfd, sbuf, slen);
+                        memcpy((&row) + rl, sbuf, slen);
+                        rl = rl + slen;
                     }
                 }
-                send_str(cfd, "\r\n");
+                store8((&row) + rl, 13);
+                store8((&row) + rl + 1, 10);
+                send_wrapped(cfd, &row, rl + 2, 0, hang, 0);
                 idx = idx + 1;
             }
         }
@@ -704,20 +806,28 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         }
         var sbuf = cmd_alloc(SUBJECT_MAX_BYTES);
         var slen = post_subject(fbuf, flen, sbuf, SUBJECT_MAX_BYTES);
+        if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
         if (slen > 0) {
-            send_str(cfd, "Subject: ");
-            send_text(cfd, sbuf, slen);
-            send_str(cfd, "\r\n");
+            # 1.10.1 (ADR 0030) — one row, wrapped under the subject's own column.
+            var subj = cmd_alloc(SUBJECT_MAX_BYTES + 16);
+            memcpy(subj, "Subject: ", 9);
+            memcpy(subj + 9, sbuf, slen);
+            store8(subj + 9 + slen, 13);
+            store8(subj + 10 + slen, 10);
+            send_wrapped(cfd, subj, slen + 11, 0, 9, 0);
         }
         send_str(cfd, "\r\n");
 
         var body_off = post_body_offset(fbuf, flen);
         var body_len = flen - body_off;
         if (body_len > 0) {
-            send_text(cfd, fbuf + body_off, body_len);
-            if ((load8(fbuf + body_off + body_len - 1) & 0xFF) != 10) {
-                send_str(cfd, "\r\n");
-            }
+            # Read before the send: send_wrapped sanitizes the body in place.
+            var ends_lf = 0;
+            if ((load8(fbuf + body_off + body_len - 1) & 0xFF) == 10) { ends_lf = 1; }
+            # 1.10.1 (ADR 0030) — wrapped to the client's window; an indented
+            # line (a list item, a code block) keeps its indent when it wraps.
+            send_wrapped(cfd, fbuf + body_off, body_len, 0, 0, TW_AUTO);
+            if (ends_lf == 0) { send_str(cfd, "\r\n"); }
         }
 
         # M5-F: list child reply IDs (one-deep) — from the reply index since
@@ -732,15 +842,42 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             var rline[2048];
             memcpy(&rline, "\r\nReplies: ", 11);
             var rlp = 11;
+            # 1.10.1 (ADR 0030) — wrapped to the client's window between ids, the
+            # continuation rows under the first id. `rcol` is the output column;
+            # with no NAWS width (0) the line is as long as it ever was.
+            var rwidth = session_wrap_width();
+            var rhang = 9;
+            if (rhang > rwidth / 2) { rhang = rwidth / 2; }
+            var rcol = 9;
             var ri = 0;
             while (ri < rcount) {
                 if (rlp > 2000) { send_buf(cfd, &rline, rlp); rlp = 0; }
+                var rid[24];
+                var ridn = fmt_int_buf(load64(rbuf + ri * 8), &rid);
                 if (ri > 0) {
                     store8((&rline) + rlp, 44);          # ','
-                    store8((&rline) + rlp + 1, 32);      # ' '
-                    rlp = rlp + 2;
+                    rlp = rlp + 1;
+                    rcol = rcol + 1;
+                    # ' ' + the id, and the ',' that will follow it unless it is last.
+                    var rneed = 1 + ridn;
+                    if (ri + 1 < rcount) { rneed = rneed + 1; }
+                    var rbreak = 0;
+                    if (rwidth > 0) { if (rcol + rneed > rwidth) { rbreak = 1; } }
+                    if (rbreak == 1) {
+                        store8((&rline) + rlp, 13);
+                        store8((&rline) + rlp + 1, 10);
+                        memset((&rline) + rlp + 2, 32, rhang);
+                        rlp = rlp + 2 + rhang;
+                        rcol = rhang;
+                    } else {
+                        store8((&rline) + rlp, 32);      # ' '
+                        rlp = rlp + 1;
+                        rcol = rcol + 1;
+                    }
                 }
-                rlp = rlp + fmt_int_buf(load64(rbuf + ri * 8), (&rline) + rlp);
+                memcpy((&rline) + rlp, &rid, ridn);
+                rlp = rlp + ridn;
+                rcol = rcol + ridn;
                 ri = ri + 1;
             }
             store8((&rline) + rlp, 13);
@@ -1167,7 +1304,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         if (ln > 0) {
             var ob = cmd_alloc(CHAT_TAIL_CAP);
             var ol = chat_emit_tail_k(lbuf, ln, CHAT_SCROLLBACK_LINES, ob, CHAT_TAIL_CAP, seenp);
-            if (ol > 0) { send_text(cfd, ob, ol); }
+            if (ol > 0) { send_wrapped(cfd, ob, ol, 0, 0, TW_TAG); }   # 1.10.1: under the speaker
         }
         g_chat_seen = load64(seenp);
         g_chat_idle = 0;
@@ -1458,7 +1595,9 @@ fn chat_flush_tail(cfd): i64 {
     var seenp = g_chat_tail_seenp;
     store64(seenp, g_chat_seen);
     var olen = chat_emit_since(buf, n, g_chat_seen, out, CHAT_TAIL_CAP, seenp);
-    if (olen > 0) { send_text(cfd, out, olen); }
+    # 1.10.1 (ADR 0030) — wrapped to this reader's window, continuation rows
+    # aligned after the speaker's "<handle> ".
+    if (olen > 0) { send_wrapped(cfd, out, olen, 0, 0, TW_TAG); }
     g_chat_seen = load64(seenp);
     return 0;
 }
@@ -1732,7 +1871,10 @@ fn door_send_frame(cfd): i64 {
     }
     g_door_emit_cap = DOOR_EMIT_UNBOUNDED;             # [D3] restore the default for non-frame emit users
     if (n > DOOR_FRAME_CAP) { n = DOOR_FRAME_CAP; }    # [D3] clamp any overshoot — never send past the cap
-    if (n > 0) { send_buf(cfd, buf, n); }
+    # 1.10.1 (ADR 0030) — wrapped to the client's window; an indented line keeps
+    # its indent on its continuation rows. Frames are rendered by agora with
+    # their own SGR colour, so they go out raw (escape sequences take no column).
+    if (n > 0) { send_wrapped(cfd, buf, n, 0, 0, TW_RAW | TW_AUTO); }
     return 0;
 }
 
@@ -2180,12 +2322,25 @@ fn render_motd(buf): i64 {
     # Blank line between banner and metadata.
     pos = motd_emit_cstr(buf, pos, "\r\n");
 
-    # Yellow version line.
+    # Yellow version line. 1.10.1 (ADR 0030) — laid out for 80 columns: it was
+    # one 149-column line that every terminal narrower than that broke mid-word.
+    # The greeting goes out before the client can report its window (NAWS), so
+    # it cannot use the real width; 80 is the classic terminal's.
     pos = tty_sgr_buf(buf, pos, TTY_FG_YELLOW);
-    pos = motd_emit_cstr(buf, pos, "  agora ");
-    pos = motd_emit_cstr(buf, pos, CYRIUS_PKG_VERSION);   # 1.8.2 — from VERSION (see print_banner)
-    pos = motd_emit_cstr(buf, pos, " — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode)");
-    pos = motd_emit_cstr(buf, pos, " + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+    if (pos >= 0) {
+        var tag[256];
+        var tl = motd_emit_cstr(&tag, 0, "  agora ");
+        tl = motd_emit_cstr(&tag, tl, CYRIUS_PKG_VERSION);   # 1.8.2 — from VERSION (see print_banner)
+        tl = motd_emit_cstr(&tag, tl, " — telnet BBS + door games (casino + Olympiad + Ashes of Empire + Decode)");
+        tl = motd_emit_cstr(&tag, tl, " + chat + Eliza/PARRY + QUEST + Jabberwacky + Descent MUD link\r\n");
+        var wst[104];          # WS_SIZE
+        term_wrap_init(&wst, &tag, tl, 0, 0, TW_AUTO, term_wrap_width(TERM_GREET_COLS));
+        var wk = 1;
+        while (wk > 0) {
+            wk = term_wrap_chunk(&wst, buf + pos, 256);
+            pos = pos + wk;
+        }
+    }
     pos = tty_sgr_reset_buf(buf, pos);
 
     # Default-color prompt + closing blank line.
@@ -3469,8 +3624,12 @@ fn process_rx(s, start, n, budget): i64 {
                                         if (clen > 0) {
                                             var bs = chat_bot_state();
                                             var bctrl = chat_bot_feed(line, clen);
-                                            send_str(cfd, chat_bot_name());
-                                            send_buf(cfd, load64(bs + EZ_RESP), load64(bs + EZ_RESPLEN));
+                                            var bname = chat_bot_name();
+                                            var bnl = strlen(bname);
+                                            send_str(cfd, bname);
+                                            # 1.10.1 — the reply wrapped under itself, after "NAME: ".
+                                            var bresp = load64(bs + EZ_RESP);
+                                            send_wrapped(cfd, bresp, load64(bs + EZ_RESPLEN), bnl, bnl, TW_RAW);
                                             send_str(cfd, "\r\n");
                                             if (bctrl == 1) {
                                                 g_chat_bot = 0;

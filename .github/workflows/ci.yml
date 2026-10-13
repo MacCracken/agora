@@ -85,7 +85,7 @@ jobs:
         # docs/development/state.md, deliberately not here.
         run: cyrius test
 
-      - name: Fuzz the IAC parser
+      - name: Fuzz the IAC parser and the word wrap
         # 1.7.0 (roadmap N4) — `fuzz/telnet_iac.fcyr` drives well over a million
         # bytes through telnet_feed / telnet_handle_sb across five passes and
         # asserts its own invariants, exiting with a distinct code per violated
@@ -95,9 +95,16 @@ jobs:
         # allocation, identical output required (applicable since cyrius 6.6.18;
         # green by hand since 1.8.0). The PRNG seed is fixed, so a failure
         # reproduces locally byte for byte.
+        # 1.10.1 — and `fuzz/term_wrap.fcyr`, the word wrap every post body,
+        # subject and chat line goes through on a sized window (ADR 0030): 6,000
+        # adversarial texts wrapped four ways, seven invariants (nothing but
+        # whitespace dropped, no escape sequence split, chunk-size independence,
+        # rows within the width, ...).
         run: |
           cyrius fuzz fuzz/telnet_iac.fcyr
           cyrius fuzz --poison=ab fuzz/telnet_iac.fcyr
+          cyrius fuzz fuzz/term_wrap.fcyr
+          cyrius fuzz --poison=ab fuzz/term_wrap.fcyr
 
       - name: Audit (fmt, lint, docs, tests, bench)
         # 1.8.2 — `cyrius audit` passes for the first time (CLAUDE.md § P(-1)
@@ -138,10 +145,10 @@ jobs:
         # concurrency, serve-model, shutdown and door-lifecycle behaviour.
         # 01 is skipped (the build-and-test job builds and tests); 20 skips
         # itself (it needs the sibling Yeoman's Descent repo); the scripts that
-        # drive both models internally (24, 28-35) run once, in the poll leg.
+        # drive both models internally (24, 28-36) run once, in the poll leg.
         run: |
           if [ "${{ matrix.model }}" = fork ]; then
-            docs/examples/run.sh --model fork --skip 01,24,28,29,30,31,32,33,34,35
+            docs/examples/run.sh --model fork --skip 01,24,28,29,30,31,32,33,34,35,36
           else
             docs/examples/run.sh --model poll --skip 01
           fi

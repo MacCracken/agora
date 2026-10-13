@@ -413,8 +413,233 @@ fn s08_line_editor_and_sb_reply(): i64 {
     return 0;
 }
 
+# Like st_feed, for `n` bytes that may include NUL (a NAWS subnegotiation).
+fn st_feedn(s, buf, n): i64 {
+    memcpy(load64(s + SESS_RXBUF), buf, n);
+    sess_load(s);
+    var r = process_rx(s, 0, n, 0);
+    sess_save(s);
+    return r;
+}
+
+# Empty the session's queued output.
+fn st_tx_reset(s): i64 {
+    store64(s + SESS_TX_LEN, 0);
+    store64(s + SESS_TX_OFF, 0);
+    return 0;
+}
+
+# The widest row, in display columns, of the session's queued output.
+fn st_tx_widest(s): i64 {
+    var tx = load64(s + SESS_TX);
+    var len = load64(s + SESS_TX_LEN);
+    var i = load64(s + SESS_TX_OFF);
+    var ls = i;
+    var w = 0;
+    while (i <= len) {
+        var at_end = 0;
+        if (i == len) { at_end = 1; }
+        else { if ((load8(tx + i) & 0xFF) == 10) { at_end = 1; } }
+        if (at_end == 1) {
+            var c = term_cols(tx, ls, i, 0);
+            if (c > w) { w = c; }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+# LFs in the session's queued output that do not follow a CR (NVT: none).
+fn st_tx_bare_lf(s): i64 {
+    var tx = load64(s + SESS_TX);
+    var len = load64(s + SESS_TX_LEN);
+    var i = load64(s + SESS_TX_OFF);
+    var c = 0;
+    while (i < len) {
+        if ((load8(tx + i) & 0xFF) == 10) {
+            if (i == 0) { c = c + 1; }
+            else { if ((load8(tx + i - 1) & 0xFF) != 13) { c = c + 1; } }
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Agree NAWS and report a window `cols` x 24 over the wire (RFC 1073).
+fn st_naws(s, cols): i64 {
+    var nb[16];
+    memcpy(&nb, "\xff\xfb\x1f\xff\xfa\x1f", 6);
+    store8((&nb) + 6, 0);
+    store8((&nb) + 7, cols);
+    store8((&nb) + 8, 0);
+    store8((&nb) + 9, 24);
+    store8((&nb) + 10, 255);
+    store8((&nb) + 11, 240);
+    return st_feedn(s, &nb, 12);
+}
+
+# s09 — output wrapped to the NAWS window (1.10.1, ADR 0030). Without a
+# reported width nothing changes; after `WILL NAWS` + a 30-column report, `read`,
+# `list` and a door frame fit 29 columns (one is left free), the subject and
+# indented lines hang, a URL stays whole; a resize to 60 takes effect on the next
+# command, and `help` hangs at its description column.
+fn s09_wrap_to_naws(): i64 {
+    var name = "s09_wrap_to_naws";
+    var fds = alloc(16);
+    st_pair(fds);
+    g_serve_mode = SERVE_POLL;
+    var url = "https://example.com/a/long/path/that/must/stay/whole";
+    var body = alloc(512);
+    var bl = 0;
+    var p1 = "the quick brown fox jumps over the lazy dog and keeps on running\n";
+    var p2 = "    an indented line that runs on well past thirty columns \x1b[2J clear\n";
+    memcpy(body, p1, strlen(p1));
+    bl = strlen(p1);
+    memcpy(body + bl, p2, strlen(p2));
+    bl = bl + strlen(p2);
+    memcpy(body + bl, url, strlen(url));
+    bl = bl + strlen(url);
+    store8(body + bl, 10);
+    bl = bl + 1;
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "a subject long enough to need a second row");
+    if (post_new(g_store_buf, "wrap", ph, body, bl) != 1) { st_fail(name, "post_new"); return 1; }
+    var s = st_session(load64(fds));
+    st_feed(s, "enter wrap\r\n", 0);
+
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    if (st_tx_count(s, "the quick brown fox jumps over the lazy dog and keeps on running") != 1) {
+        st_fail(name, "without NAWS a line must go out whole");
+        return 1;
+    }
+
+    st_naws(s, 30);
+    if (telnet_term_cols(load64(s + SESS_TS)) != 30) { st_fail(name, "NAWS not taken"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    if (st_tx_count(s, url) != 1)                   { st_fail(name, "the URL was cut"); return 1; }
+    if (st_tx_count(s, "\r\n         ") < 1)        { st_fail(name, "the subject does not hang"); return 1; }
+    # Exactly four spaces after a break: the indented line's own continuation rows.
+    if (st_tx_count(s, "\r\n    ") - st_tx_count(s, "\r\n     ") < 2) {
+        st_fail(name, "the indented line lost its indent");
+        return 1;
+    }
+    if (st_tx_count(s, "\x1b") != 0)               { st_fail(name, "a wrapped body was not sanitized"); return 1; }
+    if (st_tx_bare_lf(s) != 0)                      { st_fail(name, "a wrapped body sent a bare LF"); return 1; }
+    # A thread's reply list wraps between ids, under the first one.
+    var ph2 = post_headers_new();
+    post_headers_set_subject(ph2, "parent");
+    var parent = post_new(g_store_buf, "wrap", ph2, "p\n", 2);
+    var r = 0;
+    while (r < 12) {
+        var phr = post_headers_new();
+        post_headers_set_subject(phr, "re");
+        post_headers_set_reply_to(phr, parent);
+        post_new(g_store_buf, "wrap", phr, "r\n", 2);
+        r = r + 1;
+    }
+    st_tx_reset(s);
+    var rcmd[16];
+    memcpy(&rcmd, "read ", 5);
+    var rcl = 5 + fmt_int_buf(parent, (&rcmd) + 5);
+    memcpy((&rcmd) + rcl, "\r\n", 2);
+    st_feedn(s, &rcmd, rcl + 2);
+    if (st_tx_count(s, "Replies: ") != 1)          { st_fail(name, "no reply list"); return 1; }
+    if (st_tx_widest(s) > 29)                       { st_fail(name, "a reply-list row is wider than 29"); return 1; }
+    if (st_tx_count(s, ",\r\n         ") < 1)     { st_fail(name, "the reply list does not hang"); return 1; }
+    # At 29 columns (28 usable) an id lands exactly on the edge: its comma must
+    # not push the row over.
+    st_naws(s, 29);
+    st_tx_reset(s);
+    st_feedn(s, &rcmd, rcl + 2);
+    if (st_tx_widest(s) > 28)                       { st_fail(name, "a reply-list comma overran the row"); return 1; }
+    st_naws(s, 30);
+    st_tx_reset(s);
+    st_feed(s, "list\r\n", 0);
+    if (st_tx_widest(s) > 29)                       { st_fail(name, "a list row is wider than 29"); return 1; }
+    # "1  [anon]  " is 11 columns: a continuation row starts with exactly 11 spaces.
+    if (st_tx_count(s, "\r\n           ") - st_tx_count(s, "\r\n            ") < 1) {
+        st_fail(name, "the subject does not hang under itself in list");
+        return 1;
+    }
+    st_tx_reset(s);
+    st_feed(s, "play smuggler practice\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_DOOR)         { st_fail(name, "door did not open"); return 1; }
+    if (st_tx_widest(s) > 29)                       { st_fail(name, "a door frame row is wider than 29"); return 1; }
+    sess_load(s);
+    session_door_free(s);
+    store64(s + SESS_MODE, MODE_COMMAND);
+
+    # Chat: another speaker's long line, continuation rows after "<zax> ".
+    st_login(s, "0123456789abcdef", "qix");
+    st_feed(s, "chat wrapt\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_CHAT)         { st_fail(name, "chat did not open"); return 1; }
+    var said = "this line is far too long for a thirty column window";
+    chat_say(g_store_buf, "wrapt", "zax", said, strlen(said));
+    st_tx_reset(s);
+    sess_load(s);
+    chat_flush_tail(load64(fds));
+    sess_save(s);
+    if (st_tx_count(s, "<zax> this") != 1)          { st_fail(name, "the chat line was not sent"); return 1; }
+    if (st_tx_widest(s) > 29)                       { st_fail(name, "a chat row is wider than 29"); return 1; }
+    if (st_tx_count(s, "\r\n      ") - st_tx_count(s, "\r\n       ") < 1) {
+        st_fail(name, "chat does not hang after the speaker");
+        return 1;
+    }
+    store64(s + SESS_MODE, MODE_COMMAND);
+
+    st_naws(s, 60);
+    st_tx_reset(s);
+    st_feed(s, "help\r\n", 0);
+    var hw = st_tx_widest(s);
+    if (hw > 59)                                    { st_fail(name, "help wider than 59 after a resize"); return 1; }
+    if (hw < 40)                                    { st_fail(name, "the resize was not taken"); return 1; }
+    # post, login, whoami, play, chat and descent wrap at 59: their continuation
+    # rows start at exactly 18 spaces.
+    if (st_tx_count(s, "\r\n                  ") - st_tx_count(s, "\r\n                   ") < 6) {
+        st_fail(name, "help does not hang at its description column");
+        return 1;
+    }
+    file_close(load64(fds));
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
+# s10 — the greeting (render_motd, 1.10.1) is laid out for 80 columns: no line over 79
+# display columns, its tagline intact, and the continuation indented like it.
+fn s10_motd_80_columns(): i64 {
+    var name = "s10_motd_80_columns";
+    var buf = alloc(1024);
+    var n = render_motd(buf);
+    if (n <= 0) { st_fail(name, "render failed"); return 1; }
+    var ls = 0;
+    var i = 0;
+    var widest = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 10) {
+            var w = term_cols(buf, ls, i, 0);
+            if (w > widest) { widest = w; }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    if (widest > 79) { st_fail(name, "a greeting line is wider than 79 columns"); return 1; }
+    var found = 0;
+    i = 0;
+    while (i + 16 <= n) {
+        if (memeq(buf + i, "Descent MUD link", 16) == 1) { found = 1; }
+        i = i + 1;
+    }
+    if (found == 0) { st_fail(name, "tagline cut"); return 1; }
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s08, remove the store, print the totals, and return 1 on any failure.
+# run s01..s10, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -434,6 +659,8 @@ fn serve_tests(): i64 {
     s06_shutdown_signalfd();
     s07_fork_short_write_fails();
     s08_line_editor_and_sb_reply();
+    s09_wrap_to_naws();
+    s10_motd_80_columns();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

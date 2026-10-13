@@ -1,0 +1,448 @@
+# term.cyr — terminal-aware output: display width and word wrap (1.10.1, ADR 0030).
+#
+# Pure — no socket I/O, no allocation. agora has stored the client's window size
+# since M1 (NAWS, RFC 1073: IAC SB NAWS w_hi w_lo h_hi h_lo IAC SE; telnet.cyr
+# TS_TERM_COLS) and until 1.10.1 nothing read it, so every line wider than the
+# reader's terminal was broken wherever the terminal ran out of columns — in the
+# middle of a word. This module lays text out for a width: main.cyr's
+# `send_wrapped` feeds it door frames, `list` rows, post bodies, chat and help.
+#
+# The rule (ADR 0030):
+#   - A line that fits is sent exactly as it is. Wrapping inserts and drops
+#     nothing unless a line is wider than the width, so a client that never
+#     reports its size, or one wide enough, sees the same bytes as before.
+#   - A line that does not fit breaks at the last space or tab that leaves the
+#     row inside the width. The whitespace at the break is dropped, and the
+#     row ends with CR LF and the continuation indent (the "hang").
+#   - A word wider than a whole row is never cut: it goes out unbroken on a row
+#     of its own and the terminal wraps it. Cutting it would put a hard newline
+#     inside a URL that a terminal's own soft wrap lets the reader copy whole.
+#   - Widths are display columns, not bytes: a UTF-8 character is one column,
+#     two in the East Asian Wide and emoji blocks, none for a combining mark; a
+#     TAB runs to the next multiple of 8; an escape sequence (a door frame's SGR
+#     colour) takes none and is never split.
+#
+# Wrapping runs as a resumable state machine (`term_wrap_init` /
+# `term_wrap_chunk`) that writes into a caller buffer of any size, so a 64 KB post
+# goes out in small chunks with no allocation, and the output does not depend on
+# the chunk size (the fuzz harness checks this).
+
+enum TermWrap {
+    TERM_TAB_STOP = 8;       # a TAB advances to the next multiple of 8 columns
+    TERM_TAG_MAX  = 40;      # TW_TAG looks this far for the '>' closing a leading <tag>
+    TERM_GREET_COLS = 80;    # the width the greeting is laid out for (sent before any NAWS can arrive)
+
+    # send_wrapped / term_wrap_init flags
+    TW_RAW  = 1;             # trusted bytes (a door frame, a literal): no sanitizing, no NVT pass
+    TW_AUTO = 2;             # continuation rows also indent by the line's own leading whitespace
+    TW_TAG  = 4;             # ... or align after a leading "<tag> " (a chat line's speaker)
+
+    # Wrap state (`term_wrap_init`): 14 i64 slots.
+    WS_SRC   = 0;            # source buffer
+    WS_N     = 8;            # source length
+    WS_POS   = 16;           # next source byte
+    WS_COL   = 24;           # output column at the current row start
+    WS_WIDTH = 32;           # row width in columns (>= 1)
+    WS_HANG  = 40;           # caller's continuation indent (columns)
+    WS_FLAGS = 48;           # TW_* flags
+    WS_LHANG = 56;           # this line's continuation indent (capped at width / 2)
+    WS_LEND  = 64;           # end of this line's text (before CR LF / LF)
+    WS_TEND  = 72;           # end of this line's terminator
+    WS_REND  = 80;           # end of the slice being copied
+    WS_PHASE = 88;           # WP_*
+    WS_BRK   = 96;           # bytes of the pending break (CR LF + hang) still to write
+    WS_SIZE  = 104;
+
+    # phases
+    WP_LINE  = 0;            # at a line start
+    WP_ROW   = 1;            # at a row start
+    WP_SLICE = 2;            # copying a row
+    WP_TERM  = 3;            # copying a line terminator
+    WP_DONE  = 4;
+}
+
+# The wrap width for a terminal `cols` wide (RFC 1073 NAWS): 0 — do not wrap —
+# when the client never reported a width or reported 0 ("no width is being
+# sent", RFC 1073); otherwise cols - 1, at least 1. One column is left free
+# because a terminal that wraps as soon as it writes the last column (the old
+# Windows console, a dumb terminal — no VT100 last-column flag) would show a
+# full-width row followed by CR LF as a row and a blank line.
+fn term_wrap_width(cols): i64 {
+    if (cols <= 0) { return 0; }
+    if (cols <= 2) { return 1; }
+    return cols - 1;
+}
+
+# 1 if lo <= cp <= hi, else 0.
+fn term_in(cp, lo, hi): i64 {
+    if (cp < lo) { return 0; }
+    if (cp > hi) { return 0; }
+    return 1;
+}
+
+# Display columns of code point `cp` (>= 0x80) in a terminal: 0 for combining
+# marks, zero-width characters and variation selectors; 2 for the East Asian
+# Wide / Fullwidth blocks and the emoji blocks; 1 otherwise. An approximation
+# of wcwidth(3) by block, not the full Unicode East Asian Width table — and
+# terminals do not agree on that table either. A miss costs a row one column
+# too wide or too narrow.
+fn term_cp_cols(cp): i64 {
+    if (cp < 0xA0) { return 0; }                               # C1 controls (sanitized away in text)
+    if (cp < 0x300) { return 1; }
+    if (term_in(cp, 0x300, 0x36F) == 1) { return 0; }          # combining diacritical marks
+    if (term_in(cp, 0x483, 0x489) == 1) { return 0; }          # Cyrillic combining marks
+    if (term_in(cp, 0x1100, 0x115F) == 1) { return 2; }        # Hangul Jamo initials
+    if (term_in(cp, 0x1AB0, 0x1AFF) == 1) { return 0; }        # combining marks extended
+    if (term_in(cp, 0x1DC0, 0x1DFF) == 1) { return 0; }        # combining marks supplement
+    if (term_in(cp, 0x200B, 0x200F) == 1) { return 0; }        # zero-width space / joiners / marks
+    if (term_in(cp, 0x202A, 0x202E) == 1) { return 0; }        # bidi embeddings / overrides
+    if (term_in(cp, 0x2060, 0x2069) == 1) { return 0; }        # word joiner, invisible operators, isolates
+    if (term_in(cp, 0x20D0, 0x20FF) == 1) { return 0; }        # combining marks for symbols
+    if (term_in(cp, 0x2E80, 0x303E) == 1) { return 2; }        # CJK radicals, symbols, punctuation
+    if (term_in(cp, 0x3041, 0x33FF) == 1) { return 2; }        # kana, bopomofo, CJK compatibility
+    if (term_in(cp, 0x3400, 0x4DBF) == 1) { return 2; }        # CJK extension A
+    if (term_in(cp, 0x4E00, 0x9FFF) == 1) { return 2; }        # CJK unified ideographs
+    if (term_in(cp, 0xA000, 0xA4CF) == 1) { return 2; }        # Yi
+    if (term_in(cp, 0xA960, 0xA97F) == 1) { return 2; }        # Hangul Jamo extended A
+    if (term_in(cp, 0xAC00, 0xD7A3) == 1) { return 2; }        # Hangul syllables
+    if (term_in(cp, 0xF900, 0xFAFF) == 1) { return 2; }        # CJK compatibility ideographs
+    if (term_in(cp, 0xFE00, 0xFE0F) == 1) { return 0; }        # variation selectors
+    if (term_in(cp, 0xFE10, 0xFE19) == 1) { return 2; }        # vertical forms
+    if (term_in(cp, 0xFE20, 0xFE2F) == 1) { return 0; }        # combining half marks
+    if (term_in(cp, 0xFE30, 0xFE6F) == 1) { return 2; }        # CJK compatibility / small forms
+    if (cp == 0xFEFF) { return 0; }                            # zero-width no-break space
+    if (term_in(cp, 0xFF00, 0xFF60) == 1) { return 2; }        # fullwidth forms
+    if (term_in(cp, 0xFFE0, 0xFFE6) == 1) { return 2; }        # fullwidth signs
+    if (term_in(cp, 0x1F300, 0x1F64F) == 1) { return 2; }      # pictographs, emoticons
+    if (term_in(cp, 0x1F680, 0x1F6FF) == 1) { return 2; }      # transport and map symbols
+    if (term_in(cp, 0x1F900, 0x1F9FF) == 1) { return 2; }      # supplemental pictographs
+    if (term_in(cp, 0x1FA70, 0x1FAFF) == 1) { return 2; }      # pictographs extended A
+    if (term_in(cp, 0x20000, 0x3FFFD) == 1) { return 2; }      # CJK extensions B and later
+    if (term_in(cp, 0xE0100, 0xE01EF) == 1) { return 0; }      # variation selectors supplement
+    return 1;
+}
+
+# Length of the escape sequence at buf[i] (buf[i] == ESC), within buf[i..e): a
+# CSI (ESC '[', parameter and intermediate bytes 0x20-0x3F, one final byte
+# 0x40-0x7E — an SGR colour is one) whole, otherwise ESC and the byte after it.
+fn term_esc_len(buf, i, e): i64 {
+    if (i + 1 >= e) { return 1; }
+    if ((load8(buf + i + 1) & 0xFF) != 91) { return 2; }
+    var j = i + 2;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (j >= e) { scanning = 0; continue; }
+        var b = load8(buf + j) & 0xFF;
+        if (term_in(b, 0x20, 0x3F) == 0) { scanning = 0; continue; }
+        j = j + 1;
+    }
+    if (j < e) {
+        if (term_in(load8(buf + j) & 0xFF, 0x40, 0x7E) == 1) { j = j + 1; }
+    }
+    return j - i;
+}
+
+# Display one character: the column after buf[i] shown at column `col`, with the
+# bytes it spans (>= 1) stored at `np`. A UTF-8 sequence is one character; a
+# byte that does not start a whole, well-formed sequence counts as one column
+# (the sanitizer turns it into one '?', and a terminal shows one replacement
+# character). Other control bytes take no column.
+fn term_step(buf, i, e, col, np): i64 {
+    var b = load8(buf + i) & 0xFF;
+    store64(np, 1);
+    if (b < 0x80) {
+        if (b == 127) { return col; }
+        if (b >= 32) { return col + 1; }
+        if (b == 9) { return (col / TERM_TAB_STOP + 1) * TERM_TAB_STOP; }
+        if (b == 27) { store64(np, term_esc_len(buf, i, e)); }
+        return col;
+    }
+    if (b < 0xC0) { return col + 1; }
+    if (b >= 0xF8) { return col + 1; }
+    var len = 4;
+    var cp = b & 0x07;
+    if (b < 0xE0) { len = 2; cp = b & 0x1F; }
+    else { if (b < 0xF0) { len = 3; cp = b & 0x0F; } }
+    if (i + len > e) { return col + 1; }
+    var ok = 1;
+    var k = 1;
+    while (k < len) {
+        var cb = load8(buf + i + k) & 0xFF;
+        if (term_in(cb, 0x80, 0xBF) == 0) { ok = 0; }
+        cp = (cp << 6) | (cb & 0x3F);
+        k = k + 1;
+    }
+    if (ok == 0) { return col + 1; }
+    store64(np, len);
+    return col + term_cp_cols(cp);
+}
+
+# The column after displaying buf[s..e) from column `col`.
+fn term_cols(buf, s, e, col): i64 {
+    var nb[8];
+    var c = col;
+    var i = s;
+    while (i < e) {
+        c = term_step(buf, i, e, c, &nb);
+        i = i + load64(&nb);
+    }
+    return c;
+}
+
+# 1 if byte `b` is a space or a TAB — where a line may break.
+fn term_is_ws(b): i64 {
+    if (b == 32) { return 1; }
+    if (b == 9) { return 1; }
+    return 0;
+}
+
+# The first index at or after p in buf[p..e) that is not a space or TAB.
+fn term_skip_ws(buf, p, e): i64 {
+    var i = p;
+    var going = 1;
+    while (going == 1) {
+        if (i >= e) { going = 0; continue; }
+        if (term_is_ws(load8(buf + i) & 0xFF) == 0) { going = 0; continue; }
+        i = i + 1;
+    }
+    return i;
+}
+
+# The end of the word at or after i in buf[i..e): whitespace skipped, then
+# characters up to the next space / TAB or e. Steps by whole characters, so an
+# escape sequence (whose bytes may include a space) is never split.
+fn term_word_end(buf, i, e): i64 {
+    var nb[8];
+    var p = term_skip_ws(buf, i, e);
+    var going = 1;
+    while (going == 1) {
+        if (p >= e) { going = 0; continue; }
+        if (term_is_ws(load8(buf + p) & 0xFF) == 1) { going = 0; continue; }
+        term_step(buf, p, e, 0, &nb);
+        p = p + load64(&nb);
+    }
+    return p;
+}
+
+# The end (exclusive) of the row that starts at buf[s], at column `col`, of a
+# line whose text ends at `e` (no line terminator inside [s, e)), for rows
+# `width` columns wide:
+#   - e, when the rest of the line fits;
+#   - otherwise the index of the whitespace after the last word that fits;
+#   - when not even one word fits: s if `fresh` is 0 (the row already holds
+#     text, so breaking first gains room), else the end of the first word — a
+#     word wider than a fresh row goes out whole rather than cut.
+# A row never ends inside a character or an escape sequence. When `fresh` is 1
+# and s < e the result is > s, which is what guarantees progress.
+fn term_row_end(buf, s, e, col, width, fresh): i64 {
+    var nb[8];
+    var c = col;
+    var i = s;
+    var brk = 0 - 1;
+    var inword = 0;
+    while (i < e) {
+        var b = load8(buf + i) & 0xFF;
+        var step = 1;
+        # Printable ASCII and SPACE — nearly all text — inline: one column, one
+        # byte. Everything else (TAB, controls, ESC, UTF-8) goes through term_step.
+        if (b >= 32) {
+            if (b < 127) {
+                if (b == 32) {
+                    if (inword == 1) { brk = i; }
+                    inword = 0;
+                } else {
+                    inword = 1;
+                }
+                c = c + 1;
+                step = 0;
+            }
+        }
+        if (step == 1) {
+            if (b == 9) {
+                if (inword == 1) { brk = i; }
+                inword = 0;
+            } else {
+                inword = 1;
+            }
+            c = term_step(buf, i, e, c, &nb);
+        }
+        if (c > width) {
+            if (brk >= 0) { return brk; }
+            if (fresh == 0) { return s; }
+            return term_word_end(buf, i, e);
+        }
+        if (step == 1) { i = i + load64(&nb); }
+        else { i = i + 1; }
+    }
+    return e;
+}
+
+# The continuation indent for the line buf[s..e): the caller's `hang`, plus the
+# line's own leading whitespace under TW_AUTO, or plus its leading "<tag> " under
+# TW_TAG — capped at half the width, so a continuation row always has room.
+fn term_line_hang(buf, s, e, hang, flags, width): i64 {
+    var h = hang;
+    if ((flags & TW_AUTO) != 0) {
+        h = h + term_cols(buf, s, term_skip_ws(buf, s, e), 0);
+    }
+    if ((flags & TW_TAG) != 0) {
+        if (s < e) {
+            if ((load8(buf + s) & 0xFF) == 60) {                  # '<'
+                var lim = s + TERM_TAG_MAX;
+                if (lim > e) { lim = e; }
+                var j = s + 1;
+                var gt = 0 - 1;
+                while (j < lim) {
+                    if (gt < 0) { if ((load8(buf + j) & 0xFF) == 62) { gt = j; } }   # '>'
+                    j = j + 1;
+                }
+                if (gt > 0) {
+                    var k = gt + 1;
+                    if (k < e) { if ((load8(buf + k) & 0xFF) == 32) { k = k + 1; } }
+                    h = h + term_cols(buf, s, k, 0);
+                }
+            }
+        }
+    }
+    var cap = width / 2;
+    if (h > cap) { h = cap; }
+    if (h < 0) { h = 0; }
+    return h;
+}
+
+# Start wrapping `n` bytes at `src` into rows `width` columns wide (>= 1). The
+# first row starts at column `col0` (text already on the row, e.g. a `list`
+# row's id and author before its subject); continuation rows start at `hang`
+# (see term_line_hang for TW_AUTO / TW_TAG). `st` is WS_SIZE bytes.
+fn term_wrap_init(st, src, n, col0, hang, flags, width): i64 {
+    store64(st + WS_SRC, src);
+    store64(st + WS_N, n);
+    store64(st + WS_POS, 0);
+    store64(st + WS_COL, col0);
+    store64(st + WS_WIDTH, width);
+    store64(st + WS_HANG, hang);
+    store64(st + WS_FLAGS, flags);
+    store64(st + WS_LHANG, 0);
+    store64(st + WS_LEND, 0);
+    store64(st + WS_TEND, 0);
+    store64(st + WS_REND, 0);
+    store64(st + WS_PHASE, WP_LINE);
+    store64(st + WS_BRK, 0);
+    return 0;
+}
+
+# Write the next part of the wrapped text into out[0..cap), cap >= 1. Returns
+# the bytes written, and 0 only when the text is finished. Lines end at LF (a CR
+# just before it belongs to the terminator), and each line's terminator is
+# copied as it was; a break writes CR LF and the line's hang in spaces.
+fn term_wrap_chunk(st, out, cap): i64 {
+    var src = load64(st + WS_SRC);
+    var width = load64(st + WS_WIDTH);
+    var o = 0;
+    var going = 1;
+    while (going == 1) {
+        if (o >= cap) { going = 0; continue; }
+        var bl = load64(st + WS_BRK);
+        if (bl > 0) {
+            var k = 2 + load64(st + WS_LHANG) - bl;   # index into CR LF + hang
+            var ch = 32;
+            if (k == 0) { ch = 13; }
+            if (k == 1) { ch = 10; }
+            store8(out + o, ch);
+            o = o + 1;
+            store64(st + WS_BRK, bl - 1);
+            continue;
+        }
+        var ph = load64(st + WS_PHASE);
+        var pos = load64(st + WS_POS);
+        if (ph == WP_DONE) { going = 0; continue; }
+        if (ph == WP_LINE) {
+            var n = load64(st + WS_N);
+            if (pos >= n) { store64(st + WS_PHASE, WP_DONE); continue; }
+            # Find the line's end, counting its TABs. Every other byte shows in
+            # at most one column (a UTF-8 character spans 2-4 bytes for 1-2
+            # columns; controls and escape sequences take none), so a line with
+            # no TAB whose bytes fit the row fits it, and is copied whole —
+            # terminator and all — without being measured again.
+            var li = pos;
+            var tabs = 0;
+            var scanning = 1;
+            while (scanning == 1) {
+                if (li >= n) { scanning = 0; continue; }
+                var lb = load8(src + li) & 0xFF;
+                if (lb == 10) { scanning = 0; continue; }
+                if (lb == 9) { tabs = tabs + 1; }
+                li = li + 1;
+            }
+            var lend = li;
+            var tend = li;
+            if (li < n) {
+                tend = li + 1;
+                if (li > pos) { if ((load8(src + li - 1) & 0xFF) == 13) { lend = li - 1; } }
+            }
+            store64(st + WS_LEND, lend);
+            store64(st + WS_TEND, tend);
+            if (tabs == 0) {
+                if (load64(st + WS_COL) + (lend - pos) <= width) {
+                    store64(st + WS_REND, tend);
+                    store64(st + WS_PHASE, WP_TERM);
+                    continue;
+                }
+            }
+            var lhang = term_line_hang(src, pos, lend, load64(st + WS_HANG), load64(st + WS_FLAGS), width);
+            store64(st + WS_LHANG, lhang);
+            store64(st + WS_PHASE, WP_ROW);
+            continue;
+        }
+        if (ph == WP_ROW) {
+            var rlend = load64(st + WS_LEND);
+            if (pos >= rlend) {
+                store64(st + WS_REND, load64(st + WS_TEND));
+                store64(st + WS_PHASE, WP_TERM);
+                continue;
+            }
+            var col = load64(st + WS_COL);
+            var lh = load64(st + WS_LHANG);
+            var fresh = 0;
+            if (col <= lh) { fresh = 1; }
+            var r = term_row_end(src, pos, rlend, col, width, fresh);
+            if (r == pos) {
+                # Nothing more fits on a row that already holds text: break first.
+                store64(st + WS_POS, term_skip_ws(src, pos, rlend));
+                store64(st + WS_BRK, 2 + lh);
+                store64(st + WS_COL, lh);
+                continue;
+            }
+            store64(st + WS_REND, r);
+            store64(st + WS_PHASE, WP_SLICE);
+            continue;
+        }
+        # WP_SLICE / WP_TERM: copy src[pos..rend).
+        var rend = load64(st + WS_REND);
+        if (pos < rend) {
+            var take = rend - pos;
+            if (take > cap - o) { take = cap - o; }
+            memcpy(out + o, src + pos, take);
+            o = o + take;
+            store64(st + WS_POS, pos + take);
+            continue;
+        }
+        if (ph == WP_TERM) {
+            store64(st + WS_COL, 0);
+            store64(st + WS_PHASE, WP_LINE);
+            continue;
+        }
+        # A row is out. Drop the whitespace at the break; if the line goes on,
+        # the next row starts after CR LF and the hang.
+        var slend = load64(st + WS_LEND);
+        var p = term_skip_ws(src, pos, slend);
+        store64(st + WS_POS, p);
+        store64(st + WS_PHASE, WP_ROW);
+        if (p < slend) {
+            var shang = load64(st + WS_LHANG);
+            store64(st + WS_BRK, 2 + shang);
+            store64(st + WS_COL, shang);
+        }
+    }
+    return o;
+}

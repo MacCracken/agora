@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-12 (1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-13 (1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -76,6 +76,38 @@ A real BBS connection mixes ~99% plain bytes with sporadic IAC events. Even sust
 
 A first cut that staged every three-byte reply through a buffer to make it atomic cost ~10 ns per negotiation
 (74 / 85 ns); a room check before pushing does the same job at the old cost.
+
+## Word wrap — 1.10.1
+
+`cyrius bench benches/bench_term.bcyr`: the cost of `term_wrap_chunk` ([ADR 0030](docs/adr/0030-terminal-aware-output.md)),
+which every door frame, `list` row, post body and chat line goes through once a client has reported a window
+width. A line with no TAB whose bytes fit the row is copied without being measured, which is most of what a
+door or an ordinary post holds.
+
+| Benchmark | First cut | 1.10.1 | What's exercised |
+|---|---:|---:|---|
+| `term/frame_fits_80` | 8.7 µs | **2.9 µs** | A Smuggler-sized door frame (18 rows, ~600 B, SGR), 80 columns: nothing breaks |
+| `term/frame_wrap_40` | 8.9 µs | **3.8 µs** | The same frame at 40 columns: its long rows break |
+| `term/body4k_fits_80` | 63 µs | **19 µs** | A 4 KB body of 60-column lines at 80 columns |
+| `term/body4k_wrap_40` | 64 µs | **40 µs** | A 4 KB paragraph at 40 columns (~10 ns/byte) |
+
+"First cut" measured a function call per character. 1.10.1 inlines printable ASCII and adds the whole-line fast
+path.
+
+End to end, `read` of a 60 KB post (poll-server CPU per command, 150 reads, from `/proc/<pid>/stat`):
+
+| Post shape | No NAWS | 80 columns | 40 columns |
+|---|---:|---:|---:|
+| 70-column lines | 1.0 ms | 1.3 ms | 2.1 ms |
+| 950-column paragraphs | 1.0 ms | 1.7 ms | 1.7 ms |
+
+Without NAWS, `send_wrapped` takes `send_text`'s path: the same bytes at the same cost. A fork child measures
+1.6 → 1.7 ms wall for the paragraph post: it sends in 2 KB chunks instead of 504-byte ones, so it makes fewer
+`write(2)` calls.
+
+**`list` got cheaper**: each row is composed and sent once (it was seven sends). Under fork every send is a
+`write(2)`, so a 300-post `list` went from **16.1 ms to 4.3 ms** wall (median of 40), with or without NAWS.
+Under poll the sends only fill the queue: ~23.2 ms either way, inside one 20 ms sweep.
 
 ## Serve-level baselines — 1.8.2 (first measured)
 
@@ -180,6 +212,7 @@ Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply`, 
 
 ```sh
 cyrius bench benches/bench_telnet.bcyr      # parser (this table)
+cyrius bench benches/bench_term.bcyr        # word wrap (§ Word wrap — 1.10.1)
 benches/serve-bench.py all                  # accept rate, per-session memory, world lock, reply scan, login
 ```
 
@@ -188,5 +221,6 @@ For ongoing tracking across releases, append the output to `bench-history.csv` (
 ## Cross-references
 
 - [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) — the source of these numbers.
+- [`benches/bench_term.bcyr`](benches/bench_term.bcyr) — the word-wrap numbers (1.10.1).
 - [`docs/development/state.md`](docs/development/state.md) — current version + binary size + in-flight slot.
 - [first-party-documentation § Benchmarks and Performance Docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#benchmarks-and-performance-docs) — convention for `BENCHMARKS.md` (root-level summary) vs. `docs/development/performance.md` (prose) vs. `docs/benchmarks.md` (history).

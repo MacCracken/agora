@@ -44,3 +44,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0027 | [The reply index: one verified record file per parent](0027-reply-index.md) | Accepted (2026-10-13) — 1.9.1; amends 0005 |
 | 0028 | [Board policy modes that mean something: members-only, anonymous posting, admins by key](0028-board-policy-modes.md) | Accepted (2026-10-13) — 1.9.2; amends 0006 |
 | 0029 | [Telnet conformance: agora as the LINEMODE server, and the line editor](0029-telnet-conformance.md) | Accepted (2026-10-13) — 1.10.0 |
+| 0030 | [Terminal-aware output: wrap to the window the client reports](0030-terminal-aware-output.md) | Accepted (2026-10-13) — 1.10.1 |

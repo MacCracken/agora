@@ -1,0 +1,116 @@
+# bench_term.bcyr — the cost of wrapping output to the client's window
+# (src/term.cyr, 1.10.1, ADR 0030).
+#
+# A session with a NAWS width sends every door frame, `list` row, post body and
+# chat line through term_wrap_chunk. These time the two shapes that matter, each
+# where nothing needs to break (the common case — a frame that fits) and where
+# most lines do: a Smuggler-sized door frame (18 rows, ~600 bytes, SGR colour)
+# and a 4 KB post body of long paragraph lines. Run with:
+#   cyrius bench benches/bench_term.bcyr
+
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "src/term.cyr"
+
+var g_frame = 0;
+var g_frame_len = 0;
+var g_body = 0;
+var g_body_len = 0;
+var g_out = 0;
+var g_st = 0;
+
+# Wrap buf[0..n) at `width` into g_out in 2 KB chunks, as send_wrapped does.
+fn wrap_into(buf, n, flags, width): i64 {
+    term_wrap_init(g_st, buf, n, 0, 0, flags, width);
+    var k = 1;
+    var total = 0;
+    while (k > 0) {
+        k = term_wrap_chunk(g_st, g_out, 2048);
+        total = total + k;
+    }
+    return total;
+}
+
+# B1 — a door frame on an 80-column window: every row fits, nothing breaks.
+fn work_frame_fits(): i64 {
+    wrap_into(g_frame, g_frame_len, TW_RAW | TW_AUTO, 79);
+    return 0;
+}
+
+# B2 — the same frame on a 40-column window: the long rows break.
+fn work_frame_40(): i64 {
+    wrap_into(g_frame, g_frame_len, TW_RAW | TW_AUTO, 39);
+    return 0;
+}
+
+# B3 — a 4 KB body whose lines all fit (60-column lines, 80-column window).
+fn work_body_fits(): i64 {
+    wrap_into(g_body, g_body_len, TW_AUTO, 79);
+    return 0;
+}
+
+# B4 — a 4 KB body of one long paragraph on a 40-column window.
+fn work_body_40(): i64 {
+    wrap_into(g_frame + 4096, 4096, TW_AUTO, 39);
+    return 0;
+}
+
+# Append cstring `s` to buf at `pos`; returns the new position.
+fn put(buf, pos, s): i64 {
+    var n = strlen(s);
+    memcpy(buf + pos, s, n);
+    return pos + n;
+}
+
+# Build the inputs (outside the timed region), run B1-B4 in batches of
+# 2,000 x 10 rounds, and print every result.
+fn main(): i64 {
+    alloc_init();
+    g_frame = alloc(8192 + 4096);
+    g_body = alloc(8192);
+    g_out = alloc(4096);
+    g_st = alloc(WS_SIZE);
+    var p = 0;
+    p = put(g_frame, p, "\x1b[33m== SMUGGLER'S LEDGER ==\x1b[0m\r\nDay 1/30   The Docks\r\n");
+    p = put(g_frame, p, "Cash 2000   Bank 0   Debt 5500\r\nHP 100   Guns 0   Coat 0/100\r\n\r\n");
+    p = put(g_frame, p, " #  GOODS       PRICE   HELD\r\n");
+    var r = 0;
+    while (r < 8) {
+        p = put(g_frame, p, " 1  loosies    30      0\r\n");
+        r = r + 1;
+    }
+    p = put(g_frame, p, "\r\n\x1b[36m[B]uy  [S]ell  [J]et  [L]oanshark  ban[K]  [F]ixer  [D]ice  [Q]uit\x1b[0m\r\n");
+    p = put(g_frame, p, "Prices move every day; the loanshark's interest compounds while you sail.\r\n> ");
+    g_frame_len = p;
+    var q = 0;
+    while (q < 4096) {
+        memcpy(g_frame + 4096 + q, "word ", 5);
+        q = q + 5;
+    }
+    var b = 0;
+    while (b + 61 <= 4096) {
+        memcpy(g_body + b, "a sixty-column line of ordinary prose, the way people write.\n", 61);
+        b = b + 61;
+    }
+    g_body_len = b;
+
+    var all = vec_new();
+    var b1 = bench_new("term/frame_fits_80");
+    bench_run_batch(b1, &work_frame_fits, 2000, 10);
+    vec_push(all, b1);
+    var b2 = bench_new("term/frame_wrap_40");
+    bench_run_batch(b2, &work_frame_40, 2000, 10);
+    vec_push(all, b2);
+    var b3 = bench_new("term/body4k_fits_80");
+    bench_run_batch(b3, &work_body_fits, 2000, 10);
+    vec_push(all, b3);
+    var b4 = bench_new("term/body4k_wrap_40");
+    bench_run_batch(b4, &work_body_40, 2000, 10);
+    vec_push(all, b4);
+    bench_report_all(all);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

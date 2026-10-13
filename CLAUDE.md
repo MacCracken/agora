@@ -40,6 +40,7 @@ cyrius build src/main.cyr build/agora        # build
 ./build/agora version                         # version stamp
 cyrius test                                   # unit tests: tests/agora.tcyr (modules) + tests/serve.tcyr (main.cyr's serve layer)
 cyrius fuzz fuzz/telnet_iac.fcyr              # fuzz the IAC parser (also --poison=ab; both in CI + release)
+cyrius fuzz fuzz/term_wrap.fcyr               # fuzz the word wrap egress text goes through (1.10.1; same gates)
 docs/examples/run.sh [--model fork|poll] [NN] # the example smokes, each with the server it needs (CI runs both models)
 benches/serve-bench.py all                    # accept rate, per-session memory, world-lock contention
 scripts/check-version-sync.sh                 # VERSION vs cyrius.cyml / binary / CHANGELOG / state.md / roadmap
@@ -119,7 +120,7 @@ Severity levels: **CRITICAL** (remote / privilege escalation), **HIGH** (moderat
 
 ### Closeout Pass (before every minor/major bump)
 
-1. **Full test suite** — a bare `cyrius test`, zero failures: it runs every `tests/*.tcyr` — `tests/agora.tcyr` (the module suite; `src/test.cyr` until 1.8.2) and `tests/serve.tcyr` (main.cyr's serve layer, which includes `src/main.cyr` under `#define AGORA_TEST`). Also `cyrius fuzz fuzz/telnet_iac.fcyr`, plain and `--poison=ab`, and the example smokes via `docs/examples/run.sh` (all CI + release gates since 1.8.2).
+1. **Full test suite** — a bare `cyrius test`, zero failures: it runs every `tests/*.tcyr` — `tests/agora.tcyr` (the module suite; `src/test.cyr` until 1.8.2) and `tests/serve.tcyr` (main.cyr's serve layer, which includes `src/main.cyr` under `#define AGORA_TEST`). Also both fuzz harnesses — `cyrius fuzz fuzz/telnet_iac.fcyr` and `fuzz/term_wrap.fcyr` (1.10.1) — plain and `--poison=ab`, and the example smokes via `docs/examples/run.sh` (all CI + release gates since 1.8.2).
 2. **Benchmark baseline** — `cyrius bench benches/bench_telnet.bcyr` + `benches/serve-bench.py all`; compare against the prior closeout in BENCHMARKS.md. **Run `scripts/check-toolchain.sh` first** — a dirty local toolchain snapshot once moved a measured binary by 215 KB
 3. **Dead code audit** — remove unused functions; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel codepaths accreted

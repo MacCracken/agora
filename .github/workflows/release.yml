@@ -60,6 +60,8 @@ jobs:
           cyrius test
           cyrius fuzz fuzz/telnet_iac.fcyr
           cyrius fuzz --poison=ab fuzz/telnet_iac.fcyr
+          cyrius fuzz fuzz/term_wrap.fcyr
+          cyrius fuzz --poison=ab fuzz/term_wrap.fcyr
 
       - name: Package
         # 1.8.2 — named per target, with SHA-256 checksums.
