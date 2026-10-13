@@ -9,10 +9,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The roadmap's two tooling slots — 1.8.2 *mechanical gates* and 1.8.3 *measure* — cut as one release. Every
 step of the Closeout Pass that a person used to perform by hand now runs in CI, the serve layer in
 `src/main.cyr` is unit-tested for the first time, and the serve-level numbers four ADRs were waiting on exist.
-One user-visible fix rode along because a new benchmark found it: a ~40 ms Nagle stall on every multi-part
-response under the default fork model.
+Two user-visible fixes rode along, each found by the new tooling: a ~40 ms Nagle stall on every multi-part
+response under the default fork model (a new benchmark), and a fork child that a non-reading client held for
+three send timeouts instead of one (a new smoke, on its first GitHub run).
 
-**238** tests (232 module + 6 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`;
+**239** tests (232 module + 7 serve-layer), also on aarch64 under qemu; fuzz plain and `--poison=ab`;
 **31/31** example smokes, **52/52 runs** under both serve models through the new runner; **`cyrius audit`
 exits 0** for the first time. `build/agora` **986,144 → 986,152 B**; `--agnos` 982,656 → 982,664 B; `--aarch64`
 2,415,440 → 2,415,456 B.
@@ -25,15 +26,16 @@ exits 0** for the first time. `build/agora` **986,144 → 986,152 B**; `--agnos`
   Every release from 1.6.7 to 1.8.1 was verified with a throwaway harness, and the README's "run them in
   order" contract never held. It refuses to start if `./bbs` or `./keys` already exist.
 - **`tests/serve.tcyr` — `src/main.cyr`'s first unit tests.** `main.cyr` runs its entry point only when
-  `AGORA_TEST` is undefined, so a test can include it. Six tests over a real socketpair: the tx queue's
+  `AGORA_TEST` is undefined, so a test can include it. Seven tests over a real socketpair: the tx queue's
   drain-compact-overflow (1.8.1 M8), the per-sweep line budget (H2), compose lines not budgeted, the
-  fork-mode sticky send failure (M10), door checkpoint-on-close plus the play lock (M1), and the shutdown
-  signalfd round trip (1.7.0 N1). Each is mutation-checked (breaking the guarded behaviour turns it red).
+  fork-mode sticky send failure (M10), door checkpoint-on-close plus the play lock (M1), the shutdown
+  signalfd round trip (1.7.0 N1), and a short fork-mode write failing after one timeout (see Fixed). Each is mutation-checked (breaking the guarded behaviour turns it red).
   Also passes under qemu-aarch64.
 - **`docs/examples/31-slow-reader.py`** — the slow-reader close path (1.6.3 / 1.7.0 / 1.8.1), a HIGH fix three
   times over, pinned at last: a client that asks for ~12 MB and reads nothing is disconnected — under poll at
-  once, with a bystander's echo unaffected; under fork within two send timeouts. A 1.8.0 build fails the fork
-  half. `--fast` skips it.
+  once, with a bystander's echo unaffected; under fork within one send timeout, watched from outside (the
+  connection's child exiting) because reading the socket would un-stall the writer. A 1.8.0 build fails the
+  fork half, and so did this release's own first cut (see Fixed). `--fast` skips it.
 - **`benches/serve-bench.py`** — accept rate, per-session memory, world-lock contention and reply-scan latency,
   per serve model (BENCHMARKS.md § Serve-level baselines). Headlines: fork accepts ~4,100 connections/s
   sequentially, poll exactly 50 (one per 20 ms sweep — it sleeps rather than waiting for readiness); an idle
@@ -84,28 +86,43 @@ exits 0** for the first time. `build/agora` **986,144 → 986,152 B**; `--agnos`
   sends, and Nagle held each one after the first until the client's delayed (~40 ms) ACK; with the client
   acknowledging immediately the same read took 2.6 ms. Accepted sockets now get `TCP_NODELAY` (both models; a
   no-op decline on agnos): `read` on 500 posts **41.0 → 3.4 ms**, fork accept rate 3,771 → 4,077 conn/s.
+- **A fork child outlived a non-reading client by two extra send timeouts** — 186 s, not the 60 s the
+  1.8.1 sticky-send fix (M10) meant. `send_buf` treated a SHORT write as success and retried the rest; on a
+  blocking socket a short write means `SO_SNDTIMEO` expired after copying part of the buffer, so the latch
+  fired only on a write that gained no bytes at all. A zero-window TCP peer does not guarantee that: on a
+  probe's ACK Linux still took 2 KB more into a 2.86 MB send queue while the client had acknowledged 4,521 B,
+  and that "progress" bought the writer another 60 s (deterministic: 6/6 trials, 186.0 s, Linux 7.2). A short
+  write now fails and latches like a failed one — the rule `send_buf`'s header comment always stated. The
+  bound is per write, not per post: a slow reader that keeps freeing room is not dropped (one that leaves
+  the kernel no room for 60 s was already dropped by the zero-byte case). Found by smoke 31 on the first
+  GitHub run of the new smoke job; pinned by `s07`, which fails on the old retry loop.
 - `docs/examples/run.sh` waits for the smoke port to be free before starting a server: a self-starting smoke
   still tearing down its own server on 2323 made a failed bind look like a started server (found on its own
   first full run).
 
 ### Verification
 
-- `cyrius test`: **232/232** (tests/agora.tcyr) + **6/6** (tests/serve.tcyr), the same under
+- `cyrius test`: **232/232** (tests/agora.tcyr) + **7/7** (tests/serve.tcyr), the same under
   `cyrius test --aarch64` (qemu). Fuzz 1/1 plain, `--poison`, `--poison=ab`. `cyrius audit` **exit 0** (fmt,
   lint, docs, tests, bench). `scripts/check-version-sync.sh` and `scripts/check-toolchain.sh` OK.
 - `docs/examples/run.sh`: **52 passed, 0 failed, 0 skipped** (31 smokes; 20 ran against the sibling MUD), on
   the build before the `TCP_NODELAY` change; after it, the connection-heavy subset (04, 05, 07, 11, 15, 20,
   23–28, 30, 31) re-run under both models.
-- The new CI and release workflows were validated as YAML and by running each step's commands locally; they
-  have not yet run on GitHub — the first push is their first real run.
+- The new workflows' first GitHub run (the untagged `2c543ea` push): the aarch64 job and the fork smoke leg
+  passed; the toolchain-provenance step and the poll smoke leg failed, both fixed above (the provenance
+  check's path match; smoke 31 finding the short-write retry). Both legs then re-run locally exactly as CI
+  runs them, on 4 CPUs: **fork 25/25, poll 30/30**. The build-and-test steps after provenance (build, version
+  sync, tests, fuzz, audit) were skipped on that run and have passed only locally so far.
 
 ### Known limitations (recorded, not fixed)
 
 - Poll-mode latency floor of 0–20 ms per command and 50 sequential accepts/s — the sweep sleeps rather than
   waiting for readiness (roadmap § 1.11.0).
 - aarch64 runs under qemu-user only; still nothing on aarch64 hardware. The wire smokes do not run under qemu.
-- Under fork a non-reading client costs up to two send timeouts (~120 s) before its child stops — deliberately
-  not one: a "60 s per call" rule would also drop a legitimately slow reader (a client emulating 2400 baud).
+- Under fork, "slow" and "stalled" are told apart by whether the KERNEL frees send-buffer room within 60 s,
+  not by whether the client acknowledged anything. The exact test needs the socket's unacknowledged-byte
+  count (`SIOCOUTQ` / `TCP_INFO`), which `lib/net.cyr` does not expose and agora does not call raw — roadmap
+  § Unscheduled.
 
 ## [1.8.1] — 2026-10-12 (code audit + repair: one client can no longer starve or exhaust the server)
 

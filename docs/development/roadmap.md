@@ -169,6 +169,7 @@ RFC 854 and RFC 1184 are authoritative; each row is a deviation, and per CLAUDE.
 |---|---|---:|
 | **Sigil identity hand-off across the Descent link** — carry `g_session_fp` / handle into the MUD so a citizen does not re-authenticate. The project's long-standing named "next". | Yeoman's Descent has **no external-identity path** (name + passphrase only), so this needs MUD-side protocol work first. Open questions unchanged from [ADR 0017](../adr/0017-descent-link-gateway.md) § Decision: token format, trust model, co-located vs remote. | large |
 | **macOS / Windows ports** | Gated on `lib/net.cyr` backends upstream; the gate has moved since the 1.0.0 note — re-check what actually remains. `$HOME` keyfile resolution (`/proc/self/environ`) is blocked on the same work. | large |
+| **Tell a slow reader from a stalled one by delivered bytes** (fork mode) — today a write that gets no send-buffer room for 60 s drops the client; the exact test is "did the client acknowledge anything in 60 s", which keeps any reader that is still reading however full the kernel's queue | A `lib/net.cyr` primitive for the unacknowledged-byte count (`SIOCOUTQ` / `TCP_INFO`); agora does not issue raw socket syscalls. Found at 1.8.2 (CHANGELOG § Fixed). | small |
 | **Binary strip / DCE-aware emit** — promised three times as a "v1.x close-out concern" | Toolchain-side: `CYRIUS_DCE=1` NOP-fills dead code but keeps its bytes and all `.bss` (the ~375 KB static-data warning). | medium |
 
 ---

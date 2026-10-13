@@ -101,7 +101,7 @@ all `.bss`; the build still warns `large static data` (≈375 KB).
 | Surface | Status (1.8.2) |
 |---|---|
 | `tests/agora.tcyr` | **232** module tests (src/test.cyr until 1.8.2) — also 232/232 under `cyrius test --aarch64` (qemu) |
-| `tests/serve.tcyr` | **6** serve-layer tests (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
+| `tests/serve.tcyr` | **7** serve-layer tests (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
 | `fuzz/telnet_iac.fcyr` | 1 harness, green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2) |
 | `docs/examples/` | **31** smokes; `run.sh` (1.8.2): **52/52 runs** under both serve models; CI runs it per model |
 | `benches/bench_telnet.bcyr` | 5 parser benchmarks — [`BENCHMARKS.md`](../../BENCHMARKS.md) |
@@ -118,7 +118,8 @@ durable posts + store hardening** (crash-safe post writes via temp + `link()`; `
 
 - **1.8.2** (2026-10-13) — tooling: the Closeout Pass in CI (smokes under both models, aarch64, audit,
   version / toolchain checks), `tests/serve.tcyr`, generated version string, serve-level baselines, and a
-  ~40 ms Nagle stall fixed under fork. 238 tests, 31 smokes.
+  ~40 ms Nagle stall fixed under fork, and a fork child no longer outlives a non-reading client by two
+  extra send timeouts. 239 tests, 31 smokes.
 - **1.8.1** (2026-10-12) — code audit + repair: poll fairness (16 pipelining clients: 13.7 s → 22 ms for a
   bystander) and unauthenticated heap growth (listings, login, `list`/`read` on big boards → 0 B/command);
   fail-closed `.policy`/`.admins`; door saves on every close path + a play lock; loader bounds; Descent
@@ -172,7 +173,7 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | `src/chat.cyr` | 427 | chat area ring transcript (ADR 0011) |
 | `src/eliza.cyr` · `src/parry.cyr` · `src/jabberwacky.cyr` | 903 · 522 · 559 | the three chatbots (ADR 0012, 0015) |
 | `src/descent.cyr` | 476 | Descent MUD gateway, TCP byte-proxy (ADR 0017) — no longer calls into `main.cyr` |
-| `tests/agora.tcyr` · `tests/serve.tcyr` | 6,540 · 383 | the module suite · the serve-layer suite (includes `main.cyr`) |
+| `tests/agora.tcyr` · `tests/serve.tcyr` | 6,540 · 413 | the module suite · the serve-layer suite (includes `main.cyr`) |
 
 ## Cross-references
 

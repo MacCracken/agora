@@ -9,16 +9,19 @@
 #
 #   poll — promptly, once the kernel buffers and the 128 KB queue are full,
 #          and without stalling a bystander session meanwhile;
-#   fork — within two 60 s send timeouts: a send that times out having made NO
-#          progress latches, and the child stops. (The first timed-out write
-#          usually reports the few bytes it squeezed in as success, so it is the
-#          second that latches. Before 1.8.1 every later send waited out its own
-#          60 s and the child lived for hours.) Deliberately not "60 s in one
-#          call": that would also drop a legitimately slow reader — a client
-#          emulating 2400 baud takes minutes over a 64 KB post.
+#   fork — within one 60 s send timeout: the first write that times out —
+#          whether or not it copied a few bytes first — latches, and the child
+#          stops. Watched from OUTSIDE (the connection's child process exiting),
+#          because reading the socket is exactly what un-stalls the writer.
+#          Before 1.8.1 every later send waited out its own 60 s and the child
+#          lived for hours; 1.8.1 latched only a write that gained NO bytes, and
+#          on a zero-window peer Linux can still take a few KB into the send
+#          queue on a probe's ACK — the child lived 186 s (three timeouts), as
+#          the first CI run of this smoke found. The bound is per WRITE, not per
+#          post: a slow reader that keeps freeing room (2400 baud) is not dropped.
 #
 # Self-contained: its own store under /tmp, its own servers. --fast skips the
-# fork half (~2.5 min). Success: "OK — ..." and exit 0.
+# fork half (~70 s). Success: "OK — ..." and exit 0.
 #
 # Usage: 31-slow-reader.py [port] [--fast]
 #        AGORA_BIN=/path/to/agora 31-slow-reader.py   (A/B an older build)
@@ -38,6 +41,8 @@ FAST = "--fast" in sys.argv
 BASE = "/tmp/agora-slowreader-smoke-%d" % os.getpid()
 STORE = BASE + "/bbs"
 READS = 200                                      # x ~61 KB of reply each
+FORK_BOUND = 90                                  # SEND_TIMEOUT_SECS (60) + margin
+FORK_GIVE_UP = 240                               # stop watching; report what was measured
 
 fails = []
 
@@ -131,18 +136,40 @@ def poll_half():
         stop(p)
 
 
+def children(pid):
+    """pids whose parent is `pid`, from /proc (field 4 of stat follows the comm's ')')."""
+    kids = []
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open("/proc/%s/stat" % d) as f:
+                    if int(f.read().rsplit(")", 1)[1].split()[1]) == pid:
+                        kids.append(int(d))
+            except (OSError, ValueError, IndexError):
+                pass
+    return kids
+
+
 def fork_half():
-    print("fork — the non-reader's child stops within two send timeouts")
+    print("fork — the non-reader's child stops within one send timeout")
     p = start("fork")
     if not p:
         check(False, "fork server started")
         return
     try:
+        t0 = time.time()
+        while children(p.pid) and time.time() - t0 < 10:   # start()'s probe connection
+            time.sleep(0.1)
         a = attacker()
         t0 = time.time()
-        time.sleep(140)                          # 2 x SEND_TIMEOUT_SECS (60) + margin
+        while not children(p.pid) and time.time() - t0 < 10:
+            time.sleep(0.1)
+        while children(p.pid) and time.time() - t0 < FORK_GIVE_UP:
+            time.sleep(0.5)
+        took = time.time() - t0
         closed, got = drained_to_eof(a)
-        check(closed, "the fork child closed the non-reading client within %d s" % int(time.time() - t0))
+        check(closed and took < FORK_BOUND,
+              "the fork child closed the non-reading client after %.0f s (bound %d s: one 60 s send timeout + margin)" % (took, FORK_BOUND))
         v = socket.create_connection(("127.0.0.1", PORT), timeout=6)
         time.sleep(0.4)
         check(len(v.recv(65536)) > 0, "the server still accepts and greets")
@@ -170,7 +197,7 @@ def main():
     if fails:
         print("FAIL — %d check(s): %s" % (len(fails), "; ".join(fails)))
         return 1
-    print("OK — slow readers are disconnected (poll: promptly, bystander unaffected; fork: within two send timeouts)")
+    print("OK — slow readers are disconnected (poll: promptly, bystander unaffected; fork: within one send timeout)")
     return 0
 
 

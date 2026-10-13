@@ -349,8 +349,37 @@ fn s06_shutdown_signalfd(): i64 {
     return 0;
 }
 
+# s07 — a SHORT fork-mode write is a failure (1.8.2). A blocking write returns
+# short only when SO_SNDTIMEO expires after copying part of the buffer; until
+# 1.8.2 that counted as success and the rest was retried, so a stalled client
+# cost one full timeout more (on a zero-window TCP peer, several: 186 s measured
+# where one 60 s timeout was meant). 1 MB into an AF_UNIX pair nobody reads, with
+# a 1 s timeout: the write copies a send buffer's worth and times out. One
+# timeout must latch; the pre-1.8.2 retry took two (~2 s).
+fn s07_fork_short_write_fails(): i64 {
+    var name = "s07_fork_short_write_fails";
+    var fds = alloc(16);
+    st_pair(fds);
+    var a = load64(fds);
+    sock_set_send_timeout(a, 1, 0);
+    g_serve_mode = SERVE_FORK;
+    var s = st_session(a);
+    var big = alloc(1048576);
+    var t0 = clock_now_ms();
+    var rc = send_buf(a, big, 1048576);
+    var dt = clock_now_ms() - t0;
+    g_serve_mode = SERVE_POLL;
+    file_close(a);
+    file_close(load64(fds + 8));
+    if (rc != 1) { st_fail(name, "a short write reported success"); return 1; }
+    if (load64(s + SESS_TX_OVF) != 1) { st_fail(name, "the short write was not latched"); return 1; }
+    if (dt >= 1800) { st_fail(name, "the short write was retried (a second send timeout)"); return 1; }
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s06, remove the store, print the totals, and return 1 on any failure.
+# run s01..s07, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -368,6 +397,7 @@ fn serve_tests(): i64 {
     s04_fork_send_failure_is_sticky();
     s05_door_checkpoint_and_play_lock();
     s06_shutdown_signalfd();
+    s07_fork_short_write_fails();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);
