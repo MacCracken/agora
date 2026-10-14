@@ -16,6 +16,15 @@
 # ADR 0017 § Decision): the MUD as built has no external-identity path, so a true
 # hand-off needs an MUD-side protocol first.
 #
+# 1.11.0 (ADR 0031) — a visit is a SESSION STATE (main.cyr MODE_DESCENT), not a
+# call that owns the process: until 1.11.0 `descent_run` blocked in its own
+# poll(2) shuttle for the whole visit, freezing every other session of a poll
+# server (and of agora on agnos, which always polls). This module now holds the
+# non-blocking pieces — dial, connect check, one read, one write — and main.cyr's
+# `descent_pump` moves bytes once per sweep (poll) or per wakeup (fork). The
+# negotiation passing through is watched by telnet.cyr's observer, so the return
+# can adopt the options the client actually holds.
+#
 # Endpoint is OPERATOR config only (<store>/.descent), never client-
 # supplied, so there is no SSRF surface: a citizen cannot point the proxy
 # at an arbitrary host.
@@ -23,66 +32,38 @@
 # Split per CLAUDE.md "pure parsing is testable; socket I/O is wired":
 #   - descent_parse_endpoint / descent_parse_ipv4 / descent_dec — pure,
 #     unit-tested (t207+).
-#   - descent_run / descent_proxy — socket I/O, covered by the wire
-#     smoke 20-descent.sh (like the accept loop, not unit-testable).
+#   - descent_endpoint / descent_dial / descent_connect_check /
+#     descent_mud_read / descent_mud_write — socket I/O, covered by the serve
+#     suite (s11) and the smokes (20, 24, 37).
 
 enum DescentConst {
     DESCENT_CFG_CAP    = 128;        # max bytes read from <store>/.descent
     DESCENT_PATH_CAP   = 512;        # <store>/.descent path buffer (cf PATH_MAX_BYTES)
-    DESCENT_PROXY_BUF  = 4096;       # bidirectional shuttle buffer
-    DESCENT_CONNECT_MS = 4000;       # bounded connect timeout (net_connect_nb)
-    DESCENT_POLL_MS    = 1000;       # poll tick in ms
+    DESCENT_PROXY_BUF  = 4096;       # one read in either direction
+    DESCENT_CONNECT_MS = 4000;       # connect deadline (Linux: polled; agnos: the kernel's own ~8 s)
     DESCENT_IDLE_MS    = 1800000;    # 30 min pure-silence bound (slowloris)
     DESCENT_DEC_MAX    = 16777216;   # overflow guard for the decimal parser
-    # poll(2) revents bits (Linux, cross-arch identical). POLLIN=1 drives
-    # the shuttle; POLLHUP|POLLERR (16|8 = 24) means the peer is gone.
-    DESCENT_POLLIN     = 1;
+    # poll(2) revents bits (Linux, cross-arch identical): POLLOUT reports a
+    # finished connect; POLLHUP|POLLERR (16|8 = 24) a failed one.
+    DESCENT_POLLOUT    = 4;
     DESCENT_POLLDEAD   = 24;
     # EAGAIN. Named locally rather than reusing main.cyr's EWOULDBLOCK_ERR
     # because tests/agora.tcyr links descent.cyr WITHOUT main.cyr — a cross-file
     # constant reference builds in the binary and breaks the test harness.
     DESCENT_EAGAIN     = 11;
-    # 1.6.3 — bound on the non-blocking write retry (see descent_write_all).
-    # 20 ms matches the poll sweep cadence; 10 s is far longer than any healthy
-    # client needs to drain a 4 KB shuttle buffer, and far shorter than the
-    # 30-minute idle bound, so a wedged writer is dropped promptly.
-    DESCENT_WRITE_TICK_MS = 20;
-    DESCENT_WRITE_MS      = 10000;
-    DESCENT_RETRY_MS      = 30000;   # 1.8.1 — after a failed connect, answer "not answering" without dialling
+    DESCENT_RETRY_MS   = 30000;      # 1.8.1 — after a failed connect, answer "not answering" without dialling
+    # 1.11.0 — a visit's phase (main.cyr SESS_DESC_PHASE).
+    DESC_NONE          = 0;
+    DESC_CONNECTING    = 1;          # a non-blocking connect is under way
+    DESC_PROXY         = 2;          # connected: bytes move both ways
 }
-
-# 1.6.5 (audit L4) — the pipelined-input tail.
-#
-# `process_rx` dispatches every complete line sitting in one recv buffer, so a
-# client that sends `descent\r\nnorth\r\n` in a single segment (a script, a
-# paste, any client that coalesces) had `north` handled as a BBS command AFTER
-# the MUD session ended — the MUD never saw it, and the BBS ran it. The proxy
-# needs those bytes, and it is the only consumer, so `process_rx` publishes the
-# remainder of the buffer here before each dispatch and `descent_run` claims it.
-#
-# Declared HERE rather than in main.cyr because tests/agora.tcyr links this module
-# WITHOUT main.cyr — the same constraint that put DESCENT_EAGAIN above. It also
-# reads better next to its only consumer: main.cyr writes, descent.cyr claims.
-#
-# Safe as a global because exactly one line is dispatched at a time per process
-# (the poll sweep runs a session to completion before the next; the fork worker
-# is single-threaded), and it is republished at every dispatch, so a stale tail
-# can never be claimed by a later `descent`.
-var g_pipe_tail = 0;      # ptr into the session rxbuf, or 0
-var g_pipe_len  = 0;      # bytes remaining after the dispatched line
-var g_pipe_taken = 0;     # set by descent_run once it has forwarded them
-
-# 1.8.1 (audit P8) — the poll server's shutdown signalfd, set by serve_poll (-1
-# otherwise). The proxy watches it so SIGTERM is not ignored for as long as a
-# player is in the MUD: on Linux the signal is BLOCKED and routed to that fd,
-# which the sweep only reads between commands. The proxy never reads it, so the
-# sweep still sees it pending on return and shuts down.
-var g_descent_stop_fd = 0 - 1;
 
 # 1.8.1 (audit P8) — wall-clock (ms) before which `descent` does not redial
 # after a failed connect. Under poll each attempt blocked the WHOLE sweep for up
 # to DESCENT_CONNECT_MS (4 s; ~8 s on agnos), so a dead or blackholed endpoint
-# let one logged-in user stall every session 4 s per line. Process-wide.
+# let one logged-in user stall every session 4 s per line. Process-wide. Since
+# 1.11.0 a Linux connect no longer blocks at all; on agnos it still does (the
+# kernel's connect is blocking), so the cooldown stays.
 var g_descent_down_until = 0;
 
 # Parse a non-negative decimal in buf[s, e). Returns the value, or (0-1)
@@ -205,272 +186,101 @@ fn descent_cfg_path(store, out): i64 {
     return sl + 9;
 }
 
-# 1.6.2 — the proxy's own full-write. Returns 0 on success, 1 on a dead peer.
-#
-# The shuttle must NOT use `send_buf` for either direction. In SERVE_POLL mode
-# `send_buf` ignores its fd argument entirely and enqueues to the ACTIVE
-# SESSION's tx queue (see send_buf in main.cyr) — which is right for ordinary BBS
-# output and wrong for a proxy in both directions at once:
-#   - client → MUD went to the client's own tx queue, so the MUD received
-#     nothing at all. The gateway was silently broken under `AGORA_SERVE=poll`
-#     from 1.6.0 until this fix (verified with a fake MUD: under fork the bytes
-#     arrive, under poll the MUD log stays empty).
-#   - MUD → client landed in that queue correctly, but the queue is drained by
-#     `session_drain` from the sweep loop — which cannot run while this function
-#     is looping — so MUD output would sit there until it overflowed SESS_TX_CAP.
-# Both fds here are plain sockets we own for the life of the proxy, so we write
-# to them directly and keep the shuttle byte-transparent (ADR 0017).
-#
-# EAGAIN is a retry, not an error: in poll mode the client fd is O_NONBLOCK
-# (set at accept), so a full tx buffer must be waited out rather than treated as
-# a dead peer. The caller's poll tick bounds how long we spin.
-#
-# 1.8.1 (audit G7) — the bound is WALL-CLOCK. It used to add up only the 20 ms
-# sleeps, but under fork the client fd is blocking with a 60 s SO_SNDTIMEO, so
-# every EAGAIN had already cost 60 s: the "10 s" bound was ~8.3 hours, pinning
-# the child and a MUD connection for a client that stopped reading.
-fn descent_write_all(fd, buf, len): i64 {
-    var off = 0;
-    var rc = 0;
-    var done = 0;
-    var stall0 = 0;
-    while (done == 0) {
-        if (off >= len) { done = 1; continue; }
-        var n = sys_write(fd, buf + off, len - off);
-        if (n > 0) { off = off + n; stall0 = 0; continue; }
-        #ifndef CYRIUS_TARGET_AGNOS
-        if (n == (0 - DESCENT_EAGAIN)) {
-            # 1.6.3 (audit, HIGH — a bug introduced by this function at 1.6.2).
-            # The retry used to be a bare `continue`: a tight, sleepless spin on
-            # a socket that is not ready. In poll mode this function runs inside
-            # the single process that owns ALL 64 sessions, so a Descent player
-            # whose client stops reading pegged a core and froze every other
-            # session — permanently, since nothing else could run to time them
-            # out. Sleep between attempts and give up after DESCENT_WRITE_MS,
-            # treating a peer that will not accept bytes for that long as dead
-            # (the caller closes the proxy, which is what the idle bound already
-            # does for a peer that sends nothing).
-            if (stall0 == 0) { stall0 = clock_now_ms(); }
-            if (clock_now_ms() - stall0 >= DESCENT_WRITE_MS) { rc = 1; done = 1; continue; }
-            sleep_ms(DESCENT_WRITE_TICK_MS);
-            continue;
-        }
-        #endif
-        rc = 1; done = 1;
-    }
-    return rc;
-}
-
-# A NUL-terminated message straight to `fd` (1.8.1). descent_run's own lines
-# used to go through `send_str`, which under poll QUEUES them on the session's
-# tx buffer — and nothing drains that queue while the proxy owns the process,
-# so the portal banner arrived after the whole MUD session (audit G5). The
-# length comes from strlen, which also fixes the idle line below: it was
-# written with length 32, but the em dash makes it 34, cutting its CR LF.
-fn descent_say(fd, msg): i64 {
-    return descent_write_all(fd, msg, strlen(msg));
-}
-
-# The transparent shuttle: forward whatever arrives on either fd to the other,
-# until one side closes, errors, or the session sits silent past
-# DESCENT_IDLE_MS (slowloris bound — a live MUD pushes ticks, so genuine play
-# resets the idle counter constantly).
-#
-# Two platform branches, because readiness notification is where the targets
-# genuinely differ:
-#
-#   Linux/macOS — poll(2) on both fds for POLLIN. pollfd layout (matching
-#   net_connect_nb): { i32 fd; i16 events; i16 revents } = 8 bytes; two entries
-#   = 16 bytes. The call stays a raw `syscall(7, ...)` because the cyrius stdlib
-#   exposes no poll wrapper (only epoll) — this is the same thing lib/net.cyr's
-#   own `net_connect_sa_nb` does, and on Mach-O the backend's SYSXLAT translates
-#   the number. What 1.6.2 fixes is that it was UNGUARDED: 7 is poll only on
-#   Linux/macOS — on agnos 7 is `SYS_OPEN`, so an agnos build asked the kernel
-#   to open the pollfd array as a path. It now lives under the target guard.
-#
-#   agnos — has no poll at all. Sweep both sockets with the non-blocking
-#   `sys_sock_recv`(#49) and pace with `sys_sleep_ms`, exactly the pattern
-#   `serve_poll` / `sess_recv_nonblock` already use on that target
-#   agnos's recv sense is inverted from Linux's: 0 means
-#   "nothing pending", negative means EOF/error.
-#
-# NOTE (unchanged from 1.6.0, documented not fixed): under SERVE_POLL this
-# function still blocks the sweep loop for as long as the player is in the MUD,
-# so other sessions stall meanwhile. Making Descent a state in the poll loop
-# rather than a blocking call is a larger change than this cut takes on.
-#
-# 1.8.1 (audit G1) — the shuttle buffer and pollfds come from the per-command
-# arena: the proxy runs inside ONE command dispatch, so they live exactly as
-# long as it does. They were bare alloc()s, ~4 KB never reclaimed per visit.
-fn descent_proxy(cfd, mfd): i64 {
-    var buf  = cmd_alloc(DESCENT_PROXY_BUF);
-    var idle = 0;
-    var done = 0;
-
-    #ifndef CYRIUS_TARGET_AGNOS
-    var pfds = cmd_alloc(24);
-    var npfd = 2;
-    if (g_descent_stop_fd >= 0) { npfd = 3; }
-    while (done == 0) {
-        # (re)arm the pollfds — kernel overwrites revents each call.
-        store32(pfds + 0, cfd);  store16(pfds + 4,  DESCENT_POLLIN); store16(pfds + 6,  0);
-        store32(pfds + 8, mfd);  store16(pfds + 12, DESCENT_POLLIN); store16(pfds + 14, 0);
-        store32(pfds + 16, g_descent_stop_fd); store16(pfds + 20, DESCENT_POLLIN); store16(pfds + 22, 0);
-        var pr = syscall(7, pfds, npfd, DESCENT_POLL_MS);   # poll(2) — Linux/macOS only, hence the guard
-        if (pr < 0) { done = 1; }
-        else { if (pr == 0) {
-                idle = idle + DESCENT_POLL_MS;
-                if (idle >= DESCENT_IDLE_MS) {
-                    descent_say(cfd, "\r\n(idle — leaving the Descent)\r\n");
-                    done = 1;
-                }
-            } else {
-                idle = 0;
-                var cre = load16(pfds + 6)  & 0xFFFF;
-                var mre = load16(pfds + 14) & 0xFFFF;
-                # 1.8.1 (P8) — the server is shutting down: leave the MUD now.
-                if (npfd == 3) {
-                    if ((load16(pfds + 22) & 0xFFFF) != 0) {
-                        descent_say(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
-                        done = 1;
-                    }
-                }
-                # client → MUD
-                if (done == 0) { if ((cre & DESCENT_POLLIN) != 0) {
-                        var cn = sys_read(cfd, buf, DESCENT_PROXY_BUF);
-                        if (cn <= 0) { done = 1; }
-                        else { if (descent_write_all(mfd, buf, cn) != 0) { done = 1; } }
-                    } }
-                # MUD → client
-                if (done == 0) {
-                    if ((mre & DESCENT_POLLIN) != 0) {
-                        var mn = sys_read(mfd, buf, DESCENT_PROXY_BUF);
-                        if (mn <= 0) { done = 1; }
-                        else { if (descent_write_all(cfd, buf, mn) != 0) { done = 1; } }
-                    }
-                }
-                # hangup / error on either side
-                if (done == 0) {
-                    if ((cre & DESCENT_POLLDEAD) != 0) { done = 1; }
-                    if ((mre & DESCENT_POLLDEAD) != 0) { done = 1; }
-                }
-            } }
-    }
-    #endif
-
-    #ifdef CYRIUS_TARGET_AGNOS
-    while (done == 0) {
-        var moved = 0;
-        # client → MUD
-        var cn = sys_sock_recv(_agnos_fd_conn(cfd), buf, DESCENT_PROXY_BUF);
-        if (cn < 0) { done = 1; }
-        else { if (cn > 0) {
-                moved = 1;
-                if (descent_write_all(mfd, buf, cn) != 0) { done = 1; }
-            } }
-        # MUD → client
-        if (done == 0) {
-            var mn = sys_sock_recv(_agnos_fd_conn(mfd), buf, DESCENT_PROXY_BUF);
-            if (mn < 0) { done = 1; }
-            else { if (mn > 0) {
-                    moved = 1;
-                    if (descent_write_all(cfd, buf, mn) != 0) { done = 1; }
-                } }
-        }
-        # idle accounting + pacing (only when neither side moved bytes)
-        if (done == 0) {
-            if (moved == 1) { idle = 0; }
-            else {
-                idle = idle + DESCENT_POLL_MS;
-                if (idle >= DESCENT_IDLE_MS) {
-                    descent_say(cfd, "\r\n(idle — leaving the Descent)\r\n");
-                    done = 1;
-                }
-                sys_sleep_ms(DESCENT_POLL_MS);
-            }
-        }
-    }
-    #endif
-
-    return 0;
-}
-
-# `descent` verb body: read the operator endpoint, dial it, shuttle, and
-# return to the BBS. All failure paths are soft — they print a line and
-# return 0 (the caller stays in MODE_COMMAND). sess_handle is the bound
-# agora handle (cstring) for the courtesy note; the MUD still logs in.
-#
-# 1.8.1 — every line here goes straight to `cfd` (descent_say), so it lands in
-# order with the MUD's bytes; the caller flushes the session's queued output
-# first (audit G5). The scratch is per-command arena, not bare alloc() — four
-# allocations (~660 B) per `descent`, even on the "No Descent linked." path,
-# used to accumulate for the life of a poll server (audit G1).
-fn descent_run(cfd, store, sess_handle): i64 {
+# Read the operator's endpoint (<store>/.descent) into *ap (packed addr) and *pp
+# (port). Returns 0, 1 when none is configured (no file, or empty), 2 when it does
+# not parse. The scratch is per-command arena (1.8.1, audit G1).
+fn descent_endpoint(store, ap, pp): i64 {
     var path = cmd_alloc(DESCENT_PATH_CAP);
     descent_cfg_path(store, path);
     var cfg = cmd_alloc(DESCENT_CFG_CAP + 1);
     var n = store_read_all(path, cfg, DESCENT_CFG_CAP);
-    if (n <= 0) {
-        descent_say(cfd, "\r\nNo Descent linked.\r\n");
-        descent_say(cfd, "(operator: put 'host:port' or a bare port in <store>/.descent)\r\n");
-        return 0;
-    }
-    var ap = cmd_alloc(8);
-    var pp = cmd_alloc(8);
-    if (descent_parse_endpoint(cfg, n, ap, pp) != 0) {
-        descent_say(cfd, "\r\nThe Descent endpoint is misconfigured (expected 'host:port' or a bare port).\r\n");
-        return 0;
-    }
-    var addr = load64(ap);
-    var port = load64(pp);
-
-    if (clock_now_ms() < g_descent_down_until) {
-        descent_say(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
-        return 0;
-    }
-
-    # 1.7.1 — cyrius 6.6.x value form: Result is a (tag, payload) register pair,
-    # so both halves must be bound. `var sr = tcp_socket();` kept the tag alone.
-    var st, sv = tcp_socket();
-    if (is_ok(st) == 0) {
-        descent_say(cfd, "\r\nCould not open a socket to the Descent.\r\n");
-        return 0;
-    }
-    var mfd = result_unwrap(st, sv);
-    if (net_connect_nb(mfd, addr, port, DESCENT_CONNECT_MS) != 0) {
-        g_descent_down_until = clock_now_ms() + DESCENT_RETRY_MS;
-        descent_say(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
-        sock_close(mfd);
-        return 0;
-    }
-    g_descent_down_until = 0;
-
-    descent_say(cfd, "\r\n-- stepping through the portal into Yeoman's Descent --\r\n");
-    if ((load8(sess_handle) & 0xFF) != 0) {
-        descent_say(cfd, "(you are ");
-        descent_say(cfd, sess_handle);
-        descent_say(cfd, " on agora; the Descent runs its own login — identity hand-off is a future link)\r\n");
-    }
-    descent_say(cfd, "\r\n");
-
-    # 1.6.5 (audit L4) — forward anything the client pipelined behind the
-    # `descent` line before the shuttle starts. `process_rx` publishes it (see
-    # g_pipe_* in main.cyr) because only it can see the recv buffer; claiming it
-    # here tells process_rx not to also execute those bytes as BBS commands once
-    # the proxy exits. A client that sends `descent\r\nnorth\r\n` in one
-    # segment now has `north` reach the MUD, which is what it meant.
-    if (g_pipe_len > 0) {
-        if (g_pipe_tail != 0) {
-            descent_write_all(mfd, g_pipe_tail, g_pipe_len);
-            g_pipe_taken = 1;
-        }
-    }
-    g_pipe_tail = 0;
-    g_pipe_len = 0;
-
-    descent_proxy(cfd, mfd);
-
-    sock_close(mfd);
-    descent_say(cfd, "\r\n-- back at the agora --\r\n");
+    if (n <= 0) { return 1; }
+    if (descent_parse_endpoint(cfg, n, ap, pp) != 0) { return 2; }
     return 0;
+}
+
+# Start a connection to the MUD. Returns the socket, with *statep set to
+# DESC_PROXY (connected already) or DESC_CONNECTING (a non-blocking connect under
+# way: descent_connect_check finishes it), or -1 if no connection could start.
+#
+# Linux: a non-blocking socket and the stdlib's `sock_connect`, which reports
+# EINPROGRESS (as an Err) for a connect still in flight — no raw socket syscall.
+# Until 1.11.0 this was `net_connect_nb`, which polls for up to 4 s INSIDE the
+# call, i.e. inside the poll server's sweep. agnos has no non-blocking connect
+# (`sock_connect` #47 polls for the SYN-ACK in the kernel, ~8 s), so it keeps
+# the bounded blocking call; the redial cooldown bounds how often it can happen.
+fn descent_dial(addr, port, statep): i64 {
+    var st, sv = tcp_socket();
+    if (is_ok(st) == 0) { return 0 - 1; }
+    var mfd = result_unwrap(st, sv);
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (net_connect_nb(mfd, addr, port, DESCENT_CONNECT_MS) != 0) { sock_close(mfd); return 0 - 1; }
+    store64(statep, DESC_PROXY);
+    return mfd;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    sock_set_nonblocking(mfd);
+    var ct, cv = sock_connect(mfd, addr, port);
+    if (is_ok(ct) == 1) { store64(statep, DESC_PROXY); return mfd; }
+    if (cv == _NET_EINPROGRESS) { store64(statep, DESC_CONNECTING); return mfd; }
+    sock_close(mfd);
+    return 0 - 1;
+    #endif
+}
+
+# Has the connect started by descent_dial finished? 1 = connected, 0 = in progress,
+# -1 = failed (refused, unreachable, reset). A zero-timeout poll(2) for
+# POLLOUT: a finished connect makes the socket writable, and a failed one also
+# raises POLLERR / POLLHUP. Raw `syscall(7, …)` as in the poll serve loop (no
+# stdlib wrapper; Linux / macOS only). agnos connects in descent_dial.
+fn descent_connect_check(mfd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var pfd[8];
+    store32(&pfd, mfd);
+    store16((&pfd) + 4, DESCENT_POLLOUT);
+    store16((&pfd) + 6, 0);
+    var pr = syscall(7, &pfd, 1, 0);
+    if (pr < 0) { return 0 - 1; }
+    if (pr == 0) { return 0; }
+    var re = load16((&pfd) + 6) & 0xFFFF;
+    if ((re & DESCENT_POLLDEAD) != 0) { return 0 - 1; }
+    if ((re & DESCENT_POLLOUT) != 0) { return 1; }
+    return 0;
+    #endif
+}
+
+# One non-blocking read from the MUD: bytes read (> 0), 0 if nothing is waiting,
+# -1 if the MUD closed or the socket failed. agnos reads with sock_recv #49,
+# whose sense is inverted from Linux's (0 = nothing pending, < 0 = gone).
+fn descent_mud_read(mfd, buf, cap): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var an = sys_sock_recv(_agnos_fd_conn(mfd), buf, cap);
+    if (an < 0) { return 0 - 1; }
+    return an;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var n = sys_read(mfd, buf, cap);
+    if (n > 0) { return n; }
+    if (n == (0 - DESCENT_EAGAIN)) { return 0; }
+    return 0 - 1;
+    #endif
+}
+
+# One non-blocking write to the MUD: bytes written (possibly fewer than `len`, 0
+# if the socket would block), or -1 if it failed. Never `send_buf`: in poll mode
+# that enqueues to the active session's tx queue, which is the CLIENT's (the
+# 1.6.2 bug that silently broke the gateway under poll — smoke 24). On agnos the
+# send itself blocks (sock_send #48 has no non-blocking form); the MUD is the
+# operator's own service.
+fn descent_mud_write(mfd, buf, len): i64 {
+    if (len <= 0) { return 0; }
+    var n = sys_write(mfd, buf, len);
+    if (n >= 0) { return n; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (n == (0 - DESCENT_EAGAIN)) { return 0; }
+    #endif
+    return 0 - 1;
 }

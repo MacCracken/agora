@@ -7281,6 +7281,175 @@ fn t252_term_wrap(): i64 {
     return 0;
 }
 
+# === 1.11.0 — the Descent negotiation observer and return resync (ADR 0031) ===
+
+# A telnet state as a session has it after a LINEMODE client agreed everything:
+# ECHO handed to the client (EDIT), SGA on, NAWS / TERMINAL-TYPE / LINEMODE on.
+fn t_ts_linemode_client(): i64 {
+    var ts = telnet_state_new();
+    opt_set_us(ts, OPT_ECHO, Q_NO);
+    opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_YES);
+    opt_set_him(ts, OPT_NAWS, Q_YES);
+    opt_set_him(ts, OPT_TERMINAL_TYPE, Q_YES);
+    opt_set_him(ts, OPT_LINEMODE, Q_YES);
+    store64(ts + TS_LM_MODE, LM_EDIT | LM_TRAPSIG);
+    store64(ts + TS_TERM_COLS, 40);
+    store64(ts + TS_TERM_ROWS, 24);
+    return ts;
+}
+
+# Feed `n` bytes to the observer one byte at a time (every sequence split).
+fn t_obs_bytes(obs, dir, buf, n): i64 {
+    var i = 0;
+    while (i < n) { tobs_feed(obs, dir, buf + i, 1); i = i + 1; }
+    return 0;
+}
+
+# t254 — the observer (telnet.cyr tobs_*): an option is on once its owner said
+# WILL and the other side DO, in either order, off on any WONT / DONT; it starts
+# from agora's own state; split sequences, IAC IAC, the client's window (with an
+# escaped 255) and an acknowledged LINEMODE mode are all read; a malformed
+# IAC SB IAC is dropped.
+fn t254_descent_observer(): i64 {
+    var name = "t254_descent_observer";
+    var ts = t_ts_linemode_client();
+    var obs = alloc(TOB_SIZE);
+    tobs_init(obs, ts);
+    if (tobs_on(obs, TOB_C2S, OPT_NAWS) != 1)      { test_fail(name, "NAWS starts on"); return 1; }
+    if (tobs_on(obs, TOB_S2C, OPT_ECHO) != 0)      { test_fail(name, "ECHO starts off"); return 1; }
+    # The MUD's passphrase: WILL ECHO, the client's DO, then WONT ECHO / DONT.
+    t_obs_bytes(obs, TOB_S2C, "\xff\xfb\x01", 3);
+    if (tobs_on(obs, TOB_S2C, OPT_ECHO) != 0)      { test_fail(name, "WILL alone turned ECHO on"); return 1; }
+    t_obs_bytes(obs, TOB_C2S, "\xff\xfd\x01", 3);
+    if (tobs_on(obs, TOB_S2C, OPT_ECHO) != 1)      { test_fail(name, "WILL + DO did not turn ECHO on"); return 1; }
+    t_obs_bytes(obs, TOB_S2C, "\xff\xfc\x01", 3);
+    if (tobs_on(obs, TOB_S2C, OPT_ECHO) != 0)      { test_fail(name, "WONT did not turn ECHO off"); return 1; }
+    # A client-owned option agreed the other way round: the MUD's DO first.
+    tobs_feed(obs, TOB_S2C, "\xff\xfd\x20", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfb\x20", 3);
+    if (tobs_on(obs, TOB_C2S, 32) != 1)            { test_fail(name, "DO then WILL"); return 1; }
+    tobs_feed(obs, TOB_C2S, "\xff\xfc\x20", 3);
+    if (tobs_on(obs, TOB_C2S, 32) != 0)            { test_fail(name, "client WONT"); return 1; }
+    # Data with an escaped IAC, then the window: 255 x 24 (255 sent as IAC IAC).
+    t_obs_bytes(obs, TOB_C2S, "ab\xff\xffcd\xff\xfa\x1f\x00\xff\xff\x00\x18\xff\xf0", 16);
+    if (load64(obs + TOB_NAWS) != 1)                { test_fail(name, "window not seen"); return 1; }
+    if (load64(obs + TOB_COLS) != 255)              { test_fail(name, "escaped 255 width"); return 1; }
+    if (load64(obs + TOB_ROWS) != 24)               { test_fail(name, "height"); return 1; }
+    # The MUD's own window report direction is not the client's window.
+    tobs_feed(obs, TOB_S2C, "\xff\xfa\x1f\x00\x10\x00\x10\xff\xf0", 9);
+    if (load64(obs + TOB_COLS) != 255)              { test_fail(name, "S2C NAWS taken as the client's"); return 1; }
+    # A MODE without ACK is a request, not a mode; with ACK it is the mode.
+    tobs_feed(obs, TOB_S2C, "\xff\xfa\x22\x01\x00\xff\xf0", 7);
+    if (load64(obs + TOB_LM_SEEN) != 0)             { test_fail(name, "unacknowledged MODE taken"); return 1; }
+    tobs_feed(obs, TOB_C2S, "\xff\xfa\x22\x01\x04\xff\xf0", 7);
+    if (load64(obs + TOB_LM_SEEN) != 1)             { test_fail(name, "acknowledged MODE missed"); return 1; }
+    if (load64(obs + TOB_LM_MODE) != 0)             { test_fail(name, "mode mask"); return 1; }
+    # IAC SB IAC is malformed: the parser returns to data, so the WILL after it counts.
+    tobs_feed(obs, TOB_C2S, "\xff\xfa\xff\xff\xfb\x18", 6);
+    if (tobs_on(obs, TOB_C2S, OPT_TERMINAL_TYPE) != 1) { test_fail(name, "lost sync after IAC SB IAC"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t255 — telnet_resync: the return adopts the client's state and negotiates only
+# the differences (the 1.8.1 reset left NAWS / LINEMODE half-agreed: wrapping
+# stopped and LINEMODE clients typed blind — reproduced with GNU telnet).
+fn t255_descent_resync(): i64 {
+    var name = "t255_descent_resync";
+    var obs = alloc(TOB_SIZE);
+    # A: a LINEMODE client through the MUD's passphrase, resized during the visit.
+    var ts = t_ts_linemode_client();
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfb\x01", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfd\x01", 3);
+    tobs_feed(obs, TOB_S2C, "\xff\xfc\x01", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfe\x01", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfa\x1f\x00\x64\x00\x1e\xff\xf0", 9);
+    telnet_resync(ts, obs);
+    if (telnet_tx_len(ts) != 0) {
+        test_fail(name, "A: nothing differs, nothing to send");
+        return 1;
+    }
+    if (opt_him(ts, OPT_NAWS) != Q_YES)             { test_fail(name, "A: NAWS lost"); return 1; }
+    if (telnet_term_cols(ts) != 100)                { test_fail(name, "A: the new window not taken"); return 1; }
+    if (opt_him(ts, OPT_LINEMODE) != Q_YES)         { test_fail(name, "A: LINEMODE lost"); return 1; }
+    if (telnet_linemode_mask(ts) != (LM_EDIT | LM_TRAPSIG)) { test_fail(name, "A: mode lost"); return 1; }
+    if (opt_us(ts, OPT_ECHO) != Q_NO) {
+        test_fail(name, "A: echo taken back from an EDIT client");
+        return 1;
+    }
+    # B: a character-mode client (it refused LINEMODE); the MUD left echo off.
+    ts = telnet_state_new();
+    opt_set_us(ts, OPT_ECHO, Q_YES);
+    opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_YES);
+    opt_set_him(ts, OPT_NAWS, Q_YES);
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfb\x01\xff\xfc\x01", 6);
+    tobs_feed(obs, TOB_C2S, "\xff\xfe\x01", 3);
+    telnet_resync(ts, obs);
+    if (t_tx_is(ts, "\xff\xfb\x01", 3) == 0) {
+        test_fail(name, "B: exactly WILL ECHO (no re-asking LINEMODE)");
+        return 1;
+    }
+    if (opt_us(ts, OPT_ECHO) != Q_WANTYES)          { test_fail(name, "B: ECHO asked for"); return 1; }
+    # C: the MUD turned on options agora refuses — one of each owner.
+    ts = t_ts_linemode_client();
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfb\x46\xff\xfd\x20", 6);
+    tobs_feed(obs, TOB_C2S, "\xff\xfd\x46\xff\xfb\x20", 6);
+    telnet_resync(ts, obs);
+    if (t_tx_is(ts, "\xff\xfe\x20\xff\xfc\x46", 6) == 0) { test_fail(name, "C: DONT 32 + WONT 70"); return 1; }
+    # D: LINEMODE turned off during the visit — re-asked, and echo taken back.
+    ts = t_ts_linemode_client();
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfe\x22", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfc\x22", 3);
+    telnet_resync(ts, obs);
+    if (telnet_linemode_mask(ts) != 0)              { test_fail(name, "D: a mode kept without LINEMODE"); return 1; }
+    if (t_tx_is(ts, "\xff\xfb\x01\xff\xfd\x22", 6) == 0) { test_fail(name, "D: WILL ECHO + DO LINEMODE"); return 1; }
+    # E: agora's DO LINEMODE answered during the visit: on, mode unknown → request it.
+    ts = telnet_state_new();
+    opt_set_us(ts, OPT_ECHO, Q_YES);
+    opt_set_him(ts, OPT_LINEMODE, Q_WANTYES);
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_C2S, "\xff\xfb\x22", 3);
+    telnet_resync(ts, obs);
+    if (opt_him(ts, OPT_LINEMODE) != Q_YES)         { test_fail(name, "E: the answer missed"); return 1; }
+    if (t_tx_is(ts, "\xff\xfa\x22\x01\x03\xff\xf0", 7) == 0) { test_fail(name, "E: the MODE request"); return 1; }
+    # F: a full reply buffer sends nothing torn and leaves the state for RFC 1143.
+    ts = telnet_state_new();
+    opt_set_us(ts, OPT_ECHO, Q_YES);
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfc\x01", 3);
+    store64(ts + TS_TX_LEN, TX_BUF_CAP - 2);
+    telnet_resync(ts, obs);
+    if (telnet_tx_len(ts) != TX_BUF_CAP - 2)        { test_fail(name, "F: a torn reply"); return 1; }
+    if (opt_us(ts, OPT_ECHO) != Q_NO)               { test_fail(name, "F: asked without saying so"); return 1; }
+    # G: an option the MUD turned on that agora refuses is recorded OFF even when
+    # its refusal does not fit (the RFC 855 gate would otherwise accept its SBs).
+    ts = telnet_state_new();
+    tobs_init(obs, ts);
+    tobs_feed(obs, TOB_S2C, "\xff\xfd\x27", 3);
+    tobs_feed(obs, TOB_C2S, "\xff\xfb\x27", 3);
+    store64(ts + TS_TX_LEN, TX_BUF_CAP - 2);
+    telnet_resync(ts, obs);
+    if (opt_him(ts, OPT_NEW_ENVIRON) != Q_NO)       { test_fail(name, "G: a refused option held on"); return 1; }
+    if (telnet_tx_len(ts) != TX_BUF_CAP - 2)        { test_fail(name, "G: a torn refusal"); return 1; }
+    # The two subnegotiation requests are whole or not at all too.
+    store64(ts + TS_TX_LEN, TX_BUF_CAP - 6);
+    ts_emit_linemode_request(ts);
+    ts_emit_tt_send(ts);
+    if (telnet_tx_len(ts) != TX_BUF_CAP) {
+        test_fail(name, "TT SEND fits exactly, MODE does not");
+        return 1;
+    }
+    store64(ts + TS_TX_LEN, TX_BUF_CAP - 5);
+    ts_emit_tt_send(ts);
+    if (telnet_tx_len(ts) != TX_BUF_CAP - 5)        { test_fail(name, "a torn TT SEND"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -7553,6 +7722,8 @@ fn main(): i64 {
     t250_term_columns();
     t251_term_row_end();
     t252_term_wrap();
+    t254_descent_observer();
+    t255_descent_resync();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

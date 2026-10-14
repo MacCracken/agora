@@ -1,6 +1,6 @@
 # 0023 — The dual serve model: fork per accept, or one process polling all sessions
 
-> **Status**: Accepted
+> **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**
 > **Date**: 2026-07-26 (recorded retroactively — the decision shipped at 1.5.0 / 1.6.0)
 > **Amends**: [ADR 0007](0007-fork-per-accept-concurrency.md) — see § Relationship to ADR 0007.
 
@@ -134,7 +134,7 @@ Two things this cost, both worth recording because neither is obvious:
   The pattern is worth stating plainly for the next structural change: **ask what the old model was
   silently providing, not just what the new code does.**
 - **Negative** — the Descent proxy still blocks the sweep for as long as a player is in the MUD, stalling
-  the other 63 sessions. Known, documented at `src/descent.cyr`, tracked as roadmap § 1.11.0.
+  the other 63 sessions. Known, documented at `src/descent.cyr`, tracked as roadmap § 1.11.0 — **fixed at 1.11.0** ([ADR 0031](0031-descent-session-state.md)).
 - **Neutral** — `AGORA_SERVE=epoll` is accepted and aliased to poll. A real epoll loop is a later
   optimisation; the sweep is a `sleep_ms(20)` tick on both platforms today.
 - **Measured at 1.8.2** (`benches/serve-bench.py`; BENCHMARKS.md § Serve-level baselines): poll accepts
@@ -145,6 +145,19 @@ Two things this cost, both worth recording because neither is obvious:
   `TCP_NODELAY` on accepted sockets since 1.8.2 (a `read` on 500 posts: 41 → 3.4 ms). Under fork, a client
   that stops reading is disconnected within **two** send timeouts (the first timed-out write usually
   reports a partial count as success), pinned by smoke 31.
+
+### Readiness and the fork child's lifecycle (added 1.11.0)
+
+[ADR 0031](0031-descent-session-state.md) changes how both models wait. The poll loop no longer sleeps 20 ms per
+sweep: on Linux it waits in one `poll(2)` over the listener, the shutdown signalfd and every session and MUD socket,
+with a timeout of the next timer due (agnos, which has no `poll`, keeps the paced sweep). Sequential accepts went
+from 50/s to ~8,400/s, and the 0–20 ms added to every command is gone. `AGORA_SERVE` now accepts `fork` and `poll`
+only: `epoll`, silently an alias of `poll` until 1.11.0, is refused with exit 2, as is any other value. A fork
+child waits in `poll(2)` on its socket and a signalfd of its own, so SIGTERM ends it cleanly (goodbye, door
+checkpoint), and `PR_SET_PDEATHSIG` ends it if the parent dies; the parent signals its children at a clean
+shutdown instead of leaving them to finish as orphans. The per-source cap weighed above was re-checked at 1.11.0:
+agnos still has neither `getpeername` nor a peer address from `sock_accept`, so the reasoning stands (roadmap
+§ Unscheduled).
 
 ## Relationship to ADR 0007
 

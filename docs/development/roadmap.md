@@ -1,10 +1,11 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.10.1 (terminal-aware output) shipped**: door frames, `list`, `read`, chat and
-> `help` wrapped to the window the client reports (NAWS), byte-identical without one (ADR 0030). That closes the
-> 1.10.x line. Next slot: **1.11.0**, Descent as a poll state + serve-model debt. The same day: 1.10.0 (telnet
-> conformance, ADR 0029), 1.9.2 closed the 1.9.x line; 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into 1.8.x →
-> 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.11.0 (Descent as a session state + serve-model debt) shipped**: a Descent
+> visit no longer freezes the poll server, the return keeps the client's options, the poll loop waits on
+> readiness, `AGORA_SERVE=epoll` is refused, fork children leave with their parent (ADR 0031); accept-rate limiting
+> re-checked and moved to § Unscheduled. Next slot: **1.11.1**, enforced module invariants. The same day: 1.10.1
+> (terminal-aware output) closed the 1.10.x line; 1.10.0, 1.9.2, 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into
+> 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -34,7 +35,7 @@ did) and the slots after it shift.
 | **1.9.2** | Board policy + operator CLI (closes the 1.9.x line: 1.9.0 store hardening, 1.9.1 reply index) | feature | ✅ 2026-10-13 |
 | **1.10.0** | Telnet conformance | protocol | ✅ 2026-10-13 |
 | **1.10.1** | Terminal-aware output (closes the 1.10.x line) | protocol / UX | ✅ 2026-10-13 |
-| **1.11.0** | Descent as a poll state + serve-model debt | structure | planned |
+| **1.11.0** | Descent as a poll state + serve-model debt | structure | ✅ 2026-10-13 |
 | **1.11.1** | Enforced module invariants | structure | planned |
 | **1.12.0** | Olympiad events + door content | content | planned |
 | **1.12.1** | Wager audit trail | content / fairness | planned |
@@ -44,15 +45,15 @@ did) and the slots after it shift.
 
 ## 1.11.x — structure
 
-### 1.11.0 — Descent as a poll state + serve-model debt
+### 1.11.0 — Descent as a poll state + serve-model debt ✅
 
-| Item | Source | Effort |
-|---|---|---:|
-| **Returning from Descent does not re-assert agora's telnet options** — the proxy passes the MUD's ECHO (and, since 1.10.0, LINEMODE) negotiation through raw, so the client's echo / editing state can come back out of step with agora's (doubled or missing echo). Since 1.10.1 the window width is affected too: a resize during the visit is reported to the MUD, so agora wraps to the stale width until the client next reports. Re-announce, or track the proxied options, on return (a DONT / DO NAWS cycle asks for a fresh report). | ADR 0029 § Consequences, ADR 0030 § Neutral; `src/descent.cyr` | small |
-| **The Descent proxy blocks the poll sweep** — a player in the MUD stalls the other 63 sessions for the whole visit, and a blackholed endpoint still costs up to 4 s per connect (1.8.1 added a 30 s redial cooldown and has the proxy watch the shutdown signalfd — audit L19). The fix is making Descent a session *state* in the poll loop rather than a blocking call; write the ADR first. | `src/descent.cyr` (documented, not fixed); [ADR 0017](../adr/0017-descent-link-gateway.md), [ADR 0023](../adr/0023-dual-serve-model.md) | large |
-| `AGORA_SERVE=epoll` is accepted and silently aliased to `poll`; implement it or reject the value. **Measured at 1.8.2**: the poll loop accepts exactly 50 connections/s sequentially — one per 20 ms sweep, because it sleeps instead of waiting for readiness — against fork's ~4,100; a `poll(2)`/epoll readiness wait removes that floor (and the 0–20 ms latency it adds to every poll-mode command). | `src/main.cyr`; BENCHMARKS.md § Serve-level baselines | medium |
-| `PR_SET_PDEATHSIG` for orphan-on-parent-crash under the fork model | ADR 0007 § Out of scope | small |
-| Accept-loop rate limiting — the never-taken half of 0.7.0 audit M4's fix. Blocked on a syscall agnos does not have; re-check before scheduling. | 0.7.0 audit M4 | large |
+Shipped 2026-10-13 (ADR 0031): a Descent visit is a session state both serve models drive (`descent_pump`), so a
+player in the MUD no longer stalls the poll sweep and a dead endpoint costs it nothing (Linux); the return
+adopts the options the client holds, learned by watching the negotiation the proxy carried (window width and
+LINEMODE survive a visit); the poll loop waits on readiness (sequential accepts 50 → ~8,400/s) and
+`AGORA_SERVE=epoll` is refused; fork children leave with their parent (`PR_SET_PDEATHSIG`) and say goodbye on
+shutdown. Accept-rate limiting moved to § Unscheduled after a re-check. Detail: CHANGELOG `[1.11.0]`. Delete
+this section when the 1.11.x line closes.
 
 ### 1.11.1 — Enforced module invariants
 
@@ -92,6 +93,7 @@ did) and the slots after it shift.
 | **Sigil identity hand-off across the Descent link** — carry `g_session_fp` / handle into the MUD so a citizen does not re-authenticate. The project's long-standing named "next". | Yeoman's Descent has **no external-identity path** (name + passphrase only), so this needs MUD-side protocol work first. Open questions unchanged from [ADR 0017](../adr/0017-descent-link-gateway.md) § Decision: token format, trust model, co-located vs remote. | large |
 | **macOS / Windows ports** | Gated on `lib/net.cyr` backends upstream; the gate has moved since the 1.0.0 note — re-check what actually remains. `$HOME` keyfile resolution (`/proc/self/environ`) is blocked on the same work. | large |
 | **Tell a slow reader from a stalled one by delivered bytes** (fork mode) — today a write that gets no send-buffer room for 60 s drops the client; the exact test is "did the client acknowledge anything in 60 s", which keeps any reader that is still reading however full the kernel's queue | A `lib/net.cyr` primitive for the unacknowledged-byte count (`SIOCOUTQ` / `TCP_INFO`); agora does not issue raw socket syscalls. Found at 1.8.2 (CHANGELOG § Fixed). | small |
+| **Accept-loop rate limiting** — the never-taken half of 0.7.0 audit M4's fix (M4's board-spam half closed at 0.8.3 with the create gate). Re-checked at 1.11.0: a per-source cap still needs the client's address, and agnos — the target that always polls — has neither `getpeername` nor a peer address from `sock_accept` (#57 returns a bare connection id), so it would protect Linux only; ADR 0023 also notes it misfires behind NAT. The operator's tools stay `MAX_SESS` and the network edge. | agnos `getpeername` (or a peer address from accept) and a stdlib `sock_accept_from`; 0.7.0 audit M4, ADR 0023 | large |
 | **Close the directory guard's `stat`-then-`open` window** — `store_dir_scan` refuses a non-directory with a `stat` first, because the stdlib's `dir_list_into` opens with a plain `O_RDONLY` and a FIFO there blocks; the swap race between the two closes when the stdlib opens with `O_DIRECTORY` | cyrius `docs/development/issues/2026-10-13-dir-list-opens-directory-without-o-directory.md` (filed at 1.9.1; CHANGELOG § Security) | small |
 | **Binary strip / DCE-aware emit** — promised three times as a "v1.x close-out concern" | Toolchain-side: `CYRIUS_DCE=1` NOP-fills dead code but keeps its bytes and all `.bss` (the ~375 KB static-data warning). | medium |
 
@@ -161,10 +163,11 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 
 - [`state.md`](state.md) — live snapshot: current version, binary size, in-flight slot, next-session boot guide.
 - [`roadmap-future.md`](roadmap-future.md) — v2.x sovereignty pillars + long-horizon door / chatbot backlog.
-- [`docs/adr/`](../adr/) — 30 ADRs (0001–0030). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
+- [`docs/adr/`](../adr/) — 31 ADRs (0001–0031). 0001–0008 span M1–0.9.0; 0009–0020 the 1.x door arc;
   0021–0022 the 1.6.x memory work; 0023 the dual serve model; 0024 egress text sanitization; 0025–0026
   the 1.9.0 store work (regular-file opens + crash-safe publish; the handle index); 0027 the reply index;
-  0028 the board policy modes; 0029 telnet conformance; 0030 terminal-aware output.
+  0028 the board policy modes; 0029 telnet conformance; 0030 terminal-aware output; 0031 the Descent as a
+  session state.
 - [`docs/audit/`](../audit/) — audit ledger: 2026-05-23 (0.7.0), 2026-06-15 (1.4.4), 2026-07-26 (1.6.2,
   closed at 1.6.5), 2026-10-12 (1.8.0, closed in the same cut), 2026-10-12-audit-1.8.1 (closed in the same cut).
 - [`docs/architecture/`](../architecture/) — non-obvious constraints (001 callptr, 002 lib-sync same-size skip).

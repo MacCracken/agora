@@ -1,6 +1,6 @@
 # 0017 — Descent link: a transparent-proxy gateway to the MUD
 
-> **Status**: Accepted
+> **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**
 > **Date**: 2026-06-10
 
 ## Context
@@ -36,6 +36,13 @@ Out of scope (deferred):
 
 > **Amendment (1.6.0 / 1.7.0).** This cost model assumed fork-per-accept was the only serve model. It is not > ([ADR 0023](0023-dual-serve-model.md)). Under `AGORA_SERVE=poll` — and on agnos, which has no choice — the > proxy blocks the shared sweep, so one player in the MUD stalls the other 63 sessions — for the whole visit: the > `DESCENT_IDLE_MS` (30 minutes) bound resets on any byte in either direction, so a live MUD never trips it. > **Since 1.7.0 that also delayed clean shutdown**, because the poll loop's signalfd check lives in the same > sweep; **1.8.1 (audit L19)** has the proxy watch the shutdown signalfd itself and stops redialling a dead > endpoint for 30 s after a failed connect. **1.8.1 also fixed three visit-boundary bugs** (audit M7, L13, L14): > a poll player was reaped on return from any visit over 60 s; agora kept echoing after the MUD's own ECHO > negotiation (it now re-announces its options on return); and the portal banner, queued, arrived after the > whole MUD session (the queue is now flushed first). Making Descent a *state* in the poll loop rather than a > blocking call is the standing fix — roadmap § 1.11.0. `poll` is invoked via the same raw `syscall(7, …)` convention `net_connect_nb` already uses — an x86_64-Linux assumption that rides along with the existing listener (cross-arch parity is a `lib/net.cyr` task, per [ADR 0001](0001-cross-platform-listener-decoupled-from-agnos.md)).
 - **Neutral** — the proxy bypasses agora's telnet state machine while active (by design — transparency requires it); on return, the session resumes at the BBS prompt with its original recv timeout intact. The deferred identity hand-off is the natural next bite and is adjacent to the v2.x *identity continuity* pillar.
+
+> **Amendment (1.11.0, [ADR 0031](0031-descent-session-state.md)).** The standing fix shipped: a visit is now a
+> session state (`MODE_DESCENT`) both serve models drive one step at a time (`descent_pump`), so it no longer
+> blocks anything, and on Linux the connect is non-blocking too. The return no longer resets and re-announces
+> agora's options — a client ignores `DO` for an option it already has on, so that left NAWS and LINEMODE
+> half-agreed (wrapping stopped; LINEMODE clients typed blind) — it adopts what a passive observer saw the client
+> agree to during the visit and negotiates only the differences. The shuttle is still byte-transparent.
 
 ## Alternatives considered
 

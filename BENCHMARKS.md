@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-13 (1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-13 (1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -108,6 +108,28 @@ Without NAWS, `send_wrapped` takes `send_text`'s path: the same bytes at the sam
 **`list` got cheaper**: each row is composed and sent once (it was seven sends). Under fork every send is a
 `write(2)`, so a 300-post `list` went from **16.1 ms to 4.3 ms** wall (median of 40), with or without NAWS.
 Under poll the sends only fill the queue: ~23.2 ms either way, inside one 20 ms sweep.
+
+## Serve-level — 1.11.0 (the readiness wait)
+
+`benches/serve-bench.py all`, the 1.11.0 build and a `git archive` of 1.10.1 in the same session, 3 runs each
+(memory measured with both binaries on the same filesystem; see § Serve-level baselines on why that matters):
+
+| Measure | 1.10.1 | 1.11.0 |
+|---|---:|---:|
+| poll accepts, sequential | 50 conn/s | **8,386 conn/s** |
+| poll accepts, 8 concurrent | 618 conn/s | **10,534 conn/s** |
+| fork accepts, sequential / 8 concurrent | 3,667 / 7,647 | 3,719 / 7,868 |
+| memory per idle session, poll / fork PSS | 12.7 / 54 KB | 12.6 / 56 KB (within fork's 4 KB spread) |
+| world lock, 1–16 writers | 487–512 txn/s | 506–511 txn/s |
+| `read` 1 with 50 / 200 / 409 replies (fork) | 0.71 / 1.42 / 2.53 ms | 0.62 / 1.43 / 2.52 ms |
+| unknown-handle login, 300 / 3,000 users (fork) | 0.24 / 0.20 ms | 0.22 / 0.25 ms |
+
+The poll loop used to sleep 20 ms per sweep, which capped sequential accepts at one per sweep and added 0–20 ms
+to every poll-mode command. On Linux it now waits in `poll(2)` for whatever is ready (ADR 0031). The rest is
+unchanged within noise. A Descent visit no longer stalls the sweep: another session's `whoami` during a visit
+took over 8 s on 1.10.1 (the whole visit) and 0.1 ms now; during a dial to an endpoint that never answers, 3.5 s
+then and 0.2 ms now (smoke 37). `bench_telnet.bcyr` and `bench_term.bcyr` are unchanged (9 / 64 / 74 / 103 /
+167 ns; 3.1 / 4.0 / 19.4 / 40.4 µs).
 
 ## Serve-level baselines — 1.8.2 (first measured)
 

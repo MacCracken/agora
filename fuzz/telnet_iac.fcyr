@@ -43,6 +43,12 @@
 #      `IAC SB ...` with no `IAC SE`, an `IAC <verb>` with no option, a bare IAC
 #      at the end: the peer would parse later bytes as part of it
 #   23 (1.10.0) the LINEMODE mode left the defined bits (MODE_ACK or undefined)
+#   24 (1.11.0) the Descent negotiation observer left its ranges — a parser state
+#      outside TOP_DATA..TOP_SBI, an option flag outside its six bits, a window
+#      dimension outside 0..65535, a mode outside the defined bits, or bytes past
+#      its object written (a guard band around it)
+#   25 (1.11.0) the return resync left a torn reply, a Q-state out of range, or a
+#      mode outside the defined bits
 #
 # DETERMINISM: the byte stream comes from an in-file xorshift64 PRNG with a
 # fixed seed, so a failure here reproduces exactly on the next run and in CI.
@@ -416,6 +422,92 @@ while (hm < 256) {
     hm = hm + 1;
 }
 
+# --- pass 6 (1.11.0): the Descent negotiation observer + the return resync -----
+# During a Descent visit both directions — the client's bytes and the MUD's — go
+# through `tobs_feed` (ADR 0031), and on return `telnet_resync` turns what it
+# saw into agora's state and a burst of negotiation. Both sides are untrusted:
+# feed each direction random and IAC-dense bytes in random-sized pieces (every
+# sequence gets split somewhere), check the observer's ranges and its guard band
+# after every piece, then resync a fresh state from it and check the replies.
+var obs_guard = alloc(TOB_SIZE + 64);
+var obs = obs_guard + 32;
+var og = 0;
+while (og < 32) { store8(obs_guard + og, 0xA5); store8(obs + TOB_SIZE + og, 0xA5); og = og + 1; }
+var pbuf = alloc(64);
+
+# Exit 24 unless every observer field is in range and the guard band is intact.
+fn check_obs(o, gb): i64 {
+    var k = 0;
+    while (k < 32) {
+        if ((load8(gb + k) & 0xFF) != 0xA5) { syscall(60, 24); }
+        if ((load8(o + TOB_SIZE + k) & 0xFF) != 0xA5) { syscall(60, 24); }
+        k = k + 1;
+    }
+    var d = 0;
+    while (d < 2) {
+        var pst = load64(o + d * TOB_DIR_BYTES + TOB_P_ST);
+        if (pst < TOP_DATA) { syscall(60, 24); }
+        if (pst > TOP_SBI)  { syscall(60, 24); }
+        d = d + 1;
+    }
+    var j = 0;
+    while (j < 256) {
+        if (((load8(o + TOB_OPTS + j) & 0xFF) & 0xC0) != 0) { syscall(60, 24); }
+        j = j + 1;
+    }
+    if (load64(o + TOB_COLS) < 0) { syscall(60, 24); }
+    if (load64(o + TOB_COLS) > 65535) { syscall(60, 24); }
+    if (load64(o + TOB_ROWS) < 0) { syscall(60, 24); }
+    if (load64(o + TOB_ROWS) > 65535) { syscall(60, 24); }
+    if ((load64(o + TOB_LM_MODE) & (~LM_MODE_DEFINED)) != 0) { syscall(60, 24); }
+    return 0;
+}
+
+var vr = 0;
+var obytes = 0;
+while (vr < 3000) {
+    var tso = telnet_state_new();
+    telnet_announce(tso);
+    telnet_tx_consume(tso);
+    agree_client_opts(tso);
+    telnet_tx_consume(tso);
+    tobs_init(obs, tso);
+    var pieces = 1 + (nextb() % 24);
+    var pc = 0;
+    while (pc < pieces) {
+        var plen = 1 + (nextb() % 48);
+        var pk = 0;
+        while (pk < plen) {
+            var pb = nextb();
+            # Half the time an IAC-dense alphabet: IAC, the four verbs, SB / SE,
+            # the options agora cares about and a few it does not.
+            if ((vr & 1) == 0) {
+                var pick = nextb() % 12;
+                if (pick < 3) { pb = IAC; }
+                else { if (pick < 7) { pb = 250 + (nextb() % 6); }
+                    else { if (pick < 9) { pb = OPT_ECHO + (nextb() % 4) * 10; }
+                        else { if (pick == 9) { pb = OPT_NAWS; } else { if (pick == 10) { pb = OPT_LINEMODE; } } } } }
+            }
+            store8(pbuf + pk, pb);
+            pk = pk + 1;
+        }
+        tobs_feed(obs, nextb() & 1, pbuf, plen);
+        obytes = obytes + plen;
+        check_obs(obs, obs_guard);
+        pc = pc + 1;
+    }
+    # A reply queue already partly full (whole IAC NOP units), so the resync's
+    # burst has to respect the room left.
+    var nops = nextb() % 128;
+    var nk = 0;
+    while (nk < nops) { ts_tx_push(tso, IAC); ts_tx_push(tso, NOP); nk = nk + 1; }
+    telnet_resync(tso, obs);
+    check_tx_frames(tso, 25);
+    check_optq(tso);
+    if ((load64(tso + TS_LM_MODE) & (~LM_MODE_DEFINED)) != 0) { syscall(60, 25); }
+    vr = vr + 1;
+}
+
 # --- pass 5: state reset ------------------------------------------------------
 # 1.6.0's session pool reuses a TelnetState across connections via
 # telnet_state_reset. A reset that leaves the machine mid-subneg would let one
@@ -431,5 +523,10 @@ if (load64(ts3 + TS_TX_LEN)   != 0)       { syscall(60, 21); }
 if (load64(ts3 + TS_TERM_TLEN) != 0)      { syscall(60, 21); }
 check_optq(ts3);
 
-println("fuzz telnet_iac: OK (5 passes, ~1.2M bytes + 656 targeted LINEMODE frames, all invariants held)");
+var om1 = "fuzz telnet_iac: Descent observer — 3,000 visits, ";
+syscall(1, 1, om1, strlen(om1));
+fmt_int(obytes);
+var om2 = " bytes in split pieces, resync replies whole\n";
+syscall(1, 1, om2, strlen(om2));
+println("fuzz telnet_iac: OK (6 passes, ~1.2M bytes + 656 LINEMODE frames + the observer; invariants held)");
 syscall(60, 0);

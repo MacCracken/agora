@@ -24,8 +24,13 @@
 #       survived SIGTERM. Children serve untrusted clients and are precisely the
 #       processes an operator most needs to kill. This is the regression this
 #       script exists to prevent, and it is invisible to every other smoke.
+#       1.11.0 (ADR 0031): the child now keeps SIGINT / SIGTERM blocked ON
+#       PURPOSE, routed to a signalfd of its own, so it leaves cleanly — a
+#       goodbye and its door checkpoint — instead of dying mid-write. The check
+#       is therefore "blocked only with a signalfd draining them", and the client
+#       must hear the goodbye.
 #
-# Success: 9 checks pass; exit 0.
+# Success: 10 checks pass; exit 0.
 #
 # Usage: 28-clean-shutdown.py [port]
 
@@ -118,7 +123,7 @@ def check_client_notified():
 
 
 def check_child_killable():
-    """(3) fork children must NOT inherit the parent's blocked signal mask."""
+    """(3) fork children must stay killable: blocked signals need a signalfd."""
     p = start("fork")
     if p is None:
         fails.append("fork: server never came up")
@@ -142,11 +147,18 @@ def check_child_killable():
                     blk = line.split()[1]
     except OSError:
         pass
-    if blk and int(blk, 16) != 0:
-        fails.append("fork: child inherited a blocked signal mask (SigBlk=%s); "
-                     "SIGINT/SIGTERM are blocked with nothing draining them" % blk)
+    sigfd = False
+    try:
+        for fd in os.listdir("/proc/%d/fd" % child):
+            if "signalfd" in os.readlink("/proc/%d/fd/%s" % (child, fd)):
+                sigfd = True
+    except OSError:
+        pass
+    if blk and int(blk, 16) != 0 and not sigfd:
+        fails.append("fork: child has blocked signals (SigBlk=%s) and no signalfd "
+                     "draining them" % blk)
     else:
-        print("  OK  fork child has no blocked signals (SigBlk=%s)" % (blk or "?"))
+        print("  OK  fork child's blocked signals (SigBlk=%s) have a signalfd: %s" % (blk or "?", sigfd))
 
     os.kill(child, signal.SIGTERM)
     time.sleep(1.0)
@@ -163,6 +175,20 @@ def check_child_killable():
             pass
     else:
         print("  OK  fork child died on SIGTERM")
+        s.settimeout(1.0)
+        got = b""
+        try:
+            while True:
+                d = s.recv(4096)
+                if not d:
+                    break
+                got += d
+        except OSError:
+            pass
+        if b"goodbye" not in got:
+            fails.append("fork: the child left without telling its client (1.11.0)")
+        else:
+            print("  OK  fork child said goodbye on SIGTERM")
 
     s.close()
     p.send_signal(signal.SIGTERM)

@@ -1,6 +1,6 @@
 # 0007 — Concurrent connections via fork-per-accept
 
-> **Status**: Accepted — **amended by [ADR 0023](0023-dual-serve-model.md) (2026-07-26)**
+> **Status**: Accepted — **amended by [ADR 0023](0023-dual-serve-model.md) (2026-07-26) and [ADR 0031](0031-descent-session-state.md) (1.11.0: `PR_SET_PDEATHSIG` shipped — the out-of-scope item below)**
 > **Date**: 2026-05-23
 >
 > **Amendment note.** This model still ships and is still the Linux default. But 1.6.0 added a second

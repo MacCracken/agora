@@ -638,8 +638,202 @@ fn s10_motd_80_columns(): i64 {
     return 0;
 }
 
+# Read whatever is waiting on `fd` into buf (up to cap), giving it `ms` to arrive.
+fn st_recv_some(fd, buf, cap, ms): i64 {
+    var pfd[8];
+    store32(&pfd, fd);
+    store16((&pfd) + 4, 1);
+    store16((&pfd) + 6, 0);
+    if (syscall(7, &pfd, 1, ms) <= 0) { return 0; }
+    var n = sys_read(fd, buf, cap);
+    if (n < 0) { return 0; }
+    return n;
+}
+
+# s11 — the Descent as a session state (1.11.0, ADR 0031), poll model, against a
+# loopback listener standing in for the MUD: `descent` returns MODE_DESCENT at
+# once (it used to block for the whole visit), the bytes pipelined behind it
+# reach the MUD first, the pump moves bytes both ways, a client whose queue is
+# full stops the MUD reads, 30 minutes of silence ends the visit, and the MUD
+# closing brings the session back to the prompt with its options resynced.
+fn s11_descent_state(): i64 {
+    var name = "s11_descent_state";
+    g_serve_mode = SERVE_POLL;
+    g_descent_down_until = 0;
+    var lt, lv = tcp_socket();
+    var lfd = result_unwrap(lt, lv);
+    sock_reuse(lfd);
+    var bt, bv = sock_bind(lfd, INADDR_LOOPBACK(), 34931);
+    if (is_ok(bt) == 0) { st_fail(name, "bind the fake MUD"); return 1; }
+    sock_listen(lfd, 4);
+    var cfgp = alloc(512);
+    descent_cfg_path(g_store_buf, cfgp);
+    var cfd0 = file_open(cfgp, O_WRONLY | O_CREAT | O_TRUNC, 384);
+    file_write(cfd0, "34931\n", 6);
+    file_close(cfd0);
+    var fds = alloc(16);
+    st_pair(fds);
+    sock_set_nonblocking(load64(fds));        # as serve_poll does at accept
+    var s = st_session(load64(fds));
+    st_login(s, "0123456789abcdef", "qix");
+    opt_set_him(load64(s + SESS_TS), OPT_NAWS, Q_YES);
+    store64(load64(s + SESS_TS) + TS_TERM_COLS, 80);
+    st_tx_reset(s);
+    st_feed(s, "descent\r\nnorth\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_DESCENT) { st_fail(name, "descent did not return MODE_DESCENT"); return 1; }
+    if (load64(s + SESS_RX_LEN) - load64(s + SESS_RX_OFF) != 7) {
+        st_fail(name, "the pipelined `north` was not kept for the MUD");
+        return 1;
+    }
+    var at, av = sock_accept(lfd);
+    if (is_ok(at) == 0) { st_fail(name, "the dial never reached the fake MUD"); return 1; }
+    var mpeer = result_unwrap(at, av);
+    var i = 0;
+    while (i < 50) {
+        sess_load(s);
+        descent_pump(s, 1, 1);
+        sess_save(s);
+        if (load64(s + SESS_DESC_PHASE) == DESC_PROXY) { i = 50; }
+        sleep_ms(10);
+        i = i + 1;
+    }
+    if (st_tx_count(s, "stepping through the portal") != 1) { st_fail(name, "no portal banner"); return 1; }
+    var buf = alloc(8192);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    var got = st_recv_some(mpeer, buf, 8192, 500);
+    if (got != 7) { st_fail(name, "the MUD did not get the pipelined line"); return 1; }
+    if (memeq(buf, "north\r\n", 7) == 0) { st_fail(name, "wrong pipelined bytes"); return 1; }
+    # MUD → client, watched by the observer (the MUD asks ECHO; the client agrees).
+    file_write(mpeer, "room\r\n\xff\xfb\x01", 9);
+    sleep_ms(20);
+    st_tx_reset(s);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    if (st_tx_count(s, "room\r\n") != 1) { st_fail(name, "MUD bytes did not reach the client"); return 1; }
+    # Client → MUD through the session socket.
+    file_write(load64(fds + 8), "look\r\n\xff\xfd\x01", 9);
+    sleep_ms(20);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    got = st_recv_some(mpeer, buf, 8192, 500);
+    if (got != 9) { st_fail(name, "client bytes did not reach the MUD"); return 1; }
+    # A client queue without room for a whole read: the MUD is not read.
+    file_write(mpeer, "more", 4);
+    sleep_ms(20);
+    store64(s + SESS_TX_OFF, 0);
+    store64(s + SESS_TX_LEN, SESS_TX_CAP - 100);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    if (load64(s + SESS_TX_LEN) != SESS_TX_CAP - 100) { st_fail(name, "read the MUD into a full queue"); return 1; }
+    st_tx_reset(s);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    if (st_tx_count(s, "more") != 1) { st_fail(name, "the held MUD bytes never came"); return 1; }
+    # The MUD hangs up: back at the prompt; ECHO (the MUD's) adopted, then
+    # re-asked by agora for a character-mode client.
+    file_close(mpeer);
+    sleep_ms(20);
+    st_tx_reset(s);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    if (load64(s + SESS_MODE) != MODE_COMMAND)  { st_fail(name, "not back in MODE_COMMAND"); return 1; }
+    if (load64(s + SESS_MUD_FD) != (0 - 1))      { st_fail(name, "the MUD socket was kept"); return 1; }
+    if (st_tx_count(s, "back at the agora") != 1) { st_fail(name, "no return line"); return 1; }
+    if (opt_us(load64(s + SESS_TS), OPT_ECHO) != Q_YES) {
+        st_fail(name, "the ECHO the client agreed was not adopted");
+        return 1;
+    }
+    if (opt_him(load64(s + SESS_TS), OPT_NAWS) != Q_YES) { st_fail(name, "NAWS lost on return"); return 1; }
+    if (telnet_term_cols(load64(s + SESS_TS)) != 80)     { st_fail(name, "the window lost on return"); return 1; }
+    # 30 minutes of silence ends a visit.
+    st_tx_reset(s);
+    st_feed(s, "descent\r\n", 0);
+    var at2, av2 = sock_accept(lfd);
+    var mpeer2 = result_unwrap(at2, av2);
+    store64(s + SESS_DESC_PHASE, DESC_PROXY);
+    store64(s + SESS_DESC_LAST_MS, clock_now_ms() - DESCENT_IDLE_MS - 1);
+    sess_load(s);
+    descent_pump(s, 1, 1);
+    sess_save(s);
+    if (st_tx_count(s, "idle — leaving the Descent") != 1) {
+        st_fail(name, "the silence bound did not end the visit");
+        return 1;
+    }
+    if (load64(s + SESS_MODE) != MODE_COMMAND)  { st_fail(name, "idle: not back at the prompt"); return 1; }
+    # A client gone mid-visit releases the MUD socket with the slot.
+    st_feed(s, "descent\r\n", 0);
+    var at3, av3 = sock_accept(lfd);
+    var mpeer3 = result_unwrap(at3, av3);
+    file_close(load64(fds + 8));
+    sess_load(s);
+    if (descent_pump(s, 1, 1) != 1) { st_fail(name, "a gone client did not close the session"); return 1; }
+    session_release(s);
+    if (load64(s + SESS_MUD_FD) != (0 - 1)) { st_fail(name, "release kept the MUD socket"); return 1; }
+    if (st_recv_some(mpeer3, buf, 16, 500) != 0) { st_fail(name, "the MUD side was not closed"); return 1; }
+    file_close(mpeer2);
+    file_close(mpeer3);
+    file_close(load64(fds));
+    sock_close(lfd);
+    xunlink(cfgp);
+    st_pass(name);
+    return 0;
+}
+
+# s12 — a fork connection child's lifecycle (1.11.0, ADR 0031). A forked child
+# arms itself as cmd_serve_on's children do (the parent's signalfd, then
+# fork_child_arm): SIGTERM must reach its OWN signalfd — the child then exits by
+# choice (status 7), not killed by the signal — and its PR_SET_PDEATHSIG must be
+# SIGTERM (status 8 otherwise). The parent's pid table signals what it holds and
+# forgets a reaped child.
+fn s12_fork_child_lifecycle(): i64 {
+    var name = "s12_fork_child_lifecycle";
+    var me = sys_getpid();
+    var pid = sys_fork();
+    if (pid == 0) {
+        var armed = shutdown_signals_arm();
+        var csig = fork_child_arm(armed, me);
+        var pd[8];
+        store64(&pd, 0);
+        sys_prctl(2, &pd, 0, 0, 0);                    # PR_GET_PDEATHSIG
+        if ((load64(&pd) & 0xFFFFFFFF) != SIGTERM) { sys_exit(8); }
+        if (csig < 0) { sys_exit(9); }
+        var pfd[8];
+        store32(&pfd, csig);
+        store16((&pfd) + 4, 1);
+        store16((&pfd) + 6, 0);
+        if (syscall(7, &pfd, 1, 5000) == 1) { sys_exit(7); }
+        sys_exit(10);
+    }
+    fork_pid_add(pid);
+    sleep_ms(200);
+    fork_pids_signal(SIGTERM);
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load64(&st) & 0xFFFF;
+    fork_pid_drop(pid);
+    if ((status & 0x7F) != 0)        { st_fail(name, "the child was killed by the signal, not told"); return 1; }
+    var code = (status >> 8) & 0xFF;
+    if (code == 8)                   { st_fail(name, "PR_SET_PDEATHSIG is not SIGTERM"); return 1; }
+    if (code != 7)                   { st_fail(name, "the child's signalfd did not see SIGTERM"); return 1; }
+    var i = 0;
+    while (i < MAX_SESS) {
+        if (load64(g_fork_pids + i * 8) != 0) { st_fail(name, "a reaped child stayed in the table"); return 1; }
+        i = i + 1;
+    }
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s10, remove the store, print the totals, and return 1 on any failure.
+# run s01..s12, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -661,6 +855,8 @@ fn serve_tests(): i64 {
     s08_line_editor_and_sb_reply();
     s09_wrap_to_naws();
     s10_motd_80_columns();
+    s11_descent_state();
+    s12_fork_child_lifecycle();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

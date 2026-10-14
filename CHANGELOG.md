@@ -4,6 +4,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-13 (Descent as a session state + serve-model debt)
+
+A player in the Descent no longer freezes everyone else, and comes back with a working terminal. Until now a
+visit to the MUD was a blocking call that owned the process. Under the poll model (and always on agnos), every
+other session stopped for the whole visit, and a dead endpoint cost the sweep 4 s per attempt. On return,
+agora reset its telnet options and re-announced them. A client ignores `DO` for an option it already has on, so
+agora was left believing NAWS and LINEMODE were merely requested: wrapping stopped for the rest of the session,
+and LINEMODE clients typed blind. Both problems were reproduced with GNU `telnet` against the real MUD.
+
+1.11.0 makes a visit a session state that both serve models drive. It resyncs the options from what the client
+actually agreed during the visit. The poll loop now waits on readiness instead of a 20 ms tick, and fork children
+leave with their parent. ADR [0031](docs/adr/0031-descent-session-state.md), amending 0007, 0017 and 0023.
+
+**266** tests (254 module + 12 serve-layer), also on aarch64 under qemu; both fuzz harnesses plain and
+`--poison=ab` (the IAC harness gains a sixth pass: the Descent observer and the resync); **37** example smokes
+(new: 37), both CI legs green; `cyrius audit` exit 0. `build/agora` **1,029,584 → 1,042,240 B**; `--agnos`
+1,026,096 → 1,034,704 B; `--aarch64` 2,483,464 → 2,483,832 B. Closeout Pass run (minor bump).
+
+### Breaking
+
+- **`AGORA_SERVE` accepts `fork` and `poll` only.** Any other value is refused before anything binds: `agora
+  serve` exits 2 and says why. `epoll` used to be accepted and silently mean `poll`, and a typo silently meant
+  the default, so an operator who asked for a model could get another one without a word. **Migration:**
+  `AGORA_SERVE=epoll` → `AGORA_SERVE=poll`. Behaviour is unchanged, and since this release `poll` waits on
+  readiness.
+
+### Fixed
+
+- **A Descent visit froze the poll server.** Every other session waited for the whole visit; another session's
+  `whoami` timed out after 8 s in the 1.10.1 A/B. Now it is answered in 0.1 ms, and in 0.2 ms while someone
+  dials an endpoint that never answers (it used to take 3.5 s). The dialler is still told "not answering" at
+  the 4 s deadline.
+- **Returning from the Descent broke the window width and LINEMODE echo for the rest of the session.**
+  - **What happened:** after any visit, `read` came back 200 columns wide instead of 39, and a LINEMODE client's
+    typed line was invisible until Enter. agora reset its option state and re-announced. The client, which still
+    had NAWS and LINEMODE on, ignored the `DO`s. Its fresh window report then arrived for an option agora
+    believed only requested, and since 1.8.1 a subnegotiation counts only for an agreed option, so it was
+    dropped. agora also took echo back from a client still in EDIT mode.
+  - **The fix:** a passive observer watches the negotiation the proxy carries. On return agora adopts what the
+    client holds and negotiates only the differences. Verified with GNU `telnet` in LINEMODE and character
+    mode, under both models, through the MUD's passphrase echo toggle.
+- **Fork connection children outlived their parent.** At a clean shutdown the parent waited 5 s and exited,
+  leaving live children running as orphans. A crashed or SIGKILLed parent left them all. Now the parent signals
+  its children, and each says goodbye and saves its door before leaving: shutdown takes 0.5 s instead of 5.
+  `PR_SET_PDEATHSIG` ends a child whose parent dies (ADR 0007 had left this open).
+- **The poll loop slept 20 ms per sweep.** It accepted at most 50 sequential connections a second, and every
+  poll-mode command waited 0–20 ms for the next tick. On Linux it now waits in `poll(2)` on what is ready.
+  agnos has no `poll` and keeps the paced sweep.
+- **Found before release by the new fuzz pass:** when the reply queue had no room for a refusal, the resync left
+  an option agora refuses held *on*, so the RFC 855 gate would accept subnegotiations for it. A refused option
+  is now always recorded off (fuzz invariant 17; `t255` § G).
+- **Two subnegotiation requests could be torn**: TERMINAL-TYPE `SEND` and the LINEMODE `MODE` request were
+  pushed byte by byte. They are now queued whole or not at all, like every other reply since 1.10.0.
+
+### Changed
+
+- **The Descent link is `MODE_DESCENT`.**
+  - `descent` dials and returns at once. On Linux the connect is non-blocking (the stdlib's `sock_connect`, with
+    no raw socket syscall), finished by a zero-timeout `poll` and abandoned after 4 s.
+  - `descent_pump` moves bytes once per sweep (poll) or wakeup (fork) in both directions. Client bytes wait in
+    the receive buffer until the MUD takes them, and the MUD is read only while the client's queue has room for
+    a whole read.
+  - The bytes pipelined behind `descent` are parked as the first bytes for the MUD, replacing 1.6.5's `g_pipe_*`
+    globals.
+  - Every line to the client goes through the session's own queue in order, so 1.8.1's `session_flush_now` is
+    gone.
+  - agnos still connects with the kernel's blocking call (about 8 s), behind the existing 30 s redial cooldown.
+- **Fork children** wait in `poll(2)` on their socket, their own shutdown signalfd and, during a visit, the MUD
+  socket. They keep SIGINT / SIGTERM blocked on purpose, routed to that signalfd; 1.7.0 unblocked them. Smoke 28
+  now checks "blocked only with a signalfd draining them" and that the child says goodbye.
+- **Accept-loop rate limiting** moved to roadmap § Unscheduled after a re-check. agnos still has neither
+  `getpeername` nor a peer address from `sock_accept`, so ADR 0023's reasoning holds.
+
+### Added
+
+- `telnet.cyr`: the negotiation observer (`tobs_init` / `tobs_feed` / `tobs_on`) and `telnet_resync`.
+  - The observer treats an option as on once its owner said `WILL` and the other side `DO`, and off on any
+    `WONT` / `DONT`.
+  - It keeps the client's window report and any acknowledged LINEMODE mode, starts from agora's own state, and
+    remembers what was on before the visit, so an option the client had refused is not asked for again.
+- `docs/examples/37-descent-state.py`: 21 checks under both models, with a built-in fake MUD, plus a real
+  inetutils `telnet` in a 40x24 pty. A 1.10.1 build fails 11 of them.
+- Fuzz pass 6 (`fuzz/telnet_iac.fcyr`): 3,000 simulated visits feeding about 860 KB to the observer in split
+  pieces, from both directions. A guard band checks the observer's bounds, and the resync runs against a reply
+  queue already partly full. New invariants 24 (the observer's ranges) and 25 (the resync's replies whole).
+- Tests: `t254` the observer, `t255` the resync (scenarios A–G); serve `s11` the Descent state against a
+  loopback fake MUD, `s12` a fork child's lifecycle (its signalfd sees SIGTERM; PDEATHSIG is SIGTERM; the pid
+  table). Mutation-checked:
+  - 14 + 2 observer / resync mutants, all caught by the module suite (the 2 also by the fuzz harness);
+  - 4 fuzz-pass mutants;
+  - 9 Descent-wiring mutants and 4 fork-lifecycle mutants, all caught by the serve suite.
+
+### Performance
+
+- `benches/serve-bench.py all`, the new build and 1.10.1 in the same session:
+  - **poll accepts: sequential 50 → 8,386 conn/s, 8 concurrent 618 → 10,534** (fork unchanged, ~3,700 /
+    ~7,700);
+  - per-session memory: poll 12.7 → 12.6 KB; fork 54 → 56 KB PSS, measured from the same filesystem and within
+    its 4 KB run-to-run spread;
+  - world lock ~510 txn/s; `read` 0.62 / 1.43 / 2.52 ms against 0.71 / 1.42 / 2.53 for 1.10.1; unknown login
+    0.20–0.25 ms on both. All unchanged.
+- `bench_telnet.bcyr` (9 / 64 / 74 / 103 / 167 ns) and `bench_term.bcyr` (3.1 / 4.0 / 19.4 / 40.4 µs):
+  unchanged.
+
+### Verification
+
+- `cyrius test`: **254/254** + **12/12**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
+  `--poison=ab`. `cyrius audit` **exit 0**. `scripts/check-version-sync.sh --tag 1.11.0` and
+  `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them, on 4 CPUs: **fork 25/25, poll 36/36**. Smoke 20 (the
+  real Yeoman's Descent MUD) and 24 (a fake MUD logging every byte) pass under both models.
+- Allocator gate, poll server: 300 back-to-back Descent visits grew the data segment by **0 KB**. The
+  observer is allocated once per slot, on its first visit. The readiness wait and the pump stay idle at 0 ms
+  CPU, including while a client floods a MUD that never reads (5 MB held back, no spin).
+- Full build from clean (`rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build`), all three targets.
+- Dead-code audit: the same 10 test-only accessors as 1.10.1.
+
+### Known limitations (recorded, not fixed)
+
+- On agnos a Descent connect still blocks the sweep (the kernel's `sock_connect` has no non-blocking form, about
+  8 s), bounded by the 30 s redial cooldown, and the sweep is still paced at 20 ms (no `poll`).
+- A fork child parked in a 60 s blocking write to a stalled client sees SIGTERM only after the write gives up.
+- If a visit ends while the client is in the middle of a telnet command, the rest of that command reaches
+  agora's parser as data.
+
 ## [1.10.1] — 2026-10-13 (terminal-aware output)
 
 agora has asked every client for its window size since M1 (NAWS, RFC 1073) and stored the answer, and until now

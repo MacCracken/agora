@@ -6,10 +6,11 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-10-13 — **1.10.1 (terminal-aware output) cut**: the window width every client reports
-> (NAWS) has its first consumer — door frames, `list`, `read`, chat and `help` wrap between words to it, with
-> hanging indents; a client with no width sees the old bytes; the greeting fits 80 columns. ADR 0030. Closes
-> the 1.10.x line. **Replace this paragraph each
+> **Last refresh**: 2026-10-13 — **1.11.0 (Descent as a session state + serve-model debt) cut**: a Descent
+> visit is a session state both serve models drive (it no longer freezes the poll server), the return
+> resyncs the telnet options from what the client agreed during the visit, the poll loop waits on readiness
+> (accepts 50 → ~8,400/s), `AGORA_SERVE` takes `fork` | `poll` only, and fork children leave with their
+> parent. ADR 0031. **Replace this paragraph each
 > release — do not append to it.** History lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
@@ -94,6 +95,14 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
      from 1.8.1 to 1.10.0).
    - **Telnet replies are queued whole or not at all** (`ts_tx_push_all`, `ts_tx_room`) [1.10.0] — never push a
      multi-byte unit byte by byte.
+   - **A Descent visit is a session state** [1.11.0, ADR 0031]: while `MODE_DESCENT`, the session's receive
+     buffer (`SESS_RX_OFF..SESS_RX_LEN`) holds client bytes owed to the MUD — they are NOT a parked
+     remainder (the sweep must not treat them as one, or the wait spins) and never run as BBS commands. The
+     readiness wait must not watch a socket the pump will not read (client while bytes are pending; MUD while
+     the client's queue is full), or it spins.
+   - **Fork children keep SIGINT / SIGTERM blocked on purpose** [1.11.0]: drained by their own signalfd
+     (`fork_child_arm`), which every wait in a child must include. On agnos a raw `syscall(7)` is `SYS_OPEN`:
+     every poll is behind an agnos guard.
    - **`send_wrapped` sanitizes its buffer in place** [1.10.1] — so the wrap measures what the reader sees. Pass it
      scratch only (a stack row, an arena copy), never a literal or a buffer read again afterwards; trusted
      wire-ready bytes (a door frame, a literal) go with `TW_RAW`, which touches nothing. A raw-socket smoke sends
@@ -105,18 +114,18 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `1.10.1` (2026-10-13) — terminal-aware output: wrap to the NAWS width. Previous: `1.10.0` (2026-10-13) — telnet conformance |
-| **In flight** | none — next is **1.11.0** (Descent as a poll state + serve-model debt), see § In-flight slot |
+| **Released** | `1.11.0` (2026-10-13) — Descent as a session state, readiness-driven serve loops, option resync, fork-child lifecycle. Previous: `1.10.1` (2026-10-13) — terminal-aware output |
+| **In flight** | none — next is **1.11.1** (enforced module invariants), see § In-flight slot |
 | **Toolchain pin** | cyrius `6.7.9` (`cyrius.cyml [package].cyrius`; local snapshot verified byte-identical to the tag at 1.8.0; a 1.8.1 clean `cyrius deps` regenerated an identical `lib/`) |
 | **Source of truth** | `VERSION` at the repo root |
 
 ## Build artifacts
 
-| Artifact | Size (1.10.1) | Build line |
+| Artifact | Size (1.11.0) | Build line |
 |---|---|---|
-| `build/agora` | **1,029,584 B** (+12,480 vs 1.10.0) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
-| `build/agora-agnos` | 1,026,096 B | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
-| aarch64 | 2,483,464 B (aarch64 ELF does no DCE compaction; its segments align to 64 KB, so it grows in steps — +17,464 B of code at 1.10.1 moved the data segment one step) | `cyrius build --aarch64 …` |
+| `build/agora` | **1,042,240 B** (+12,656 vs 1.10.1) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
+| `build/agora-agnos` | 1,034,704 B | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
+| aarch64 | 2,483,832 B (aarch64 ELF does no DCE compaction; its segments align to 64 KB, so it grows in steps — +17,464 B of code at 1.10.1 moved the data segment one step) | `cyrius build --aarch64 …` |
 
 The release workflow publishes all three (`agora-<ver>-x86_64-linux`, `-aarch64-linux`, `-x86_64-agnos`)
 with `SHA256SUMS` since 1.8.2.
@@ -127,25 +136,28 @@ all `.bss`; the build still warns `large static data` (≈375 KB).
 
 ## Tests + benchmarks
 
-| Surface | Status (1.10.1) |
+| Surface | Status (1.11.0) |
 |---|---|
-| `tests/agora.tcyr` | **252** module tests (src/test.cyr until 1.8.2) — also 252/252 under `cyrius test --aarch64` (qemu) |
-| `tests/serve.tcyr` | **10** serve-layer tests (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
-| `fuzz/telnet_iac.fcyr` | green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2); since 1.10.0 it agrees the client options before its structured subnegotiations, checks for torn replies, and drives 656 targeted LINEMODE frames |
+| `tests/agora.tcyr` | **254** module tests (src/test.cyr until 1.8.2) — also 254/254 under `cyrius test --aarch64` (qemu) |
+| `tests/serve.tcyr` | **12** serve-layer tests (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
+| `fuzz/telnet_iac.fcyr` | green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2); since 1.10.0 it agrees the client options before its structured subnegotiations, checks for torn replies, and drives 656 targeted LINEMODE frames |; since 1.11.0 a sixth pass drives the Descent negotiation observer (3,000 visits in split pieces, guard band) and the return resync (invariants 24 / 25)
 | `fuzz/term_wrap.fcyr` | new at 1.10.1: the word wrap — 6,000 adversarial texts (6.1 MB) each wrapped four ways, seven invariants (nothing but whitespace dropped, breaks only at whitespace, no escape sequence split — by its own parser, chunk-size independence, rows within the width, identity when everything fits, no runaway); green plain and `--poison=ab`, in CI and release |
-| `docs/examples/` | **36** smokes; `run.sh`: both CI legs green at 1.10.1 (**fork 25/25, poll 35/35**); CI runs it per model |
+| `docs/examples/` | **37** smokes; `run.sh`: both CI legs green at 1.11.0 (**fork 25/25, poll 36/36**); CI runs it per model |
 | `benches/bench_telnet.bcyr` · `bench_term.bcyr` | 5 parser benchmarks · 4 word-wrap benchmarks (1.10.1) — [`BENCHMARKS.md`](../../BENCHMARKS.md) |
 | `benches/serve-bench.py` | accept rate, per-session memory, world lock, reply (`read` with and without replies; 1.9.1 index), unknown-handle login + first-start time (1.9.0) — BENCHMARKS.md § Serve-level baselines |
 | `cyrius audit` | **exit 0** since 1.8.2 — fmt, lint (0 warnings), docs (every function documented), tests, bench — and a CI gate |
 
 ## In-flight slot
 
-**None.** 1.10.1 is cut and closes the 1.10.x line. Next is **1.11.0 — Descent as a poll state +
-serve-model debt** (re-asserting agora's telnet options — ECHO, LINEMODE and now the NAWS width — on return from
-the MUD; the proxy that blocks the poll sweep; `AGORA_SERVE=epoll`). See roadmap § 1.11.0.
+**None.** 1.11.0 is cut. Next is **1.11.1 — enforced module invariants** (ADR 0022's borrowed
+world-snapshot pointer, the chat-couch bot ABI, ADR 0020's per-slot smoke obligation turned into a test).
+See roadmap § 1.11.1.
 
 ## Recent shipped
 
+- **1.11.0** (2026-10-13) — the Descent as a session state (a visit no longer freezes the poll server), the
+  option resync on return (window width and LINEMODE echo survive a visit), readiness-driven poll loop (accepts
+  50 → ~8,400/s), `AGORA_SERVE=epoll` refused, fork children leave with their parent. 266 tests, 37 smokes.
 - **1.10.1** (2026-10-13) — terminal-aware output: door frames, `list`, `read`, chat and `help` wrapped to the
   NAWS width (byte-identical without one); `src/term.cyr` + a second fuzz harness; `list` under fork 16.2 →
   4.2 ms on 300 posts. 262 tests, 36 smokes.
@@ -202,12 +214,12 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | kii / sankoch | M3 inline images / M4 stored-file deltas | — | gates met, no consumer; nothing in `src/` references them |
 | agnos ext4 WRITE | AGNOS-target storage | in flight upstream | not blocking (ADR 0001) |
 
-## Source surface (1.10.1, lines)
+## Source surface (1.11.0, lines)
 
 | File | Lines | Holds |
 |---|---:|---|
-| `src/main.cyr` | 5,186 | argv dispatch + CLI verbs; both serve models (fork / poll), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat / Descent glue, door save lifecycle; N1 shutdown |
-| `src/telnet.cyr` | 989 | RFC 854 IAC parser (AYT, EC / EL events), RFC 1143 Q-method, NAWS / TERMINAL-TYPE subnegotiation, RFC 1184 LINEMODE server side (MODE + echo hand-off, SLC, FORWARDMASK refused) — only for agreed options |
+| `src/main.cyr` | 5,650 | argv dispatch + CLI verbs; both serve models (fork / poll; readiness waits, the fork child's signalfd + PDEATHSIG), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat glue; the Descent as a session state (`descent_begin` / `descent_pump` / `descent_leave`); door save lifecycle; N1 shutdown |
+| `src/telnet.cyr` | 1,249 | RFC 854 IAC parser (AYT, EC / EL events), RFC 1143 Q-method, NAWS / TERMINAL-TYPE subnegotiation, RFC 1184 LINEMODE server side (MODE + echo hand-off, SLC, FORWARDMASK refused) — only for agreed options; the Descent negotiation observer + return resync (1.11.0) |
 | `src/term.cyr` | 448 | terminal-aware output (ADR 0030): display width (UTF-8, wide / zero-width, TAB stops, escape sequences) and the resumable word-wrap state machine `send_wrapped` drives |
 | `src/board.cyr` | 1,956 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading + the reply index (ADR 0027), policy modes + read gate (ADR 0028) / admins (fail closed; streamed; fingerprint entries), `flock` helpers, the directory workspace (`store_dir_scan`, FIFO-guarded), egress sanitize rule (ADR 0024) |
 | `src/account.cyr` | 799 | fingerprint, handle validation, user dirs, keyfiles, nonce / signature parse, From-header extraction, the register lock, the handle index (ADR 0026) |
@@ -219,8 +231,8 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | `src/wager.cyr` | 311 | shared wagering primitive (ADR 0013) |
 | `src/chat.cyr` | 451 | chat area ring transcript (ADR 0011) |
 | `src/eliza.cyr` · `src/parry.cyr` · `src/jabberwacky.cyr` | 903 · 522 · 559 | the three chatbots (ADR 0012, 0015) |
-| `src/descent.cyr` | 476 | Descent MUD gateway, TCP byte-proxy (ADR 0017) — no longer calls into `main.cyr` |
-| `tests/agora.tcyr` · `tests/serve.tcyr` | 7,570 · 676 | the module suite · the serve-layer suite (includes `main.cyr`) |
+| `src/descent.cyr` | 286 | Descent MUD gateway (ADR 0017 / 0031): endpoint parsing + non-blocking dial / connect check / one read / one write — the pump lives in `main.cyr` |
+| `tests/agora.tcyr` · `tests/serve.tcyr` | 7,741 · 872 | the module suite · the serve-layer suite (includes `main.cyr`) |
 
 ## Cross-references
 

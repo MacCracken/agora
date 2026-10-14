@@ -11,7 +11,9 @@
 # keystrokes on the player's own outbound queue and the MUD received NOTHING.
 # The gateway looked alive (the MUD's banner still reached the client) but no
 # input ever arrived. 1.6.2 gives descent_proxy its own direct full-write
-# (descent_write_all) for both directions.
+# (descent_write_all) for both directions. (1.11.0, ADR 0031: the proxy is now
+# a session state; the client->MUD write is descent_mud_write, still never
+# send_buf, and MUD->client bytes go through send_buf on purpose, in order.)
 #
 # This script pins that with a FAKE MUD rather than the real one — a stub that
 # logs every byte it receives — so the assertion is exact ("the MUD saw these

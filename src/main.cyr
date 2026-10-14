@@ -68,6 +68,7 @@ enum SessMode {
     MODE_LOGIN_AWAIT_SIG  = 3;   # M6-C: parked challenge, waiting for `auth:`
     MODE_DOOR             = 4;   # 1.1.0: in a door game; lines route to the game
     MODE_CHAT             = 5;   # 1.3.0: in a chat channel; lines say to the room (ADR 0011)
+    MODE_DESCENT          = 6;   # 1.11.0: in the Descent; bytes go to the MUD (ADR 0031)
 }
 
 # 1.3.0 chat runtime (ADR 0011). These are main.cyr socket concerns —
@@ -1316,19 +1317,15 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
 
     # 1.4.0 (ADR 0017): `descent` — step through the portal into the
     # sibling Yeoman's Descent MUD. Login-gated like chat (a citizen
-    # steps through; the MUD still runs its own login). descent_run
-    # blocks in the transparent proxy until the MUD session ends, then
-    # returns and we drop straight back to the BBS command prompt. All
-    # of descent_run's failure paths are soft (print + return).
+    # steps through; the MUD still runs its own login). 1.11.0 (ADR 0031) —
+    # it no longer blocks: descent_begin dials and returns MODE_DESCENT, and the
+    # serve loop moves the bytes (descent_pump) until the visit ends.
     if (line_has_prefix(line, len, "descent") != 0) {
         if ((load8(g_session_fp) & 0xFF) == 0) {
             send_str(cfd, "descent needs an identity — log in first ('login <handle>').\r\n");
             return MODE_COMMAND;
         }
-        session_flush_now(cfd);
-        descent_run(cfd, g_store_buf, g_session_handle);
-        session_after_descent(cfd);
-        return MODE_COMMAND;
+        return descent_begin(cfd);
     }
 
     if (line_has_prefix(line, len, "quit") != 0) {
@@ -2391,6 +2388,8 @@ var g_active_sess = 0;   # session currently being dispatched (send_buf tx targe
 # need them and `serve_poll` takes only `sfd`. (0 - 1) = not armed.
 var g_shutdown_sigfd   = 0 - 1;
 var g_shutdown_siginfo = 0;
+var g_poll_fds    = 0;   # 1.11.0 — serve_poll_wait's pollfd array (POLL_FDS_MAX entries, once)
+var g_child_sigfd = 0 - 1;   # 1.11.0 — a fork child's own shutdown signalfd (fork_child_arm)
 var g_sess_pool   = 0;   # alloc(MAX_SESS*8): pre-allocated session slots, reused
 
 enum SessCap {
@@ -2456,7 +2455,20 @@ enum SessOff {
     SESS_DOOR_LOCK         = 336;
     SESS_DOOR_OVER0        = 344;
     SESS_POST_FULL         = 352;   # 1.8.1 (S12) — the compose body hit POST_MAX_BYTES
-    SESS_SIZE              = 360;
+    # 1.11.0 (ADR 0031) — the Descent negotiation observer (telnet.cyr TOB_SIZE),
+    # allocated on the slot's first `descent` and kept for the slot's life: at most
+    # one per slot (64 under poll, one per fork child), never per command.
+    SESS_DESC_OBS          = 360;
+    # 1.11.0 (ADR 0031) — a Descent visit as session state: the MUD socket (-1 =
+    # none), the phase (descent.cyr DESC_*), the connect deadline, and the last
+    # time bytes moved (the 30-minute silence bound). While in MODE_DESCENT the
+    # receive buffer's SESS_RX_OFF..SESS_RX_LEN holds client bytes the MUD has
+    # not taken yet.
+    SESS_MUD_FD            = 368;
+    SESS_DESC_PHASE        = 376;
+    SESS_DESC_DEADLINE     = 384;
+    SESS_DESC_LAST_MS      = 392;
+    SESS_SIZE              = 400;
 }
 
 # Build the pool once (at serve_poll start): MAX_SESS slots, each with its per-conn
@@ -2492,6 +2504,7 @@ fn session_alloc(): i64 {
     store64(s + SESS_REPLY_SUBJECT,  alloc(SUBJECT_MAX_BYTES + 8));
     store64(s + SESS_FD, 0 - 1);
     store64(s + SESS_DOOR_LOCK, 0 - 1);
+    store64(s + SESS_MUD_FD, 0 - 1);
     return s;
 }
 
@@ -2522,6 +2535,7 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_TX_OVF, 0);
     store64(s + SESS_RX_OFF, 0);
     store64(s + SESS_RX_LEN, 0);
+    store64(s + SESS_DESC_PHASE, DESC_NONE);
     telnet_state_reset(load64(s + SESS_TS));
     store64(s + SESS_LINE_POS, 0);
     store64(s + SESS_POST_POS, 0);
@@ -2621,6 +2635,10 @@ fn session_release(s): i64 {
     # 1.6.3 — a player who disconnects mid-game leaves a live door state in the
     # slot. Under fork the child's exit reclaimed it; under poll nothing did.
     session_door_free(s);
+    # 1.11.0 — a client gone mid-visit takes its MUD connection with it.
+    var mfd = load64(s + SESS_MUD_FD);
+    if (mfd >= 0) { sock_close(mfd); store64(s + SESS_MUD_FD, 0 - 1); }
+    store64(s + SESS_DESC_PHASE, DESC_NONE);
     store64(s + SESS_ACTIVE, 0);
     store64(s + SESS_FD, 0 - 1);
     return 0;
@@ -2677,8 +2695,14 @@ fn sess_save(s): i64 {
     return 0;
 }
 
-# Serve model from AGORA_SERVE ({fork,poll,epoll}). Default: fork on Linux
+# Serve model from AGORA_SERVE: `fork` or `poll`. Default: fork on Linux
 # (classic/back-compat), poll on agnos (its only concurrent option; no fork).
+#
+# 1.11.0 (ADR 0031) — anything else is REJECTED (returns -1; `agora serve` exits
+# 2 before binding). `epoll` used to be accepted and silently mean `poll`, and a
+# typo silently meant the default: an operator who asked for a model got another
+# one without a word. Since 1.11.0 the poll model waits on readiness itself, so
+# there is no separate epoll model to ask for.
 fn serve_mode_from_env(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     var dflt = SERVE_POLL;
@@ -2689,7 +2713,6 @@ fn serve_mode_from_env(): i64 {
     var e = getenv("AGORA_SERVE");
     if (e == 0) { return dflt; }
     if (streq(e, "poll") == 1)  { return SERVE_POLL; }
-    if (streq(e, "epoll") == 1) { return SERVE_POLL; }
     if (streq(e, "fork") == 1) {
         #ifdef CYRIUS_TARGET_AGNOS
         return SERVE_POLL;   # agnos has no fork; honor "single-process" intent via poll
@@ -2698,7 +2721,7 @@ fn serve_mode_from_env(): i64 {
         return SERVE_FORK;
         #endif
     }
-    return dflt;
+    return 0 - 1;
 }
 
 # --- poll-mode I/O (bites C+D) -------------------------------------------------
@@ -2843,38 +2866,247 @@ fn session_drain(s): i64 {
     return rc;
 }
 
-# 1.8.1 (audit G5) — write the active session's queued output NOW, blocking
-# (bounded by descent_write_all's wall-clock limit). Only the Descent link needs
-# it: the proxy writes the client fd directly, so anything still queued — the
-# echo of the `descent` line, earlier output — would otherwise arrive after the
-# whole MUD session. A no-op in fork mode, where send_buf never queues.
-fn session_flush_now(cfd): i64 {
-    if (g_serve_mode != SERVE_POLL) { return 0; }
+# === 1.11.0 — the Descent as a session state (ADR 0031) ======================
+#
+# Until 1.11.0 `descent` called a proxy that owned the process for the whole
+# visit: under poll (and always on agnos) every other session froze, and a dead
+# endpoint cost up to 4 s inside the sweep. Now `descent` dials and returns
+# MODE_DESCENT; each sweep (poll) or wakeup (fork) runs `descent_pump` once, and
+# the visit ends in `descent_leave`. Everything sent to the client goes through
+# `send_buf` — the session's tx queue under poll — so the portal lines, the MUD's
+# bytes and the return arrive in order, and the 1.8.1 flush is gone.
+
+# `descent`: read the endpoint, dial, and enter MODE_DESCENT. Every failure is
+# soft — a line, and the caller stays in MODE_COMMAND.
+fn descent_begin(cfd): i64 {
     var s = g_active_sess;
-    var off = load64(s + SESS_TX_OFF);
-    var len = load64(s + SESS_TX_LEN);
-    if (len > off) { descent_write_all(cfd, load64(s + SESS_TX) + off, len - off); }
-    store64(s + SESS_TX_OFF, 0);
-    store64(s + SESS_TX_LEN, 0);
+    var ap = cmd_alloc(8);
+    var pp = cmd_alloc(8);
+    var er = descent_endpoint(g_store_buf, ap, pp);
+    if (er == 1) {
+        send_str(cfd, "\r\nNo Descent linked.\r\n");
+        send_str(cfd, "(operator: put 'host:port' or a bare port in <store>/.descent)\r\n");
+        return MODE_COMMAND;
+    }
+    if (er == 2) {
+        send_str(cfd, "\r\nThe Descent endpoint is misconfigured (expected 'host:port' or a bare port).\r\n");
+        return MODE_COMMAND;
+    }
+    var now = clock_now_ms();
+    if (now < g_descent_down_until) {
+        send_str(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
+        return MODE_COMMAND;
+    }
+    var stp = cmd_alloc(8);
+    var mfd = descent_dial(load64(ap), load64(pp), stp);
+    if (mfd < 0) {
+        g_descent_down_until = clock_now_ms() + DESCENT_RETRY_MS;
+        send_str(cfd, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
+        return MODE_COMMAND;
+    }
+    # The negotiation observer (telnet.cyr): one per slot, kept for its life.
+    var obs = load64(s + SESS_DESC_OBS);
+    if (obs == 0) {
+        obs = alloc(TOB_SIZE);
+        store64(s + SESS_DESC_OBS, obs);
+    }
+    tobs_init(obs, load64(s + SESS_TS));
+    store64(s + SESS_MUD_FD, mfd);
+    store64(s + SESS_DESC_PHASE, load64(stp));
+    store64(s + SESS_DESC_DEADLINE, clock_now_ms() + DESCENT_CONNECT_MS);
+    store64(s + SESS_DESC_LAST_MS, clock_now_ms());
+    if (load64(stp) == DESC_PROXY) { descent_arrived(cfd); }
+    return MODE_DESCENT;
+}
+
+# The connection is up: the portal lines.
+fn descent_arrived(cfd): i64 {
+    g_descent_down_until = 0;
+    send_str(cfd, "\r\n-- stepping through the portal into Yeoman's Descent --\r\n");
+    if ((load8(g_session_handle) & 0xFF) != 0) {
+        send_str(cfd, "(you are ");
+        send_str(cfd, g_session_handle);
+        send_str(cfd, " on agora; the Descent runs its own login — identity hand-off is a future link)\r\n");
+    }
+    send_str(cfd, "\r\n");
     return 0;
+}
+
+# End the visit: close the MUD socket, say `msg` (0 = nothing) and, if the MUD
+# was reached, `back at the agora`, then resync the telnet options from what the
+# observer saw (telnet_resync) and return to the BBS prompt. Client bytes still
+# waiting for the MUD are dropped — they were typed for the MUD, not as BBS
+# commands.
+fn descent_leave(s, msg): i64 {
+    var cfd = load64(s + SESS_FD);
+    var mfd = load64(s + SESS_MUD_FD);
+    if (mfd >= 0) { sock_close(mfd); }
+    store64(s + SESS_MUD_FD, 0 - 1);
+    var reached = 0;
+    if (load64(s + SESS_DESC_PHASE) == DESC_PROXY) { reached = 1; }
+    store64(s + SESS_DESC_PHASE, DESC_NONE);
+    store64(s + SESS_RX_OFF, 0);
+    store64(s + SESS_RX_LEN, 0);
+    if (msg != 0) { send_str(cfd, msg); }
+    if (reached == 1) {
+        send_str(cfd, "\r\n-- back at the agora --\r\n");
+        session_after_descent(cfd, load64(s + SESS_DESC_OBS));
+    }
+    store64(s + SESS_MODE, MODE_COMMAND);
+    send_prompt(cfd, load64(s + SESS_CURBOARD));
+    return 0;
+}
+
+# Room in the client's output for a MUD read: the poll tx queue's free space
+# (after compaction); under fork send_buf writes the socket itself, so always.
+fn descent_tx_room(s): i64 {
+    if (g_serve_mode != SERVE_POLL) { return SESS_TX_CAP; }
+    return SESS_TX_CAP - (load64(s + SESS_TX_LEN) - load64(s + SESS_TX_OFF));
+}
+
+# Read the client into the receive buffer for the MUD: > 0 bytes, 0 nothing yet,
+# -1 gone. Poll: the non-blocking session read. Fork: the socket is blocking, so
+# the caller reads only after poll(2) said it is readable.
+fn descent_client_read(s): i64 {
+    if (g_serve_mode == SERVE_POLL) { return sess_recv_nonblock(s); }
+    var n = sys_read(load64(s + SESS_FD), load64(s + SESS_RXBUF), RECV_BUF_BYTES);
+    if (n > 0) { return n; }
+    if (n == (0 - EWOULDBLOCK_ERR)) { return 0; }
+    return 0 - 1;
+}
+
+# Move a visit forward once, never blocking. `crd` = the client may be read
+# (under fork only when poll(2) said so; under poll always — its reads do not
+# block), `mrd` likewise for the MUD. Returns 1 if the session must close (the
+# client is gone or its output failed), 0 otherwise — including when the visit
+# ended, in which case the session is back in MODE_COMMAND.
+#
+# Backpressure both ways: the client is read only when the MUD has taken
+# everything read before (one receive buffer of pending bytes), and the MUD only
+# when the client's output has room for a whole read — so a stalled MUD stops
+# reading the client, and a client that stops reading stops the MUD's reads
+# rather than overflowing its tx queue.
+fn descent_pump(s, crd, mrd): i64 {
+    var cfd = load64(s + SESS_FD);
+    var mfd = load64(s + SESS_MUD_FD);
+    var now = clock_now_ms();
+    if (load64(s + SESS_DESC_PHASE) == DESC_CONNECTING) {
+        var c = descent_connect_check(mfd);
+        if (c == 0) {
+            if (now < load64(s + SESS_DESC_DEADLINE)) { return 0; }
+            c = 0 - 1;
+        }
+        if (c < 0) {
+            g_descent_down_until = now + DESCENT_RETRY_MS;
+            descent_leave(s, "\r\nThe Descent is not answering (operator may have it offline).\r\n");
+            return 0;
+        }
+        store64(s + SESS_DESC_PHASE, DESC_PROXY);
+        store64(s + SESS_DESC_LAST_MS, now);
+        descent_arrived(cfd);
+    }
+    var rxbuf = load64(s + SESS_RXBUF);
+    var obs = load64(s + SESS_DESC_OBS);
+    var moved = 0;
+    # client → MUD
+    if (load64(s + SESS_RX_OFF) >= load64(s + SESS_RX_LEN)) {
+        if (crd != 0) {
+            var cn = descent_client_read(s);
+            if (cn < 0) { return 1; }
+            if (cn > 0) {
+                tobs_feed(obs, TOB_C2S, rxbuf, cn);
+                store64(s + SESS_RX_OFF, 0);
+                store64(s + SESS_RX_LEN, cn);
+            }
+        }
+    }
+    var off = load64(s + SESS_RX_OFF);
+    var len = load64(s + SESS_RX_LEN);
+    if (off < len) {
+        var w = descent_mud_write(mfd, rxbuf + off, len - off);
+        if (w < 0) { descent_leave(s, 0); return 0; }
+        if (w > 0) {
+            moved = 1;
+            off = off + w;
+            if (off >= len) { off = 0; len = 0; }
+            store64(s + SESS_RX_OFF, off);
+            store64(s + SESS_RX_LEN, len);
+        }
+    }
+    # MUD → client
+    if (mrd != 0) {
+        if (descent_tx_room(s) >= DESCENT_PROXY_BUF) {
+            var buf[4096];                # DESCENT_PROXY_BUF
+            var mn = descent_mud_read(mfd, &buf, DESCENT_PROXY_BUF);
+            if (mn < 0) { descent_leave(s, 0); return 0; }
+            if (mn > 0) {
+                moved = 1;
+                tobs_feed(obs, TOB_S2C, &buf, mn);
+                if (send_buf(cfd, &buf, mn) != 0) { return 1; }
+            }
+        }
+    }
+    if (moved == 1) {
+        store64(s + SESS_DESC_LAST_MS, now);
+    } else {
+        if (now - load64(s + SESS_DESC_LAST_MS) >= DESCENT_IDLE_MS) {
+            descent_leave(s, "\r\n(idle — leaving the Descent)\r\n");
+        }
+    }
+    return 0;
+}
+
+# The fork child's wait during a visit: poll(2) on the client socket (unless the
+# MUD still owes us a write) and the MUD socket (for writes too while connecting
+# or holding client bytes), up to a second, then one pump. Returns as the pump.
+fn descent_fork_step(s): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return descent_pump(s, 1, 1);    # no fork on agnos; and 7 is SYS_OPEN there, not poll
+    #endif
+    var pfds[24];
+    var nf = 0;
+    var ci = 0 - 1;
+    var pend = 0;
+    if (load64(s + SESS_RX_OFF) < load64(s + SESS_RX_LEN)) { pend = 1; }
+    if (pend == 0) { ci = nf; nf = poll_fd_put(&pfds, nf, load64(s + SESS_FD), POLL_IN); }
+    var mev = POLL_IN;
+    if (pend == 1) { mev = mev | POLL_OUT; }
+    if (load64(s + SESS_DESC_PHASE) == DESC_CONNECTING) { mev = mev | POLL_OUT; }
+    nf = poll_fd_put(&pfds, nf, load64(s + SESS_MUD_FD), mev);
+    var si = 0 - 1;
+    if (g_child_sigfd >= 0) { si = nf; nf = poll_fd_put(&pfds, nf, g_child_sigfd, POLL_IN); }
+    syscall(7, &pfds, nf, POLL_WAIT_MAX_MS);
+    if (si >= 0) {
+        if ((load16((&pfds) + si * 8 + 6) & 0xFFFF) != 0) {
+            if (shutdown_signal_pending(g_child_sigfd, g_shutdown_siginfo) == 1) {
+                fork_child_goodbye(s);
+                return 1;
+            }
+        }
+    }
+    var crd = 0;
+    if (ci >= 0) { if ((load16((&pfds) + ci * 8 + 6) & 0xFFFF) != 0) { crd = 1; } }
+    return descent_pump(s, crd, 1);
 }
 
 # 1.8.1 — back at the BBS from the Descent.
 #  - (audit G2) the visit was activity: SESS_LAST_MS was not touched while the
 #    player was in the MUD, so under poll the sweep reaped them the moment they
 #    returned from any visit longer than SESS_IDLE_MS (60 s).
-#  - (audit G4) re-assert our telnet options. The MUD negotiates its own ECHO
-#    (WILL ECHO around the passphrase, then WONT ECHO), the client follows it,
-#    and agora never saw that exchange — so it kept echoing into a client that
-#    had gone back to local echo: every character doubled for the rest of the
-#    session. Resetting the Q-state and re-announcing lets RFC 1143 converge
-#    again from whatever the client now believes.
-fn session_after_descent(cfd): i64 {
+#  - (audit G4) the MUD negotiates its own ECHO (WILL ECHO around the passphrase,
+#    then WONT ECHO) and agora never sees that exchange, so it kept echoing into a
+#    client that had gone back to local echo. 1.8.1 reset agora's option state
+#    and re-announced. 1.11.0 (ADR 0031) — that reset is gone: a client ignores DO
+#    for an option it already has on, so the reset left agora believing NAWS and
+#    LINEMODE were only requested, dropped every later window report (wrapping
+#    stopped for good) and re-took echo from a LINEMODE client still in EDIT
+#    (blind typing). `telnet_resync` adopts what the observer saw the client
+#    agree to and negotiates only the differences.
+fn session_after_descent(cfd, obs): i64 {
     var s = g_active_sess;
     store64(s + SESS_LAST_MS, clock_now_ms());
     var ts = load64(s + SESS_TS);
-    telnet_state_reset(ts);
-    telnet_announce(ts);
+    telnet_resync(ts, obs);
     var tl = telnet_tx_len(ts);
     if (tl > 0) {
         send_buf(cfd, telnet_tx_buf(ts), tl);
@@ -2915,7 +3147,11 @@ enum StoreLimit {
 
 enum PollRuntime {
     POLL_LINE_BUDGET = 1;      # 1.8.1 (H2) — counted lines per session per sweep
-    POLL_MS      = 20;         # sweep cadence
+    POLL_MS      = 20;         # sweep cadence on agnos (no poll(2)); Linux waits on readiness
+    POLL_WAIT_MAX_MS = 1000;   # 1.11.0 — the longest readiness wait (timers are re-checked)
+    POLL_FDS_MAX = 130;        # 1.11.0 — listener + signalfd + a client and a MUD socket per slot
+    POLL_IN      = 1;          # poll(2) events (Linux / macOS, cross-arch identical)
+    POLL_OUT     = 4;
     SESS_IDLE_MS = 60000;      # general idle reap (mirrors RECV_TIMEOUT_SECS)
     CHAT_TICK_MS = 2000;       # chat live-tail flush cadence (CHAT_POLL_SECS)
 }
@@ -3060,6 +3296,79 @@ fn shutdown_signals_child_reset(sigfd): i64 {
     return 0;
 }
 
+# 1.11.0 (ADR 0031) — set up a freshly forked connection child. Replaces, for
+# connection children, the 1.7.0 `shutdown_signals_child_reset` (still used by
+# the one-shot index child):
+#   - the parent's signalfd is closed, as before;
+#   - SIGINT / SIGTERM, which the child inherits BLOCKED, get a signalfd of the
+#     child's own, which `handle_client` waits on beside the client socket — so
+#     the child still ends on SIGTERM (1.7.0's point: children serve untrusted
+#     clients and must stay killable), but it ends the way a poll session does
+#     at shutdown: a goodbye, the door checkpoint, the MUD socket closed. If the
+#     signalfd cannot be made, the signals are unblocked instead (1.7.0's
+#     behaviour: the default action ends the child).
+#   - PR_SET_PDEATHSIG = SIGTERM: a parent that dies — crashes, is SIGKILLed —
+#     takes its children with it instead of leaving orphans nobody can count
+#     (ADR 0007's open item). The getppid re-check closes the race where the
+#     parent died between the fork and the prctl: then no signal will ever come,
+#     so the child leaves at once.
+# Returns the child's signalfd, or -1.
+fn fork_child_arm(sigfd, ppid): i64 {
+    if (sigfd >= 0) { file_close(sigfd); }
+    var csig = 0 - 1;
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sigfd >= 0) {
+        var mask[8];
+        store64(&mask, shutdown_sigmask());
+        csig = sys_signalfd(0 - 1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+        if (csig < 0) { sys_sigprocmask(1, &mask, 0); }   # 1 = SIG_UNBLOCK
+    }
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    sys_prctl(1, SIGTERM, 0, 0, 0);                         # 1 = PR_SET_PDEATHSIG
+    if (sys_getppid() != ppid) { sys_exit(0); }
+    #endif
+    return csig;
+}
+
+# The fork child's wait between lines: poll(2) on the client socket and the
+# child's signalfd, for as long as the recv timeout the session is under —
+# CHAT_POLL_SECS in chat (the live-tail tick), RECV_TIMEOUT_SECS otherwise.
+# Returns 1 when the client is readable (or hung up), 0 on the timeout, 2 when a
+# shutdown signal arrived. Before 1.11.0 the child blocked in read(2) and the
+# SO_RCVTIMEO timeout woke it; a signal could only kill it.
+fn fork_child_wait(s): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;                    # no fork on agnos; and 7 is SYS_OPEN there, not poll
+    #endif
+    var pfds[16];
+    var nf = poll_fd_put(&pfds, 0, load64(s + SESS_FD), POLL_IN);
+    if (g_child_sigfd >= 0) { nf = poll_fd_put(&pfds, nf, g_child_sigfd, POLL_IN); }
+    var ms = RECV_TIMEOUT_SECS * 1000;
+    if (load64(s + SESS_MODE) == MODE_CHAT) { ms = CHAT_POLL_SECS * 1000; }
+    var pr = syscall(7, &pfds, nf, ms);
+    if (pr <= 0) { return 0; }
+    if (nf == 2) {
+        if ((load16((&pfds) + 14) & 0xFFFF) != 0) {
+            if (shutdown_signal_pending(g_child_sigfd, g_shutdown_siginfo) == 1) { return 2; }
+        }
+    }
+    if ((load16((&pfds) + 6) & 0xFFFF) != 0) { return 1; }
+    return 0;
+}
+
+# A fork child told to stop (its parent's shutdown, or the parent's death via
+# PR_SET_PDEATHSIG): say why, as serve_poll_shutdown does for a poll session.
+# The caller's close path then checkpoints the door and closes the socket.
+fn fork_child_goodbye(s): i64 {
+    var cfd = load64(s + SESS_FD);
+    if (load64(s + SESS_MODE) == MODE_DESCENT) {
+        send_str(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
+    }
+    send_str(cfd, "\r\n(server shutting down -- goodbye)\r\n");
+    return 0;
+}
+
 # Has a shutdown signal arrived? Non-blocking; returns 1 if so, 0 otherwise.
 # `infobuf` must be at least SIGINFO_BYTES. The record's contents are not
 # inspected — both signals mean the same thing to us — but the read must still
@@ -3086,6 +3395,9 @@ fn serve_poll_shutdown(sfd, sigfd): i64 {
             # in poll mode — without it the notice would land on whichever
             # session happened to be dispatched last.
             sess_load(s);
+            if (load64(s + SESS_MODE) == MODE_DESCENT) {
+                send_str(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
+            }
             send_str(cfd, "\r\n(server shutting down -- goodbye)\r\n");
             session_drain(s);
             sess_save(s);
@@ -3099,6 +3411,74 @@ fn serve_poll_shutdown(sfd, sigfd): i64 {
     sock_close(sfd);
     println("agora serve: stopped");
     return 0;
+}
+
+# 1.11.0 (ADR 0031) — the poll model's wait: one poll(2) over the listener, the
+# shutdown signalfd and every live session's socket (POLLIN, plus POLLOUT while
+# its tx queue holds bytes the socket would not take), with a timeout of the
+# next timer due — a chat session's live-tail tick or a session's idle reap — at
+# most POLL_WAIT_MAX_MS. Until 1.11.0 the loop slept a fixed 20 ms per sweep: at
+# most 50 sequential accepts a second, and 0-20 ms added to every command. The
+# array is rebuilt each time (at most 2 + 2 x MAX_SESS entries, 8 bytes each):
+# sessions come and go and change mode, and a rebuild needs no bookkeeping.
+# What woke us does not matter: the sweep looks at everything anyway. Linux /
+# macOS only — poll(2) is raw `syscall(7, …)` (no stdlib wrapper), as in the
+# fork accept loop; agnos has none.
+fn serve_poll_wait(sfd, sigfd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    sys_sleep_ms(POLL_MS);       # never called there (serve_poll paces agnos itself); 7 is SYS_OPEN on agnos
+    return 0;
+    #endif
+    if (g_poll_fds == 0) { g_poll_fds = alloc(POLL_FDS_MAX * 8); }
+    var fds = g_poll_fds;
+    var nf = poll_fd_put(fds, 0, sfd, POLL_IN);
+    if (sigfd >= 0) { nf = poll_fd_put(fds, nf, sigfd, POLL_IN); }
+    var now = clock_now_ms();
+    var wait = POLL_WAIT_MAX_MS;
+    var i = 0;
+    while (i < MAX_SESS) {
+        var s = load64(g_sess_pool + i * 8);
+        if (load64(s + SESS_ACTIVE) != 0) {
+            var mode = load64(s + SESS_MODE);
+            var ev = POLL_IN;
+            var due = SESS_IDLE_MS - (now - load64(s + SESS_LAST_MS));
+            if (mode == MODE_CHAT) {
+                due = CHAT_TICK_MS - (now - load64(s + SESS_CHAT_TICK_MS));
+            }
+            if (mode == MODE_DESCENT) {
+                # The client is read only when the MUD holds none of its bytes,
+                # and the MUD only while the client's queue has room — waiting
+                # on a socket the pump will not read would spin.
+                var pend = 0;
+                if (load64(s + SESS_RX_OFF) < load64(s + SESS_RX_LEN)) { pend = 1; ev = 0; }
+                var mev = 0;
+                if (descent_tx_room(s) >= DESCENT_PROXY_BUF) { mev = POLL_IN; }
+                if (pend == 1) { mev = mev | POLL_OUT; }
+                due = POLL_WAIT_MAX_MS;
+                if (load64(s + SESS_DESC_PHASE) == DESC_CONNECTING) {
+                    mev = mev | POLL_OUT;
+                    due = load64(s + SESS_DESC_DEADLINE) - now;
+                }
+                if (mev != 0) { nf = poll_fd_put(fds, nf, load64(s + SESS_MUD_FD), mev); }
+            }
+            if (load64(s + SESS_TX_LEN) > load64(s + SESS_TX_OFF)) { ev = ev | POLL_OUT; }
+            if (ev != 0) { nf = poll_fd_put(fds, nf, load64(s + SESS_FD), ev); }
+            if (due < wait) { wait = due; }
+        }
+        i = i + 1;
+    }
+    if (wait < 0) { wait = 0; }
+    syscall(7, fds, nf, wait);
+    return 0;
+}
+
+# Append one pollfd { i32 fd; i16 events; i16 revents } at index `n`; returns n + 1.
+fn poll_fd_put(fds, n, fd, ev): i64 {
+    var p = fds + n * 8;
+    store32(p, fd);
+    store16(p + 4, ev);
+    store16(p + 6, 0);
+    return n + 1;
 }
 
 # 1.6.0 single-process poll multiplex: one process serves ALL connections. Each
@@ -3115,7 +3495,6 @@ fn serve_poll(sfd): i64 {
     #endif
     # N1: armed in cmd_serve_on, before the listener existed (see the note there).
     var sigfd = g_shutdown_sigfd;
-    g_descent_stop_fd = sigfd;     # 1.8.1 (P8) — the Descent proxy watches it too
     var siginfo = g_shutdown_siginfo;
     var stop = 0;
     while (stop == 0) {
@@ -3143,8 +3522,8 @@ fn serve_poll(sfd): i64 {
                     # cut off exactly the trailing CRLF: the one message a
                     # client gets when the 64-slot pool is full arrived
                     # unterminated, and its next output ran on from there.
-                    # Like the fork loop's cap refusal and the Descent proxy's
-                    # descent_write_all, this writes the socket directly — there
+                    # Like the fork loop's cap refusal and the Descent's write to
+                    # the MUD (descent_mud_write), this writes the socket directly — there
                     # is no session to enqueue into yet — so a send_buf-based
                     # audit misses it. (1.8.1: it used to call itself the only one.)
                     sys_write(cfd, "server full — try again shortly\r\n", 35);
@@ -3170,48 +3549,54 @@ fn serve_poll(sfd): i64 {
                 var close_it = 0;
                 # 1.8.1 (audit H2) — a remainder parked by the line budget runs
                 # before anything new is read; it IS this sweep's input.
-                var poff = load64(s + SESS_RX_OFF);
-                var n = 0;
-                if (poff < load64(s + SESS_RX_LEN)) { n = 0 - 2; }
-                else { n = sess_recv_nonblock(s); }
-                if (n == (0 - 2)) {
-                    if (process_rx(s, poff, load64(s + SESS_RX_LEN), POLL_LINE_BUDGET) == 1) { close_it = 1; }
-                }
-                else { if (n > 0) {
-                        # 1.6.4 (audit M3) — the idle timer is NOT refreshed here.
-                        #
-                        # It used to be, on ANY bytes arriving, which made the 64-slot
-                        # pool trivially pinnable: `IAC NOP` (2 bytes) is consumed by
-                        # the state machine with no response and no data byte, so 64
-                        # connections sending one every 50 s held every slot forever
-                        # at ~2 bytes/minute each — invisibly, since nothing was ever
-                        # typed. Protocol chatter is not activity. `process_rx` now
-                        # refreshes the timer only when a byte actually reaches the
-                        # session as DATA, so a keepalive-only connection ages out
-                        # like a silent one. (1.8.1: the chat reaper's g_chat_idle
-                        # likewise resets in process_rx, on a kept byte only.)
-                        if (process_rx(s, 0, n, POLL_LINE_BUDGET) == 1) { close_it = 1; }
+                # 1.11.0 (ADR 0031) — a session in the Descent is pumped, never read as
+                # lines: its receive buffer holds client bytes owed to the MUD.
+                if (load64(s + SESS_MODE) == MODE_DESCENT) {
+                    if (descent_pump(s, 1, 1) == 1) { close_it = 1; }
+                } else {
+                    var poff = load64(s + SESS_RX_OFF);
+                    var n = 0;
+                    if (poff < load64(s + SESS_RX_LEN)) { n = 0 - 2; }
+                    else { n = sess_recv_nonblock(s); }
+                    if (n == (0 - 2)) {
+                        if (process_rx(s, poff, load64(s + SESS_RX_LEN), POLL_LINE_BUDGET) == 1) { close_it = 1; }
                     }
-                    else { if (n < 0) { close_it = 1; }
-                        else {
-                            # would-block: no input this sweep. Chat live-tail tick +
-                            # idle reaping (fork mode gets these from the recv timeout).
-                            if (load64(s + SESS_MODE) == MODE_CHAT) {
-                                if (now - load64(s + SESS_CHAT_TICK_MS) >= CHAT_TICK_MS) {
-                                    store64(s + SESS_CHAT_TICK_MS, now);
-                                    if (load64(s + SESS_LINE_POS) == 0) {
-                                        if (g_chat_bot == 0) { chat_flush_tail(cfd); }
+                    else { if (n > 0) {
+                            # 1.6.4 (audit M3) — the idle timer is NOT refreshed here.
+                            #
+                            # It used to be, on ANY bytes arriving, which made the 64-slot
+                            # pool trivially pinnable: `IAC NOP` (2 bytes) is consumed by
+                            # the state machine with no response and no data byte, so 64
+                            # connections sending one every 50 s held every slot forever
+                            # at ~2 bytes/minute each — invisibly, since nothing was ever
+                            # typed. Protocol chatter is not activity. `process_rx` now
+                            # refreshes the timer only when a byte actually reaches the
+                            # session as DATA, so a keepalive-only connection ages out
+                            # like a silent one. (1.8.1: the chat reaper's g_chat_idle
+                            # likewise resets in process_rx, on a kept byte only.)
+                            if (process_rx(s, 0, n, POLL_LINE_BUDGET) == 1) { close_it = 1; }
+                        }
+                        else { if (n < 0) { close_it = 1; }
+                            else {
+                                # would-block: no input this sweep. Chat live-tail tick +
+                                # idle reaping (fork mode gets these from the recv timeout).
+                                if (load64(s + SESS_MODE) == MODE_CHAT) {
+                                    if (now - load64(s + SESS_CHAT_TICK_MS) >= CHAT_TICK_MS) {
+                                        store64(s + SESS_CHAT_TICK_MS, now);
+                                        if (load64(s + SESS_LINE_POS) == 0) {
+                                            if (g_chat_bot == 0) { chat_flush_tail(cfd); }
+                                        }
+                                        g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
+                                        if (g_chat_idle >= CHAT_IDLE_SECS) {
+                                            send_str(cfd, "\r\n(idle — leaving chat)\r\n");
+                                            close_it = 1;
+                                        }
                                     }
-                                    g_chat_idle = g_chat_idle + CHAT_POLL_SECS;
-                                    if (g_chat_idle >= CHAT_IDLE_SECS) {
-                                        send_str(cfd, "\r\n(idle — leaving chat)\r\n");
-                                        close_it = 1;
-                                    }
+                                } else {
+                                    if (now - load64(s + SESS_LAST_MS) >= SESS_IDLE_MS) { close_it = 1; }
                                 }
-                            } else {
-                                if (now - load64(s + SESS_LAST_MS) >= SESS_IDLE_MS) { close_it = 1; }
-                            }
-                        } } }
+                            } } }
+                }
                 # 3) flush queued output
                 if (close_it == 0) {
                     if (session_drain(s) < 0) { close_it = 1; }
@@ -3223,20 +3608,26 @@ fn serve_poll(sfd): i64 {
                     sock_close(cfd);
                     session_release(s);
                 } else {
-                    if (load64(s + SESS_RX_OFF) < load64(s + SESS_RX_LEN)) { parked = 1; }
+                    # (Bytes a Descent session holds for the MUD are not a parked
+                    # remainder: the wait watches the MUD socket for them.)
+                    if (load64(s + SESS_MODE) != MODE_DESCENT) {
+                        if (load64(s + SESS_RX_OFF) < load64(s + SESS_RX_LEN)) { parked = 1; }
+                    }
                 }
             }
             i = i + 1;
         }
-        # 4) pace the sweep — but not while a session has a parked remainder
-        # (1.8.1, H2): the budget is for fairness between sessions, not a rate
-        # limit, so a lone scripted client still runs at full speed.
+        # 4) wait for the next thing to do — but not while a session has a parked
+        # remainder (1.8.1, H2): the budget is for fairness between sessions,
+        # not a rate limit, so a lone scripted client still runs at full speed.
+        # 1.11.0 (ADR 0031) — on Linux a readiness wait (serve_poll_wait), not a
+        # fixed 20 ms sleep; agnos has no poll(2) and keeps the paced sweep.
         if (parked == 0) {
             #ifdef CYRIUS_TARGET_AGNOS
             sys_sleep_ms(POLL_MS);
             #endif
             #ifndef CYRIUS_TARGET_AGNOS
-            sleep_ms(POLL_MS);
+            serve_poll_wait(sfd, sigfd);
             #endif
         }
     }
@@ -3458,23 +3849,6 @@ fn process_rx(s, start, n, budget): i64 {
 
             if (eol != 0) {
                 send_str(cfd, "\r\n");
-                # 1.6.5 (audit L4) — publish whatever else arrived in this recv
-                # so a `descent` on this line can forward it to the MUD instead
-                # of leaving it to be run as BBS commands afterwards.
-                g_pipe_tail  = rxbuf + i + 1;
-                g_pipe_len   = n - i - 1;
-                g_pipe_taken = 0;
-                # 1.8.1 — the LF paired with this line's CR is part of the line
-                # ending, not the start of the tail; the MUD was handed a stray
-                # leading newline (an empty command) on every pipelined descent.
-                if (db == 13) {
-                    if (g_pipe_len > 0) {
-                        if ((load8(g_pipe_tail) & 0xFF) == 10) {
-                            g_pipe_tail = g_pipe_tail + 1;
-                            g_pipe_len = g_pipe_len - 1;
-                        }
-                    }
-                }
                 # 1.6.2 — reclaim the per-command scratch arena. This is the one
                 # point that dominates EVERY line dispatch below (command, door,
                 # chat, login, posting) in BOTH serve models, since the fork
@@ -3491,11 +3865,23 @@ fn process_rx(s, start, n, budget): i64 {
                 if (mode == MODE_COMMAND) {
                     mode = session_execute(cfd, line, line_pos, current_board, quit);
                     line_pos = 0;
-                    # 1.6.5 — if the proxy forwarded the rest of the buffer to
-                    # the MUD, those bytes are spoken for: do not also run them
-                    # here as BBS commands.
-                    if (g_pipe_taken != 0) {
-                        g_pipe_taken = 0;
+                    # 1.11.0 (ADR 0031) — into the Descent: whatever else this
+                    # recv holds was typed for the MUD (1.6.5, audit L4: a client
+                    # that sends `descent\r\nnorth\r\n` in one segment meant
+                    # `north` for the MUD). It stays in the receive buffer as the
+                    # first bytes the pump forwards, and is not run here. The LF
+                    # paired with this line's CR is the line ending, not input
+                    # (1.8.1: the MUD used to get a stray empty command).
+                    if (mode == MODE_DESCENT) {
+                        var pend = i + 1;
+                        if (db == 13) {
+                            if (pend < n) { if ((load8(rxbuf + pend) & 0xFF) == 10) { pend = pend + 1; } }
+                        }
+                        if (pend < n) {
+                            tobs_feed(load64(s + SESS_DESC_OBS), TOB_C2S, rxbuf + pend, n - pend);
+                            park = pend;
+                        }
+                        last_cr = 0;
                         i = n;
                         continue;
                     }
@@ -3795,7 +4181,22 @@ fn handle_client(cfd): i64 {
     var done = 0;
     while (done == 0) {
         sess_load(s);
-        var n = sys_read(cfd, load64(s + SESS_RXBUF), RECV_BUF_BYTES);
+        # 1.11.0 (ADR 0031) — a visit to the Descent: wait on both sockets, pump.
+        if (load64(s + SESS_MODE) == MODE_DESCENT) {
+            done = descent_fork_step(s);
+            sess_save(s);
+            continue;
+        }
+        # 1.11.0 — wait on the socket and the child's signalfd (fork_child_wait).
+        var w = fork_child_wait(s);
+        if (w == 2) {
+            fork_child_goodbye(s);
+            done = 1;
+            sess_save(s);
+            continue;
+        }
+        var n = 0 - EWOULDBLOCK_ERR;
+        if (w == 1) { n = sys_read(cfd, load64(s + SESS_RXBUF), RECV_BUF_BYTES); }
         if (n <= 0) {
             done = session_rx_idle(s, n);
         } else {
@@ -3818,6 +4219,49 @@ fn handle_client(cfd): i64 {
     return 0;
 }
 
+# 1.11.0 — the fork parent's live children (MAX_SESS pids, 0 = free), so a clean
+# shutdown can signal them. The table is as large as the connection cap, which is
+# checked before every fork, so an add always finds room.
+var g_fork_pids = 0;
+
+# Remember child `pid`.
+fn fork_pid_add(pid): i64 {
+    if (g_fork_pids == 0) {
+        g_fork_pids = alloc(MAX_SESS * 8);
+        memset(g_fork_pids, 0, MAX_SESS * 8);
+    }
+    var i = 0;
+    var placed = 0;
+    while (i < MAX_SESS) {
+        if (placed == 0) { if (load64(g_fork_pids + i * 8) == 0) { store64(g_fork_pids + i * 8, pid); placed = 1; } }
+        i = i + 1;
+    }
+    return placed;
+}
+
+# Forget child `pid` (it was reaped).
+fn fork_pid_drop(pid): i64 {
+    if (g_fork_pids == 0) { return 0; }
+    var i = 0;
+    while (i < MAX_SESS) {
+        if (load64(g_fork_pids + i * 8) == pid) { store64(g_fork_pids + i * 8, 0); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Send `sig` to every live child.
+fn fork_pids_signal(sig): i64 {
+    if (g_fork_pids == 0) { return 0; }
+    var i = 0;
+    while (i < MAX_SESS) {
+        var p = load64(g_fork_pids + i * 8);
+        if (p > 0) { sys_kill(p, sig); }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Spin up the listener and run the accept loop. Returns 0 when the loop exits
 # cleanly, 1 on bind/listen failure.
 #
@@ -3828,6 +4272,15 @@ fn handle_client(cfd): i64 {
 # its 64 slots; the fork parent waits on poll(2) over {listener, signalfd},
 # closes the listener and reaps children within a bounded grace window.
 fn cmd_serve_on(port): i64 {
+    # 1.11.0 — an unknown AGORA_SERVE is refused before anything is bound.
+    g_serve_mode = serve_mode_from_env();
+    if (g_serve_mode < 0) {
+        var bad1 = "agora serve: AGORA_SERVE must be 'fork' or 'poll'";
+        var bad2 = " (there is no separate epoll model: poll waits on readiness)\n";
+        syscall(1, 2, bad1, strlen(bad1));
+        syscall(1, 2, bad2, strlen(bad2));
+        return 2;
+    }
     println("agora serve: opening telnet listener");
 
     # 1.6.2 — ignore SIGPIPE before a single byte can be written.
@@ -3953,7 +4406,6 @@ fn cmd_serve_on(port): i64 {
 
     # 1.6.0: pick the serve model. agnos always polls (no fork); Linux honors
     # AGORA_SERVE ({fork,poll}), default fork (classic per-connection isolation).
-    g_serve_mode = serve_mode_from_env();
     if (g_serve_mode == SERVE_POLL) {
         println("agora serve: model = poll (single-process multiplex)");
         return serve_poll(sfd);
@@ -3970,7 +4422,8 @@ fn cmd_serve_on(port): i64 {
     #
     # poll(2) is a raw `syscall(7)` because the stdlib exposes no wrapper (only
     # epoll) — the same call, with the same 8-byte pollfd layout, that
-    # `descent_proxy` and `lib/net.cyr`'s `net_connect_sa_nb` already make. It is
+    # serve_poll_wait, the Descent's connect check and `lib/net.cyr`'s
+    # `net_connect_sa_nb` make. It is
     # safe unguarded *here* only because this whole loop is fork-mode, which is
     # Linux-only: `serve_mode_from_env` returns SERVE_POLL on every agnos path.
     # The guard is kept anyway — 1.6.2 had to fix exactly this call being
@@ -3992,6 +4445,7 @@ fn cmd_serve_on(port): i64 {
     # 200 processes, and an anonymous client could keep adding them until
     # RLIMIT_NPROC — also starving every other process of the same user.
     var nchild = 0;
+    var ppid = sys_getpid();     # 1.11.0 — what each child checks its parent against
     var stop = 0;
     while (stop == 0) {
         #ifndef CYRIUS_TARGET_AGNOS
@@ -4005,7 +4459,10 @@ fn cmd_serve_on(port): i64 {
         while (reap == 1) {
             var rpid = sys_waitpid(0 - 1, 0, WNOHANG);
             if (rpid <= 0) { reap = 0; }
-            else { if (nchild > 0) { nchild = nchild - 1; } }
+            else {
+                if (nchild > 0) { nchild = nchild - 1; }
+                fork_pid_drop(rpid);
+            }
         }
         #endif
 
@@ -4058,13 +4515,13 @@ fn cmd_serve_on(port): i64 {
             # Child: drop the listening fd we inherited (a child crash
             # shouldn't leak the listener), serve the client, exit.
             #
-            # 1.7.0 (N1) — restore default signal disposition FIRST. fork(2)
-            # inherits the parent's blocked mask, so without this every
-            # connection child runs with SIGINT+SIGTERM blocked and no signalfd
-            # being read: an operator's `kill` on a wedged session would do
-            # nothing. Also closes the inherited signalfd, which SFD_CLOEXEC
-            # does not cover across a plain fork.
-            shutdown_signals_child_reset(sigfd);
+            # 1.7.0 (N1) — fork(2) inherits the parent's blocked mask, so a child
+            # that read no signalfd would run with SIGINT+SIGTERM blocked: an
+            # operator's `kill` on a wedged session would do nothing. 1.7.0
+            # unblocked them; 1.11.0 (ADR 0031) gives the child a signalfd of
+            # its own instead (it leaves cleanly on SIGTERM) and PR_SET_PDEATHSIG
+            # (it leaves when the parent dies) — fork_child_arm.
+            g_child_sigfd = fork_child_arm(sigfd, ppid);
             sock_close(sfd);
             handle_client(cfd);
             sys_exit(0);
@@ -4078,6 +4535,7 @@ fn cmd_serve_on(port): i64 {
         }
         # Parent: child owns cfd now via fork; we drop our copy.
         nchild = nchild + 1;
+        fork_pid_add(pid);
         sock_close(cfd);
         #endif
     }
@@ -4085,12 +4543,18 @@ fn cmd_serve_on(port): i64 {
     # N1 shutdown, fork parent. Close the listener FIRST so no further client can
     # connect, then give the children already serving a bounded window to finish
     # and be reaped. Bounded, not unbounded: a player parked in a door game would
-    # otherwise hold the operator's shutdown open indefinitely. Children still
-    # alive at the deadline are left running and reparented to init when we exit
-    # — an honest trade, and the reason the count is reported rather than hidden.
+    # otherwise hold the operator's shutdown open indefinitely.
+    #
+    # 1.11.0 (ADR 0031) — and the children are TOLD: each gets SIGTERM, which its
+    # own signalfd turns into a goodbye, a door checkpoint and a clean close, the
+    # way a poll session ends at shutdown. Until 1.11.0 they were not signalled,
+    # finished on their own, and any still alive at the deadline were left running
+    # as orphans. A child that cannot leave in time (a write parked on a stalled
+    # client) still gets its PR_SET_PDEATHSIG SIGTERM when this process exits.
     println("agora serve: shutdown signal — closing listener");
     sock_close(sfd);
     if (sigfd >= 0) { file_close(sigfd); }
+    fork_pids_signal(SIGTERM);
     #ifndef CYRIUS_TARGET_AGNOS
     var waited = 0;
     var live = 0;

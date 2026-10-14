@@ -666,8 +666,11 @@ fn telnet_feed(ts, b): i64 {
 
 # Emit the 6-byte "please send your terminal type" request:
 #   IAC SB TERMINAL_TYPE SEND IAC SE
-# Called when him-TERMINAL_TYPE first transitions to Q_YES.
+# Called when him-TERMINAL_TYPE first transitions to Q_YES. Whole or not at all
+# (1.11.0 — like every other reply since 1.10.0; a torn `IAC SB` would make the
+# peer read the bytes after it as part of the subnegotiation).
 fn ts_emit_tt_send(ts): i64 {
+    if (ts_tx_room(ts) < 6) { return 0; }
     ts_tx_push(ts, IAC);
     ts_tx_push(ts, SB);
     ts_tx_push(ts, OPT_TERMINAL_TYPE);
@@ -681,8 +684,10 @@ fn ts_emit_tt_send(ts): i64 {
 #   IAC SB LINEMODE MODE (EDIT | TRAPSIG) IAC SE
 # Called when him-LINEMODE first transitions to Q_YES. Establishes
 # the BBS-default mode: client buffers a line locally, forwards on
-# Enter, traps signal chars (Ctrl+C / Ctrl+\ / Ctrl+]) as IAC commands.
+# Enter, traps signal chars (Ctrl+C / Ctrl+\ / Ctrl+]) as IAC commands. Whole or
+# not at all (1.11.0, as ts_emit_tt_send).
 fn ts_emit_linemode_request(ts): i64 {
+    if (ts_tx_room(ts) < 7) { return 0; }
     ts_tx_push(ts, IAC);
     ts_tx_push(ts, SB);
     ts_tx_push(ts, OPT_LINEMODE);
@@ -985,5 +990,260 @@ fn telnet_announce(ts): i64 {
     opt_set_him(ts, OPT_LINEMODE, Q_WANTYES);
     ts_emit_iac3(ts, DO, OPT_LINEMODE);
 
+    return 0;
+}
+
+# === 1.11.0 — the negotiation observer and the return resync (ADR 0031) ===
+#
+# While a session is in the Descent, agora forwards bytes between the client and
+# the MUD without parsing them, so the MUD's option negotiation with the client
+# happens out of agora's sight. The OBSERVER watches both directions passively —
+# it never replies — and records what the two sides converge to; on return,
+# telnet_resync makes agora's Q-state match what the client now holds and
+# negotiates only the differences. (1.8.1 reset agora's state and re-announced
+# instead; a client ignores DO for an option it already has on, so agora was
+# left believing NAWS / LINEMODE were only requested — every later size report
+# was dropped and a LINEMODE client typed blind. Reproduced with GNU telnet.)
+#
+# Per option, one byte of flags. An option is ON once its owner said WILL and
+# the other side DO, in either order, and OFF after any WONT or DONT: the state
+# RFC 1143 converges to between two conforming peers. "Client-owned" options
+# (NAWS, TERMINAL-TYPE, LINEMODE) are WILLed by the client; "server-owned" ones
+# (ECHO, SGA) by the server — here the MUD.
+
+enum TelObs {
+    TOB_C_EN   = 0x01;    # client-owned option on
+    TOB_C_WILL = 0x02;    # the client's last word on it was WILL
+    TOB_C_DO   = 0x04;    # the server's last word on it was DO
+    TOB_S_EN   = 0x08;    # server-owned option on
+    TOB_S_WILL = 0x10;    # the server's last word on it was WILL
+    TOB_S_DO   = 0x20;    # the client's last word on it was DO
+    TOB_C2S    = 0;       # direction: client → server (the MUD)
+    TOB_S2C    = 1;       # direction: server → client
+    TOB_SB_CAP = 8;       # subnegotiation payload bytes kept (NAWS needs 4, MODE 2)
+    # Per-direction parser: state, verb, SB option, payload length, payload.
+    TOB_DIR_BYTES = 40;
+    TOB_P_ST    = 0;
+    TOB_P_VERB  = 8;
+    TOB_P_SBOPT = 16;
+    TOB_P_SBLEN = 24;
+    TOB_P_SB    = 32;     # TOB_SB_CAP bytes
+    TOB_COLS    = 80;     # the last window the client reported (SB NAWS)
+    TOB_ROWS    = 88;
+    TOB_NAWS    = 96;     # 1 once a report was seen
+    TOB_LM_MODE = 104;    # the last LINEMODE mode acknowledged (MODE_ACK set)
+    TOB_LM_SEEN = 112;
+    TOB_OPTS    = 120;    # 256 flag bytes
+    TOB_PRE     = 376;    # 256 bytes: agora's state at the `descent` (1 = us not NO, 2 = him not NO)
+    TOB_SIZE    = 632;
+    # parser states
+    TOP_DATA = 0;
+    TOP_IAC  = 1;
+    TOP_VERB = 2;
+    TOP_SB0  = 3;         # after IAC SB: the option byte
+    TOP_SB   = 4;
+    TOP_SBI  = 5;         # IAC inside a subnegotiation
+}
+
+# Start observing: both parsers idle, each option's flags taken from agora's own
+# Q-state at the `descent` line. A YES is on with both words said; a WANTYES is
+# agora's request still in flight, so the client's answer during the visit
+# completes it. `obs` is TOB_SIZE bytes.
+fn tobs_init(obs, ts): i64 {
+    memset(obs, 0, TOB_SIZE);
+    var o = 0;
+    while (o < 256) {
+        var f = 0;
+        var h = opt_him(ts, o);
+        if (h == Q_YES) { f = TOB_C_EN | TOB_C_WILL | TOB_C_DO; }
+        if (h == Q_WANTYES) { f = TOB_C_DO; }
+        var u = opt_us(ts, o);
+        if (u == Q_YES) { f = f | TOB_S_EN | TOB_S_WILL | TOB_S_DO; }
+        if (u == Q_WANTYES) { f = f | TOB_S_WILL; }
+        store8(obs + TOB_OPTS + o, f);
+        var pre = 0;
+        if (u != Q_NO) { pre = 1; }
+        if (h != Q_NO) { pre = pre | 2; }
+        store8(obs + TOB_PRE + o, pre);
+        o = o + 1;
+    }
+    return 0;
+}
+
+# Record one negotiation command `verb opt` seen travelling in direction `dir`.
+fn tobs_verb(obs, dir, verb, opt): i64 {
+    var p = obs + TOB_OPTS + (opt & 0xFF);
+    var f = load8(p) & 0xFF;
+    var c_off = 0xFF ^ (TOB_C_EN | TOB_C_WILL | TOB_C_DO);
+    var s_off = 0xFF ^ (TOB_S_EN | TOB_S_WILL | TOB_S_DO);
+    if (dir == TOB_C2S) {
+        if (verb == WILL) { f = f | TOB_C_WILL; if ((f & TOB_C_DO) != 0) { f = f | TOB_C_EN; } }
+        if (verb == WONT) { f = f & c_off; }
+        if (verb == DO)   { f = f | TOB_S_DO; if ((f & TOB_S_WILL) != 0) { f = f | TOB_S_EN; } }
+        if (verb == DONT) { f = f & s_off; }
+    } else {
+        if (verb == WILL) { f = f | TOB_S_WILL; if ((f & TOB_S_DO) != 0) { f = f | TOB_S_EN; } }
+        if (verb == WONT) { f = f & s_off; }
+        if (verb == DO)   { f = f | TOB_C_DO; if ((f & TOB_C_WILL) != 0) { f = f | TOB_C_EN; } }
+        if (verb == DONT) { f = f & c_off; }
+    }
+    store8(p, f);
+    return 0;
+}
+
+# A completed subnegotiation `opt` (payload in the direction's buffer). Kept: the
+# client's window (SB NAWS), and a LINEMODE MODE either side acknowledged.
+fn tobs_sb(obs, dir, base): i64 {
+    var opt = load64(base + TOB_P_SBOPT);
+    var n = load64(base + TOB_P_SBLEN);
+    var pl = base + TOB_P_SB;
+    if (opt == OPT_NAWS) {
+        if (dir == TOB_C2S) {
+            if (n == 4) {
+                store64(obs + TOB_COLS, ((load8(pl) & 0xFF) << 8) | (load8(pl + 1) & 0xFF));
+                store64(obs + TOB_ROWS, ((load8(pl + 2) & 0xFF) << 8) | (load8(pl + 3) & 0xFF));
+                store64(obs + TOB_NAWS, 1);
+            }
+        }
+    }
+    if (opt == OPT_LINEMODE) {
+        if (n == 2) {
+            if ((load8(pl) & 0xFF) == LM_MODE) {
+                var m = load8(pl + 1) & 0xFF;
+                if ((m & LM_MODE_ACK) != 0) {
+                    store64(obs + TOB_LM_MODE, m & LM_MODE_DEFINED);
+                    store64(obs + TOB_LM_SEEN, 1);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+# Feed `n` bytes travelling in direction `dir` (TOB_C2S / TOB_S2C). Passive: the
+# bytes themselves are forwarded unchanged by the caller. A sequence split across
+# calls continues where it stopped; payload past TOB_SB_CAP is counted, not kept.
+fn tobs_feed(obs, dir, buf, n): i64 {
+    var base = obs + dir * TOB_DIR_BYTES;
+    var st = load64(base + TOB_P_ST);
+    var i = 0;
+    while (i < n) {
+        var b = load8(buf + i) & 0xFF;
+        i = i + 1;
+        if (st == TOP_DATA) {
+            if (b == IAC) { st = TOP_IAC; }
+            continue;
+        }
+        if (st == TOP_IAC) {
+            st = TOP_DATA;
+            if (b == SB) { st = TOP_SB0; }
+            if (b >= WILL) { if (b <= DONT) { store64(base + TOB_P_VERB, b); st = TOP_VERB; } }
+            continue;
+        }
+        if (st == TOP_VERB) {
+            tobs_verb(obs, dir, load64(base + TOB_P_VERB), b);
+            st = TOP_DATA;
+            continue;
+        }
+        if (st == TOP_SB0) {
+            store64(base + TOB_P_SBOPT, b);
+            store64(base + TOB_P_SBLEN, 0);
+            st = TOP_SB;
+            if (b == IAC) { st = TOP_DATA; }      # IAC SB IAC: malformed — drop it
+            continue;
+        }
+        if (st == TOP_SB) {
+            if (b == IAC) { st = TOP_SBI; continue; }
+        } else {
+            # TOP_SBI: IAC SE ends it, IAC IAC is a data 255, anything else aborts.
+            if (b == SE) { tobs_sb(obs, dir, base); st = TOP_DATA; continue; }
+            if (b != IAC) { st = TOP_DATA; continue; }
+            st = TOP_SB;
+        }
+        var sl = load64(base + TOB_P_SBLEN);
+        if (sl < TOB_SB_CAP) { store8(base + TOB_P_SB + sl, b); }
+        if (sl < 0x7FFFFFFF) { store64(base + TOB_P_SBLEN, sl + 1); }
+    }
+    store64(base + TOB_P_ST, st);
+    return 0;
+}
+
+# Whether option `opt` is on for its owner `side` (TOB_C2S = the client's,
+# TOB_S2C = the server's) according to the observer. Pure; unit tests use it.
+fn tobs_on(obs, side, opt): i64 {
+    var f = load8(obs + TOB_OPTS + (opt & 0xFF)) & 0xFF;
+    if (side == TOB_C2S) { if ((f & TOB_C_EN) != 0) { return 1; } return 0; }
+    if ((f & TOB_S_EN) != 0) { return 1; }
+    return 0;
+}
+
+# Back from the Descent: make agora's Q-state match what the client holds (from
+# the observer), keep everything else agora already knew (terminal type, SLC),
+# take the window the client reported during the visit, and queue only the
+# negotiation that differs from agora's preferences:
+#   - WILL / DO for an option agora wants that the client has off — only if it
+#     was on, or being asked for, before the visit: an option the client had
+#     refused is not asked for again;
+#   - WONT / DONT for one the MUD turned on that agora refuses;
+#   - the LINEMODE echo hand-off (ADR 0029) for the mode now in force: with EDIT
+#     the client echoes, so ECHO must be off, else agora echoes;
+#   - the EDIT | TRAPSIG request again when LINEMODE is on but no mode is known.
+# Every reply is queued whole or not at all. A request that does not fit leaves
+# the option off (agora never waits for an answer to a request it did not send);
+# an option agora refuses is recorded off whether or not its refusal fits — the
+# 1.8.1 rule accepts a subnegotiation only for an option agora holds on, so a
+# refused option must never be held on (fuzz invariant 17).
+fn telnet_resync(ts, obs): i64 {
+    var o = 0;
+    while (o < 256) {
+        if (tobs_on(obs, TOB_S2C, o) == 1) { opt_set_us(ts, o, Q_YES); } else { opt_set_us(ts, o, Q_NO); }
+        if (tobs_on(obs, TOB_C2S, o) == 1) { opt_set_him(ts, o, Q_YES); } else { opt_set_him(ts, o, Q_NO); }
+        o = o + 1;
+    }
+    if (load64(obs + TOB_NAWS) == 1) {
+        store64(ts + TS_TERM_COLS, load64(obs + TOB_COLS));
+        store64(ts + TS_TERM_ROWS, load64(obs + TOB_ROWS));
+    }
+    if (load64(obs + TOB_LM_SEEN) == 1) { store64(ts + TS_LM_MODE, load64(obs + TOB_LM_MODE)); }
+    if (opt_him(ts, OPT_LINEMODE) != Q_YES) { store64(ts + TS_LM_MODE, 0); }
+    var edit = load64(ts + TS_LM_MODE) & LM_EDIT;
+    o = 0;
+    while (o < 256) {
+        var want_us = opt_pref_us(o);
+        if (o == OPT_ECHO) { if (edit != 0) { want_us = 0; } }
+        var su = opt_us(ts, o);
+        var pre = load8(obs + TOB_PRE + o) & 0xFF;
+        var ask_us = pre & 1;
+        if (o == OPT_ECHO) { ask_us = 1; }      # echo follows the LINEMODE hand-off rule
+        if (want_us == 1) {
+            if (su == Q_NO) {
+                if (ask_us != 0) {
+                    if (ts_tx_room(ts) >= 3) { opt_set_us(ts, o, Q_WANTYES); ts_emit_iac3(ts, WILL, o); }
+                }
+            }
+        } else {
+            if (su == Q_YES) {
+                opt_set_us(ts, o, Q_NO);
+                ts_emit_iac3(ts, WONT, o);         # whole or not at all
+            }
+        }
+        var sh = opt_him(ts, o);
+        if (opt_pref_him(o) == 1) {
+            if (sh == Q_NO) {
+                if ((pre & 2) != 0) {
+                    if (ts_tx_room(ts) >= 3) { opt_set_him(ts, o, Q_WANTYES); ts_emit_iac3(ts, DO, o); }
+                }
+            }
+        } else {
+            if (sh == Q_YES) {
+                opt_set_him(ts, o, Q_NO);
+                ts_emit_iac3(ts, DONT, o);         # whole or not at all
+            }
+        }
+        o = o + 1;
+    }
+    if (opt_him(ts, OPT_LINEMODE) == Q_YES) {
+        if (load64(ts + TS_LM_MODE) == 0) { ts_emit_linemode_request(ts); }
+    }
     return 0;
 }
