@@ -1145,8 +1145,116 @@ fn s15_door_days_flag(): i64 {
     return 0;
 }
 
+# Lines in the file at `path` (0 if it cannot be read).
+fn st_file_lines(path, buf, cap): i64 {
+    var n = store_read_all(path, buf, cap);
+    if (n <= 0) { return 0; }
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 10) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# s16 — the wager audit trail (1.12.1, ADR 0033): a settled real-stakes wager
+# becomes one W line with every draw; a Practice wager or an anonymous one
+# none; a used seed's reveal is an R line written once, and every close path
+# (session_door_checkpoint) writes it; `fair` shows the commitment, `fair
+# reveal` the seed, and a bad client seed is refused.
+fn s16_wager_audit_trail(): i64 {
+    var name = "s16_wager_audit_trail";
+    var fds = alloc(16);
+    st_pair(fds);
+    var s = st_session(load64(fds));
+    st_login(s, "00112233aabbccdd", "qix");
+    var ctx = g_wager_fair;
+    if (ctx == 0) { st_fail(name, "no fairness context in the session"); return 1; }
+    wager_fair_reset(ctx);
+    var i = 0;
+    while (i < 4) {
+        memcpy(ctx + WF_CUR + i * 16, "0123456789abcdef", 16);
+        memcpy(ctx + WF_NEXT + i * 16, "fedcba9876543210", 16);
+        i = i + 1;
+    }
+    sha256(ctx + WF_CUR, 64, ctx + WF_CURC);
+    sha256(ctx + WF_NEXT, 64, ctx + WF_NEXTC);
+    memcpy(ctx + WF_CLIENT, "qix", 3);
+    store64(ctx + WF_CLEN, 3);
+    store64(ctx + WF_SEEDED, 1);
+    var path = alloc(PATH_MAX_BYTES);
+    wager_log_path(path);
+    xunlink(path);
+    var buf = alloc(8192);
+    g_door_game = GAME_PORT;
+    g_door_mode = DOOR_SOLO;
+    wager_trace_begin();
+    var r = wager_uniform(6);
+    wager_audit(10, 1, r, 0 - 10, 90);
+    door_wager_flush();
+    if (st_file_lines(path, buf, 8192) != 1) { st_fail(name, "a solo wager is one W line"); return 1; }
+    var want = "W\t";
+    if (memeq(buf, want, 2) == 0) { st_fail(name, "W record"); return 1; }
+    store8(buf + store_read_all(path, buf, 8192), 0);
+    var head = "\tqix\tport\ta8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e\t";
+    var tail = "\tqix\t0\t6:5\t10\t1\t5\t-10\t90\n";
+    if (strstr(buf, head) < 0) { st_fail(name, "W fields"); return 1; }
+    if (strstr(buf, tail) < 0) { st_fail(name, "W draws and amounts"); return 1; }
+    g_door_mode = DOOR_PRACTICE;
+    wager_audit(10, 1, r, 0 - 10, 80);
+    door_wager_flush();
+    if (load64(ctx + WF_PEND) != 0) { st_fail(name, "practice record left pending"); return 1; }
+    if (st_file_lines(path, buf, 8192) != 1) { st_fail(name, "a practice wager was logged"); return 1; }
+    g_door_mode = DOOR_SOLO;
+    store8(g_session_handle, 0);
+    wager_audit(10, 1, r, 0 - 10, 70);
+    door_wager_flush();
+    if (st_file_lines(path, buf, 8192) != 1) { st_fail(name, "an anonymous wager was logged"); return 1; }
+    st_login(s, "00112233aabbccdd", "qix");     # (reloads the slot's globals: the door mode again)
+    g_door_game = GAME_PORT;
+    g_door_mode = DOOR_SOLO;
+    wager_log_reveal(ctx);
+    if (st_file_lines(path, buf, 8192) != 2) { st_fail(name, "the reveal is an R line"); return 1; }
+    store8(buf + store_read_all(path, buf, 8192), 0);
+    if (strstr(buf, "\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tqix\t1\n") < 0) {
+        st_fail(name, "R fields");
+        return 1;
+    }
+    wager_log_reveal(ctx);
+    if (st_file_lines(path, buf, 8192) != 2) { st_fail(name, "revealed twice"); return 1; }
+    wager_trace_begin();
+    r = wager_uniform(6);
+    wager_audit(10, 1, r, 0 - 10, 60);
+    door_wager_flush();
+    if (st_file_lines(path, buf, 8192) != 3) { st_fail(name, "the second wager was not logged"); return 1; }
+    sess_save(s);
+    session_door_checkpoint(s);
+    if (st_file_lines(path, buf, 8192) != 4) { st_fail(name, "a close path did not reveal"); return 1; }
+    g_door_game = GAME_NONE;
+    g_door_mode = DOOR_PRACTICE;
+    sess_save(s);
+    st_feed(s, "fair\r\n", 8);
+    if (st_tx_count(s, "commitment  a8ae6e6ee929abea") != 1) { st_fail(name, "fair shows the commitment"); return 1; }
+    st_feed(s, "fair reveal\r\n", 8);
+    var rv = "the seed you bet on was:\r\n  0123456789abcdef";
+    if (st_tx_count(s, rv) != 1) { st_fail(name, "fair reveal"); return 1; }
+    st_feed(s, "fair seed bad:seed\r\n", 8);
+    if (st_tx_count(s, "a client seed is 1-32") != 1) { st_fail(name, "a bad client seed taken"); return 1; }
+    st_feed(s, "fairy\r\n", 8);
+    if (st_tx_count(s, "unknown command") < 1) { st_fail(name, "fairy taken for fair"); return 1; }
+    # the slot's next connection starts with new seeds, not this one's
+    session_reset(s, load64(fds));
+    if (load64(load64(s + SESS_FAIR) + WF_SEEDED) != 0) { st_fail(name, "a new connection kept the seed"); return 1; }
+    xunlink(path);
+    sock_close(load64(fds));
+    sock_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s15, remove the store, print the totals, and return 1 on any failure.
+# run s01..s16, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -1173,6 +1281,7 @@ fn serve_tests(): i64 {
     s13_registry_conformance();
     s14_world_pointer_guard();
     s15_door_days_flag();
+    s16_wager_audit_trail();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

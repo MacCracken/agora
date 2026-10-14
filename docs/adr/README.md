@@ -47,3 +47,4 @@ Per [first-party-documentation § ADRs](https://github.com/MacCracken/agnosticos
 | 0030 | [Terminal-aware output: wrap to the window the client reports](0030-terminal-aware-output.md) | Accepted (2026-10-13) — 1.10.1 |
 | 0031 | [Descent as a session state, readiness-driven serve loops, and option resync on return](0031-descent-session-state.md) | Accepted (2026-10-13) — 1.11.0; amends 0007, 0017, 0023 |
 | 0032 | [The daily ration: game days per UTC day, for runs that persist](0032-daily-ration.md) | Accepted (2026-10-13) — 1.12.0; amends 0009, 0010, 0016 |
+| 0033 | [Provably fair wagers: committed seeds, and an audit trail anyone can check](0033-provably-fair-wagers.md) | Accepted (2026-10-14) — 1.12.1; amends 0013, 0016 |

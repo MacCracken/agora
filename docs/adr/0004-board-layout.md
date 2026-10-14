@@ -73,7 +73,7 @@ Specifics:
 
 **Neutral**:
 
-- **Pillar 4 (federation by interest, [`roadmap-future.md`](../development/roadmap-future.md))** maps cleanly onto boards — federate by board, each board's ID-set and post-store is the unit of sync. Current layout is a strict prefix of the federated shape.
+- **Pillar 4 (federation by interest, [`roadmap.md`](../development/roadmap.md) § 2.x)** maps cleanly onto boards — federate by board, each board's ID-set and post-store is the unit of sync. Current layout is a strict prefix of the federated shape.
 
 ## Alternatives considered
 

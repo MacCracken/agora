@@ -76,7 +76,7 @@ exactly the bytes it got before.**
 
 - **Rows** (NAWS height) and **TERMINAL-TYPE** still have no consumer. Paging (`--More--`) would change the
   input model mid-output, and colour by terminal type would need the greeting delayed until the type is known.
-  Both are recorded in `roadmap-future.md`.
+  Both are planned in `roadmap.md` § 1.13.0.
 - **The Descent link** forwards the client's NAWS updates to the MUD, so a window resized during a visit is
   not seen by agora until the client next reports. Folded into roadmap § 1.11.0's "re-assert options on
   return".

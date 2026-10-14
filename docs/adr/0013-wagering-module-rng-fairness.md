@@ -1,6 +1,6 @@
 # 0013 — Shared wager module (a casino is a mechanic, not a door) + the wager-RNG fairness decision
 
-> **Status**: Accepted — realized at **1.3.4** (`src/wager.cyr`, the shared module + the CSPRNG fairness split, tests t179–t184). **1.3.5** wires the integrations across the existing doors and the **1.3.6** training-sim is the flagship consumer. See the [roadmap](../development/roadmap.md) 1.3.4–1.3.6 entries.
+> **Status**: Accepted — **amended at 1.12.1** (the open questions answered: commit-reveal draws and an audit trail, [ADR 0033](0033-provably-fair-wagers.md)). Realized at **1.3.4** (`src/wager.cyr`, the shared module + the CSPRNG fairness split, tests t179–t184). **1.3.5** wires the integrations across the existing doors and the **1.3.6** training-sim is the flagship consumer. See the [roadmap](../development/roadmap.md) 1.3.4–1.3.6 entries.
 > **Date**: 2026-06-08 (proposed); accepted 2026-06-08 at the 1.3.4 cut.
 
 > **Implementation note (1.3.5 cut)**: the integrations landed across all three existing doors as planned — a cantina **Dabo Wheel** in Port Authority (`PSCR_GAMBLE`: weighted 3-light draw, 1×/2×/5×, 3% edge), back-alley **Bones** in Smuggler's Ledger (`SCR_DICE`: even-money binary, 6% edge), and a tavern **Card Table** in QUEST (`QSCR_CARDS`: 4-suit uniform, 3:1, 4% edge). Each is a thin screen that runs the `bet → draw → resolve → settle` loop against the game's existing gold field within a single feed call — no per-game persistent wager state, so no save-format change. Three distinct table shapes prove the shared abstraction. Per-game tuning is extracted into named builders (`pa_dabo_table` / `sl_dice_table` / `qu_cards_table`) and unit-pinned (t186–t188); the shared bet-line parser is `door_parse_2int` (t185) and the shared reject vocabulary is `wager_reason`. Wire smoke: `docs/examples/16-casino.sh`. The **per-game vs global edge** open question below now has data: the three integrations chose *different* edges (300/600/400 bps) for tonal reasons (the back alley is a steeper game than the cantina), so per-game-configurable was the right call — no consolidation to a global default.
@@ -82,3 +82,13 @@ The module draws a hard line between the two kinds of randomness:
 - **Which CSPRNG primitive** — call `sys_getrandom(buf, len, 0)` directly, or read `/dev/urandom` the way `sigil.cyr` already does, and whether to finally land the referenced-but-missing `lib/random.cyr` (with the `GRND_*` constants the `sys_getrandom` comment already points at) as the shared wrapper. A plumbing decision for 1.3.4; both sources yield the same non-reproducible bytes.
 - **Whether wagers ever need an audit trail** — a `flock`'d per-game wager log (stake, outcome, delta, timestamp) for dispute/debug, or even the commit-reveal scheme above. Deferred until a real need (operator dispute, "the house cheated" complaint) appears; the first cut settles silently against the balance.
 - **Per-game vs global house edge** — this ADR picks per-game configurable. If every integration ends up wanting the same edge, a global default with per-game override is a trivial later consolidation; if they diverge (a cantina vs a card table want different odds), per-game was right. Revisit after the 1.3.5 integrations show whether the values actually differ.
+
+> **1.12.1 amendment — both open questions answered** ([ADR 0033](0033-provably-fair-wagers.md)). The
+> wager draw is no longer a fresh kernel read per draw but a **committed** one: a session seed from the
+> kernel CSPRNG, whose SHA-256 the player sees before betting, revealed afterwards; draw *k* is
+> `SHA-256("<seed>:<client>:<k>")`, 15 hex digits, mod the range. The fairness split stands: the games keep
+> their seeded PRNG, and the player still cannot predict a wager. What changed is that a wager can now be
+> checked. Every real-stakes wager is also a line in `<store>/.games/wagers`, an append-only, fsync'd audit
+> trail, and `scripts/verify-wagers.py` checks it against the revealed seeds with no agora code.
+> `wager_draw_csprng` became `wager_draw`; `wager_uniform_csprng` remains as the seed source and the fallback
+> with no session context.

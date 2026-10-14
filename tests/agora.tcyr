@@ -4380,8 +4380,8 @@ fn t178_jw_load_malformed(): i64 {
 #
 # The pure majority — validation, the weight→outcome mapping, the
 # edge-haircut resolve, the clamp-and-apply settle — is unit-tested for
-# exact values. The one impure point (wager_draw_csprng) is tested only
-# for DISTRIBUTION (range + termination + coverage), never an exact
+# exact values. The one impure point (wager_draw with no fairness context —
+# the kernel read) is tested only for DISTRIBUTION (range + termination + coverage), never an exact
 # value: that is the property the casino requires and the games reject.
 
 # A small 3-outcome table backing two arrays the test owns; weights
@@ -4500,7 +4500,8 @@ fn t182_wager_settle(): i64 {
     return 0;
 }
 
-# t183 — the ONE impure path. wager_draw_csprng pulls real kernel
+# t183 — the ONE impure path. wager_draw with no fairness context (since
+# 1.12.1 every session has one; t261 covers that path) pulls real kernel
 # entropy, so we cannot assert an exact outcome; instead we assert
 # DISTRIBUTION: every draw lands in [0, nout), the call terminates, and
 # over many draws each outcome is hit at least once (coverage, not
@@ -4513,7 +4514,7 @@ fn t183_wager_draw_csprng(): i64 {
     store64(hit + 0, 0); store64(hit + 8, 0); store64(hit + 16, 0);
     var i = 0;
     while (i < 3000) {
-        var o = wager_draw_csprng(tbl);
+        var o = wager_draw(tbl);
         if (o < 0)  { test_fail("t183_wager_draw_csprng", "csprng read failed"); return 1; }
         if (o >= 3) { test_fail("t183_wager_draw_csprng", "out of range"); return 1; }
         store64(hit + o * 8, load64(hit + o * 8) + 1);
@@ -4538,7 +4539,7 @@ fn t184_wager_draw_degenerate(): i64 {
     wager_table_init(t1, 1, 0, 0, 3, w1, m1);
     var i = 0;
     while (i < 50) {
-        if (wager_draw_csprng(t1) != 1) { test_fail("t184_wager_draw_degenerate", "single mass"); return 1; }
+        if (wager_draw(t1) != 1) { test_fail("t184_wager_draw_degenerate", "single mass"); return 1; }
         i = i + 1;
     }
     # weights [0,0,0], total 0 -> outcome 0 (safe slot), no entropy read
@@ -4546,7 +4547,7 @@ fn t184_wager_draw_degenerate(): i64 {
     var m0 = alloc(3 * 8); store64(m0, 1); store64(m0 + 8, 1); store64(m0 + 16, 9);
     var t0 = alloc(WT_SIZE);
     wager_table_init(t0, 1, 0, 0, 3, w0, m0);
-    if (wager_draw_csprng(t0) != 0) { test_fail("t184_wager_draw_degenerate", "zero total"); return 1; }
+    if (wager_draw(t0) != 0) { test_fail("t184_wager_draw_degenerate", "zero total"); return 1; }
     test_pass("t184_wager_draw_degenerate");
     return 0;
 }
@@ -7886,6 +7887,172 @@ fn t260_door_ration(): i64 {
     return 0;
 }
 
+# === 1.12.1 — provably fair wagers ===
+
+# A fairness context with known seeds: current "0123456789abcdef" x 4, next
+# "fedcba9876543210" x 4, client seed "qix", nonce 0 — the vectors below were
+# computed with Python's hashlib (scripts/verify-wagers.py's arithmetic).
+fn t_fair_fixture(ctx): i64 {
+    wager_fair_reset(ctx);
+    var i = 0;
+    while (i < 4) {
+        memcpy(ctx + WF_CUR + i * 16, "0123456789abcdef", 16);
+        memcpy(ctx + WF_NEXT + i * 16, "fedcba9876543210", 16);
+        i = i + 1;
+    }
+    sha256(ctx + WF_CUR, 64, ctx + WF_CURC);
+    sha256(ctx + WF_NEXT, 64, ctx + WF_NEXTC);
+    memcpy(ctx + WF_CLIENT, "qix", 3);
+    store64(ctx + WF_CLEN, 3);
+    store64(ctx + WF_SEEDED, 1);
+    return 0;
+}
+
+# Fail a fairness test: report it, drop the test's context (later tests expect
+# none) and return 1.
+fn t_fair_fail(name, why): i64 {
+    test_fail(name, why);
+    g_wager_fair = 0;
+    return 1;
+}
+
+# t261 — commit-reveal draws (1.12.1, ADR 0033): the commitment is SHA-256 of
+# the seed text; draw k is SHA-256("seed:client:k")[:15 hex] mod n, matching
+# Python; draws walk the nonce and fill the contest trace, which wager_audit
+# snapshots; a table draw starts its own trace; rotation reveals the current
+# seed and promotes the next (committed earlier); client seeds are checked;
+# seeding is idempotent; the betting screens show the commitment; and with no
+# context the draw falls back to the kernel read and the audit is a no-op.
+fn t261_wager_fair(): i64 {
+    var name = "t261_wager_fair";
+    var ctx = alloc(WF_SIZE);
+    t_fair_fixture(ctx);
+    var hx = alloc(80);
+    wager_hex(hx, ctx + WF_CURC, 32);
+    if (memeq(hx, "a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e", 64) == 0) {
+        test_fail(name, "commitment");
+        return 1;
+    }
+    if (wager_fair_value(ctx, 0, 6) != 5)          { test_fail(name, "draw 0"); return 1; }
+    if (wager_fair_value(ctx, 1, 37) != 10)        { test_fail(name, "draw 1"); return 1; }
+    if (wager_fair_value(ctx, 2, 1000) != 895)     { test_fail(name, "draw 2"); return 1; }
+    if (wager_fair_value(ctx, 3, 3) != 2)          { test_fail(name, "draw 3"); return 1; }
+    if (wager_fair_value(ctx, 3, 1) != 0)          { test_fail(name, "range 1"); return 1; }
+    g_wager_fair = ctx;
+    wager_trace_begin();
+    if (wager_uniform(6) != 5)                     { return t_fair_fail(name, "uniform 0"); }
+    if (wager_uniform(37) != 10)                   { return t_fair_fail(name, "uniform 1"); }
+    if (load64(ctx + WF_NONCE) != 2)               { return t_fair_fail(name, "nonce"); }
+    if (load64(ctx + WF_TRACE_N) != 2)             { return t_fair_fail(name, "trace n"); }
+    if (load64(ctx + WF_TRACE + 24) != 10)         { return t_fair_fail(name, "trace pair"); }
+    wager_audit(10, 1, 2, 0 - 10, 90);
+    if (load64(ctx + WF_PEND) != 1)                { return t_fair_fail(name, "pending"); }
+    if (load64(ctx + WF_P_ND) != 2)                { return t_fair_fail(name, "pending draws"); }
+    if (load64(ctx + WF_P_DRAWS) != 6)             { return t_fair_fail(name, "pending range"); }
+    if (load64(ctx + WF_P_BAL) != 90)              { return t_fair_fail(name, "pending balance"); }
+    wager_audit(10, 1, 2, 0 - 10, 80);
+    if (load64(ctx + WF_LOST) != 1)                { return t_fair_fail(name, "lost count"); }
+    # a table draw starts its own trace: nonce 2 on the fixture's weights [1,2,3]
+    var tbl = wt_fixture(0);
+    var want = wager_pick(tbl, wager_fair_value(ctx, 2, 6));
+    if (wager_draw(tbl) != want)                   { return t_fair_fail(name, "table draw"); }
+    if (load64(ctx + WF_TRACE_0) != 2)             { return t_fair_fail(name, "table trace start"); }
+    if (load64(ctx + WF_TRACE_N) != 1)             { return t_fair_fail(name, "table trace n"); }
+    # the betting screen shows the commitment and the next draw's number
+    var buf = alloc(256);
+    var n = wager_emit_fair(buf, 0);
+    store8(buf + n, 0);
+    if (strstr(buf, "seed commitment a8ae6e6ee929abea...") < 0) { return t_fair_fail(name, "screen"); }
+    if (strstr(buf, "draw #3") < 0)                { return t_fair_fail(name, "screen nonce"); }
+    # rotation: the current seed is revealed, the committed next becomes current
+    var oldnext = alloc(64);
+    memcpy(oldnext, ctx + WF_NEXT, 64);
+    store64(ctx + WF_LOGGED, 1);
+    if (wager_fair_rotate(ctx) != 0)               { return t_fair_fail(name, "rotate"); }
+    if (memeq(ctx + WF_LAST, "0123456789abcdef", 16) == 0) { return t_fair_fail(name, "revealed"); }
+    if (memeq(ctx + WF_CUR, oldnext, 64) == 0)     { return t_fair_fail(name, "promoted"); }
+    if (memeq(ctx + WF_NEXT, oldnext, 64) != 0)    { return t_fair_fail(name, "a new next"); }
+    if (load64(ctx + WF_NONCE) != 0)               { return t_fair_fail(name, "nonce reset"); }
+    if (load64(ctx + WF_LOGGED) != 0)              { return t_fair_fail(name, "logged reset"); }
+    var chk = alloc(32);
+    sha256(ctx + WF_NEXT, 64, chk);
+    if (memeq(chk, ctx + WF_NEXTC, 32) == 0)       { return t_fair_fail(name, "next commitment"); }
+    # client seeds
+    if (wager_fair_set_client(ctx, "pac-man_1.0", 11) != 0) { return t_fair_fail(name, "client ok"); }
+    if (wager_fair_set_client(ctx, "bad:seed", 8) != 1) { return t_fair_fail(name, "client colon"); }
+    if (wager_fair_set_client(ctx, "", 0) != 1)    { return t_fair_fail(name, "client empty"); }
+    if (wager_client_ok("0123456789abcdef0123456789abcdefX", 33) != 0) { return t_fair_fail(name, "client 33"); }
+    if (wager_client_ok("0123456789abcdef0123456789abcdef", 32) != 1) { return t_fair_fail(name, "client 32"); }
+    if (load64(ctx + WF_CLEN) != 11)               { return t_fair_fail(name, "client kept"); }
+    # seeding a fresh context: real entropy, its own commitment, idempotent
+    var f = alloc(WF_SIZE);
+    wager_fair_reset(f);
+    if (wager_fair_seed(f) != 0)                   { return t_fair_fail(name, "seed"); }
+    sha256(f + WF_CUR, 64, chk);
+    if (memeq(chk, f + WF_CURC, 32) == 0)          { return t_fair_fail(name, "fresh commitment"); }
+    if (load64(f + WF_CLEN) != 16)                 { return t_fair_fail(name, "fresh client"); }
+    memcpy(oldnext, f + WF_CUR, 64);
+    wager_fair_seed(f);
+    if (memeq(oldnext, f + WF_CUR, 64) == 0)       { return t_fair_fail(name, "reseeded"); }
+    # no context: the kernel read, and nothing recorded
+    g_wager_fair = 0;
+    var r = wager_uniform(6);
+    if (r < 0) { test_fail(name, "fallback"); return 1; }
+    if (r >= 6) { test_fail(name, "fallback range"); return 1; }
+    if (wager_audit(1, 0, 0, 1, 2) != 0)           { test_fail(name, "audit no-op"); return 1; }
+    if (wager_emit_fair(buf, 0) != 0)              { test_fail(name, "screen without context"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t262 — every place a wager settles leaves its audit record (1.12.1, ADR
+# 0033): the cantina wheel, the back-alley bones, the tavern cards and the
+# Olympiad book each call wager_audit with the stake, the bet, the outcome the
+# draw gave, the delta and the balance after — and its draws.
+fn t262_wager_audit_sites(): i64 {
+    var name = "t262_wager_audit_sites";
+    var ctx = alloc(WF_SIZE);
+    t_fair_fixture(ctx);
+    g_wager_fair = ctx;
+    var pa = pa_new(5, DOOR_SOLO, PA_DEF_DAYS);
+    pa_start(pa);
+    pa_feed_gamble(pa, "10 1", 4);
+    if (load64(ctx + WF_PEND) != 1)                     { return t_fair_fail(name, "cantina"); }
+    if (load64(ctx + WF_P_BAL) != load64(pa + PA_CREDITS)) { return t_fair_fail(name, "cantina balance"); }
+    if (load64(ctx + WF_P_STAKE) != 10)                 { return t_fair_fail(name, "cantina stake"); }
+    if (load64(ctx + WF_P_ND) != 1)                     { return t_fair_fail(name, "cantina draws"); }
+    store64(ctx + WF_PEND, 0);
+    var sl = sl_new(6, DOOR_SOLO, SL_DEF_DAYS);
+    sl_start(sl);
+    sl_feed_dice(sl, "10 2", 4);
+    if (load64(ctx + WF_PEND) != 1)                     { return t_fair_fail(name, "bones"); }
+    if (load64(ctx + WF_P_BAL) != load64(sl + SL_CASH)) { return t_fair_fail(name, "bones balance"); }
+    if (load64(ctx + WF_P_CHOICE) != 1)                 { return t_fair_fail(name, "bones bet"); }
+    store64(ctx + WF_PEND, 0);
+    var qu = qu_new(7, DOOR_SOLO, 0);
+    qu_start(qu);
+    store64(qu + QU_GOLD, 500);
+    qu_feed_cards(qu, "20 3", 4);
+    if (load64(ctx + WF_PEND) != 1)                     { return t_fair_fail(name, "cards"); }
+    if (load64(ctx + WF_P_BAL) != load64(qu + QU_GOLD)) { return t_fair_fail(name, "cards balance"); }
+    store64(ctx + WF_PEND, 0);
+    var ol = ol_new(8, DOOR_SOLO);
+    ol_feed(ol, "e", 1);
+    ol_feed(ol, "2 20", 4);
+    ol_feed(ol, "", 0);
+    if (load64(ctx + WF_PEND) != 1)                     { return t_fair_fail(name, "book"); }
+    if (load64(ctx + WF_P_ND) != OL_FIELD_BASE)         { return t_fair_fail(name, "book: the race's draws"); }
+    if (load64(ctx + WF_P_BAL) != load64(ol + OL_MONEY)) { return t_fair_fail(name, "book balance"); }
+    if (load64(ctx + WF_P_CHOICE) != 1)                 { return t_fair_fail(name, "book lane"); }
+    g_wager_fair = 0;
+    pa_free(pa);
+    sl_free(sl);
+    qu_free(qu);
+    ol_free(ol);
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -8165,6 +8332,8 @@ fn main(): i64 {
     t258_decode_guess_dict();
     t259_ol_events();
     t260_door_ration();
+    t261_wager_fair();
+    t262_wager_audit_sites();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

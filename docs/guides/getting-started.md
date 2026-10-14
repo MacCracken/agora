@@ -64,6 +64,10 @@ Door pacing: `--door-days <n>` caps the game days a saved door run (Solo or Univ
 Authority, The Handler, the Olympiad) advances per UTC day — default 10, `0` for no cap, `2` for the old BBS
 rhythm; Practice runs are never capped (since 1.12.0, [ADR 0032](../adr/0032-daily-ration.md)). The startup
 lines show the setting in force.
+Wagers are provably fair (since 1.12.1, [ADR 0033](../adr/0033-provably-fair-wagers.md)): each betting screen
+shows the SHA-256 commitment of the seed the draws come from, and `fair` at the prompt shows it in full,
+`fair reveal` reveals it, and `fair seed <text>` sets your own client seed. Every Solo or Universe wager is a
+line in `<store>/.games/wagers`; check a log with `scripts/verify-wagers.py <store>/.games/wagers`.
 
 ```sh
 ./build/agora serve 2323 --store ./bbs --motd ./motd.txt
@@ -204,6 +208,6 @@ Each session sees its own banner, its own `g_session_*` slots, and its own bump-
 - [`docs/development/roadmap.md`](../development/roadmap.md) — what's shipped, what's next, what's deferred.
 - [`docs/development/state.md`](../development/state.md) — live state snapshot (version / size / in-flight slot / boot guide).
 - [`docs/examples/`](../examples/) — runnable smoke scripts for each major surface.
-- [`docs/adr/`](../adr/) — the architecture decision records (0001–0032) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
+- [`docs/adr/`](../adr/) — the architecture decision records (0001–0033) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
 - [`CLAUDE.md`](../../CLAUDE.md) — durable agent / contributor process rules.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

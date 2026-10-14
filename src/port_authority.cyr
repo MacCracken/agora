@@ -959,6 +959,7 @@ fn pa_render(st, buf, cap): i64 {
         pos = emit_int(buf, pos, PA_DABO_MIN);
         pos = emit_cstr(buf, pos, ", x to leave)");
         pos = emit_crlf(buf, pos);
+        pos = wager_emit_fair(buf, pos);       # 1.12.1 (ADR 0033)
     }
     if (screen == PSCR_COMBAT) {
         pos = emit_sgr(buf, pos, 31);
@@ -1298,8 +1299,9 @@ fn pa_dabo_table(tbl): i64 {
 }
 
 # PSCR_GAMBLE — the cantina dabo wheel (1.3.5, the first user-reachable
-# wager.cyr surface; ADR 0013). Three lights spin on the KERNEL-CSPRNG
-# draw (not the game's seeded PRNG — a casino must be non-replayable):
+# wager.cyr surface; ADR 0013). Three lights spin on the wager draw (not
+# the game's seeded PRNG — a casino must be non-replayable; since 1.12.1 the
+# session's committed seed, ADR 0033):
 # Green 3/6 → 1x, Amber 2/6 → 2x, Red 1/6 → 5x (fair odds, then a
 # PA_DABO_EDGE haircut on a win). One bet per line, "<stake> <1-3>".
 # Only PA_CREDITS moves — already serialized, so the wheel adds no save
@@ -1318,10 +1320,11 @@ fn pa_feed_gamble(st, line, len): i64 {
     var bal = load64(st + PA_CREDITS);
     var rc = wager_validate(tbl, bal, stake, choice);
     if (rc != WAGER_OK) { pa_msg(st, wager_reason(rc)); return 0; }
-    var outcome = wager_draw_csprng(tbl);
+    var outcome = wager_draw(tbl);
     if (outcome < 0) { pa_msg(st, "The wheel's lamp shorts out -- bet refused, credits untouched."); return 0; }
     var delta = wager_resolve(tbl, stake, choice, outcome);
     store64(st + PA_CREDITS, wager_settle(bal, delta));
+    wager_audit(stake, choice, outcome, delta, load64(st + PA_CREDITS));   # 1.12.1 (ADR 0033)
     # Compose the result straight into PA_MSG (256-byte buffer). Decide
     # win/wash/loss by the match, NOT delta's sign — a tiny winning stake
     # can floor to 0 profit (a wash), which is not a loss.

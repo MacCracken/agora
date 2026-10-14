@@ -6,7 +6,7 @@
 #
 # Why (1.8.2): VERSION is the single source of truth, but three things repeatedly
 # fell out of step with it — 1.6.6 and 1.7.1 both shipped without state.md or
-# roadmap.md recording them, because the "release post-hook" CLAUDE.md once
+# roadmap.md being refreshed, because the "release post-hook" CLAUDE.md once
 # promised never existed — and until 1.8.2 the binary's version strings were
 # three hand-edited literals CI only partly checked. They now come from
 # CYRIUS_PKG_VERSION (cyrius.cyml `version = "${file:VERSION}"`), so this script
@@ -58,14 +58,20 @@ grep -Fq "## [$V]" CHANGELOG.md || bad "CHANGELOG.md has no '## [$V]' entry"
 grep -Fq "| **Released** | \`$V\`" docs/development/state.md \
     || bad "docs/development/state.md: the Released row does not name \`$V\` (refreshed by hand every release)"
 
-row="$(grep -F "| **$V** |" docs/development/roadmap.md | head -1)"
-if [ -z "$row" ]; then
-    bad "docs/development/roadmap.md: no release-plan row for **$V**"
-else
-    echo "$row" | grep -q '✅' || bad "docs/development/roadmap.md: the **$V** row is not marked shipped (✅)"
+# 1.12.1 — the roadmap is forward-only (shipped work leaves it for the
+# CHANGELOG), so it no longer carries a row for the released version. What a
+# release must still do to it: name a next slot AFTER VERSION in its header, and
+# delete the section that planned VERSION.
+RM=docs/development/roadmap.md
+next="$(grep -oE 'Next slot: \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*' "$RM" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+if [ -z "$next" ]; then
+    bad "$RM: its header names no 'Next slot: **X.Y.Z**' (refreshed by hand every release)"
+elif [ "$next" = "$V" ] || [ "$(printf '%s\n%s\n' "$V" "$next" | sort -V | tail -1)" != "$next" ]; then
+    bad "$RM: the next slot ($next) is not after VERSION ($V) — refresh the roadmap for the release"
 fi
+grep -Eq "^### $V( |\$)" "$RM" && bad "$RM: still plans $V (### $V) — a shipped slot's section is deleted"
 
 if [ "$fail" -eq 0 ]; then
-    echo "version-sync: OK — $V agrees across VERSION, cyrius.cyml, the binary, CHANGELOG, state.md and roadmap.md${TAG:+ and tag $TAG}"
+    echo "version-sync: OK — $V agrees across VERSION, cyrius.cyml, the binary, CHANGELOG and state.md; roadmap.md plans $next next${TAG:+; tag $TAG}"
 fi
 exit "$fail"

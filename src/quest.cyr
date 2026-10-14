@@ -857,13 +857,15 @@ fn qu_render_cards(st, buf, pos): i64 {
     pos = emit_int(buf, pos, QU_CARD_MIN);
     pos = emit_cstr(buf, pos, ", x to leave)");
     pos = emit_crlf(buf, pos);
+    pos = wager_emit_fair(buf, pos);           # 1.12.1 (ADR 0033)
     return pos;
 }
 
 # QSCR_CARDS — the tavern card table (1.3.5, shared wager.cyr; ADR 0013).
 # "Pick the suit", a 4-outcome uniform draw paying 3:1, resolved on the
-# KERNEL-CSPRNG (a casino must be non-replayable, unlike QUEST's seeded
-# forest/combat PRNG). One stake per line, "<gold> <1-4>". Only QU_GOLD
+# wager draw (a casino must be non-replayable, unlike QUEST's seeded
+# forest/combat PRNG; since 1.12.1 the session's committed seed, ADR 0033).
+# One stake per line, "<gold> <1-4>". Only QU_GOLD
 # (gold on hand) moves — already serialized, so the table adds no save
 # state. Gold on hand is the muggable purse, so the tavern bets the
 # vulnerable money, never the banked vault — thematically right.
@@ -881,10 +883,11 @@ fn qu_feed_cards(st, line, len): i64 {
     var bal = load64(st + QU_GOLD);
     var rc = wager_validate(tbl, bal, stake, choice);
     if (rc != WAGER_OK) { qu_msg(st, wager_reason(rc)); return 0; }
-    var outcome = wager_draw_csprng(tbl);
+    var outcome = wager_draw(tbl);
     if (outcome < 0) { qu_msg(st, "The dealer fumbles the cut -- bet refused, gold untouched."); return 0; }
     var delta = wager_resolve(tbl, stake, choice, outcome);
     store64(st + QU_GOLD, wager_settle(bal, delta));
+    wager_audit(stake, choice, outcome, delta, load64(st + QU_GOLD));      # 1.12.1 (ADR 0033)
     var msg = load64(st + QU_MSG);
     var p = 0;
     p = emit_cstr(msg, p, "The deal turns up ");

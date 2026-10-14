@@ -38,12 +38,33 @@
 #   wager_pick(tbl, r)       — PURE: map a uniform r in [0,total_weight)
 #                              to an outcome index. The injected seam —
 #                              tests pass a fixed r for a known outcome.
-#   wager_draw_csprng(tbl)   — production: uniform → pick (or 0-1).
+#   wager_uniform(n)         — production: [0,n) from the session's committed
+#                              seed (1.12.1), or the kernel CSPRNG with no context.
+#   wager_draw(tbl)          — production: uniform → pick (or 0-1).
 #   wager_resolve(...)       — PURE: signed gold delta given the outcome.
 #   wager_settle(...)        — PURE: clamp-and-apply (no negative path).
 #
 # Mirrors ADR 0009's pure-render / wired-I/O split and ADR 0010's
 # pure-transform / wired-lock split: the impure edge is one seam.
+#
+# === Provably fair (1.12.1, ADR 0033) ===
+#
+# Since 1.12.1 a draw is not a fresh kernel read but a COMMITTED one. Each
+# session holds a fairness context (`g_wager_fair`, swapped per session by
+# main.cyr): a server seed drawn from the kernel CSPRNG, whose SHA-256 the
+# player is shown before they bet, the next seed's commitment too, a client
+# seed the player may set, and a nonce. Draw k is
+#
+#     SHA-256("<seed>:<client>:<k>"), its first 15 hex digits as a number, mod n
+#
+# so once the seed is revealed (`fair reveal`, a new client seed, or the end of
+# the session) every draw made with it can be recomputed with any SHA-256 tool
+# — and the commitment proves the seed was fixed before the first bet. The
+# player still cannot predict a draw: the seed is 256 kernel-random bits they
+# only ever see hashed. Each settled wager also leaves a record (`wager_audit`)
+# that main.cyr writes to the store's wager log for a real-stakes run. With no
+# context (the unit harness, a CLI path) a draw falls back to the plain kernel
+# read, as before 1.12.1.
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr            — imin/imax (integer helpers); included earlier
@@ -214,13 +235,15 @@ fn wager_uniform_csprng(n): i64 {
     return x % n;
 }
 
-# Production draw: uniform over the weight total, mapped to an outcome.
-# Returns the resolved outcome index, or (0-1) if the CSPRNG read failed
-# (caller maps that to WAGER_E_DRAW and refuses the bet — no settlement).
-fn wager_draw_csprng(tbl): i64 {
+# Production draw: uniform over the weight total, mapped to an outcome. One
+# table bet is one draw, so it starts its own audit trace. Returns the resolved
+# outcome index, or (0-1) if the draw failed (caller maps that to WAGER_E_DRAW
+# and refuses the bet — no settlement).
+fn wager_draw(tbl): i64 {
+    wager_trace_begin();
     var total = wager_weight_total(tbl);
     if (total <= 1) { return wager_pick(tbl, 0); }   # degenerate: the lone populated outcome, else 0
-    var r = wager_uniform_csprng(total);
+    var r = wager_uniform(total);
     if (r < 0) { return 0 - 1; }
     return wager_pick(tbl, r);
 }
@@ -308,4 +331,236 @@ fn wager_payout(stake, num, den, edge_bps): i64 {
     if (kept < 0) { kept = 0; }
     if (kept > WAGER_EDGE_DENOM) { kept = WAGER_EDGE_DENOM; }
     return (gross / WAGER_EDGE_DENOM) * kept + ((gross % WAGER_EDGE_DENOM) * kept) / WAGER_EDGE_DENOM;
+}
+
+# === Provably fair draws (1.12.1, ADR 0033) ===
+
+enum WagerFair {
+    WF_SEEDED   = 0;     # 1 once the seeds are drawn (lazily: the first draw, a fair screen, `fair`)
+    WF_NONCE    = 8;     # draws made on the current seed
+    WF_LOGGED   = 16;    # 1 once a logged wager used the current seed (its reveal is owed to the log)
+    WF_CLEN     = 24;    # client seed length
+    WF_TRACE_N  = 32;    # draws in the current trace (one contest's draws)
+    WF_TRACE_0  = 40;    # nonce of the trace's first draw
+    WF_HASLAST  = 48;    # 1 once a seed has been revealed this session
+    WF_PEND     = 56;    # 1 while a settled wager waits to be written (wager_audit)
+    WF_P_STAKE  = 64;    # the pending wager: stake, choice, outcome, delta, balance after,
+    WF_P_CHOICE = 72;    # first nonce, draw count, and its (range, result) pairs
+    WF_P_OUT    = 80;
+    WF_P_DELTA  = 88;
+    WF_P_BAL    = 96;
+    WF_P_N0     = 104;
+    WF_P_ND     = 112;
+    WF_LOST     = 120;   # wagers settled while one was still pending (never expected; logged)
+    WF_CUR      = 128;   # current server seed: 64 hex chars (the hash input is the hex text)
+    WF_CURC     = 192;   # its commitment: SHA-256 of those 64 chars (32 bytes)
+    WF_NEXT     = 224;   # the next server seed, committed before any client seed is chosen
+    WF_NEXTC    = 288;
+    WF_LAST     = 320;   # the last revealed seed and its commitment
+    WF_LASTC    = 384;
+    WF_CLIENT   = 416;   # client seed, up to WF_CLIENT_MAX chars
+    WF_TRACE    = 448;   # WF_TRACE_MAX (range, result) i64 pairs of the current trace
+    WF_P_DRAWS  = 576;   # ... and of the pending wager
+    WF_SIZE     = 704;
+    WF_TRACE_MAX  = 8;   # draws one contest records (the Olympiad's widest field)
+    WF_CLIENT_MAX = 32;
+}
+
+var g_wager_fair = 0;    # the active session's fairness context (main.cyr sess_load); 0 = none
+
+# Clear a fairness context (WF_SIZE bytes): unseeded, nothing pending.
+fn wager_fair_reset(ctx): i64 {
+    memset(ctx, 0, WF_SIZE);
+    return 0;
+}
+
+# Write `n` bytes at `bytes` as 2n lowercase hex chars at `out` (no NUL). Returns 2n.
+fn wager_hex(out, bytes, n): i64 {
+    var digits = "0123456789abcdef";
+    var i = 0;
+    while (i < n) {
+        var b = load8(bytes + i) & 0xFF;
+        store8(out + i * 2, load8(digits + (b >> 4)) & 0xFF);
+        store8(out + i * 2 + 1, load8(digits + (b & 15)) & 0xFF);
+        i = i + 1;
+    }
+    return n * 2;
+}
+
+# A fresh server seed: 32 kernel-random bytes as 64 hex chars at `seed`, and
+# their commitment (SHA-256 of the 64 chars) at `commit`. 0, or (0-1) on a
+# short entropy read (the caller refuses).
+fn wager_fair_new_seed(seed, commit): i64 {
+    var raw[32];
+    if (sys_getrandom(&raw, 32, 0) != 32) { return 0 - 1; }
+    wager_hex(seed, &raw, 32);
+    sha256(seed, 64, commit);
+    return 0;
+}
+
+# Seed an unseeded context: the current and next server seeds, and a
+# random 16-hex-char client seed for a player who never sets one. Idempotent.
+# 0, or (0-1) on an entropy fault.
+fn wager_fair_seed(ctx): i64 {
+    if (load64(ctx + WF_SEEDED) == 1) { return 0; }
+    if (wager_fair_new_seed(ctx + WF_CUR, ctx + WF_CURC) != 0) { return 0 - 1; }
+    if (wager_fair_new_seed(ctx + WF_NEXT, ctx + WF_NEXTC) != 0) { return 0 - 1; }
+    var raw[8];
+    if (sys_getrandom(&raw, 8, 0) != 8) { return 0 - 1; }
+    wager_hex(ctx + WF_CLIENT, &raw, 8);
+    store64(ctx + WF_CLEN, 16);
+    store64(ctx + WF_NONCE, 0);
+    store64(ctx + WF_SEEDED, 1);
+    return 0;
+}
+
+# Reveal the current seed and move on: it becomes the "last revealed" seed,
+# the next seed (committed earlier) becomes current, and a new next seed is
+# drawn. The nonce restarts. 0, or (0-1) on an entropy fault.
+fn wager_fair_rotate(ctx): i64 {
+    if (wager_fair_seed(ctx) != 0) { return 0 - 1; }
+    memcpy(ctx + WF_LAST, ctx + WF_CUR, 64);
+    memcpy(ctx + WF_LASTC, ctx + WF_CURC, 32);
+    store64(ctx + WF_HASLAST, 1);
+    memcpy(ctx + WF_CUR, ctx + WF_NEXT, 64);
+    memcpy(ctx + WF_CURC, ctx + WF_NEXTC, 32);
+    store64(ctx + WF_NONCE, 0);
+    store64(ctx + WF_LOGGED, 0);
+    store64(ctx + WF_TRACE_N, 0);
+    store64(ctx + WF_TRACE_0, 0);
+    if (wager_fair_new_seed(ctx + WF_NEXT, ctx + WF_NEXTC) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# 1 if s[0..len) may be a client seed: 1 to WF_CLIENT_MAX letters, digits,
+# '.', '_' or '-' (nothing that could blur the "seed:client:nonce" input). Pure.
+fn wager_client_ok(s, len): i64 {
+    if (len < 1) { return 0; }
+    if (len > WF_CLIENT_MAX) { return 0; }
+    var i = 0;
+    var bad = 0;
+    while (i < len) {
+        var c = load8(s + i) & 0xFF;
+        var ok = 0;
+        if (c >= 48) { if (c <= 57) { ok = 1; } }        # 0-9
+        if (c >= 65) { if (c <= 90) { ok = 1; } }        # A-Z
+        if (c >= 97) { if (c <= 122) { ok = 1; } }       # a-z
+        if (c == 46) { ok = 1; }                         # .
+        if (c == 95) { ok = 1; }                         # _
+        if (c == 45) { ok = 1; }                         # -
+        if (ok == 0) { bad = 1; }
+        i = i + 1;
+    }
+    if (bad == 1) { return 0; }
+    return 1;
+}
+
+# Set the client seed to s[0..len) if wager_client_ok allows it. Returns 0, or
+# 1 if refused (the context is untouched). The caller rotates first, so the
+# seed the new client seed is used with was committed before it was chosen.
+fn wager_fair_set_client(ctx, s, len): i64 {
+    if (wager_client_ok(s, len) == 0) { return 1; }
+    memcpy(ctx + WF_CLIENT, s, len);
+    store64(ctx + WF_CLEN, len);
+    return 0;
+}
+
+# Draw `nonce` on the context's current seed, in [0, n): SHA-256 of
+# "<seed>:<client>:<nonce>", its first 15 hex digits (60 bits) as a number,
+# mod n. Pure given the context — the verification recipe, in code. The 60-bit
+# value keeps the arithmetic inside i64; the modulo bias for any range a game
+# uses is below 2^-40.
+fn wager_fair_value(ctx, nonce, n): i64 {
+    if (n <= 1) { return 0; }
+    var inp[128];
+    var p = 0;
+    memcpy(&inp, ctx + WF_CUR, 64);
+    p = 64;
+    store8(&inp + p, 58); p = p + 1;                     # ':'
+    var cl = load64(ctx + WF_CLEN);
+    memcpy(&inp + p, ctx + WF_CLIENT, cl);
+    p = p + cl;
+    store8(&inp + p, 58); p = p + 1;
+    p = p + fmt_int_buf(nonce, &inp + p);
+    var d[32];
+    sha256(&inp, p, &d);
+    var x = 0;
+    var i = 0;
+    while (i < 7) {
+        x = (x << 8) | (load8(&d + i) & 0xFF);
+        i = i + 1;
+    }
+    x = (x << 4) | ((load8(&d + 7) & 0xFF) >> 4);        # 15 hex digits = 60 bits
+    return x % n;
+}
+
+# Start a contest's audit trace: the draws from here until the next
+# wager_audit (or the next trace) are the ones a settled wager records.
+fn wager_trace_begin(): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { return 0; }
+    store64(ctx + WF_TRACE_N, 0);
+    store64(ctx + WF_TRACE_0, load64(ctx + WF_NONCE));
+    return 0;
+}
+
+# A uniform value in [0, n) — every wager and contest draw comes through here.
+# With a session context: the next committed draw (seeding the context first if
+# need be), added to the contest's trace. With none: the plain kernel read.
+# (0-1) on an entropy fault, so the caller refuses and never settles.
+fn wager_uniform(n): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { return wager_uniform_csprng(n); }
+    if (n <= 1) { return 0; }
+    if (wager_fair_seed(ctx) != 0) { return 0 - 1; }
+    var nonce = load64(ctx + WF_NONCE);
+    var r = wager_fair_value(ctx, nonce, n);
+    var tn = load64(ctx + WF_TRACE_N);
+    if (tn < WF_TRACE_MAX) {
+        store64(ctx + WF_TRACE + tn * 16, n);
+        store64(ctx + WF_TRACE + tn * 16 + 8, r);
+        store64(ctx + WF_TRACE_N, tn + 1);
+    }
+    store64(ctx + WF_NONCE, nonce + 1);
+    return r;
+}
+
+# Record a settled wager for the audit log: the stake, the bet, the outcome,
+# the signed delta, the balance after, and the contest's draws (from its trace).
+# main.cyr writes it after the line (a real-stakes run only) and clears it. A
+# no-op without a context. Pure but for the context.
+fn wager_audit(stake, choice, outcome, delta, balance): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { return 0; }
+    if (load64(ctx + WF_PEND) == 1) { store64(ctx + WF_LOST, load64(ctx + WF_LOST) + 1); }
+    store64(ctx + WF_P_STAKE, stake);
+    store64(ctx + WF_P_CHOICE, choice);
+    store64(ctx + WF_P_OUT, outcome);
+    store64(ctx + WF_P_DELTA, delta);
+    store64(ctx + WF_P_BAL, balance);
+    store64(ctx + WF_P_N0, load64(ctx + WF_TRACE_0));
+    var nd = load64(ctx + WF_TRACE_N);
+    store64(ctx + WF_P_ND, nd);
+    memcpy(ctx + WF_P_DRAWS, ctx + WF_TRACE, nd * 16);
+    store64(ctx + WF_PEND, 1);
+    return 0;
+}
+
+# The line a betting screen shows: the current seed's commitment (its first 16
+# hex chars) and the next draw's number, so a player can match each bet to the
+# seed revealed later. Seeds the context if need be — the commitment must be on
+# screen before the first bet. Nothing without a context. Returns the new pos.
+fn wager_emit_fair(buf, pos): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { return pos; }
+    if (wager_fair_seed(ctx) != 0) { return pos; }
+    var hx[64];
+    wager_hex(&hx, ctx + WF_CURC, 8);
+    store8(&hx + 16, 0);
+    pos = emit_cstr(buf, pos, "Provably fair: seed commitment ");
+    pos = emit_cstr(buf, pos, &hx);
+    pos = emit_cstr(buf, pos, "..., draw #");
+    pos = emit_int(buf, pos, load64(ctx + WF_NONCE));
+    pos = emit_cstr(buf, pos, " ('fair' at the prompt)");
+    return emit_crlf(buf, pos);
 }

@@ -4,6 +4,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-10-14 (provably fair wagers)
+
+A bet can now be checked instead of trusted. Every wager and contest draw comes from a session seed whose
+SHA-256 commitment the player sees on the betting screen before they stake anything. The seed is revealed
+afterwards, so anyone can recompute every draw. Each real-stakes wager also leaves a line in an append-only audit
+log, and a short independent script checks the log against the reveals. This answers both open questions ADR
+0013 left at 1.3.4 (ADR [0033](docs/adr/0033-provably-fair-wagers.md)), and closes the 1.12.x line and the
+1.8.x → 1.12.x plan.
+
+The roadmap is rebuilt as one forward-only file. `roadmap-future.md` is folded in, the shipped history is gone
+(the CHANGELOG keeps it), and the plan runs in release arcs to a defined 2.0 and past it.
+
+**277** tests (261 module + 16 serve-layer), also on aarch64 under qemu; both fuzz harnesses plain and
+`--poison=ab`; **39** example smokes (new: 39), both CI legs green; `cyrius audit` exit 0. `build/agora`
+**1,109,304 → 1,122,600 B**; `--agnos` 1,101,768 → 1,115,064 B; `--aarch64` 2,530,408 → 2,531,424 B.
+
+### Added
+
+- **Committed draws** (`src/wager.cyr`, ADR 0033). Each session holds a fairness context:
+  - **Seeds**: a server seed (32 kernel-random bytes, kept as 64 hex characters), its commitment (SHA-256 of
+    those characters), and the next seed with its commitment, committed in advance.
+  - **Client seed and nonce**: a client seed the player can set, and a nonce.
+  - **The draw**: draw *k* is `SHA-256("<seed>:<client>:<k>")`, its first 15 hex digits as a number, mod the
+    range. The cantina wheel, the back-alley bones, the tavern cards and the Olympiad's race order all draw this
+    way (`wager_uniform`, `wager_draw`).
+  - **Lifetime**: the context is per session slot, reset for each connection, and seeded lazily (first draw,
+    first betting screen, or `fair`). With no context, as in the unit harness, a draw falls back to the plain
+    kernel read.
+- **The betting screens show the commitment**: `Provably fair: seed commitment <16 hex>..., draw #<n>`, on the
+  cantina, the bones, the tavern table and the Olympiad book, so it is on screen before the first bet.
+- **`fair`** at the BBS prompt shows the full commitment, the next seed's commitment, the client seed and the
+  draws made on the current seed.
+  - **`fair reveal`** reveals the seed and moves to the next.
+  - **`fair seed <text>`** does the same and sets the client seed: 1 to 32 letters, digits, `.`, `_` or `-`;
+    anything else is refused. The next seed was committed before the client seed was chosen.
+- **The wager audit trail**: `<store>/.games/wagers`, one append-only line per settled real-stakes wager, each
+  write fsync'd and `flock`'d.
+  - A `W` line records the time, handle, game, commitment, client seed, first nonce, every `range:result` draw,
+    stake, bet, outcome, delta and the balance after.
+  - An `R` line records a revealed seed, written on `fair reveal`, on `fair seed` and on every session close
+    path, so a seed a logged wager used is always revealed.
+  - Real stakes means Solo or Universe; a Practice wager leaves no line. The modules stay pure: `wager_audit`
+    records into the session context, and `main.cyr` writes after the line (`door_wager_flush`), as it writes
+    worlds and saves.
+- **`scripts/verify-wagers.py`**: checks a wager log with Python's own `hashlib`, sharing no agora code. Each
+  reveal must hash to its commitment, and each draw must recompute; unrevealed wagers are reported as pending,
+  and the script exits 1 on any mismatch.
+- Tests: **t261** (draws against Python-computed vectors, the trace, rotation, client seeds, seeding, the
+  fallback), **t262** (all four settlement sites record their wager), **s16** (the log for Solo / Practice /
+  anonymous play, reveals once and on close, `fair`, fresh seeds per connection). **Smoke
+  `39-provably-fair.py`** checks all of it over the wire in both serve models, including a log with one altered
+  draw that the verifier must catch.
+
+### Changed
+
+- **The roadmap is one forward-only file** (`docs/development/roadmap.md`). The 1.12.x section and the
+  § Shipped table are gone, and `roadmap-future.md` is folded in and deleted. The plan now runs in release arcs:
+  - **1.13.x** — the terminal and the protocol;
+  - **1.14.x** — door depth;
+  - **1.15.x** — bots and media;
+  - **1.16.x** — the road to 2.0;
+  - **2.0.0** — the format break: the key is the identity, and posts are addressed by content, with cut
+    criteria;
+  - **2.1–2.4.x** — the four remaining sovereignty pillars.
+
+  Blocked work names the arc it would join. References in the README, CLAUDE.md, state.md, ADRs 0002 / 0004 /
+  0006 / 0012 / 0030 and two source comments now point at the merged file.
+- **`scripts/check-version-sync.sh`** checks the forward-only roadmap. Its header must name a next slot after
+  `VERSION`, and no section may still plan `VERSION`. Before, it required a ✅ row for the released version.
+- `wager_draw_csprng` is now `wager_draw` (it draws from the committed seed and starts the contest's audit
+  trace); `wager_uniform_csprng` remains as the seed source and the no-context fallback. The session's
+  `SESS_SPARE_264` holds the fairness context (`SESS_FAIR`).
+- ADR 0013 is amended (both open questions answered), and ADR 0016 notes that the race order is now
+  verifiable. CLAUDE.md's allocator gate lists the fairness context among the deliberate once-per-slot
+  allocations.
+
+### Verification
+
+- `cyrius test`: **261/261** + **16/16**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
+  `--poison=ab`. `cyrius audit` **exit 0**. `scripts/check-version-sync.sh --tag 1.12.1` OK (its new roadmap
+  check); `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them: **fork 25/25, poll 38/38**.
+- **Mutation-checked: 28 mutants, all caught**, covering four areas:
+  - **the draw**: the hash input's separator, 56 bits for 60, a nonce that does not advance, draws untraced, a
+    table draw that keeps an old trace, a rotation that reveals nothing, draws a fresh current seed or keeps
+    the logged flag, a colon or a 33rd character accepted in a client seed, the raw bytes committed instead of
+    the hex, an audit that keeps no draws;
+  - **the log**: a Practice or anonymous wager logged, a logged seed not marked, a reveal for any seed, a
+    close path that does not reveal, a new connection keeping the old seed, the session context never loaded,
+    stake and bet swapped;
+  - **the command**: `fair seed` rotating before it checks the seed;
+  - **the sites**: each of the four settlement sites unaudited, the race keeping an old trace or drawing off
+    the record, the cantina hiding its commitment (caught by smoke 39).
+- A poll-mode heap A/B: 300 pipelined rounds each of cantina bets, `fair` / `fair reveal` / `fair seed`, and
+  Olympiad races with bets left VmData at **+0 KB**.
+- **A/B against a `git archive` 1.12.0 build**: smoke 39 fails 30 of its 32 checks there (all but the two
+  logins: no commitment, no log, no `fair`, nothing to verify), and passes here.
+- The security re-scan found one new external input, `fair seed <text>`, which is validated (letters, digits,
+  `.` `_` `-`, at most 32). The one new allocation is the 704-byte context, once per slot. The new store write
+  goes through `store_append_locked`. There are no new plain opens.
+
 ## [1.12.0] — 2026-10-13 (Olympiad events + door content)
 
 The doors get their missing content. The Olympiad gains the three events its competition engine was built for:

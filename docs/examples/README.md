@@ -14,7 +14,7 @@ docs/examples/run.sh --fast --skip 01     # skip the slow halves (26's idle wait
 [`run.sh`](run.sh) (1.8.2) knows what each script needs: a clean `./bbs` and `./keys`, a freshly registered
 `qix` (03, 05, 06, 11–13, 15, 24, 26, 27), or a server it must start itself under the requested model (the
 client-only 04, 05, 23, 25, 26, 27). Scripts that start their own server inherit `AGORA_SERVE`, so
-`--model fork|poll|both` covers them too; 24 and 28–38 drive both models internally and run once. 20 skips
+`--model fork|poll|both` covers them too; 24 and 28–39 drive both models internally and run once. 20 skips
 itself unless the sibling `../cyrius-yeomans-descent` repo is present. Logs land in `build/smoke-logs/`.
 **CI runs the whole set on every push, once per serve model.** The runner refuses to start if `./bbs` or
 `./keys` already exist, since the scripts create and delete them (`--force` to override).
@@ -25,7 +25,7 @@ under a model named only in their header. Every release from 1.6.7 to 1.8.1 was 
 harness — the reason smoke 20's breakage went unnoticed for four releases.)
 
 Running one by hand still works: each script's header says what it needs. Defaults: `./build/agora`,
-a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–38 pick their own).
+a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–39 pick their own).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -67,6 +67,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–38 pic
 | 36 | [`36-terminal-width.py`](36-terminal-width.py) | 1.10.1 (ADR 0030): output wrapped to the window the client reports, both serve models — without NAWS a long line arrives whole; after `WILL NAWS` + 40x24, `read` and `list` fit 39 columns with the subject hanging under itself, an indented line keeping its indent, a URL never cut, every newline CR LF; a resize to 60 applies on the next command; a door frame fits; a width of 0 means no wrap; the greeting fits 80 — and § G, a real inetutils `telnet` in a 40x24 pty whose own NAWS fits `read` to it (skipped if none is installed). A 1.10.0 build fails 15 of 24 checks. | `/tmp/agora-width-smoke-$$` |
 | 37 | [`37-descent-state.py`](37-descent-state.py) | 1.11.0 (ADR 0031): the Descent as a session state, with a built-in fake MUD — under poll another session is answered at once while one is in the MUD or dialling an endpoint that never answers (told within the 4 s deadline); the bytes pipelined behind `descent` reach the MUD; echo resumes once after the MUD's WILL / WONT ECHO; shutdown during a visit; `AGORA_SERVE=epoll` refused; 200 sequential poll accepts in well under a second; fork children say goodbye at shutdown and leave with a SIGKILLed parent; and § I, a real inetutils `telnet` in a 40x24 pty keeping its window width and LINEMODE echo across a visit. A 1.10.1 build fails 11 of 21 checks. | `/tmp/agora-descent-state-$$` |
 | 38 | [`38-door-content.py`](38-door-content.py) | 1.12.0 (roadmap § 1.12.0): the door content release, both serve models — the daily ration (ADR 0032: under `--door-days 2` a Solo Port Authority run ends two days, is refused the third with a message, stays refused across a save, while Practice is not rationed and `--door-days 0` lifts the cap); Ashes ages (a v3 world one player dominates is upgraded in place, the next turn ends the age, the victor's visit claims it and posts an Imperator row, a player who saw the old age is founded with the news); Decode/Words taking `pizza` and refusing `roate`; the Olympiad market hiring a runner into the stadion. Against a 1.11.1 build 24 checks fail (§ A cannot start: the old server takes `--door-days 2` as port 2). | `/tmp/agora-content-smoke-$$` |
+| 39 | [`39-provably-fair.py`](39-provably-fair.py) | 1.12.1 (ADR 0033): provably fair wagers, both serve models — the cantina, the bones and the Olympiad book show the seed commitment before the first bet; Solo bets at all three are W lines in `<store>/.games/wagers` with their draws; `fair` shows the commitment, `fair reveal` reveals a seed that hashes to it (an R line), `fair seed` sets the client seed and refuses a bad one; a disconnect reveals the last seed; an anonymous Practice bet leaves no line; `scripts/verify-wagers.py` verifies every logged draw and catches one altered draw. A 1.12.0 build fails 30 of 32 checks (all but the logins). | `/tmp/agora-fair-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

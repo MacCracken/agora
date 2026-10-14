@@ -22,7 +22,7 @@ The naming convention adds a **Greek lane** to the AGNOS ecosystem (previously S
 
 ## Roadmap
 
-The release plan (1.8.x → 1.12.x) and a one-row-per-line history of what shipped are in [`docs/development/roadmap.md`](docs/development/roadmap.md); v1.0's criteria are in CHANGELOG `[1.0.0]`. M0–M6 + 0.7.0 security sweep + 0.8.x audit followups + 0.9.0 ABI freeze + 0.9.1 doc-pass + 0.9.2 closeout sweep all shipped 2026-05-23. **v1.0.0 cut after archaemenid iron validation, same day.** Post-1.0 directions live in [`docs/development/roadmap-future.md`](docs/development/roadmap-future.md) — six unpinned v2.x sovereignty pillars, pulled forward on consumer pressure rather than calendar.
+The plan from here — release arcs through 1.16.x, the 2.0 format break (the key is the identity; posts are addressed by content), and the 2.x network after it — is one forward-only file, [`docs/development/roadmap.md`](docs/development/roadmap.md). What has shipped is in [`CHANGELOG.md`](CHANGELOG.md); v1.0's criteria are in CHANGELOG `[1.0.0]` (cut 2026-05-23 after archaemenid iron validation).
 
 ## Build
 
@@ -65,6 +65,7 @@ agora binary (~874 KB static ELF at 1.3.7)
 ├── src/quest.cyr           QUEST: a LORD-homage door RPG (play quest)
 ├── src/jabberwacky.cyr     Jabberwacky: corpus-learning chatbot (ADR 0015)
 ├── src/wager.cyr           shared casino/wagering primitive (ADR 0013)
+│                           + provably fair draws, the audit record (ADR 0033)
 ├── src/olympiad.cyr        Olympiad: games-owner sim + compete() (ADR 0016) —
 │                           chariots, gladiators, the stadion, the regatta
 ├── src/decode.cyr          Decode: Mastermind / Wordle on one engine (ADR 0018)
@@ -83,13 +84,13 @@ Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + 
 
 ## Docs
 
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — milestones, sub-bites, v1.0 criteria.
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — the forward plan: release arcs to 2.0 and the 2.x network (one file since 1.12.1).
 - [`docs/development/state.md`](docs/development/state.md) — current version, binary size, in-flight slot. Refreshed every release.
 - [`docs/doc-health.md`](docs/doc-health.md) — fresh / stale / archive ledger across the whole doc tree.
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — thirty-eight runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`) / store hardening (`32-store-hardening.py`) / the reply index (`33-reply-index.py`) / board policy (`34-board-policy.py`) / telnet conformance (`35-telnet-conformance.py`) / terminal width (`36-terminal-width.py`) / the Descent as a session state (`37-descent-state.py`) / the 1.12.0 door content — the daily ration, Ashes ages, Decode words, Olympiad events (`38-door-content.py`).
+- [`docs/examples/`](docs/examples/) — thirty-nine runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`) / store hardening (`32-store-hardening.py`) / the reply index (`33-reply-index.py`) / board policy (`34-board-policy.py`) / telnet conformance (`35-telnet-conformance.py`) / terminal width (`36-terminal-width.py`) / the Descent as a session state (`37-descent-state.py`) / the 1.12.0 door content — the daily ration, Ashes ages, Decode words, Olympiad events (`38-door-content.py`) / provably fair wagers and the audit trail (`39-provably-fair.py`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (~9 ns/byte hot path, unchanged across every release since M1-close).
 - [`fuzz/`](fuzz/) — the IAC-parser fuzz harness (`cyrius fuzz`), run by CI and at release.
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.

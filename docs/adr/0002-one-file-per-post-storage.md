@@ -5,7 +5,7 @@
 
 ## Context
 
-M5 (post persistence) needs an on-disk format for the boards / threads / messages that the v1.0 BBS will serve. The format choice is **load-bearing**: it ripples into how `agora post` / `list` / `read` work today (M5-A), how the telnet wire layer surfaces those operations (M5-B), how concurrent writes are coordinated (M5-G), and how the v2.x post-pillar-2 content-addressed-storage graduation (see [`roadmap-future.md`](../development/roadmap-future.md)) replaces the post ID with a content hash without breaking external references.
+M5 (post persistence) needs an on-disk format for the boards / threads / messages that the v1.0 BBS will serve. The format choice is **load-bearing**: it ripples into how `agora post` / `list` / `read` work today (M5-A), how the telnet wire layer surfaces those operations (M5-B), how concurrent writes are coordinated (M5-G), and how the v2.x post-pillar-2 content-addressed-storage graduation (see [`roadmap.md`](../development/roadmap.md) § 2.x) replaces the post ID with a content hash without breaking external references.
 
 Three candidate shapes:
 

@@ -145,10 +145,10 @@ jobs:
         # concurrency, serve-model, shutdown and door-lifecycle behaviour.
         # 01 is skipped (the build-and-test job builds and tests); 20 skips
         # itself (it needs the sibling Yeoman's Descent repo); the scripts that
-        # drive both models internally (24, 28-38) run once, in the poll leg.
+        # drive both models internally (24, 28-39) run once, in the poll leg.
         run: |
           if [ "${{ matrix.model }}" = fork ]; then
-            docs/examples/run.sh --model fork --skip 01,24,28,29,30,31,32,33,34,35,36,37,38
+            docs/examples/run.sh --model fork --skip 01,24,28,29,30,31,32,33,34,35,36,37,38,39
           else
             docs/examples/run.sh --model poll --skip 01
           fi

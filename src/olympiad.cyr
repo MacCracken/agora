@@ -24,9 +24,10 @@
 # === The fairness split (extends ADR 0013) ===
 #
 # The rival FIELD is generated from the seeded door.cyr PRNG (replayable
-# — a save replays the same season's opponents). The race WINNER is the
-# kernel CSPRNG (`wager_uniform_csprng`, non-replayable) — the one thing
-# money rides on is the one thing a player cannot predict or replay.
+# — a save replays the same season's opponents). The race WINNER comes from
+# the wager draw (`wager_uniform`: since 1.12.1 the session's committed seed,
+# drawn from the kernel CSPRNG and revealed afterwards, ADR 0033) — the one
+# thing money rides on is the one thing a player cannot predict, yet can verify.
 # Training shifts your WEIGHT; it never makes the result reconstructable.
 # The pure weight->index map (`ol_pick_weighted`, the injected test seam)
 # is split from the CSPRNG read, exactly as wager.cyr splits wager_pick.
@@ -45,7 +46,7 @@
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr   — emit_*, door_key/door_parse_int, save_put/get_i64, imin/imax
-#   wager.cyr  — wager_uniform_csprng (the kernel-CSPRNG draw), WAGER_* (bite 3)
+#   wager.cyr  — wager_uniform (the committed draw), wager_audit, WAGER_* (bite 3)
 
 # === Constants ===
 
@@ -423,20 +424,20 @@ fn ol_pick_weighted(forms, n, taken, r): i64 {
 }
 
 # Resolve a single WINNER over a field of n entrants weighted by form[].
-# One kernel-CSPRNG draw (non-replayable). Returns the 0-based winner
-# index, or (0-1) on a CSPRNG fault (caller refuses to settle the card).
+# One wager draw (non-replayable). Returns the 0-based winner index, or
+# (0-1) on a draw fault (caller refuses to settle the card).
 fn ol_compete_winner(forms, n): i64 {
     var total = ol_field_total(forms, n, 0);
     if (total <= 0) { return 0; }
-    var r = wager_uniform_csprng(total);
+    var r = wager_uniform(total);
     if (r < 0) { return 0 - 1; }
     return ol_pick_weighted(forms, n, 0, r);
 }
 
 # Resolve a full finishing ORDER (for place/show + standings): a SEQUENTIAL
-# weighted draw — pick a winner ∝ form from the kernel CSPRNG, remove,
-# repeat. Writes 0-based entrant indices into out_order[0..n) (1st first).
-# Returns 0, or (0-1) on a CSPRNG fault. Uses a working `taken` mask.
+# weighted draw — pick a winner ∝ form from the wager draw (`wager_uniform`),
+# remove, repeat. Writes 0-based entrant indices into out_order[0..n) (1st
+# first). Returns 0, or (0-1) on a draw fault. Uses a working `taken` mask.
 fn ol_compete_order(forms, n, out_order): i64 {
     var taken = cmd_alloc(n);
     var z = 0;
@@ -449,7 +450,7 @@ fn ol_compete_order(forms, n, out_order): i64 {
         if (total <= 0) {
             chosen = ol_pick_weighted(forms, n, taken, 0);   # remaining all-zero: index order
         } else {
-            var r = wager_uniform_csprng(total);
+            var r = wager_uniform(total);
             if (r < 0) { fault = 1; place = n; }
             else       { chosen = ol_pick_weighted(forms, n, taken, r); }
         }
@@ -805,13 +806,14 @@ fn ol_place_bet(st, lane, stake): i64 {
 }
 
 # Run the assembled race: compete() resolves the finishing order off the
-# kernel CSPRNG, your placing pays a purse, and the race tires your real
+# wager draw, your placing pays a purse, and the race tires your real
 # team (so you can't spam races without resting — the "train or not"
 # tension). Transitions to OSCR_RESULT, or back to the hub on a fault.
 fn ol_run_race(st): i64 {
     var n = load64(st + OL_FIELDN);
     var forms = load64(st + OL_FIELD);
     var order = load64(st + OL_ORDER);
+    wager_trace_begin();                       # 1.12.1 — the race's draws are what a bet settles on
     if (ol_compete_order(forms, n, order) != 0) {
         ol_msg(st, "The gates jam (entropy fault) -- the race is void, no stakes lost.");
         store64(st + OL_SCREEN, OSCR_STABLE);
@@ -863,6 +865,7 @@ fn ol_run_race(st): i64 {
         }
         store64(st + OL_MONEY, wager_settle(load64(st + OL_MONEY), bdelta));
         store64(st + OL_BETDELTA, bdelta);
+        wager_audit(stake, bi, load64(order + 0 * 8), bdelta, load64(st + OL_MONEY));   # 1.12.1 (ADR 0033)
     }
     ol_clear_bet(st);
     # advancement: a win in any event climbs the ladder; winning the final
@@ -1126,6 +1129,7 @@ fn ol_render_race(st, buf, pos): i64 {
     pos = emit_cstr(buf, pos, load64(d + EVD_START));
     pos = emit_cstr(buf, pos, "   [x] scratch");
     pos = emit_crlf(buf, pos);
+    pos = wager_emit_fair(buf, pos);           # 1.12.1 (ADR 0033): the race settles on it
     pos = ol_render_msg(st, buf, pos);
     return pos;
 }

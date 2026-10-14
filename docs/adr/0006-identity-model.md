@@ -9,7 +9,7 @@ M5 closed at 0.5.0 with a multi-board threaded BBS — but every poster on the w
 
 M6 introduces **identity**. agora gains: a per-user keypair, a wire-side login flow, a session-bound author identity, and a `From:` header on posts. Per-board posting policy ships in the same cycle so the identity is actually load-bearing the day it lands.
 
-Out of scope for M6: **federated identity** (one fingerprint, multiple agora nodes — that's v2.x pillar 1 in [`roadmap-future.md`](../development/roadmap-future.md), and requires the content-addressed-storage graduation to be coherent). Web-of-trust signatures, key revocation lists, and TOFU-pinning prompts are also v2.x — M6 is single-node authentication.
+Out of scope for M6: **federated identity** (one fingerprint, multiple agora nodes — that's v2.x pillar 1 in [`roadmap.md`](../development/roadmap.md) § 2.x, and requires the content-addressed-storage graduation to be coherent). Web-of-trust signatures, key revocation lists, and TOFU-pinning prompts are also v2.x — M6 is single-node authentication.
 
 Six load-bearing decisions:
 
@@ -135,7 +135,7 @@ Reply-To: <id>           (optional, ADR 0005)
 - **Lost keyfile = lost identity.** No recovery flow; no shared-secret backdoor. A user who deletes `~/.agora/key` cannot post as the old fingerprint again, even with the same handle (the server holds the pubkey; only the matching secret can sign the nonce). Users who care about continuity should back up the keyfile.
 - **Single-node identity at M6.** Same fingerprint on two agora deployments requires the user to copy the keyfile to both and register the same handle on both. Federated identity (one fingerprint, N nodes auto-resolve) is v2.x pillar 1.
 - **64-bit fingerprint space.** 2^64 is fine for ~10s of users per deployment, fragile at 10k+ (birthday collision at ~4 billion). A deployment-level ADR can extend the fingerprint to 32 hex chars (128-bit) when needed; the on-disk shape is forward-compatible (longer strings just truncate to 16 chars for display, full string for crypto).
-- **Telnet has no TLS at M6.** The signature flow protects the secret key, but the post content + handle + fp travel cleartext over the wire. A passive observer can read every post and see who wrote it. This is the BBS-history shape (telnet was never confidential), but operators running on hostile networks should either tunnel agora over SSH or wait for v2.x for a wire-encryption pillar (not currently on the roadmap-future).
+- **Telnet has no TLS at M6.** The signature flow protects the secret key, but the post content + handle + fp travel cleartext over the wire. A passive observer can read every post and see who wrote it. This is the BBS-history shape (telnet was never confidential), but operators running on hostile networks should either tunnel agora over SSH or wait for v2.x for a wire-encryption pillar (planned since 1.12.1: `roadmap.md` § 2.1.x, an encrypted wire).
 - **Per-board policy adds a fourth side-channel file** in the board layout (`.lock`, `.policy`, `.admins`, plus the M6 `.users/<fp>/` per-store). Operators reading `ls <store>/<board>/` see more dotfiles. Mitigated by the dot-prefix convention being load-bearing for all storage-private files.
 - **No anonymous-post mode at M6.** Boards that want "anyone with the socket can post" require a future ADR; today's `open` policy is "any registered user can post."
 - **Handle squatting.** First-come-first-served handle registration means a user who grabs `linus` blocks the actual linus from registering. Operator-side `agora unregister <handle>` is implementable but deferred — the v2.x pillar 1 web-of-trust would solve this properly.
@@ -164,7 +164,7 @@ Reply-To: <id>           (optional, ADR 0005)
 
 **(P3) Operator-configurable read-vs-post policy at startup.** Rejected as M6 first cut. Adds operator-config surface, doubled test paths, and a doc burden for a feature with no current consumer asking for it. Per-board posting policy (M6-F) covers the posting axis; read-gating earns its own ADR when a real operator hits the case.
 
-**Federated identity at M6.** Rejected — v2.x pillar 1 in [`roadmap-future.md`](../development/roadmap-future.md). Requires the content-addressed-storage graduation (pillar 2) to be coherent (a post's `From:` field must resolve to the same identity across nodes). Premature at M6.
+**Federated identity at M6.** Rejected — v2.x pillar 1 in [`roadmap.md`](../development/roadmap.md) § 2.x. Requires the content-addressed-storage graduation (pillar 2) to be coherent (a post's `From:` field must resolve to the same identity across nodes). Premature at M6.
 
 **Web-of-trust at M6.** Rejected — also v2.x pillar 1. M6 is single-trust-root (the operator's keyring). WoT signatures, trust scoring, and revocation lists are post-1.0.
 

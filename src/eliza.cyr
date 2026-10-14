@@ -20,7 +20,7 @@
 # script content rather than a data-driven descriptor. (A script-descriptor
 # refactor was recommended here before 1.3.1; PARRY shipped without it, on its
 # own affect-gated dispatch, so the if-chain stands. A future script-engine bot
-# — ALICE / Racter, roadmap-future.md — is where it would earn its keep.)
+# — ALICE / Racter, roadmap.md § 1.15.0 — is where it would earn its keep.)
 # The engine pipeline, per input line:
 #   normalize  → lowercase, punctuation→space, keep apostrophes, cap
 #   reflect    → whole-word pronoun swap (I<->you, my<->your, am->are…)

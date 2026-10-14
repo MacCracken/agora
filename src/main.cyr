@@ -576,12 +576,21 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         memcpy((&play) + pl, pt, strlen(pt));
         send_wrapped(cfd, &play, pl + strlen(pt), 0, 18, TW_RAW);
         send_help_line(cfd, "  scores <game>   top-10 leaderboard for a door game\r\n");
+        send_help_line(cfd, "  fair            provably fair wagers: the seed commitment, reveal, your seed\r\n");
         send_help_line(cfd, "  chat [channel]  join a live chat channel (default 'lobby'); /leave to exit\r\n");
         send_help_line(cfd, "  descent         step through the portal into the Yeoman's Descent MUD\r\n");
         send_help_line(cfd, "  help            this message\r\n");
         send_help_line(cfd, "  quit            close the session\r\n");
         send_str(cfd, "\r\n");
         return MODE_COMMAND;
+    }
+
+    # 1.12.1 (ADR 0033) — `fair`, exactly, or `fair <args>`.
+    if (line_has_prefix(line, len, "fair") != 0) {
+        var fairword = 0;
+        if (len == 4) { fairword = 1; }
+        if (len > 4) { if ((load8(line + 4) & 0xFF) == 32) { fairword = 1; } }
+        if (fairword == 1) { return cmd_fair(cfd, line, len); }
     }
 
     # M5-E: `boards` — list main + all named subdirectory boards.
@@ -1996,12 +2005,232 @@ fn door_send_frame(cfd): i64 {
 # Port Authority Universe play wraps the feed in a world transaction so
 # trades/claims hit the shared galaxy under the flock (ADR 0010 bite 2).
 fn door_feed_line(cfd, line, line_len): i64 {
-    if (g_door_mode == DOOR_UNIVERSE) { return door_universe_feed(line, line_len); }
-    var d = door_desc_for(g_door_game);
-    if (d == 0) { return 1; }
-    var fp = load64(d + DD_FEED);
-    if (fp == 0) { return 1; }
-    return callptr(fp, g_door_state, line, line_len);
+    var ctrl = 1;
+    if (g_door_mode == DOOR_UNIVERSE) { ctrl = door_universe_feed(line, line_len); }
+    else {
+        var d = door_desc_for(g_door_game);
+        var fp = 0;
+        if (d != 0) { fp = load64(d + DD_FEED); }
+        if (fp != 0) { ctrl = callptr(fp, g_door_state, line, line_len); }
+    }
+    door_wager_flush();     # 1.12.1 (ADR 0033) — a wager the line settled goes to the log
+    return ctrl;
+}
+
+# === 1.12.1 — the wager audit trail (ADR 0033) ===
+#
+# <store>/.games/wagers, one append-only, fsync'd, flock'd line per settled
+# real-stakes wager, and one per revealed seed:
+#
+#   W <time> <handle> <game> <commitment> <client seed> <first nonce> <n:r,...>
+#     <stake> <bet> <outcome> <delta> <balance>
+#   R <time> <handle> <commitment> <seed> <client seed> <draws>
+#
+# (tab-separated). A W line carries every draw its contest made — the range and
+# the result — so once the R line for its commitment is written, anyone can
+# recompute them: scripts/verify-wagers.py does, with Python's own SHA-256.
+# Real stakes means a Solo or Universe run, so always a logged-in player; a
+# Practice wager is ephemeral chips and leaves no line. Each write is fsync'd:
+# an audit line that a crash can take back is not one.
+
+# `<store>/.games/wagers` into out (PATH_MAX_BYTES); ensures `.games` exists.
+fn wager_log_path(out): i64 {
+    var pos = world_games_root(g_store_buf, out);
+    store_ensure(out);
+    memcpy(out + pos, "/wagers", 7);
+    store8(out + pos + 7, 0);
+    return pos + 7;
+}
+
+# Append the line `buf[0..n)` to the wager log, durably. 0, or negative on failure.
+fn wager_log_append(buf, n): i64 {
+    var path = cmd_alloc(PATH_MAX_BYTES);
+    wager_log_path(path);
+    var w = store_append_locked(path, buf, n, 1);
+    if (w != n) { return 0 - 1; }
+    return 0;
+}
+
+# Append "<TAB><time><TAB><handle>" to a log line at buf+pos (the shared prefix
+# after the record letter). Returns the new pos.
+fn wager_log_head(buf, pos): i64 {
+    store8(buf + pos, 9); pos = pos + 1;
+    var ts[24];
+    iso8601_into(clock_epoch_ns() / 1000000000, &ts);
+    pos = emit_cstr(buf, pos, &ts);
+    store8(buf + pos, 9); pos = pos + 1;
+    pos = emit_cstr(buf, pos, g_session_handle);
+    store8(buf + pos, 9); pos = pos + 1;
+    return pos;
+}
+
+# Write the wager the last line settled (wager_audit's pending record) as a W
+# line, for a real-stakes run; then clear it either way. A write that fails is
+# told to the player, as a failed world write is.
+fn door_wager_flush(): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { return 0; }
+    if (load64(ctx + WF_PEND) == 0) { return 0; }
+    store64(ctx + WF_PEND, 0);
+    if (g_door_mode == DOOR_PRACTICE) { return 0; }
+    if ((load8(g_session_handle) & 0xFF) == 0) { return 0; }
+    var line = cmd_alloc(1024);
+    store8(line, 87);                                  # 'W'
+    var p = wager_log_head(line, 1);
+    p = emit_cstr(line, p, door_game_name(g_door_game));
+    store8(line + p, 9); p = p + 1;
+    p = p + wager_hex(line + p, ctx + WF_CURC, 32);
+    store8(line + p, 9); p = p + 1;
+    var cl = load64(ctx + WF_CLEN);
+    memcpy(line + p, ctx + WF_CLIENT, cl); p = p + cl;
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_N0));
+    store8(line + p, 9); p = p + 1;
+    var nd = load64(ctx + WF_P_ND);
+    var i = 0;
+    while (i < nd) {
+        if (i > 0) { store8(line + p, 44); p = p + 1; }   # ','
+        p = emit_int(line, p, load64(ctx + WF_P_DRAWS + i * 16));
+        store8(line + p, 58); p = p + 1;                  # ':'
+        p = emit_int(line, p, load64(ctx + WF_P_DRAWS + i * 16 + 8));
+        i = i + 1;
+    }
+    if (nd == 0) { store8(line + p, 45); p = p + 1; }     # '-' (a degenerate table drew nothing)
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_STAKE));
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_CHOICE));
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_OUT));
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_DELTA));
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_P_BAL));
+    store8(line + p, 10); p = p + 1;
+    if (wager_log_append(line, p) != 0) {
+        var d = door_desc_for(g_door_game);
+        if (d != 0) {
+            var mfp = load64(d + DD_MSG);
+            var wmsg = "The wager log could not be written -- tell the operator.";
+            if (mfp != 0) { var mr = callptr(mfp, g_door_state, wmsg); }
+        }
+        return 0;
+    }
+    store64(ctx + WF_LOGGED, 1);
+    return 0;
+}
+
+# If a logged wager used the context's current seed, write its R line (the seed
+# revealed, with its commitment and client seed), so every W line on it can be
+# checked. Called before each rotation and on every close path. 0 / negative.
+fn wager_log_reveal(ctx): i64 {
+    if (ctx == 0) { return 0; }
+    if (load64(ctx + WF_SEEDED) == 0) { return 0; }
+    if (load64(ctx + WF_LOGGED) == 0) { return 0; }
+    var line = cmd_alloc(512);
+    store8(line, 82);                                  # 'R'
+    var p = wager_log_head(line, 1);
+    p = p + wager_hex(line + p, ctx + WF_CURC, 32);
+    store8(line + p, 9); p = p + 1;
+    memcpy(line + p, ctx + WF_CUR, 64); p = p + 64;
+    store8(line + p, 9); p = p + 1;
+    var cl = load64(ctx + WF_CLEN);
+    memcpy(line + p, ctx + WF_CLIENT, cl); p = p + cl;
+    store8(line + p, 9); p = p + 1;
+    p = emit_int(line, p, load64(ctx + WF_NONCE));
+    store8(line + p, 10); p = p + 1;
+    store64(ctx + WF_LOGGED, 0);
+    return wager_log_append(line, p);
+}
+
+# Send "<label><64 hex of the 32 bytes at h>\r\n".
+fn fair_send_hash(cfd, label, h): i64 {
+    var hx[72];
+    wager_hex(&hx, h, 32);
+    send_str(cfd, label);
+    send_buf(cfd, &hx, 64);
+    send_str(cfd, "\r\n");
+    return 0;
+}
+
+# Index of the first non-space byte of line[from..len), or len.
+fn skip_spaces(line, from, len): i64 {
+    var i = from;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= len) { scanning = 0; continue; }
+        if ((load8(line + i) & 0xFF) != 32) { scanning = 0; continue; }
+        i = i + 1;
+    }
+    return i;
+}
+
+# `fair` (1.12.1, ADR 0033): show the session's provably-fair state;
+# `fair reveal` reveals the current seed and moves to the next (committed
+# before); `fair seed <text>` does the same and sets the client seed.
+fn cmd_fair(cfd, line, len): i64 {
+    var ctx = g_wager_fair;
+    if (ctx == 0) { send_str(cfd, "no fairness context in this session.\r\n"); return MODE_COMMAND; }
+    var efail = "the entropy source failed -- try again.\r\n";
+    if (wager_fair_seed(ctx) != 0) { send_str(cfd, efail); return MODE_COMMAND; }
+    var arg = skip_spaces(line, 4, len);
+    var rest = line + arg;
+    var rlen = len - arg;
+    var rotate = 0;
+    var setclient = 0;
+    var cseed = 0;
+    var clen = 0;
+    if (rlen == 6) { if (memeq(rest, "reveal", 6) != 0) { rotate = 1; } }
+    if (rlen >= 4) {
+        if (memeq(rest, "seed", 4) != 0) {
+            setclient = 1;
+            var cs = skip_spaces(rest, 4, rlen);
+            cseed = rest + cs;
+            clen = rlen - cs;
+        }
+    }
+    if (rlen > 0) {
+        if (rotate == 0) {
+            if (setclient == 0) {
+                send_str(cfd, "usage: fair | fair reveal | fair seed <1-32 letters, digits, . _ ->\r\n");
+                return MODE_COMMAND;
+            }
+        }
+    }
+    if (setclient == 1) {
+        if (wager_client_ok(cseed, clen) == 0) {
+            send_str(cfd, "a client seed is 1-32 letters, digits, '.', '_' or '-'.\r\n");
+            return MODE_COMMAND;
+        }
+        rotate = 1;
+    }
+    if (rotate == 1) {
+        wager_log_reveal(ctx);
+        if (wager_fair_rotate(ctx) != 0) { send_str(cfd, efail); return MODE_COMMAND; }
+        if (setclient == 1) { wager_fair_set_client(ctx, cseed, clen); }
+        send_str(cfd, "revealed. the seed you bet on was:\r\n  ");
+        send_buf(cfd, ctx + WF_LAST, 64);
+        send_str(cfd, "\r\n");
+    }
+    send_str(cfd, "provably fair wagers -- every draw is SHA-256(\"<seed>:<client>:<n>\"),\r\n");
+    send_str(cfd, "its first 15 hex digits as a number, mod the range (ADR 0033).\r\n");
+    fair_send_hash(cfd, "  commitment  ", ctx + WF_CURC);
+    fair_send_hash(cfd, "  next        ", ctx + WF_NEXTC);
+    send_str(cfd, "  client seed ");
+    send_buf(cfd, ctx + WF_CLIENT, load64(ctx + WF_CLEN));
+    send_str(cfd, "\r\n  draws       ");
+    var nb[24];
+    var nl = fmt_int_buf(load64(ctx + WF_NONCE), &nb);
+    send_buf(cfd, &nb, nl);
+    send_str(cfd, "\r\n");
+    if (load64(ctx + WF_HASLAST) == 1) {
+        send_str(cfd, "  revealed    ");
+        send_buf(cfd, ctx + WF_LAST, 64);
+        send_str(cfd, "\r\n");
+        fair_send_hash(cfd, "  its hash    ", ctx + WF_LASTC);
+    }
+    send_str(cfd, "fair reveal: reveal this seed and start the next.  fair seed <text>: set yours.\r\n");
+    return MODE_COMMAND;
 }
 
 # 1 if the active door state's run is finished (its DD_IS_OVER hook); chatbots are never over.
@@ -2338,8 +2567,11 @@ fn door_save_on_exit(cfd): i64 {
 # `q`: a disconnect, an idle reap, a server shutdown. Called on every close path
 # before the state is freed, after sess_save(s) has made the slot current.
 fn session_door_checkpoint(s): i64 {
-    if (load64(s + SESS_DOOR_STATE) == 0) { return 0; }
+    # 1.12.1 (ADR 0033) — and the session's wager seed is revealed to the log if
+    # a logged wager used it: every recorded draw becomes verifiable.
     sess_load(s);
+    wager_log_reveal(load64(s + SESS_FAIR));
+    if (load64(s + SESS_DOOR_STATE) == 0) { return 0; }
     door_save_on_exit(load64(s + SESS_FD));
     return 0;
 }
@@ -2567,7 +2799,7 @@ enum SessOff {
     SESS_CHAT_IDLE         = 240;
     SESS_CHAT_BOT          = 248;
     SESS_COUCH             = 256;   # 1.11.1 — couch states by game id (was SESS_ELIZA)
-    SESS_SPARE_264         = 264;   # (SESS_PARRY until 1.11.1)
+    SESS_FAIR              = 264;   # 1.12.1 — the wager fairness context (wager.cyr WF_SIZE); SESS_PARRY until 1.11.1
     SESS_SPARE_272         = 272;   # (SESS_JABBER until 1.11.1)
     SESS_REPLY_TO          = 280;
     SESS_REPLY_SUBJECT     = 288;
@@ -2637,6 +2869,11 @@ fn session_alloc(): i64 {
     var couch = alloc((GAME_LAST + 1) * 8);
     memset(couch, 0, (GAME_LAST + 1) * 8);
     store64(s + SESS_COUCH, couch);
+    # 1.12.1 (ADR 0033) — the slot's wager fairness context, kept for the slot's
+    # life and reset for each connection (seeded on its first draw or `fair`).
+    var fair = alloc(WF_SIZE);
+    wager_fair_reset(fair);
+    store64(s + SESS_FAIR, fair);
     store64(s + SESS_FD, 0 - 1);
     store64(s + SESS_DOOR_LOCK, 0 - 1);
     store64(s + SESS_MUD_FD, 0 - 1);
@@ -2703,6 +2940,8 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_REPLY_TO, 0);
     store8(load64(s + SESS_REPLY_SUBJECT), 0);
     store64(s + SESS_REPLY_SUBJECT_LEN, 0);
+    # 1.12.1 — a new connection gets new seeds (a close path has revealed the old).
+    wager_fair_reset(load64(s + SESS_FAIR));
     return 0;
 }
 
@@ -2785,6 +3024,7 @@ fn sess_load(s): i64 {
     g_chat_idle         = load64(s + SESS_CHAT_IDLE);
     g_chat_bot          = load64(s + SESS_CHAT_BOT);
     g_couch             = load64(s + SESS_COUCH);
+    g_wager_fair        = load64(s + SESS_FAIR);
     g_reply_to          = load64(s + SESS_REPLY_TO);
     g_reply_subject     = load64(s + SESS_REPLY_SUBJECT);
     g_reply_subject_len = load64(s + SESS_REPLY_SUBJECT_LEN);

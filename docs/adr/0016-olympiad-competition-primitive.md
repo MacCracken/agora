@@ -93,3 +93,9 @@ This is the same "reproducible where it should be, unpredictable where money rid
 >   ration's day.
 > - **Loader.** A save naming an event that does not exist is refused (the event indexes the descriptor
 >   table); stats and condition are clamped into range. t259, smoke 38 D.
+
+> **1.12.1 note.** The race order is drawn from the session's committed seed ([ADR
+> 0033](0033-provably-fair-wagers.md)): `ol_compete_order` calls `wager_uniform`, `ol_run_race` starts the
+> race's audit trace, and a settled bet's audit line carries every draw of the race. The fairness split
+> above (a replayable field, an unpredictable result) stands, and the result can now be verified after the
+> seed is revealed.
