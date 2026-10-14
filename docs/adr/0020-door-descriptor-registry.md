@@ -1,6 +1,6 @@
 # 0020 — Door descriptor registry (table-driven door dispatch)
 
-> **Status**: Accepted
+> **Status**: Accepted — **amended at 1.11.1** (the couch and the name parsing joined the registry; a conformance test)
 > **Date**: 2026-06-15
 
 ## Context
@@ -88,3 +88,23 @@ parser's name→id line) — not an edit to eighteen scattered functions.
   function-built registry keeps the per-game blocks readable and co-located, and
   the per-process build cost is negligible. See [001-cyrius-callptr-constraints](../architecture/001-cyrius-callptr-constraints.md)
   for the language constraints that shaped the implementation.
+
+> **Amendment (1.11.1).** Two things this ADR scoped out, and one it left to discipline, are now in the
+> registry or enforced by it:
+>
+> - **The chat couch.** A bot is any door with a `DD_COUCH_CMD`. Its command, reply prefix, `/help` blurb and
+>   opening note are descriptor data (`DD_COUCH_CMD` / `_NAME` / `_HELP` / `_NOTE`), and its last reply comes
+>   from a `DD_REPLY` function. That retires ADR 0012's shared-offset ABI: the couch read every bot at Eliza's
+>   `EZ_RESP` / `EZ_RESPLEN`, and nothing enforced it. Couch states live in one per-session table indexed by game
+>   id (`SESS_COUCH`), released through the registry like any door state.
+> - **Name parsing.** `play` and `scores` look names up in the registry (`door_game_by_name`; `scores` only
+>   matches a door with a `DD_SCORE`), and their usage lines and the `help` door list are generated from it.
+>   `GAME_LAST` bounds every walk. A new door is its enum id, `GAME_LAST`, and one registry block; no parser
+>   edit.
+> - **The coverage obligation.** "Mitigated by the full example-smoke suite" is now a test.
+>   `tests/serve.tcyr` `s13` walks every id up to `GAME_LAST`. It requires a registered descriptor whose name
+>   the parser finds, plus the slots its capabilities imply: a save needs a load, a leaderboard a rank, a
+>   Universe game its whole world set (with a fresh world its validator accepts), and a couch bot its reply.
+>   It then drives every door through its slots: render, input, is-over, reply, score / rank, and a save
+>   round-tripped through its load. Eleven mutants (a slot mis-wired, missing or unregistered, among them) are
+>   each caught.

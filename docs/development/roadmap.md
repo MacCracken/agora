@@ -1,10 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.11.0 (Descent as a session state + serve-model debt) shipped**: a Descent
-> visit no longer freezes the poll server, the return keeps the client's options, the poll loop waits on
-> readiness, `AGORA_SERVE=epoll` is refused, fork children leave with their parent (ADR 0031); accept-rate limiting
-> re-checked and moved to § Unscheduled. Next slot: **1.11.1**, enforced module invariants. The same day: 1.10.1
-> (terminal-aware output) closed the 1.10.x line; 1.10.0, 1.9.2, 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into
+> **Last Updated**: 2026-10-13 — **1.11.1 (enforced module invariants) shipped**, closing the 1.11.x line: a
+> door's free can no longer reach the session's world buffer, the chat couch and the `play` / `scores` names
+> come from the door registry, and a test walks every registered door — slots, a drive, a save round trip, a
+> leak check. Next slot: **1.12.0**, Olympiad events + door content. The same day: 1.11.0 (Descent as a session
+> state, ADR 0031), 1.10.1 and 1.10.0 (the 1.10.x line), 1.9.2, 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into
 > 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
@@ -36,32 +36,10 @@ did) and the slots after it shift.
 | **1.10.0** | Telnet conformance | protocol | ✅ 2026-10-13 |
 | **1.10.1** | Terminal-aware output (closes the 1.10.x line) | protocol / UX | ✅ 2026-10-13 |
 | **1.11.0** | Descent as a poll state + serve-model debt | structure | ✅ 2026-10-13 |
-| **1.11.1** | Enforced module invariants | structure | planned |
+| **1.11.1** | Enforced module invariants (closes the 1.11.x line) | structure | ✅ 2026-10-13 |
 | **1.12.0** | Olympiad events + door content | content | planned |
 | **1.12.1** | Wager audit trail | content / fairness | planned |
 | 1.x | Cross-repo and toolchain-blocked work | — | blocked — see § Unscheduled |
-
----
-
-## 1.11.x — structure
-
-### 1.11.0 — Descent as a poll state + serve-model debt ✅
-
-Shipped 2026-10-13 (ADR 0031): a Descent visit is a session state both serve models drive (`descent_pump`), so a
-player in the MUD no longer stalls the poll sweep and a dead endpoint costs it nothing (Linux); the return
-adopts the options the client holds, learned by watching the negotiation the proxy carried (window width and
-LINEMODE survive a visit); the poll loop waits on readiness (sequential accepts 50 → ~8,400/s) and
-`AGORA_SERVE=epoll` is refused; fork children leave with their parent (`PR_SET_PDEATHSIG`) and say goodbye on
-shutdown. Accept-rate limiting moved to § Unscheduled after a re-check. Detail: CHANGELOG `[1.11.0]`. Delete
-this section when the 1.11.x line closes.
-
-### 1.11.1 — Enforced module invariants
-
-| Item | Source | Effort |
-|---|---|---:|
-| ADR 0022's borrowed world-snapshot pointer is an **unenforced per-module invariant** — door #11 can silently leak or corrupt the session pool | [ADR 0022](../adr/0022-door-state-free-hook.md) | medium |
-| The chat-couch bot dispatch was left out of the descriptor registry; its shared-offset ABI (PY/EZ alias) is unenforced | [ADR 0020](../adr/0020-door-descriptor-registry.md) | small |
-| ADR 0020 descriptor slots resolve at run time, so every new slot carries an untracked smoke-coverage obligation — turn it into a test | ADR 0020 | small |
 
 ---
 
@@ -156,6 +134,7 @@ One row per release line; per-tag narrative, numbers and findings are in [`CHANG
 | Audit + repair, tooling | 1.8.1 – 1.8.2 | six-slice audit, 41 fixes (poll fairness, vendored-allocation leaks, fail-closed policy, door save lifecycle, loader bounds, fork caps); then the Closeout Pass in CI, serve-layer unit tests, generated version string, serve-level baselines | 2026-10-13 |
 | Storage, scale, policy | 1.9.0 – 1.9.2 | store opens refuse symlinks and FIFOs (files and directories); crash-safe post publish; the handle index (unknown login O(1)); the reply index (`read` O(replies)); `.admins` read whole and keyed on fingerprints; four board modes that each mean something (members-only, anonymous posting); `agora policy` / `agora admins`; chat channel cap; the slot risk recorded (ADRs 0025–0028) | 2026-10-13 |
 | The wire | 1.10.0 – 1.10.1 | RFC 854 / 1184 conformance — agora as the LINEMODE server (MODE and SLC answered, echo handed to an editing client), AYT, a line editor for character-mode clients, NVT egress; then output wrapped to the client's NAWS width (door frames, `list`, `read`, chat, `help`), byte-identical without one; a second fuzz harness (ADRs 0029–0030) | 2026-10-13 |
+| Structure | 1.11.0 – 1.11.1 | the Descent as a session state (no more stalled poll server; the return resyncs the client's telnet options), readiness-driven serve loops (`AGORA_SERVE=epoll` refused), fork children that leave with their parent; then the door registry's invariants enforced — one release point that keeps a door's free off the session's world buffer, the chat couch and the command names in the registry, and a conformance test over every door (ADRs 0031, 0020 / 0022 amendments) | 2026-10-13 |
 
 ---
 

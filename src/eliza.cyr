@@ -865,6 +865,14 @@ fn ez_free(st): i64 {
     return 0;
 }
 
+# 1.11.1 — the last reply: its buffer, with its length stored at `lenp`. The chat
+# couch reads every bot through its registered reply function (DD_REPLY), not
+# through a shared struct offset.
+fn ez_reply(st, lenp): i64 {
+    store64(lenp, load64(st + EZ_RESPLEN));
+    return load64(st + EZ_RESP);
+}
+
 # Seed the opening line.
 fn ez_start(st): i64 {
     var resp = load64(st + EZ_RESP);

@@ -76,6 +76,10 @@ enum DoorGame {
     GAME_OLYMPIAD = 8;   # 1.3.6: Olympiad, the Greco-Roman games-owner sim (ADR 0016)
     GAME_ASHES    = 9;   # 1.3.7: Ashes of Empire, the async shared-world war-game (ADR 0014)
     GAME_DECODE   = 10;  # 1.4.1: Decode, the Mastermind/Wordle code-breaking door (ADR 0018)
+    # 1.11.1 — the highest id: the registry is sized by it and every walk over the
+    # door fleet (name lookup, the couch, the conformance test) stops at it. A new
+    # door takes GAME_LAST + 1 and moves this.
+    GAME_LAST     = 10;
 }
 
 # === Integer helpers ===

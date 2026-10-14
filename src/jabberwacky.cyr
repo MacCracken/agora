@@ -45,9 +45,9 @@
 # the corpus, scorer, learner, and serialisation are all unit-testable
 # in tests/agora.tcyr without binding a port (t167+).
 #
-# State layout keeps the response buffer + length at the SAME struct
-# offsets as ELIZA/PARRY (JW_RESP=8 / JW_RESPLEN=16) so main.cyr's chat
-# couch reads any bot uniformly (the shared-offset ABI, ADR 0012).
+# (Until 1.11.1 the state had to keep its response buffer + length at Eliza's
+# offsets, because main.cyr's chat couch read every bot at EZ_RESP — an ABI
+# nothing enforced. The couch now reads jw_reply through the registry.)
 #
 # Deps resolved upstream: eliza.cyr (ez_* primitives), door.cyr
 # (emit_cstr/emit_crlf, save_put_i64/save_get_i64, DOOR_SOLO), lib/*
@@ -70,8 +70,8 @@ enum JwCap {
 # with ELIZA's literal offset names regardless of which bot is active.
 enum JW {
     JW_OVER    = 0;        # 0 talking, 1 said goodbye (couch never reads)
-    JW_RESP    = 8;        # ptr -> response buffer (== EZ_RESP)
-    JW_RESPLEN = 16;       # current response length (== EZ_RESPLEN)
+    JW_RESP    = 8;        # ptr -> response buffer
+    JW_RESPLEN = 16;       # current response length
     JW_MODE    = 24;       # DoorMode (practice/solo)
     JW_SEED    = 32;       # session seed (unused by retrieval; kept for save symmetry)
     JW_COUNT   = 40;       # total pairs stored (seed + learned)
@@ -366,6 +366,12 @@ fn jw_state_alloc(): i64 {
     store64(st + JW_PREV,  fl_alloc(JW_SLOT));
     store64(st + JW_NORM,  fl_alloc(JW_IN_MAX + 1));
     return st;
+}
+
+# 1.11.1 — the last reply: its buffer, with its length stored at `lenp` (DD_REPLY).
+fn jw_reply(st, lenp): i64 {
+    store64(lenp, load64(st + JW_RESPLEN));
+    return load64(st + JW_RESP);
 }
 
 # 1.6.3 — release a Jabberwacky state and its seven owned buffers (the learned

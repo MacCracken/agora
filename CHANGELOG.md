@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-13 (enforced module invariants)
+
+The door registry (ADR 0020) and the door-state free hook (ADR 0022) each rested on rules that only discipline
+kept:
+- a door's free function must step around the session's world buffer;
+- every buffer a door state owns must come from the freelist and go back;
+- the chat couch must find every bot's reply at Eliza's struct offsets;
+- every descriptor slot must point at the right function, which only a smoke would notice if it didn't.
+
+Door #11 could have broken any of them silently. Each is now enforced by code or by a test that walks the whole
+registry, so a new door is checked simply by being added. Closes the 1.11.x line. No player-visible change:
+`help`, `play`, `scores` and a full chat-couch session are byte-identical to 1.11.0.
+
+**268** tests (254 module + 14 serve-layer), also on aarch64 under qemu; both fuzz harnesses plain and
+`--poison=ab`; **37** example smokes, both CI legs green; `cyrius audit` exit 0. `build/agora` **1,042,240 →
+1,041,936 B**; `--agnos` 1,034,704 → 1,038,496 B; `--aarch64` 2,483,832 → 2,483,528 B.
+
+### Changed
+
+- **One release point for door states.** `door_release_state` is now the only place a door's `DD_FREE` runs: on
+  quit, on a disconnect and for the chat couch. It first clears a Universe state's world field (`DD_WORLD_OFF`),
+  which points at the session slot's `alloc()` buffer rather than memory the state owns. Before 1.11.1 a door's
+  `*_free` that forgot to step around it would have put that buffer on the freelist and corrupted the pool.
+  Now the most it can free through the field is 0 (ADR 0022 amendment).
+- **The chat couch is in the registry.**
+  - A bot is any door with a `DD_COUCH_CMD`; its reply prefix, `/help` blurb and opening note are descriptor
+    data, and its reply comes from a new `DD_REPLY` function (`ez_reply`, `py_reply`, `jw_reply`).
+  - This retires ADR 0012's shared-offset ABI: PARRY's and Jabberwacky's reply had to sit at Eliza's offsets
+    8 / 16, kept true only by "== EZ_RESP" comments.
+  - The three hand-written `/eliza` / `/parry` / `/jabberwacky` blocks and the 3-way `chat_bot_*` switches are
+    gone, and the three per-session state fields became one table indexed by game id (`SESS_COUCH`).
+  - `g_chat_bot` holds the bot's game id.
+- **Names come from the registry.** `play` and `scores` look a name up in the registry (`door_game_by_name`;
+  `scores` matches only a door with a leaderboard). Their usage lines and the `help` door list are generated
+  from it. That removes two hand-kept chains of the ten names. `GAME_LAST` bounds every walk over the fleet.
+- CLAUDE.md's release-check allocator gate ("mixed-allocator scan") now cites `s13` / `s14`, which enforce it
+  for every door.
+
+### Added
+
+- `tests/serve.tcyr` **`s13` registry conformance**. It walks every id up to `GAME_LAST`:
+  - **Registration:** a descriptor must exist, under a name the parser finds.
+  - **Capability slots:** a save needs a load, a score a rank, a Universe game its whole world set (with a fresh
+    world its own validator accepts), and a couch bot its reply.
+  - **The drive:** render, five input lines, is-over, reply, score / rank, and a save round-tripped byte for byte
+    through its load.
+  - **Leaks:** another 200 drives after a warm-up must move neither the bump heap (an `alloc()` that belonged on
+    the freelist), nor the freelist arena (a buffer the door's free misses), nor the data segment.
+- **`s14` world-pointer guard**: a hostile `DD_FREE` on every Universe door, through all three release paths, is
+  never handed the session's world pointer.
+- Mutation-checked: 11 mutants, all caught:
+  - a door left unregistered; a load slot mis-wired; a save slot, a rank slot or a couch reply missing; a couch
+    reply pointing at the wrong function; a world validator crossed between doors;
+  - `jw_free` missing one buffer; PARRY's counters on `alloc()`; the release keeping the world field; the
+    `scores` lookup ignoring the leaderboard requirement.
+
+### Verification
+
+- `cyrius test`: **254/254** + **14/14**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
+  `--poison=ab`. `cyrius audit` **exit 0**. `scripts/check-version-sync.sh --tag 1.11.1` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them: **fork 25/25, poll 36/36**; the couch smokes (12 Eliza,
+  13 PARRY, 15 Jabberwacky) pass in both models.
+- **No visible change**: `help`, `play nosuch`, `scores` (with no name, a door without a leaderboard and an
+  unknown name) and a 14-step chat session are byte-identical to a `git archive` 1.11.0 build. The session
+  covers `/help`, each bot, switching between bots, `bye`, an unknown command and `/leave`.
+- Dead-code audit: the same 10 test-only accessors. Full build from clean, all three targets.
+
 ## [1.11.0] — 2026-10-13 (Descent as a session state + serve-model debt)
 
 A player in the Descent no longer freezes everyone else, and comes back with a working terminal. Until now a

@@ -1,6 +1,6 @@
 # 0022 — The door-state free hook (`DD_FREE`)
 
-> **Status**: Accepted
+> **Status**: Accepted — **amended at 1.11.1** (the borrowed world pointer enforced; per-door leak check)
 > **Date**: 2026-07-26
 
 ## Context
@@ -125,3 +125,18 @@ Freeing it would corrupt the pool.
 > it — ~738 B per attempt, reachable in practice mode with no login. Fixed in `th_feed_decrypt` and
 > `th_free`. The lesson for door #11: a state that EMBEDS another door's state owns it, and must free it
 > on every path (end of round, and `*_free` for a player who leaves mid-round).
+
+> **Amendment (1.11.1).** Both "unenforceable" invariants above are now enforced:
+>
+> - **The borrowed world pointer.** Every release now goes through one function, `door_release_state`,
+>   which clears the state's world field (`DD_WORLD_OFF`) *before* calling the door's `DD_FREE`. This covers
+>   `door_state_drop` (quit), `session_door_free` (a disconnect) and the chat couch. The most a door's free
+>   can release through that field is 0, so a `*_free` that forgot to step around it can no longer put the
+>   session's `alloc()` buffer on the freelist. `tests/serve.tcyr` `s14` installs a hostile free on every
+>   Universe door and proves, on all three paths, that it is never handed the pointer.
+> - **Every buffer a door state owns is freelist memory, released by its `DD_FREE`.** `s13` drives every
+>   registered door 200 times after a warm-up and requires that neither the bump heap (`_heap_ptr`: an
+>   `alloc()` where `fl_alloc` belonged) nor the freelist arena (`_fl_arena_pos`: a buffer its free misses)
+>   nor the data segment moved. This automates, for every path the drive reaches, the release check's
+>   "mixed-allocator scan". Mutants that drop one `fl_free` from `jw_free`, or allocate PARRY's counters with
+>   `alloc()`, are each caught.

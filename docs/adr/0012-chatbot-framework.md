@@ -1,6 +1,6 @@
 # 0012 — Chatbot framework (Eliza, PARRY, and the fixed-script family)
 
-> **Status**: Accepted — Eliza shipped 1.3.0, PARRY shipped 1.3.1; Jabberwacky pinned 1.3.3 as a different engine kind. Reachable two ways each (a `play <bot>` door + a private `/<bot>` chat side-channel). Pure modules, no new deps, unit-testable without a socket (`src/eliza.cyr`, `src/parry.cyr`; couch wiring in `src/main.cyr`).
+> **Status**: Accepted — **the shared-offset ABI below was retired at 1.11.1** ([ADR 0020](0020-door-descriptor-registry.md) amendment: the couch reads each bot through its registered `DD_REPLY`) — Eliza shipped 1.3.0, PARRY shipped 1.3.1; Jabberwacky pinned 1.3.3 as a different engine kind. Reachable two ways each (a `play <bot>` door + a private `/<bot>` chat side-channel). Pure modules, no new deps, unit-testable without a socket (`src/eliza.cyr`, `src/parry.cyr`; couch wiring in `src/main.cyr`).
 > **Date**: 2026-06-08
 
 > **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That

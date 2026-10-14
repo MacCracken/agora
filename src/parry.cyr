@@ -80,12 +80,13 @@ enum PySlot {
     PY_NCTRS     = 7;
 }
 
-# Affect-state struct (8-byte i64 fields). PY_RESP / PY_RESPLEN share
-# Eliza's offsets (8 / 16) so the chat couch reads both uniformly.
+# Affect-state struct (8-byte i64 fields). (Until 1.11.1 PY_RESP / PY_RESPLEN had
+# to share Eliza's offsets, because the chat couch read every bot at EZ_RESP; it
+# now reads them through py_reply, so the layout is PARRY's own.)
 enum PY {
     PY_OVER     = 0;       # 0 talking, 1 ended
-    PY_RESP     = 8;       # ptr -> response buffer (== EZ_RESP)
-    PY_RESPLEN  = 16;      # response length (== EZ_RESPLEN)
+    PY_RESP     = 8;       # ptr -> response buffer
+    PY_RESPLEN  = 16;      # response length
     PY_FEAR     = 24;
     PY_ANGER    = 32;
     PY_MISTRUST = 40;
@@ -481,6 +482,12 @@ fn py_free(st): i64 {
     fl_free(load64(st + PY_CTRS));
     fl_free(st);
     return 0;
+}
+
+# 1.11.1 — the last reply: its buffer, with its length stored at `lenp` (DD_REPLY).
+fn py_reply(st, lenp): i64 {
+    store64(lenp, load64(st + PY_RESPLEN));
+    return load64(st + PY_RESP);
 }
 
 # Seed PARRY's guarded opening line into the response buffer. Returns 0.

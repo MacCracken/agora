@@ -832,8 +832,302 @@ fn s12_fork_child_lifecycle(): i64 {
     return 0;
 }
 
+# --- 1.11.1: the door registry, checked door by door -------------------------
+
+var g_t_lines = 0;          # the input lines the conformance drive feeds every door
+
+# Render door state `st` of descriptor `d` into buf as door_send_frame does;
+# returns the frame length.
+fn st_door_render(d, st, buf): i64 {
+    g_door_emit_cap = DOOR_FRAME_CAP;
+    var n = callptr(load64(d + DD_RENDER), st, buf, DOOR_FRAME_CAP);
+    g_door_emit_cap = DOOR_EMIT_UNBOUNDED;
+    return n;
+}
+
+# Build a state of game `g` the way the `play` launcher does: practice, or —
+# for a game that forces it — universe with a fresh world in `world` and a
+# session fingerprint. Returns the state.
+fn st_door_build(g, d, world): i64 {
+    var mode = DOOR_PRACTICE;
+    if (load64(d + DD_MODE_POLICY) == DM_FORCE_UNIVERSE) { mode = DOOR_UNIVERSE; }
+    var st = callptr(load64(d + DD_NEW), 12345, mode, load64(d + DD_DEF_DAYS));
+    if (st == 0) { return 0; }
+    if (load64(d + DD_START) != 0) { var sr = callptr(load64(d + DD_START), st); }
+    if (mode == DOOR_UNIVERSE) {
+        if (load64(d + DD_FP_OFF) != 0) { store64(st + load64(d + DD_FP_OFF) - 1, 0x0123456789ABCDEF); }
+        door_world_fresh_into(g, world);
+        store64(st + load64(d + DD_WORLD_OFF), world);
+        if (load64(d + DD_ON_ENTRY) != 0) { var er = callptr(load64(d + DD_ON_ENTRY), st); }
+    }
+    return st;
+}
+
+# One drive of game `g`: build, render, feed every test line, render again, ask
+# is-over / reply / score, round-trip a save, release. Returns 0, or a failure
+# reason (cstring).
+fn st_door_drive(g, d, world, buf, buf2): i64 {
+    var st = st_door_build(g, d, world);
+    if (st == 0) { return "DD_NEW returned 0"; }
+    var n = st_door_render(d, st, buf);
+    if (n <= 0) { return "DD_RENDER drew nothing"; }
+    if (n > DOOR_FRAME_CAP) { return "DD_RENDER overran its cap"; }
+    var li = 0;
+    while (li < 5) {
+        var line = load64(g_t_lines + li * 8);
+        var fr = callptr(load64(d + DD_FEED), st, line, strlen(line));
+        li = li + 1;
+    }
+    if (st_door_render(d, st, buf) <= 0) { return "DD_RENDER drew nothing after input"; }
+    if (load64(d + DD_IS_OVER) != 0) {
+        var ov = callptr(load64(d + DD_IS_OVER), st);
+        if (ov < 0) { return "DD_IS_OVER < 0"; }
+        if (ov > 1) { return "DD_IS_OVER > 1"; }
+    }
+    if (load64(d + DD_REPLY) != 0) {
+        var rl[8];
+        var rb = callptr(load64(d + DD_REPLY), st, &rl);
+        if (rb == 0) { return "DD_REPLY gave no buffer"; }
+        if (load64(&rl) <= 0) { return "DD_REPLY gave an empty reply"; }
+    }
+    if (load64(d + DD_SCORE) != 0) {
+        var sc = callptr(load64(d + DD_SCORE), st);
+        var rk = callptr(load64(d + DD_RANK), sc);
+        if (rk == 0) { return "DD_RANK gave no label"; }
+        if (strlen(rk) == 0) { return "DD_RANK gave an empty label"; }
+    }
+    if (load64(d + DD_SAVE_FMT) != 0) {
+        var n1 = callptr(load64(d + DD_SAVE_FMT), st, buf, DOOR_SAVE_CAP);
+        if (n1 <= 0) { return "DD_SAVE_FMT wrote nothing"; }
+        var st2 = callptr(load64(d + DD_LOAD), buf, n1);
+        if (st2 == 0) { return "DD_LOAD refused its own save"; }
+        if (load64(d + DD_WORLD_BYTES) != 0) {
+            if (load64(st + load64(d + DD_WORLD_OFF)) != 0) { store64(st2 + load64(d + DD_WORLD_OFF), world); }
+        }
+        var n2 = callptr(load64(d + DD_SAVE_FMT), st2, buf2, DOOR_SAVE_CAP);
+        door_release_state(g, st2);
+        if (n2 != n1) { return "a save did not survive DD_LOAD (length)"; }
+        if (memeq(buf, buf2, n1) == 0) { return "a save did not survive DD_LOAD (bytes)"; }
+    }
+    door_release_state(g, st);
+    return 0;
+}
+
+var g_t_vmbuf = 0;
+
+# VmData (KB) of this process. Its read buffer is allocated once, so measuring
+# does not itself move the bump heap.
+fn st_vmdata(): i64 {
+    if (g_t_vmbuf == 0) { g_t_vmbuf = alloc(4096); }
+    var b = g_t_vmbuf;
+    var n = file_read_all("/proc/self/status", b, 4095);
+    var i = 0;
+    var v = 0;
+    while (i + 7 < n) {
+        if (memeq(b + i, "VmData:", 7) == 1) {
+            var j = i + 7;
+            while (j < n) {
+                var c = load8(b + j) & 0xFF;
+                if (c >= 48) { if (c <= 57) { v = v * 10 + (c - 48); } }
+                if (c == 10) { j = n; }
+                j = j + 1;
+            }
+            i = n;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+# s13 — the door registry, door by door (1.11.1, ADR 0020 / 0022). Descriptor
+# slots resolve at run time, so until 1.11.1 a mis-wired slot showed only when a
+# smoke happened to drive it. Every id up to GAME_LAST must be registered, under
+# a name the parser finds, with the slots its capabilities imply (a save has a
+# load, a leaderboard a rank, a Universe game its whole world set, a couch bot
+# its reply); then each door is DRIVEN through its slots — render, five lines,
+# is-over, reply, score / rank, a save round-tripped through its load — and
+# driven 200 more times to prove it gives back everything it takes: neither the
+# bump heap nor the process's data segment may grow (ADR 0022: a door state is
+# freelist memory, released by its DD_FREE). Door #11 is checked by being added.
+fn s13_registry_conformance(): i64 {
+    var name = "s13_registry_conformance";
+    g_t_lines = alloc(5 * 8);
+    store64(g_t_lines, "?");
+    store64(g_t_lines + 8, "1");
+    store64(g_t_lines + 16, "n");
+    store64(g_t_lines + 24, "x");
+    store64(g_t_lines + 32, "help");
+    var buf = alloc(DOOR_SAVE_CAP + DOOR_FRAME_CAP);
+    var buf2 = alloc(DOOR_SAVE_CAP + DOOR_FRAME_CAP);
+    var world = alloc(DOOR_WORLD_CAP);
+    st_vmdata();
+    var g = 1;
+    while (g <= GAME_LAST) {
+        var d = door_desc_for(g);
+        if (d == 0) { st_fail(name, "a game id up to GAME_LAST is not registered"); return 1; }
+        var nm = load64(d + DD_NAME);
+        if (nm == 0) { st_fail(name, "a door has no DD_NAME"); return 1; }
+        if (door_game_by_name(nm, 0) != g) { st_fail(name, nm); return 1; }
+        if (load64(d + DD_SCORE) == 0) {
+            if (door_game_by_name(nm, DD_SCORE) != GAME_NONE) {
+                st_fail(name, "`scores` would accept a door with no leaderboard");
+                return 1;
+            }
+        }
+        if (load64(d + DD_RENDER) == 0) { st_fail(name, "a door has no DD_RENDER"); return 1; }
+        if (load64(d + DD_FEED) == 0)   { st_fail(name, "a door has no DD_FEED"); return 1; }
+        if (load64(d + DD_NEW) == 0)    { st_fail(name, "a door has no DD_NEW"); return 1; }
+        if (load64(d + DD_FREE) == 0)   { st_fail(name, "a door has no DD_FREE (ADR 0022)"); return 1; }
+        var hs = 0;
+        if (load64(d + DD_SAVE_FMT) != 0) { hs = 1; }
+        var hl = 0;
+        if (load64(d + DD_LOAD) != 0) { hl = 1; }
+        if (hs != hl) { st_fail(name, "a save without a load, or a load without a save"); return 1; }
+        var hsc = 0;
+        if (load64(d + DD_SCORE) != 0) { hsc = 1; }
+        var hrk = 0;
+        if (load64(d + DD_RANK) != 0) { hrk = 1; }
+        if (hsc != hrk) { st_fail(name, "a score without a rank, or a rank without a score"); return 1; }
+        var uni = 0;
+        if ((load64(d + DD_FLAGS) & DF_UNIVERSE) != 0) { uni = 1; }
+        var hw = 0;
+        if (load64(d + DD_WORLD_BYTES) != 0) { hw = 1; }
+        if (uni != hw) { st_fail(name, "DF_UNIVERSE and a world size disagree"); return 1; }
+        if (uni == 1) {
+            if (load64(d + DD_USLOT) == 0)       { st_fail(name, "a Universe door without DD_USLOT"); return 1; }
+            if (load64(d + DD_WORLD_VALID) == 0) { st_fail(name, "a Universe door without DD_WORLD_VALID"); return 1; }
+            if (load64(d + DD_WORLD_NEW) == 0)   { st_fail(name, "a Universe door without DD_WORLD_NEW"); return 1; }
+            if (load64(d + DD_WORLD_OFF) <= 0) {
+                st_fail(name, "a Universe door's world field at offset 0");
+                return 1;
+            }
+            if (load64(d + DD_MSG) == 0)         { st_fail(name, "a Universe door without DD_MSG"); return 1; }
+            if (load64(d + DD_BUSY) == 0)        { st_fail(name, "a Universe door without DD_BUSY"); return 1; }
+            if (door_world_bytes(g) > DOOR_WORLD_CAP) {
+                st_fail(name, "a world larger than the session buffer");
+                return 1;
+            }
+            door_world_fresh_into(g, world);
+            if (door_world_valid(g, world, door_world_bytes(g)) != 1) {
+                st_fail(name, "a fresh world fails its validator");
+                return 1;
+            }
+        } else {
+            if (load64(d + DD_USLOT) != 0)      { st_fail(name, "a solo door with a Universe slot"); return 1; }
+            if (load64(d + DD_ON_ENTRY) != 0)   { st_fail(name, "a solo door with an on-entry hook"); return 1; }
+            if (load64(d + DD_WORLD_TICK) != 0) { st_fail(name, "a solo door with a world tick"); return 1; }
+        }
+        if (load64(d + DD_WORLD_TICK) != 0) {
+            if (load64(d + DD_TICK_NS) <= 0) { st_fail(name, "a world tick without DD_TICK_NS"); return 1; }
+        }
+        var mp = load64(d + DD_MODE_POLICY);
+        if (mp < DM_NORMAL)         { st_fail(name, "an unknown mode policy"); return 1; }
+        if (mp > DM_FORCE_UNIVERSE) { st_fail(name, "an unknown mode policy"); return 1; }
+        if (mp == DM_PRACTICE_ONLY) { if (hs == 1) { st_fail(name, "a practice-only door with a save"); return 1; } }
+        if (mp == DM_FORCE_UNIVERSE) {
+            if (uni == 0) { st_fail(name, "a forced-Universe door that is not one"); return 1; }
+        }
+        if (uni == 1) {
+            if (mp == DM_PRACTICE_ONLY) { st_fail(name, "a Universe door limited to practice"); return 1; }
+            if (mp == DM_NO_UNIVERSE)   { st_fail(name, "a Universe door that refuses universe"); return 1; }
+        }
+        if (load64(d + DD_COUCH_CMD) != 0) {
+            if ((load8(load64(d + DD_COUCH_CMD)) & 0xFF) != 47) {
+                st_fail(name, "a couch command without '/'");
+                return 1;
+            }
+            if (load64(d + DD_COUCH_NAME) == 0) { st_fail(name, "a couch bot without DD_COUCH_NAME"); return 1; }
+            if (load64(d + DD_COUCH_HELP) == 0) { st_fail(name, "a couch bot without DD_COUCH_HELP"); return 1; }
+            if (load64(d + DD_COUCH_NOTE) == 0) { st_fail(name, "a couch bot without DD_COUCH_NOTE"); return 1; }
+            if (load64(d + DD_REPLY) == 0)      { st_fail(name, "a couch bot without DD_REPLY"); return 1; }
+        }
+        # Drive it, then drive it 200 times more: nothing may stay behind.
+        var why = st_door_drive(g, d, world, buf, buf2);
+        if (why != 0) { st_fail(name, nm); st_fail(name, why); return 1; }
+        var w = 0;
+        while (w < 10) { cmd_scratch_reset(); st_door_drive(g, d, world, buf, buf2); w = w + 1; }
+        var heap0 = _heap_ptr;
+        var vm0 = st_vmdata();
+        var fl0 = _fl_arena_pos;
+        var c = 0;
+        while (c < 200) { cmd_scratch_reset(); st_door_drive(g, d, world, buf, buf2); c = c + 1; }
+        if (_heap_ptr != heap0) {
+            st_fail(name, nm);
+            st_fail(name, "a door drive took bump-heap memory (alloc, not fl_alloc)");
+            return 1;
+        }
+        if (_fl_arena_pos != fl0) {
+            st_fail(name, nm);
+            st_fail(name, "a door drive kept freelist memory (a buffer its DD_FREE misses)");
+            return 1;
+        }
+        if (st_vmdata() > vm0 + 8) {
+            st_fail(name, nm);
+            st_fail(name, "a door drive leaked: 200 drives grew the data segment");
+            return 1;
+        }
+        g = g + 1;
+    }
+    st_pass(name);
+    return 0;
+}
+
+var g_t_seen_world = 0 - 1;
+var g_t_real_free = 0;
+var g_t_world_off = 0;
+
+# A door free that records what its state's world field holds, then frees as the
+# door would. Installed by s14 in place of a Universe door's DD_FREE.
+fn t_hostile_free(st): i64 {
+    g_t_seen_world = load64(st + g_t_world_off);
+    return callptr(g_t_real_free, st);
+}
+
+# s14 — ADR 0022's borrowed world pointer, enforced (1.11.1). A Universe door's
+# state points at the SESSION's world snapshot, which it does not own; a DD_FREE
+# that freed it would put an alloc() block on the freelist. Every release path —
+# door_release_state, door_state_drop (quit), session_door_free (a disconnect) —
+# must hand the door's free a state whose world field is already 0.
+fn s14_world_pointer_guard(): i64 {
+    var name = "s14_world_pointer_guard";
+    var world = alloc(DOOR_WORLD_CAP);
+    var g = 1;
+    while (g <= GAME_LAST) {
+        var d = door_desc_for(g);
+        if (load64(d + DD_WORLD_BYTES) != 0) {
+            g_t_real_free = load64(d + DD_FREE);
+            g_t_world_off = load64(d + DD_WORLD_OFF);
+            store64(d + DD_FREE, &t_hostile_free);
+            var path = 0;
+            while (path < 3) {
+                var st = callptr(load64(d + DD_NEW), 7, DOOR_UNIVERSE, load64(d + DD_DEF_DAYS));
+                store64(st + g_t_world_off, world);
+                g_t_seen_world = 0 - 1;
+                if (path == 0) { door_release_state(g, st); }
+                if (path == 1) { g_door_game = g; g_door_state = st; door_state_drop(); }
+                if (path == 2) {
+                    var s = session_alloc();
+                    store64(s + SESS_DOOR_GAME, g);
+                    store64(s + SESS_DOOR_STATE, st);
+                    session_door_free(s);
+                }
+                if (g_t_seen_world != 0) {
+                    store64(d + DD_FREE, g_t_real_free);
+                    st_fail(name, "a door's free was handed the session's world pointer");
+                    return 1;
+                }
+                path = path + 1;
+            }
+            store64(d + DD_FREE, g_t_real_free);
+        }
+        g = g + 1;
+    }
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s12, remove the store, print the totals, and return 1 on any failure.
+# run s01..s14, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -857,6 +1151,8 @@ fn serve_tests(): i64 {
     s10_motd_80_columns();
     s11_descent_state();
     s12_fork_child_lifecycle();
+    s13_registry_conformance();
+    s14_world_pointer_guard();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);
