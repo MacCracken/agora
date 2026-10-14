@@ -603,6 +603,82 @@ fn save_get_i64(buf, len, cur_ptr): i64 {
     return val;
 }
 
+# === 1.12.0 — the daily ration (ADR 0032; audit 1.8.1 I4 / I5) ===
+#
+# ADRs 0009, 0010 and 0016 describe a wall-clock day — a LORD-style rhythm in
+# which a run advances so far each real day — but only QUEST ever gated on the
+# clock: Smuggler's Ledger, Port Authority and The Handler advanced a game day
+# whenever the player pressed the next-day key, and the Olympiad refilled its
+# actions the same way. Now each of those four counts the game days a run
+# advances per UTC day: at most g_door_days (`agora serve --door-days N`,
+# default DOOR_DAYS_DEFAULT; 0 turns the ration off). It applies to Solo and
+# Universe runs, which persist; a Practice run is an ephemeral sandbox that
+# ends with the session, and a ration on it would only make it impossible to
+# finish. The two cells — the UTC day the ration was last refilled and the
+# days left — live in each game's state and save (appended, so a 1.11 save
+# without them reads 0 and gets a fresh ration). A new UTC day refills; so
+# does a clock that moved BACKWARD (QUEST's self-heal, never a freeze).
+
+enum DoorRation {
+    DOOR_NS_PER_DAY   = 86400000000000;   # one UTC day in ns (clock_epoch_ns)
+    DOOR_DAYS_DEFAULT = 10;               # game days per UTC day unless the operator says otherwise
+    DOOR_DAYS_MAX     = 1000;             # the most `--door-days` accepts
+    DOOR_RATION_SAVE  = 42;               # bytes the two cells can add to a save (2 x 21)
+}
+
+var g_door_days      = DOOR_DAYS_DEFAULT; # game days per UTC day for a Solo / Universe run; 0 = off
+var g_door_today_pin = 0;                 # the unit tests pin "today"; 0 = the wall clock
+
+# Today's UTC day index (clock_epoch_ns / DOOR_NS_PER_DAY), or the tests' pin.
+fn door_today(): i64 {
+    if (g_door_today_pin != 0) { return g_door_today_pin; }
+    return clock_epoch_ns() / DOOR_NS_PER_DAY;
+}
+
+# 1 if a run in `mode` is under the ration (Solo or Universe, ration on).
+fn door_rationed(mode): i64 {
+    if (g_door_days <= 0) { return 0; }
+    if (mode == DOOR_PRACTICE) { return 0; }
+    return 1;
+}
+
+# The days a run may still advance today, WITHOUT recording anything: the
+# operator's full allowance on a day the ration has not been refilled for, the
+# stored count (clamped to the allowance, which an operator may have lowered)
+# otherwise. (0 - 1) if the run is not rationed. Pure but for the clock.
+fn door_ration_peek(dayp, leftp, mode): i64 {
+    if (door_rationed(mode) == 0) { return 0 - 1; }
+    if (load64(dayp) != door_today()) { return g_door_days; }
+    return iclamp(load64(leftp), 0, g_door_days);
+}
+
+# Spend one day of the ration: refill it first on a new UTC day, then take a
+# day if one is left. Returns 1 if the run may advance a day (counted), 0 if
+# today's days are spent. An unrationed run always may.
+fn door_ration_take(dayp, leftp, mode): i64 {
+    var left = door_ration_peek(dayp, leftp, mode);
+    if (left < 0) { return 1; }
+    store64(dayp, door_today());
+    if (left == 0) { store64(leftp, 0); return 0; }
+    store64(leftp, left - 1);
+    return 1;
+}
+
+# What a game says when the ration refuses its next day.
+fn door_ration_spent(): i64 {
+    return "That's all the days a run gets today -- it picks up again tomorrow (UTC).";
+}
+
+# Append "   N more today" for a rationed run (nothing otherwise) at buf+pos.
+# Returns the new pos.
+fn door_emit_ration(buf, pos, dayp, leftp, mode): i64 {
+    var left = door_ration_peek(dayp, leftp, mode);
+    if (left < 0) { return pos; }
+    pos = emit_cstr(buf, pos, "   ");
+    pos = emit_int(buf, pos, left);
+    return emit_cstr(buf, pos, " more today");
+}
+
 # === 1.2.0 world-transaction framework (ADR 0010) ===
 #
 # Shared-world multiplayer state lives on disk (fork-per-accept means

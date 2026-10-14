@@ -104,7 +104,10 @@ enum TH {
     TH_DECODE   = 160;   # ptr → an active decode game during a crack (0 = not decrypting)
     TH_CRACKED  = 168;   # ptr → TH_REG_MAX-byte runtime bitset of cracked cables
     TH_DECRI    = 176;   # registry index of the cable being decrypted (-1 = none)
-    TH_SIZE     = 184;
+    # 1.12.0 (ADR 0032): the daily ration — saved, appended after the registry.
+    TH_RDAY     = 184;   # UTC day the ration was last refilled
+    TH_RLEFT    = 192;   # days this run may still end today
+    TH_SIZE     = 200;
 }
 
 # === Tables ===
@@ -659,6 +662,11 @@ fn th_save_format(st, buf, cap): i64 {
         pos = save_put_i64(buf, pos, load64(cb + CB_ANOM));
         j = j + 1;
     }
+    # 1.12.0 — the ration cells, after the registry (a 1.11 save ends before
+    # them and loads with a fresh ration); `cap` honoured as above.
+    if (pos + DOOR_RATION_SAVE > cap) { return 0 - 1; }
+    pos = save_put_i64(buf, pos, load64(st + TH_RDAY));
+    pos = save_put_i64(buf, pos, load64(st + TH_RLEFT));
     return pos;
 }
 
@@ -722,6 +730,8 @@ fn th_load_parse(buf, len): i64 {
         store64(cb + CB_ANOM,     save_get_i64(buf, len, cur));
         j = j + 1;
     }
+    store64(st + TH_RDAY,  save_get_i64(buf, len, cur));
+    store64(st + TH_RLEFT, save_get_i64(buf, len, cur));
     if (th_load_indexes_ok(st) == 0) { th_free(st); return 0; }
     return st;
 }
@@ -803,6 +813,7 @@ fn th_render_status(st, buf, pos): i64 {
     pos = emit_int(buf, pos, load64(st + TH_DAY));
     pos = emit_cstr(buf, pos, "/");
     pos = emit_int(buf, pos, load64(st + TH_MAXDAYS));
+    pos = door_emit_ration(buf, pos, st + TH_RDAY, st + TH_RLEFT, load64(st + TH_MODE));
     pos = emit_cstr(buf, pos, "  Confidence ");
     pos = emit_int(buf, pos, load64(st + TH_CONF));
     pos = emit_cstr(buf, pos, "%  Audit ");
@@ -1144,6 +1155,11 @@ fn th_feed_main(st, line, len): i64 {
     if (k == 111) { store64(st + TH_SCREEN, HSCR_ORDERS); return 0; } # o
     if (k == 97)  { store64(st + TH_SCREEN, HSCR_ACCUSE); return 0; } # a
     if (k == 101) {                                                   # e end day
+        # 1.12.0 (ADR 0032) — g_door_days game days per UTC day (Solo / Universe).
+        if (door_ration_take(st + TH_RDAY, st + TH_RLEFT, load64(st + TH_MODE)) == 0) {
+            th_msg(st, door_ration_spent());
+            return 0;
+        }
         th_next_day(st);
         if (load64(st + TH_OVER) != 0) { store64(st + TH_SCREEN, HSCR_OVER); return 0; }
         if (load64(st + TH_LASTBURN) > 0) {

@@ -54,6 +54,7 @@ agora binary (~874 KB static ELF at 1.3.7)
 │                           + keyfile + nonce / sig parse + From-header
 │                           (ADR 0006, M6)
 ├── src/door.cyr            door framework: PRNG + int helpers + save IO
+│                           + the daily ration, --door-days (ADR 0032)
 ├── src/smuggler.cyr        Smuggler's Ledger (door game)
 ├── src/port_authority.cyr  Port Authority (door game)
 ├── src/handler.cyr         The Handler (door game)   (all three: ADR 0009)
@@ -64,7 +65,12 @@ agora binary (~874 KB static ELF at 1.3.7)
 ├── src/quest.cyr           QUEST: a LORD-homage door RPG (play quest)
 ├── src/jabberwacky.cyr     Jabberwacky: corpus-learning chatbot (ADR 0015)
 ├── src/wager.cyr           shared casino/wagering primitive (ADR 0013)
-├── src/olympiad.cyr        Olympiad: games-owner sim + compete() (ADR 0016)
+├── src/olympiad.cyr        Olympiad: games-owner sim + compete() (ADR 0016) —
+│                           chariots, gladiators, the stadion, the regatta
+├── src/decode.cyr          Decode: Mastermind / Wordle on one engine (ADR 0018)
+├── src/decode_words.cyr    its answer pool + guess dictionary
+│                           (scripts/gen-decode-guesses.py)
+├── src/descent.cyr         the Descent link to the MUD (ADRs 0017 / 0031)
 ├── src/ashes.cyr           Ashes of Empire: async shared-world war-game (ADR 0014)
 ├── src/arena.cyr           per-command scratch arena + crash-safe store write
 ├── tests/agora.tcyr        module suite (count in docs/development/state.md)
@@ -83,7 +89,7 @@ Stdlib consumed: net + io + fs + str + vec + alloc + sigil + freelist + bayan + 
 - [`docs/adr/`](docs/adr/) — architecture decision records (why we chose X over Y).
 - [`docs/architecture/`](docs/architecture/) — non-obvious invariants the code relies on.
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (`getting-started.md` first).
-- [`docs/examples/`](docs/examples/) — thirty-seven runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`).
+- [`docs/examples/`](docs/examples/) — thirty-eight runnable smoke scripts (and `run.sh`, which runs them under both serve models) covering build / auth / concurrency / policy / door games / Universe / leaderboards / chat (`11-chat.sh`) / Eliza (`12-eliza.sh`) / PARRY (`13-parry.sh`) / QUEST (`14-quest.sh`) / Jabberwacky (`15-jabberwacky.sh`) / casino (`16-casino.sh`) / Olympiad (`17-olympiad.sh`) / Ashes of Empire (`18-ashes.sh`, `19-ashes-concurrency.sh`) / the Descent MUD gateway (`20-descent.sh`, `24-descent-serve-models.sh`) / decode (`21-decode.sh`) / the Handler decrypt lever (`22-handler-decrypt.sh`) / SIGPIPE survival (`23-sigpipe-survival.py`) / door-state churn (`25-door-state-churn.py`) / IAC + idle (`26-iac-and-idle.py`) / audit LOWs (`27-audit-lows.py`) / clean shutdown (`28-clean-shutdown.py`) / egress sanitizing (`29-egress-sanitize.py`) / the 1.8.1 audit repairs (`30-audit-1.8.1.py`) / the slow-reader close path (`31-slow-reader.py`) / store hardening (`32-store-hardening.py`) / the reply index (`33-reply-index.py`) / board policy (`34-board-policy.py`) / telnet conformance (`35-telnet-conformance.py`) / terminal width (`36-terminal-width.py`) / the Descent as a session state (`37-descent-state.py`) / the 1.12.0 door content — the daily ration, Ashes ages, Decode words, Olympiad events (`38-door-content.py`).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — telnet-parser baseline (~9 ns/byte hot path, unchanged across every release since M1-close).
 - [`fuzz/`](fuzz/) — the IAC-parser fuzz harness (`cyrius fuzz`), run by CI and at release.
 - [`CHANGELOG.md`](CHANGELOG.md) — per-tag chronology.

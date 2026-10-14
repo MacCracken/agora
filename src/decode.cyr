@@ -220,23 +220,9 @@ fn decode_parse_numbers(line, len, out, code_len, colors): i64 {
 # === Words variant (Wordle, 1.4.2) ===
 #
 # Symbols are lowercase ASCII letters (97..122); the classifier is the same
-# byte-wise scorer. The dictionary (src/decode_words.cyr) is BOTH the answer
-# pool and the valid-guess set.
-
-# Index of a 5-letter lowercased word in the dictionary, or (0 - 1) if absent.
-# `w` points at DW_LEN lowercase bytes. Linear memeq scan — fine at BBS scale.
-fn decode_word_index(w): i64 {
-    var n = decode_word_count();
-    var i = 0;
-    var found = 0 - 1;
-    var scanning = 1;
-    while (scanning == 1) {
-        if (i >= n) { scanning = 0; continue; }
-        if (memeq(decode_word(i), w, DW_LEN) != 0) { found = i; scanning = 0; continue; }
-        i = i + 1;
-    }
-    return found;
-}
+# byte-wise scorer. src/decode_words.cyr holds two lists: the answer pool the
+# secret is drawn from, and (1.12.0) the larger guess dictionary a guess must
+# be in — until 1.12.0 the answer pool was both, and rejected most real words.
 
 # Mint a fresh Words secret: draw a word id from the seeded PRNG and copy its
 # letters into DG_SECRET (lowercase ASCII bytes). Replayable from the seed.
@@ -264,7 +250,7 @@ fn decode_set_words(st): i64 {
 # Parse a Words guess from line[0..len) into out[0..DW_LEN) as lowercase ASCII
 # letters. Skips leading/trailing spaces; an interior space or non-letter is a
 # reject. Returns DEC_OK / DEC_BADLEN (not 5 letters) / DEC_BADWORD (not in the
-# dictionary). Pure.
+# guess dictionary). Pure.
 fn decode_parse_words(line, len, out): i64 {
     var count = 0;
     var bad = 0;
@@ -292,7 +278,7 @@ fn decode_parse_words(line, len, out): i64 {
     }
     if (bad == 1)         { return DEC_BADWORD; }       # non-letter junk
     if (count != DW_LEN)  { return DEC_BADLEN; }
-    if (decode_word_index(out) < 0) { return DEC_BADWORD; }
+    if (decode_guess_ok(out) == 0) { return DEC_BADWORD; }
     return DEC_OK;
 }
 

@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-13 (1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-13 (1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -108,6 +108,35 @@ Without NAWS, `send_wrapped` takes `send_text`'s path: the same bytes at the sam
 **`list` got cheaper**: each row is composed and sent once (it was seven sends). Under fork every send is a
 `write(2)`, so a 300-post `list` went from **16.1 ms to 4.3 ms** wall (median of 40), with or without NAWS.
 Under poll the sends only fill the queue: ~23.2 ms either way, inside one 20 ms sweep.
+
+## Serve-level — 1.12.0 (closeout; door content only)
+
+`benches/serve-bench.py all`, the 1.12.0 build and a `git archive` of 1.11.1 in the same session, both binaries
+on the same filesystem, 3 runs each; `reply` re-run twice more for each, alternating builds:
+
+| Measure | 1.11.1 | 1.12.0 |
+|---|---:|---:|
+| fork accepts, sequential / 8 concurrent | 3,572 / 10,956 conn/s | 3,503 / 10,602 conn/s |
+| poll accepts, sequential / 8 concurrent | 8,193 / 13,710 conn/s | 8,300 / 13,698 conn/s |
+| memory per idle session, poll / fork PSS | 12.8 / 62 KB (runs 66 / 62 / 62) | 12.8 / 64 KB (runs 64 ×3) |
+| world lock, 1–16 writers | 491–509 txn/s | 456–510 txn/s (one 144 txn/s run at 8) |
+| `read` 1 with 50 / 200 / 409 replies (fork), all three passes | 0.47–0.49 / 1.26–1.30 / 2.42–2.47 ms | 0.46–0.63 / 1.25–1.49 / 2.41–2.52 ms |
+| unknown-handle login, 300 / 3,000 users (fork) | 0.20 / 0.20 ms | 0.20 / 0.20 ms |
+
+Unchanged within noise, as it should be: 1.12.0 touches the door modules and `door.cyr` only, not the parser,
+the serve loops, the store or the send path. Two readings worth naming:
+- The first `all` pass had 1.12.0's `read` 1 at 0.63 / 1.49 ms. The two alternating re-runs put both builds at
+  0.46–0.51 / 1.25–1.30 ms, so that was the session warming up, not code.
+- Fork PSS reads 64 KB on every 1.12.0 run, against 62 KB here and 62 / 62 / 66 at 1.11.0. That is within the
+  4 KB step fork's figure has always moved in, and the binary is about 67 KB larger (the Decode guess
+  dictionary is 43 KB of it, read only when a player guesses).
+
+The world lock dropping to one slow run per series is the same fsync stall seen at 1.11.0 (a 65 txn/s run for
+1.11.1 here).
+
+`bench_telnet.bcyr`: 8 / 65 / 76 / 104 / 173 ns (`plain_byte` / `iac_untracked` / `iac_tracked_agree` /
+`subneg_naws` / `announce_salvo`; 1.11.0: 9 / 64 / 74 / 103 / 167). `bench_term.bcyr`: 2.9 / 3.8 / 19.5 /
+40.6 µs (1.11.0: 3.1 / 4.0 / 19.4 / 40.4). Unchanged.
 
 ## Serve-level — 1.11.0 (the readiness wait)
 

@@ -7,7 +7,9 @@
 #
 # This script logs a player in, plays Port Authority solo to the close
 # of the quarter (end-day until OVER), leaves (which posts the score),
-# then asserts `scores port` lists the run.
+# then asserts `scores port` lists the run. A whole quarter in one sitting is
+# more game days than the daily ration allows (1.12.0, ADR 0032), so this
+# server runs with `--door-days 0`; 38-door-content.py covers the ration.
 #
 # Requires: openssl >= 3.0, python3.
 # Usage: ./10-leaderboard.sh [port]
@@ -25,7 +27,7 @@ rm -rf "$STORE" "$KEYS"; mkdir -p "$KEYS"
 "$BIN" keygen  --key "$KEYS/qix" >/dev/null
 "$BIN" register --handle qix --key "$KEYS/qix" --store "$STORE" >/dev/null
 
-"$BIN" serve "$PORT" --store "$STORE" >/tmp/agora-leaderboard-10.log 2>&1 &
+"$BIN" serve "$PORT" --store "$STORE" --door-days 0 >/tmp/agora-leaderboard-10.log 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null || true' EXIT
 sleep 1

@@ -4625,18 +4625,19 @@ fn t188_qu_cards_table(): i64 {
 # a live team, 0 for an empty slot.
 fn t189_ol_chariot_form(): i64 {
     var c = alloc(CMP_SIZE);
+    store64(c + CMP_TYPE, EV_CHARIOT);
     store64(c + CMP_SPEED, 8); store64(c + CMP_STAMINA, 8);
     store64(c + CMP_HANDLE, 8); store64(c + CMP_NERVE, 8);
     store64(c + CMP_COND, 100);
-    if (ol_chariot_form(c) != 32)        { test_fail("t189_ol_chariot_form", "full"); return 1; }
+    if (ol_form(c) != 32)        { test_fail("t189_ol_chariot_form", "full"); return 1; }
     store64(c + CMP_COND, 50);
-    if (ol_chariot_form(c) != 16)        { test_fail("t189_ol_chariot_form", "half"); return 1; }
+    if (ol_form(c) != 16)        { test_fail("t189_ol_chariot_form", "half"); return 1; }
     store64(c + CMP_COND, 0);            # spent but alive → floored to 1
-    if (ol_chariot_form(c) != 1)         { test_fail("t189_ol_chariot_form", "spent"); return 1; }
+    if (ol_form(c) != 1)         { test_fail("t189_ol_chariot_form", "spent"); return 1; }
     store64(c + CMP_SPEED, 0); store64(c + CMP_STAMINA, 0);
     store64(c + CMP_HANDLE, 0); store64(c + CMP_NERVE, 0);
     store64(c + CMP_COND, 100);
-    if (ol_chariot_form(c) != 0)         { test_fail("t189_ol_chariot_form", "empty"); return 1; }
+    if (ol_form(c) != 0)         { test_fail("t189_ol_chariot_form", "empty"); return 1; }
     test_pass("t189_ol_chariot_form");
     return 0;
 }
@@ -4763,9 +4764,9 @@ fn t194_ol_field(): i64 {
     var st = ol_new(777, DOOR_PRACTICE);
     var mine = ol_comp(st, 0);
     store64(mine + CMP_SPEED, 15);                 # distinctive, to spot the lane-0 copy
-    var n = ol_build_chariot_field(st);
-    if (n != OL_RACE_FIELD)                  { test_fail("t194_ol_field", "size"); return 1; }
-    if (load64(st + OL_FIELDN) != OL_RACE_FIELD) { test_fail("t194_ol_field", "fieldn"); return 1; }
+    var n = ol_build_field(st);
+    if (n != OL_FIELD_BASE)                  { test_fail("t194_ol_field", "size"); return 1; }
+    if (load64(st + OL_FIELDN) != OL_FIELD_BASE) { test_fail("t194_ol_field", "fieldn"); return 1; }
     var fc = load64(st + OL_FCOMP);
     if (load64(fc + CMP_SPEED) != 15)        { test_fail("t194_ol_field", "lane0 copy"); return 1; }
     var forms = load64(st + OL_FIELD);
@@ -5510,15 +5511,30 @@ fn t214_decode_classify_words(): i64 {
     return 0;
 }
 
+# Index of the 5 lowercase bytes at `w` in the Words ANSWER POOL, or (0 - 1).
+# Lived in src/decode.cyr until 1.12.0 as the guess check; the guess dictionary
+# (decode_guess_ok) took that job, and only the tests still ask this.
+fn td_answer_index(w): i64 {
+    var i = 0;
+    var found = 0 - 1;
+    while (i < decode_word_count()) {
+        if (found < 0) {
+            if (memeq(decode_word(i), w, DW_LEN) != 0) { found = i; }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
 # t215 — the dictionary + the Words parser: membership, OK/lowercasing, and
 # the BADLEN / BADWORD reject paths.
 fn t215_decode_words_dict(): i64 {
     if (decode_word_count() != 532)             { test_fail("t215_decode_words_dict", "count"); return 1; }
     var w0 = alloc(8); td_letters(w0, "crane");
     if (memeq(decode_word(0), w0, 5) == 0)      { test_fail("t215_decode_words_dict", "word0"); return 1; }
-    if (decode_word_index(w0) != 0)             { test_fail("t215_decode_words_dict", "index0"); return 1; }
+    if (td_answer_index(w0) != 0)             { test_fail("t215_decode_words_dict", "index0"); return 1; }
     var wz = alloc(8); td_letters(wz, "zzzzz");
-    if (decode_word_index(wz) != (0 - 1))       { test_fail("t215_decode_words_dict", "absent"); return 1; }
+    if (td_answer_index(wz) != (0 - 1))       { test_fail("t215_decode_words_dict", "absent"); return 1; }
     var out = alloc(8);
     if (decode_parse_words("crane", 5, out) != DEC_OK) {
         test_fail("t215_decode_words_dict", "ok");
@@ -5559,7 +5575,7 @@ fn t216_decode_words_play(): i64 {
     if (load64(st + DG_VARIANT) != DV_WORDS)   { test_fail("t216_decode_words_play", "variant"); return 1; }
     if (load64(st + DG_LEN) != DW_LEN)         { test_fail("t216_decode_words_play", "len"); return 1; }
     var sec = load64(st + DG_SECRET);
-    if (decode_word_index(sec) < 0)            { test_fail("t216_decode_words_play", "secret in dict"); return 1; }
+    if (td_answer_index(sec) < 0)            { test_fail("t216_decode_words_play", "secret in dict"); return 1; }
     # crack it: guess the secret word exactly
     var win = alloc(8);
     memcpy(win, sec, DW_LEN);
@@ -5625,7 +5641,7 @@ fn t217_th_cipher_deterministic(): i64 {
         test_fail("t217_th_cipher_deterministic", "kind2 words");
         return 1;
     }
-    if (decode_word_index(sw) < 0) {
+    if (td_answer_index(sw) < 0) {
         test_fail("t217_th_cipher_deterministic", "word in dict");
         return 1;
     }
@@ -7450,6 +7466,426 @@ fn t255_descent_resync(): i64 {
     return 0;
 }
 
+# === 1.12.0 — door content ===
+
+# t256 — audit 1.8.1 I7: two Universe ships fly one galaxy (PA_SEED, which
+# pa_start regenerates the warp map from) but roll their own dice — each combat
+# PRNG comes from the ship's own seed. A solo ship still takes its galaxy from it.
+fn t256_pa_universe_own_dice(): i64 {
+    var name = "t256_pa_universe_own_dice";
+    var a = pa_new(111, DOOR_UNIVERSE, PA_DEF_DAYS);
+    var b = pa_new(222, DOOR_UNIVERSE, PA_DEF_DAYS);
+    if (load64(a + PA_SEED) != PA_UNIVERSE_SEED)   { test_fail(name, "galaxy a"); return 1; }
+    if (load64(b + PA_SEED) != PA_UNIVERSE_SEED)   { test_fail(name, "galaxy b"); return 1; }
+    var same = 1;
+    var i = 0;
+    while (i < 8) {
+        if (rng_next(a + PA_RNG) != rng_next(b + PA_RNG)) { same = 0; }
+        i = i + 1;
+    }
+    if (same == 1)                                 { test_fail(name, "the same dice"); return 1; }
+    var s = pa_new(333, DOOR_SOLO, PA_DEF_DAYS);
+    if (load64(s + PA_SEED) != 333)                { test_fail(name, "solo galaxy"); return 1; }
+    pa_free(a);
+    pa_free(b);
+    pa_free(s);
+    test_pass(name);
+    return 0;
+}
+
+# t257 — audit 1.8.1 I6: the turn that completes a domination ends the age —
+# a new map, the queue and pacts swept, the victor's laurel left to claim — so
+# the world reopens; the victor claims the laurel exactly once (over, Imperator
+# score), others are founded anew with a notice, and a v3 snapshot upgrades in
+# place (a corrupt one does not).
+fn t257_ash_new_age(): i64 {
+    var name = "t257_ash_new_age";
+    var w = ashw_new(ASH_WORLD_SEED);
+    if (ashw_age(w) != 1)                          { test_fail(name, "fresh age"); return 1; }
+    if (ashw_laurel(w) != 0)                       { test_fail(name, "fresh laurel"); return 1; }
+    # the v3 upgrade: whole v3 bytes, garbage where the age cells will go
+    ashw_set_owner(w, 2, 55);
+    ashw_order_push(w, 55, 2, 3, 4);
+    ash_pact_propose(w, 55, 66);
+    store64(w + ASHW_OFF_VERSION * 8, 3);
+    var v3len = ashw_ages_base() * 8;
+    store64(w + v3len, 0 - 9);
+    store64(w + v3len + 8, 1234);
+    if (ashw_valid(w, v3len) != 1)                 { test_fail(name, "v3 refused"); return 1; }
+    if (load64(w + ASHW_OFF_VERSION * 8) != 4)     { test_fail(name, "v3 not bumped"); return 1; }
+    if (ashw_age(w) != 1)                          { test_fail(name, "v3 age"); return 1; }
+    if (ashw_laurel(w) != 0)                       { test_fail(name, "v3 laurel"); return 1; }
+    if (ashw_owner(w, 2) != 55)                    { test_fail(name, "v3 map kept"); return 1; }
+    if (ashw_norders(w) != 1)                      { test_fail(name, "v3 orders kept"); return 1; }
+    if (ashw_valid(w, ashw_byte_size()) != 1)      { test_fail(name, "upgraded invalid"); return 1; }
+    # a corrupt v3 is refused and left alone; a v4 with no age is refused
+    store64(w + ASHW_OFF_VERSION * 8, 3);
+    ashw_set_norders(w, ASH_MAXORD + 1);
+    if (ashw_valid(w, v3len) != 0)                 { test_fail(name, "corrupt v3 taken"); return 1; }
+    if (load64(w + ASHW_OFF_VERSION * 8) != 3)     { test_fail(name, "corrupt v3 touched"); return 1; }
+    var w0 = ashw_new(ASH_WORLD_SEED);
+    store64(w0 + ashw_ages_base() * 8, 0);
+    if (ashw_valid(w0, ashw_byte_size()) != 0)     { test_fail(name, "age 0 taken"); return 1; }
+    # eleven provinces is not a domination
+    var w2 = ashw_new(ASH_WORLD_SEED);
+    var t = 0;
+    while (t < ASH_TERR - 1) { ashw_set_owner(w2, t, 77); t = t + 1; }
+    ash_resolve_turn(w2);
+    if (ashw_age(w2) != 1)                         { test_fail(name, "eleven ended it"); return 1; }
+    # twelve is: the age turns in the same resolution
+    ashw_set_owner(w2, ASH_TERR - 1, 77);
+    ashw_order_push(w2, 77, 0, 1, 3);
+    ash_pact_propose(w2, 77, 66);
+    var turn0 = ashw_turn(w2);
+    ash_resolve_turn(w2);
+    if (ashw_age(w2) != 2)                         { test_fail(name, "age did not turn"); return 1; }
+    if (ashw_laurel(w2) != 77)                     { test_fail(name, "laurel"); return 1; }
+    if (ashw_last_victor(w2) != 77)                { test_fail(name, "last victor"); return 1; }
+    if (ashw_seed(w2) != ASH_WORLD_SEED + 1)       { test_fail(name, "new map seed"); return 1; }
+    if (ashw_turn(w2) != turn0 + 1)                { test_fail(name, "turn"); return 1; }
+    if (ashw_holdings(w2, 0) != ASH_TERR)          { test_fail(name, "map not reopened"); return 1; }
+    if (ashw_army(w2, 5) != ash_neutral_army(ASH_WORLD_SEED + 1, 5)) { test_fail(name, "garrison"); return 1; }
+    if (ashw_norders(w2) != 0)                     { test_fail(name, "orders kept"); return 1; }
+    if (ash_pact_status_of(w2, 77, 66) != ASH_PACT_NONE) { test_fail(name, "pacts kept"); return 1; }
+    if (ashw_valid(w2, ashw_byte_size()) != 1)     { test_fail(name, "new age invalid"); return 1; }
+    # the victor claims it once
+    var v = ash_new(0, DOOR_UNIVERSE);
+    store64(v + AE_FP, 77);
+    store64(v + AE_WORLD, w2);
+    store64(v + AE_SEENAGE, 1);
+    ash_on_entry(v);
+    if (ash_is_over(v) != 1)                       { test_fail(name, "victor not over"); return 1; }
+    if (ash_final_score(v) != ASH_TERR * 100)      { test_fail(name, "victor score"); return 1; }
+    if (ashw_laurel(w2) != 0)                      { test_fail(name, "laurel not cleared"); return 1; }
+    if (ashw_holdings(w2, 77) != 0)                { test_fail(name, "victor founded"); return 1; }
+    if (ash_feed(v, "march 1 2 3", 11) != 1)       { test_fail(name, "victor stays"); return 1; }
+    var v2 = ash_new(0, DOOR_UNIVERSE);
+    store64(v2 + AE_FP, 77);
+    store64(v2 + AE_WORLD, w2);
+    ash_on_entry(v2);
+    if (ash_is_over(v2) != 0)                      { test_fail(name, "claimed twice"); return 1; }
+    if (ashw_holdings(w2, 77) != 1)                { test_fail(name, "victor not refounded"); return 1; }
+    # a returning player is founded with the news
+    var r = ash_new(0, DOOR_UNIVERSE);
+    store64(r + AE_FP, 88);
+    store64(r + AE_WORLD, w2);
+    store64(r + AE_SEENAGE, 1);
+    ash_on_entry(r);
+    if (ashw_holdings(w2, 88) != 1)                { test_fail(name, "returner not founded"); return 1; }
+    if (strstr(load64(r + AE_MSG), "new age") < 0) { test_fail(name, "no notice"); return 1; }
+    if (load64(r + AE_SEENAGE) != 2)               { test_fail(name, "seen age"); return 1; }
+    # a player connected while the age turns is founded on their next line
+    var o = ash_new(0, DOOR_UNIVERSE);
+    store64(o + AE_FP, 99);
+    store64(o + AE_WORLD, w2);
+    store64(o + AE_SEENAGE, 1);
+    if (ash_feed(o, "map", 3) != 0)                { test_fail(name, "online left"); return 1; }
+    if (ashw_holdings(w2, 99) != 1)                { test_fail(name, "online not founded"); return 1; }
+    ash_free(v);
+    ash_free(v2);
+    ash_free(r);
+    ash_free(o);
+    test_pass(name);
+    return 0;
+}
+
+# t258 — the Words guess dictionary (1.12.0): sorted and lowercase (the binary
+# search depends on it), holds every answer, accepts real words the answer pool
+# lacks and its own first and last entries, refuses non-words either side of
+# them — and the answer pool itself is unchanged, word for word and in order
+# (a seeded game draws its secret by index).
+fn t258_decode_guess_dict(): i64 {
+    var name = "t258_decode_guess_dict";
+    var n = decode_guess_count();
+    if (n != 8636)                                  { test_fail(name, "count"); return 1; }
+    var blob = decode_guess_blob();
+    var i = 0;
+    var bad = 0;
+    while (i < n * DW_LEN) {
+        var c = load8(blob + i) & 0xFF;
+        if (c < 97) { bad = 1; }
+        if (c > 122) { bad = 1; }
+        i = i + 1;
+    }
+    if (bad == 1)                                   { test_fail(name, "not lowercase"); return 1; }
+    var k = 1;
+    while (k < n) {
+        if (decode_cmp5(blob + (k - 1) * DW_LEN, blob + k * DW_LEN) >= 0) { bad = 1; }
+        k = k + 1;
+    }
+    if (bad == 1)                                   { test_fail(name, "not sorted"); return 1; }
+    var a = 0;
+    while (a < decode_word_count()) {
+        if (decode_guess_ok(decode_word(a)) == 0) { bad = 1; }
+        a = a + 1;
+    }
+    if (bad == 1)                                   { test_fail(name, "an answer refused"); return 1; }
+    var w = alloc(8);
+    td_letters(w, "pizza");
+    if (td_answer_index(w) >= 0)                    { test_fail(name, "pizza is an answer"); return 1; }
+    if (decode_guess_ok(w) != 1)                    { test_fail(name, "pizza"); return 1; }
+    if (decode_guess_ok(blob) != 1)                 { test_fail(name, "first"); return 1; }
+    if (decode_guess_ok(blob + (n - 1) * DW_LEN) != 1) { test_fail(name, "last"); return 1; }
+    td_letters(w, "aaaaa");
+    if (decode_guess_ok(w) != 0)                    { test_fail(name, "before first"); return 1; }
+    td_letters(w, "zzzzz");
+    if (decode_guess_ok(w) != 0)                    { test_fail(name, "after last"); return 1; }
+    td_letters(w, "roate");
+    if (decode_guess_ok(w) != 0)                    { test_fail(name, "roate"); return 1; }
+    var out = alloc(8);
+    if (decode_parse_words("GLYPH", 5, out) != DEC_OK) { test_fail(name, "parse glyph"); return 1; }
+    if (decode_parse_words("roate", 5, out) != DEC_BADWORD) { test_fail(name, "parse roate"); return 1; }
+    # the answer pool, pinned: a rolling hash of all 532 words in order
+    var h = 0;
+    var ab = decode_word_blob();
+    var j = 0;
+    while (j < decode_word_count() * DW_LEN) {
+        h = (h * 31 + (load8(ab + j) & 0xFF)) % 1000000007;
+        j = j + 1;
+    }
+    if (h != 580236154)                             { test_fail(name, "answer pool changed"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# Render the Olympiad state `st` into `buf` and NUL-terminate it, so strstr can
+# look through the frame. Returns buf.
+fn t_ol_frame(st, buf): i64 {
+    var n = ol_render(st, buf, 8192);
+    store8(buf + n, 0);
+    return buf;
+}
+
+# t259 — the Olympiad's later events (1.12.0, ADR 0016): every descriptor is
+# whole (weights summing to 8, costs, purses, prices, twelve venues, eight
+# names, four labels); a form follows its event's weights; the market hires
+# one per event at its price; a field is all one event and grows with the
+# meet; a contest pays and tires by its event; a crown can be won in any event
+# and shows that event's crown; a save keeps a hired competitor and refuses an
+# event that does not exist.
+fn t259_ol_events(): i64 {
+    var name = "t259_ol_events";
+    if (ol_field_size(0) != 4)                     { test_fail(name, "field t0"); return 1; }
+    if (ol_field_size(3) != 5)                     { test_fail(name, "field t3"); return 1; }
+    if (ol_field_size(6) != 6)                     { test_fail(name, "field t6"); return 1; }
+    if (ol_field_size(9) != 7)                     { test_fail(name, "field t9"); return 1; }
+    if (ol_field_size(OL_MAX_TIER - 1) != OL_FIELD_MAX) { test_fail(name, "field top"); return 1; }
+    if (ol_field_size(99) != OL_FIELD_MAX)         { test_fail(name, "field clamp"); return 1; }
+    var buf = alloc(8192);
+    var ev = 0;
+    while (ev < OL_NEVENTS) {
+        var d = ol_evd(ev);
+        var w = load64(d + EVD_W0) + load64(d + EVD_W1) + load64(d + EVD_W2) + load64(d + EVD_W3);
+        if (w != 8)                                { test_fail(name, "weights"); return 1; }
+        if (load64(d + EVD_COST) <= 0)             { test_fail(name, "cost"); return 1; }
+        if (load64(d + EVD_PURSE) <= 0)            { test_fail(name, "purse"); return 1; }
+        if (load64(d + EVD_HIRE) <= 0)             { test_fail(name, "hire"); return 1; }
+        if (load64(d + EVD_CROWN) == 0)            { test_fail(name, "crown"); return 1; }
+        if (streq(ol_venue(ev, 0), ol_venue(ev, OL_MAX_TIER - 1)) != 0) { test_fail(name, "venues"); return 1; }
+        if (strlen(ol_cname(ev, 7)) == 0)          { test_fail(name, "names"); return 1; }
+        var k = 0;
+        while (k < 4) {
+            if (ol_emit_item(buf, 0, load64(d + EVD_STATS), k) != 3) { test_fail(name, "label"); return 1; }
+            k = k + 1;
+        }
+        if (ol_emit_item(buf, 0, load64(d + EVD_STATS), 4) != 0) { test_fail(name, "label 5"); return 1; }
+        ev = ev + 1;
+    }
+    g_door_emit_cap = 2;                           # the emitter cap holds (all-or-nothing)
+    var capped = ol_emit_item(buf, 0, "Spd|Sta", 1);
+    g_door_emit_cap = DOOR_EMIT_UNBOUNDED;
+    if (capped != 0)                               { test_fail(name, "emit cap"); return 1; }
+    if (ol_evd(OL_NEVENTS) != ol_evd(EV_CHARIOT))  { test_fail(name, "evd bound"); return 1; }
+    # a gladiator's form leans on Skill (weight 3), not Endurance (weight 1)
+    var g = alloc(CMP_SIZE);
+    store64(g + CMP_TYPE, EV_MUNUS);
+    store64(g + CMP_SPEED, 8); store64(g + CMP_STAMINA, 8);
+    store64(g + CMP_HANDLE, 20); store64(g + CMP_NERVE, 8);
+    store64(g + CMP_COND, 100);
+    if (ol_form(g) != 50)                          { test_fail(name, "munus form"); return 1; }
+    store64(g + CMP_STAMINA, 20); store64(g + CMP_HANDLE, 8);
+    if (ol_form(g) != 38)                          { test_fail(name, "munus weights"); return 1; }
+    # the market
+    var st = ol_new(9, DOOR_PRACTICE);
+    if (ol_hire(st, EV_CHARIOT) != 1)              { test_fail(name, "founding team"); return 1; }
+    if (ol_hire(st, EV_REGATTA) != 2)              { test_fail(name, "afforded 220"); return 1; }
+    if (ol_hire(st, OL_NEVENTS) != 3)              { test_fail(name, "no such event"); return 1; }
+    if (ol_hire(st, EV_MUNUS) != 0)                { test_fail(name, "hire"); return 1; }
+    if (load64(st + OL_MONEY) != OL_START_MONEY - 180) { test_fail(name, "price"); return 1; }
+    if (load64(st + OL_NCOMP) != 2)                { test_fail(name, "ncomp"); return 1; }
+    if (load64(st + OL_SEL) != 1)                  { test_fail(name, "selected"); return 1; }
+    if (ol_hire(st, EV_MUNUS) != 1)                { test_fail(name, "hired twice"); return 1; }
+    if (strstr(t_ol_frame(st, buf), "Str 8 End 8 Skl 8 Crg 8") < 0) { test_fail(name, "hub labels"); return 1; }
+    if (strstr(buf, "the wooden arena at Fidenae") < 0) { test_fail(name, "hub venue"); return 1; }
+    # its field is all gladiators, and grows with the meet
+    store64(st + OL_TIER, 6);
+    if (ol_build_field(st) != 6)                   { test_fail(name, "field size"); return 1; }
+    var fc = load64(st + OL_FCOMP);
+    var i = 0;
+    while (i < 6) {
+        if (load64(fc + i * CMP_SIZE + CMP_TYPE) != EV_MUNUS) { test_fail(name, "field event"); return 1; }
+        i = i + 1;
+    }
+    # a bout pays and tires by its event (lane 0 rigged to win)
+    store64(st + OL_TIER, 0);
+    store64(st + OL_FIELDN, 4);
+    var f = load64(st + OL_FIELD);
+    store64(f + 0, 10); store64(f + 8, 0); store64(f + 16, 0); store64(f + 24, 0);
+    var money0 = load64(st + OL_MONEY);
+    ol_run_race(st);
+    if (load64(st + OL_PURSE) != 130)              { test_fail(name, "bout purse"); return 1; }
+    if (load64(st + OL_MONEY) != money0 + 130)     { test_fail(name, "bout paid"); return 1; }
+    if (load64(ol_comp(st, 1) + CMP_COND) != 65)   { test_fail(name, "bout cost"); return 1; }
+    if (load64(ol_comp(st, 0) + CMP_COND) != 100)  { test_fail(name, "wrong one tired"); return 1; }
+    # switching, and the crown in the arena
+    ol_feed(st, "", 0);                            # the finish -> back to the stable
+    ol_feed(st, "s", 1);
+    if (load64(st + OL_SEL) != 0)                  { test_fail(name, "switch"); return 1; }
+    ol_feed(st, "s", 1);
+    store64(st + OL_TIER, OL_MAX_TIER - 1);
+    store64(st + OL_FIELDN, 4);
+    store64(f + 0, 10); store64(f + 8, 0); store64(f + 16, 0); store64(f + 24, 0);
+    ol_run_race(st);
+    if (ol_is_over(st) != 1)                       { test_fail(name, "arena crown"); return 1; }
+    if (load64(st + OL_CROWNEV) != EV_MUNUS)       { test_fail(name, "crown event"); return 1; }
+    if (strstr(t_ol_frame(st, buf), "THE WOODEN SWORD") < 0) { test_fail(name, "crown screen"); return 1; }
+    # the market over the wire: h, then 3 hires a runner
+    var st2 = ol_new(10, DOOR_PRACTICE);
+    ol_feed(st2, "h", 1);
+    if (load64(st2 + OL_SCREEN) != OSCR_HIRE)      { test_fail(name, "market"); return 1; }
+    ol_feed(st2, "3", 1);
+    if (load64(ol_comp(st2, 1) + CMP_TYPE) != EV_STADION) { test_fail(name, "hired by key"); return 1; }
+    if (load64(st2 + OL_SCREEN) != OSCR_STABLE)    { test_fail(name, "back to stable"); return 1; }
+    # a save keeps the runner; an unknown event is refused
+    var sb = alloc(4096);
+    var n = ol_save_format(st2, sb, 4096);
+    var st3 = ol_load_parse(sb, n);
+    if (st3 == 0)                                  { test_fail(name, "load"); return 1; }
+    if (load64(st3 + OL_NCOMP) != 2)               { test_fail(name, "load ncomp"); return 1; }
+    if (load64(ol_comp(st3, 1) + CMP_TYPE) != EV_STADION) { test_fail(name, "load event"); return 1; }
+    store64(ol_comp(st2, 1) + CMP_TYPE, OL_NEVENTS);
+    n = ol_save_format(st2, sb, 4096);
+    if (ol_load_parse(sb, n) != 0)                 { test_fail(name, "unknown event loaded"); return 1; }
+    ol_free(st);
+    ol_free(st2);
+    ol_free(st3);
+    test_pass(name);
+    return 0;
+}
+
+# Render door state `st` with render fn `rfp` into `buf`, NUL-terminated. Returns buf.
+fn t_door_frame(rfp, st, buf): i64 {
+    var n = callptr(rfp, st, buf, 8192);
+    store8(buf + n, 0);
+    return buf;
+}
+
+# t260 — the daily ration (1.12.0, ADR 0032; audit 1.8.1 I4 / I5): the shared
+# cells refill on a new UTC day (and on a clock that went back), run out after
+# g_door_days, follow an operator who lowers the allowance, and leave Practice
+# and a 0 allowance alone; each of the four day-based doors refuses its next
+# day once today's are spent, says so, shows what is left, and keeps the cells
+# across a save (a 1.11 save without them loads with a fresh ration).
+fn t260_door_ration(): i64 {
+    var name = "t260_door_ration";
+    g_door_days = 10;
+    g_door_today_pin = 20000;
+    if (door_rationed(DOOR_PRACTICE) != 0)          { test_fail(name, "practice rationed"); return 1; }
+    if (door_rationed(DOOR_SOLO) != 1)              { test_fail(name, "solo"); return 1; }
+    if (door_rationed(DOOR_UNIVERSE) != 1)          { test_fail(name, "universe"); return 1; }
+    var r = alloc(16);
+    if (door_ration_peek(r, r + 8, DOOR_SOLO) != 10) { test_fail(name, "fresh"); return 1; }
+    var i = 0;
+    var took = 0;
+    while (i < 12) { took = took + door_ration_take(r, r + 8, DOOR_SOLO); i = i + 1; }
+    if (took != 10)                                 { test_fail(name, "allowance"); return 1; }
+    if (door_ration_peek(r, r + 8, DOOR_SOLO) != 0) { test_fail(name, "spent"); return 1; }
+    g_door_today_pin = 20001;
+    if (door_ration_take(r, r + 8, DOOR_SOLO) != 1) { test_fail(name, "new day"); return 1; }
+    if (load64(r + 8) != 9)                         { test_fail(name, "new day count"); return 1; }
+    g_door_today_pin = 19999;
+    if (door_ration_peek(r, r + 8, DOOR_SOLO) != 10) { test_fail(name, "clock went back"); return 1; }
+    g_door_today_pin = 20001;
+    g_door_days = 3;
+    if (door_ration_peek(r, r + 8, DOOR_SOLO) != 3) { test_fail(name, "lowered"); return 1; }
+    store64(r + 8, 0 - 5);
+    if (door_ration_peek(r, r + 8, DOOR_SOLO) != 0) { test_fail(name, "negative"); return 1; }
+    if (door_ration_take(r, r + 8, DOOR_PRACTICE) != 1) { test_fail(name, "practice refused"); return 1; }
+    g_door_days = 0;
+    if (door_ration_take(r, r + 8, DOOR_SOLO) != 1) { test_fail(name, "off refused"); return 1; }
+    g_door_days = 2;
+    var buf = alloc(8192);
+    # Port Authority: two end-days, then refused; practice is not
+    var pa = pa_new(5, DOOR_SOLO, PA_DEF_DAYS);
+    pa_start(pa);
+    if (strstr(t_door_frame(&pa_render, pa, buf), "2 more today") < 0) { test_fail(name, "pa shown"); return 1; }
+    pa_feed(pa, "n", 1);
+    pa_feed(pa, "n", 1);
+    pa_feed(pa, "n", 1);
+    if (load64(pa + PA_DAY) != 3)                   { test_fail(name, "pa ration"); return 1; }
+    if (strstr(load64(pa + PA_MSG), "tomorrow") < 0) { test_fail(name, "pa said"); return 1; }
+    var pp = pa_new(5, DOOR_PRACTICE, PA_DEF_DAYS);
+    pa_start(pp);
+    pa_feed(pp, "n", 1); pa_feed(pp, "n", 1); pa_feed(pp, "n", 1);
+    if (load64(pp + PA_DAY) != 4)                   { test_fail(name, "pa practice"); return 1; }
+    if (strstr(t_door_frame(&pa_render, pp, buf), "more today") >= 0) {
+        test_fail(name, "pa practice shown");
+        return 1;
+    }
+    # its save keeps the cells; without them (a 1.11 save) the ration is fresh
+    var sb = alloc(4096);
+    var n = pa_save_format(pa, sb, 4096);
+    var pa2 = pa_load_parse(sb, n);
+    if (load64(pa2 + PA_RLEFT) != 0)                { test_fail(name, "pa save left"); return 1; }
+    if (load64(pa2 + PA_RDAY) != 20001)             { test_fail(name, "pa save day"); return 1; }
+    var cut = n - 1;
+    var lines = 0;
+    while (lines < 2) {
+        cut = cut - 1;
+        if ((load8(sb + cut) & 0xFF) == 10) { lines = lines + 1; }
+    }
+    var pa3 = pa_load_parse(sb, cut + 1);
+    if (door_ration_peek(pa3 + PA_RDAY, pa3 + PA_RLEFT, DOOR_SOLO) != 2) { test_fail(name, "old save"); return 1; }
+    # The Handler: [E]nd the day
+    var th = th_new(6, DOOR_SOLO, TH_DEF_DAYS);
+    th_start(th);
+    th_feed(th, "e", 1); th_feed(th, "e", 1); th_feed(th, "e", 1);
+    if (load64(th + TH_DAY) != 3)                   { test_fail(name, "handler ration"); return 1; }
+    n = th_save_format(th, sb, 4096);
+    var th2 = th_load_parse(sb, n);
+    if (load64(th2 + TH_RDAY) != 20001)             { test_fail(name, "handler save"); return 1; }
+    # the Olympiad: [N]ext-day
+    var ol = ol_new(7, DOOR_SOLO);
+    ol_feed(ol, "n", 1); ol_feed(ol, "n", 1); ol_feed(ol, "n", 1);
+    if (load64(ol + OL_DAY) != 3)                   { test_fail(name, "olympiad ration"); return 1; }
+    n = ol_save_format(ol, sb, 4096);
+    var ol2 = ol_load_parse(sb, n);
+    if (load64(ol2 + OL_LASTDAY) != 20001)          { test_fail(name, "olympiad save day"); return 1; }
+    if (load64(ol2 + OL_RLEFT) != 0)                { test_fail(name, "olympiad save left"); return 1; }
+    # Smuggler's Ledger: a jet burns a day
+    var sl = sl_new(8, DOOR_SOLO, SL_DEF_DAYS);
+    sl_start(sl);
+    var j = 0;
+    while (j < 3) {
+        var dest = "2";
+        if (load64(sl + SL_LOC) == 1) { dest = "3"; }
+        sl_feed_jet(sl, dest, 1);
+        j = j + 1;
+    }
+    if (load64(sl + SL_DAY) != 3)                   { test_fail(name, "smuggler ration"); return 1; }
+    n = sl_save_format(sl, sb, 4096);
+    var sl2 = sl_load_parse(sb, n);
+    if (load64(sl2 + SL_RDAY) != 20001)             { test_fail(name, "smuggler save"); return 1; }
+    pa_free(pa); pa_free(pp); pa_free(pa2); pa_free(pa3);
+    th_free(th); th_free(th2);
+    ol_free(ol); ol_free(ol2);
+    sl_free(sl); sl_free(sl2);
+    g_door_days = DOOR_DAYS_DEFAULT;
+    g_door_today_pin = 0;
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -7724,6 +8160,11 @@ fn main(): i64 {
     t252_term_wrap();
     t254_descent_observer();
     t255_descent_resync();
+    t256_pa_universe_own_dice();
+    t257_ash_new_age();
+    t258_decode_guess_dict();
+    t259_ol_events();
+    t260_door_ration();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

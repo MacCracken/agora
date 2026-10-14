@@ -14,7 +14,7 @@ docs/examples/run.sh --fast --skip 01     # skip the slow halves (26's idle wait
 [`run.sh`](run.sh) (1.8.2) knows what each script needs: a clean `./bbs` and `./keys`, a freshly registered
 `qix` (03, 05, 06, 11–13, 15, 24, 26, 27), or a server it must start itself under the requested model (the
 client-only 04, 05, 23, 25, 26, 27). Scripts that start their own server inherit `AGORA_SERVE`, so
-`--model fork|poll|both` covers them too; 24 and 28–37 drive both models internally and run once. 20 skips
+`--model fork|poll|both` covers them too; 24 and 28–38 drive both models internally and run once. 20 skips
 itself unless the sibling `../cyrius-yeomans-descent` repo is present. Logs land in `build/smoke-logs/`.
 **CI runs the whole set on every push, once per serve model.** The runner refuses to start if `./bbs` or
 `./keys` already exist, since the scripts create and delete them (`--force` to override).
@@ -25,7 +25,7 @@ under a model named only in their header. Every release from 1.6.7 to 1.8.1 was 
 harness — the reason smoke 20's breakage went unnoticed for four releases.)
 
 Running one by hand still works: each script's header says what it needs. Defaults: `./build/agora`,
-a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–37 pick their own).
+a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–38 pick their own).
 
 | # | Script | Surface | Reads / writes |
 |---|---|---|---|
@@ -38,7 +38,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–37 pic
 | 07 | [`07-play-door.sh`](07-play-door.sh) | 1.1.0 door games: plays Smuggler's Ledger / Port Authority / The Handler over telnet (practice mode) — ADR 0009 | none |
 | 08 | [`08-world-concurrency.sh`](08-world-concurrency.sh) | 1.2.0 world-transaction framework: N processes hammer one shared world, assert no lost updates — ADR 0010 | `/tmp/agora-world-smoke-$$` |
 | 09 | [`09-universe-port.sh`](09-universe-port.sh) | 1.2.0 bite 2 PA shared galaxy: two players `play port universe` — shared map, exclusive planet ownership across sessions, world persists, login-gated — ADR 0010 | `./bbs/`, `./keys/` |
-| 10 | [`10-leaderboard.sh`](10-leaderboard.sh) | 1.2.0 bite 5 cross-game leaderboards: finish a Port Authority run, then `scores port` lists it — ADR 0010 | `./bbs/`, `./keys/` |
+| 10 | [`10-leaderboard.sh`](10-leaderboard.sh) | 1.2.0 bite 5 cross-game leaderboards: finish a Port Authority run, then `scores port` lists it — ADR 0010. A whole quarter in one sitting needs `serve --door-days 0` since 1.12.0 (ADR 0032). | `./bbs/`, `./keys/` |
 | 11 | [`11-chat.sh`](11-chat.sh) | 1.3.0 chat area: two sessions in a channel, live-tail by sequence number, no cross-talk — ADR 0011 | `./bbs/`, `./keys/` |
 | 12 | [`12-eliza.sh`](12-eliza.sh) | 1.3.0 Eliza: the `play eliza` door decomposes "I am sad"; the private `/eliza` couch answers off the room transcript — ADR 0011 | `./bbs/`, `./keys/qix` |
 | 13 | [`13-parry.sh`](13-parry.sh) | 1.3.1 PARRY: the `play parry` door is calm then a Mafia "flare" launches the delusion; private `/parry` off the transcript — ADR 0012 | `./bbs/`, `./keys/qix` |
@@ -66,6 +66,7 @@ a scratch store at `./bbs/`, port 2323 (11–15 use 2324–2328; 24, 28–37 pic
 | 35 | [`35-telnet-conformance.py`](35-telnet-conformance.py) | 1.10.0 (ADR 0029): RFC 854 / 1184 through the real server, raw bytes, both serve models — DO LINEMODE in the greeting, AYT → `[Yes]`, DEL / IAC EC / IAC EL editing in character mode, LINEMODE MODE + the WONT ECHO hand-off, the SLC import reply, NVT newlines (CR LF / CR NUL) on a CLI-authored post — and § G, a real inetutils `telnet` in a pty negotiating the whole exchange (skipped if none is installed). A 1.9.2 build fails 18 of 20 raw checks. | `/tmp/agora-telnet-smoke-$$` |
 | 36 | [`36-terminal-width.py`](36-terminal-width.py) | 1.10.1 (ADR 0030): output wrapped to the window the client reports, both serve models — without NAWS a long line arrives whole; after `WILL NAWS` + 40x24, `read` and `list` fit 39 columns with the subject hanging under itself, an indented line keeping its indent, a URL never cut, every newline CR LF; a resize to 60 applies on the next command; a door frame fits; a width of 0 means no wrap; the greeting fits 80 — and § G, a real inetutils `telnet` in a 40x24 pty whose own NAWS fits `read` to it (skipped if none is installed). A 1.10.0 build fails 15 of 24 checks. | `/tmp/agora-width-smoke-$$` |
 | 37 | [`37-descent-state.py`](37-descent-state.py) | 1.11.0 (ADR 0031): the Descent as a session state, with a built-in fake MUD — under poll another session is answered at once while one is in the MUD or dialling an endpoint that never answers (told within the 4 s deadline); the bytes pipelined behind `descent` reach the MUD; echo resumes once after the MUD's WILL / WONT ECHO; shutdown during a visit; `AGORA_SERVE=epoll` refused; 200 sequential poll accepts in well under a second; fork children say goodbye at shutdown and leave with a SIGKILLed parent; and § I, a real inetutils `telnet` in a 40x24 pty keeping its window width and LINEMODE echo across a visit. A 1.10.1 build fails 11 of 21 checks. | `/tmp/agora-descent-state-$$` |
+| 38 | [`38-door-content.py`](38-door-content.py) | 1.12.0 (roadmap § 1.12.0): the door content release, both serve models — the daily ration (ADR 0032: under `--door-days 2` a Solo Port Authority run ends two days, is refused the third with a message, stays refused across a save, while Practice is not rationed and `--door-days 0` lifts the cap); Ashes ages (a v3 world one player dominates is upgraded in place, the next turn ends the age, the victor's visit claims it and posts an Imperator row, a player who saw the old age is founded with the news); Decode/Words taking `pizza` and refusing `roate`; the Olympiad market hiring a runner into the stadion. Against a 1.11.1 build 24 checks fail (§ A cannot start: the old server takes `--door-days 2` as port 2). | `/tmp/agora-content-smoke-$$` |
 
 Demo handles use three-letter old-arcade-game names (`qix`, `pac`, `zax`) to avoid colliding with real handles.
 

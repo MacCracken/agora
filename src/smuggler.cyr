@@ -56,7 +56,10 @@ enum SL {
     SL_EVENT   = 192;   # ptr → 2 i64 (event kind, good)
     SL_MSG     = 200;   # ptr → 256-byte transient message buffer
     SL_WORLD   = 208;   # 1.2.0 Universe (ADR 0010 bite 4): ptr → shared district-heat snapshot (0 = solo)
-    SL_SIZE    = 216;
+    # 1.12.0 (ADR 0032): the daily ration — saved, appended after the inventory.
+    SL_RDAY    = 216;   # UTC day the ration was last refilled
+    SL_RLEFT   = 224;   # days this run may still jet today
+    SL_SIZE    = 232;
 }
 
 # === Construction ===
@@ -626,9 +629,11 @@ fn sl_rank(score): i64 {
 
 # === Save / load (positional text via door framework) ===
 
-# Serialize the durable run fields: the SLDG1 header line, then 21 decimal i64
-# lines in sl_load_parse's order. Returns bytes written; `cap` is not checked
-# (the fixed layout fits SL_SAVE_CAP). Runtime fields are not saved.
+# Serialize the durable run fields: the SLDG1 header line, then 23 decimal i64
+# lines in sl_load_parse's order (1.12.0 appended the two ration cells; a 1.11
+# save ends before them and loads with a fresh ration). Returns bytes written;
+# `cap` is not checked (the fixed layout fits SL_SAVE_CAP). Runtime fields are
+# not saved.
 fn sl_save_format(st, buf, cap): i64 {
     var pos = 0;
     memcpy(buf + pos, "SLDG1\n", 6); pos = pos + 6;
@@ -650,6 +655,8 @@ fn sl_save_format(st, buf, cap): i64 {
         pos = save_put_i64(buf, pos, sl_inv(st, i));
         i = i + 1;
     }
+    pos = save_put_i64(buf, pos, load64(st + SL_RDAY));
+    pos = save_put_i64(buf, pos, load64(st + SL_RLEFT));
     return pos;
 }
 
@@ -680,6 +687,8 @@ fn sl_load_parse(buf, len): i64 {
         sl_set_inv(st, i, save_get_i64(buf, len, cur));
         i = i + 1;
     }
+    store64(st + SL_RDAY,    save_get_i64(buf, len, cur));
+    store64(st + SL_RLEFT,   save_get_i64(buf, len, cur));
     return st;
 }
 
@@ -696,6 +705,7 @@ fn sl_render_status(st, buf, pos): i64 {
     pos = emit_int(buf, pos, load64(st + SL_DAY));
     pos = emit_cstr(buf, pos, "/");
     pos = emit_int(buf, pos, load64(st + SL_MAXDAYS));
+    pos = door_emit_ration(buf, pos, st + SL_RDAY, st + SL_RLEFT, load64(st + SL_MODE));
     pos = emit_cstr(buf, pos, "   ");
     pos = emit_cstr(buf, pos, sl_district_name(load64(st + SL_LOC)));
     pos = emit_crlf(buf, pos);
@@ -1008,6 +1018,13 @@ fn sl_feed_jet(st, line, len): i64 {
             var dest = k - 49;
             if (dest == load64(st + SL_LOC)) {
                 sl_msg(st, "You're already there.");
+                store64(st + SL_SCREEN, SCR_MAIN);
+                return 0;
+            }
+            # 1.12.0 (ADR 0032) — a jet burns a day, and a Solo / Universe run
+            # gets g_door_days of them per UTC day.
+            if (door_ration_take(st + SL_RDAY, st + SL_RLEFT, load64(st + SL_MODE)) == 0) {
+                sl_msg(st, door_ration_spent());
                 store64(st + SL_SCREEN, SCR_MAIN);
                 return 0;
             }

@@ -1,6 +1,6 @@
 # 0009 — Door / games subsystem architecture
 
-> **Status**: Accepted
+> **Status**: Accepted — amended at 1.12.0 (the daily ration is enforced, [ADR 0032](0032-daily-ration.md))
 > **Date**: 2026-06-07
 
 ## Context
@@ -46,3 +46,8 @@ In scope at 1.1.0: the `door.cyr` framework, the three games' Practice + Solo ex
 > next-day key. (QUEST does gate on the wall clock.) A real daily ration is roadmap § 1.12.0. 1.8.1 did
 > close the exploit that made this matter most — a dropped connection now saves like a clean `q`, so a
 > loss can no longer be undone by disconnecting (audit M1).
+
+> **1.12.0 amendment.** The daily rhythm is enforced since 1.12.0 ([ADR 0032](0032-daily-ration.md)): a
+> Solo or Universe run of Smuggler's Ledger, Port Authority or The Handler advances at most `--door-days`
+> game days per UTC day (default 10; The Handler's "1–3 turns/day" is `agora serve --door-days 2`; 0 turns it
+> off). Practice runs are not rationed. The 1.8.1 note above describes the code before that.

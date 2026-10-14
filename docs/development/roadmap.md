@@ -1,11 +1,12 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-13 — **1.11.1 (enforced module invariants) shipped**, closing the 1.11.x line: a
-> door's free can no longer reach the session's world buffer, the chat couch and the `play` / `scores` names
-> come from the door registry, and a test walks every registered door — slots, a drive, a save round trip, a
-> leak check. Next slot: **1.12.0**, Olympiad events + door content. The same day: 1.11.0 (Descent as a session
-> state, ADR 0031), 1.10.1 and 1.10.0 (the 1.10.x line), 1.9.2, 1.9.1, 1.9.0, 1.8.2; 1.8.1 and the re-plan into
-> 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in [`CHANGELOG.md`](../../CHANGELOG.md)).
+> **Last Updated**: 2026-10-13 — **1.12.0 (Olympiad events + door content) shipped**: the gladiatorial bout,
+> the stadion and the regatta on the Olympiad's `compete()` (with a market, and a field that grows with the
+> meet), Decode/Words' own guess dictionary, a real daily ration for the four day-based doors (ADR 0032), Ashes
+> ages, and per-ship dice in Port Authority's Universe. Next slot: **1.12.1**, the wager audit trail, which
+> closes the 1.12.x line. The same day: 1.11.1 and 1.11.0 (the 1.11.x line), 1.10.1, 1.10.0, 1.9.2, 1.9.1, 1.9.0,
+> 1.8.2; 1.8.1 and the re-plan into 1.8.x → 1.12.x slots on 2026-10-12 (per-tag detail in
+> [`CHANGELOG.md`](../../CHANGELOG.md)).
 >
 > **What this file is**: what is planned next and in what order, what is blocked on someone else, and what
 > is deliberately not being done. **What it is not**: a second changelog, or a record of what each closed
@@ -37,7 +38,7 @@ did) and the slots after it shift.
 | **1.10.1** | Terminal-aware output (closes the 1.10.x line) | protocol / UX | ✅ 2026-10-13 |
 | **1.11.0** | Descent as a poll state + serve-model debt | structure | ✅ 2026-10-13 |
 | **1.11.1** | Enforced module invariants (closes the 1.11.x line) | structure | ✅ 2026-10-13 |
-| **1.12.0** | Olympiad events + door content | content | planned |
+| **1.12.0** | Olympiad events + door content | content | ✅ 2026-10-13 |
 | **1.12.1** | Wager audit trail | content / fairness | planned |
 | 1.x | Cross-repo and toolchain-blocked work | — | blocked — see § Unscheduled |
 
@@ -45,18 +46,7 @@ did) and the slots after it shift.
 
 ## 1.12.x — doors and content
 
-### 1.12.0 — Olympiad events + door content
-
-| Item | Source | Effort |
-|---|---|---:|
-| **Olympiad's later events** (gladiators / athletics / boat crews) — thin descriptors on the `compete()` primitive, which was the whole point of building it | [ADR 0016](../adr/0016-olympiad-competition-primitive.md) | medium |
-| The Olympiad race field is not tier-scaled — a flat 4 entrants at every meet | `src/olympiad.cyr` | small |
-| **Decode/Words rejects most real English words** — the 532-entry list is both answer pool *and* guess dictionary; split them | [ADR 0018](../adr/0018-decode-engine.md); `src/decode_words.cyr` | small |
-| **A real daily ration** — Smuggler, Port Authority and The Handler advance a day whenever the player presses the next-day key, and Olympiad's refill is free (`OL_LASTDAY` is saved, never read), though ADRs 0009 / 0010 / 0016 describe a wall-clock cadence. QUEST is the model. | audit 1.8.1 I4, I5 | medium |
-| Ashes never resets after one player holds all twelve provinces — the world is closed to everyone else for good | audit 1.8.1 I6 | small |
-| Every Port Authority Universe ship starts from one seed (`DD_UNI_SEED`), so combat rolls are identical for all players | audit 1.8.1 I7 | small |
-
-### 1.12.1 — Wager audit trail
+### 1.12.1 — Wager audit trail (closes the 1.12.x line)
 
 | Item | Source | Effort |
 |---|---|---:|

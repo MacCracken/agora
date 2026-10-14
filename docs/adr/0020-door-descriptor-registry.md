@@ -108,3 +108,8 @@ parser's name→id line) — not an edit to eighteen scattered functions.
 >   It then drives every door through its slots: render, input, is-over, reply, score / rank, and a save
 >   round-tripped through its load. Eleven mutants (a slot mis-wired, missing or unregistered, among them) are
 >   each caught.
+
+> **1.12.0 note.** The "Universe seed override" (`DD_UNI_SEED`) is gone; its slot is spare (`DD_SPARE_184`).
+> It made Port Authority's galaxy seed every Universe ship's seed too, so all ships rolled the same dice
+> (audit 1.8.1 I7). A shared map's seed is now the module's business: `pa_new` keeps the galaxy seed in
+> Universe mode and seeds the ship from the launcher's clock (ADR 0010's 1.12.0 amendment).

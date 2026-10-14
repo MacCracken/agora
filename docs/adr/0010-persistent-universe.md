@@ -81,3 +81,14 @@ Start narrow (framework + one depletable-stock slice) and get a concurrency smok
 > transaction is one fsync (~1.9 ms): the cost is the durability write, not lock contention. **The gate stays
 > closed** — finer locks would remove contention the system does not have and add lock-ordering hazards.
 > Numbers: BENCHMARKS.md § Serve-level baselines.
+
+> **1.12.0 amendments.**
+>
+> - **The daily-turn cadence is enforced** ([ADR 0032](0032-daily-ration.md)): a Universe run of Smuggler,
+>   Port Authority or The Handler advances at most `--door-days` game days per UTC day, so the fairness lever
+>   above is real. The 1.8.1 note's "not enforced" no longer holds.
+> - **Each Port Authority Universe ship rolls its own dice** (audit 1.8.1 I7). The launcher built every
+>   Universe ship from the galaxy seed (the `DD_UNI_SEED` descriptor slot), so all of them began with the same
+>   combat/event PRNG and rolled identically for identical moves. `pa_new` now keeps `PA_UNIVERSE_SEED` as
+>   the galaxy seed in Universe mode, so the shared map regenerates as before, and seeds the ship's PRNG
+>   from the launcher's clock. The slot is gone (`DD_SPARE_184`). Saved ships keep the PRNG cell they have.

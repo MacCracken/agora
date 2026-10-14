@@ -60,6 +60,10 @@ Expect **0 failures** (the suite was 80 tests at 0.9.0 and has grown with every 
 agora prints a few status lines and the listener parks on port 2323; each telnet client is greeted with the ANSI MOTD. agora serves with one of two models, chosen at startup ([ADR 0023](../adr/0023-dual-serve-model.md)). On Linux the default is **fork-per-connection** ([ADR 0007](../adr/0007-fork-per-accept-concurrency.md)) — open as many concurrent sessions as your kernel allows. Set `AGORA_SERVE=poll` for the single-process multiplex, which serves up to 64 sessions from one process and is the only model on AGNOS; any other value is refused (since 1.11.0 — `epoll` used to mean `poll` silently). **Ctrl-C (or `kill`) shuts either model down cleanly since 1.7.0** — sessions are told, drained and closed rather than cut off, and since 1.8.1 a player's in-game progress is saved on the way out (as it is on any disconnect). Since 1.11.0 fork-mode connection processes are told too, and end with their parent even if it crashes ([ADR 0031](../adr/0031-descent-session-state.md)).
 
 Storage defaults to `./agora-data/`. Override with `--store <path>`. Custom MOTD: `--motd <path>` (4 KB ceiling).
+Door pacing: `--door-days <n>` caps the game days a saved door run (Solo or Universe Smuggler's Ledger, Port
+Authority, The Handler, the Olympiad) advances per UTC day — default 10, `0` for no cap, `2` for the old BBS
+rhythm; Practice runs are never capped (since 1.12.0, [ADR 0032](../adr/0032-daily-ration.md)). The startup
+lines show the setting in force.
 
 ```sh
 ./build/agora serve 2323 --store ./bbs --motd ./motd.txt
@@ -200,6 +204,6 @@ Each session sees its own banner, its own `g_session_*` slots, and its own bump-
 - [`docs/development/roadmap.md`](../development/roadmap.md) — what's shipped, what's next, what's deferred.
 - [`docs/development/state.md`](../development/state.md) — live state snapshot (version / size / in-flight slot / boot guide).
 - [`docs/examples/`](../examples/) — runnable smoke scripts for each major surface.
-- [`docs/adr/`](../adr/) — the architecture decision records (0001–0031) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
+- [`docs/adr/`](../adr/) — the architecture decision records (0001–0032) — the listener, storage and identity foundations, the door / universe / chat subsystems, the wager and decode primitives, the Descent gateway, the dual serve model and the allocator decisions.
 - [`CLAUDE.md`](../../CLAUDE.md) — durable agent / contributor process rules.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.

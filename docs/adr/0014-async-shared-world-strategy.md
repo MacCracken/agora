@@ -1,6 +1,6 @@
 # 0014 — War-game door — asynchronous shared-world strategy as the MUD on-ramp
 
-> **Status**: Accepted — **shipped at 1.3.7** (2026-06-09) (the war-game door, "Ashes of Empire"), the last door before **1.4.0 Descent link**.
+> **Status**: Accepted — **shipped at 1.3.7** (2026-06-09) (the war-game door, "Ashes of Empire"), the last door before **1.4.0 Descent link**. **Amended at 1.12.0** (a domination ends the age, not the game).
 > **Date**: 2026-06-08 (accepted 2026-06-09, bite 1: the shared-world snapshot foundation)
 
 > **1.6.0 note**: this rationale cites ADR 0007's "no shared state across sessions" constraint. That
@@ -79,3 +79,27 @@ This is the last rehearsal before the MUD's harder real-time concurrency in 1.4.
 > update (ADR 0010's note; BENCHMARKS.md). The bench world is 8 bytes; Ashes' 3,048-byte map adds one page to
 > each write, which cannot move a ~1.9 ms fsync-bound transaction materially (inferred, not separately
 > measured). The coarse single-world `flock` stands; per-territory locks stay rejected.
+
+> **1.12.0 amendment — ages (audit 1.8.1 I6).** "Domination ends a run" ended the game for everyone: once
+> one player held all twelve provinces the victor's run was over on every visit, `ash_spawn` had no neutral
+> province for anyone else, and the world was closed for good. The victor's own win reached the leaderboard
+> only if they were connected when the turn resolved: the launcher counted a domination found by the
+> entry's own resolution as "over before this session", and so never posted it.
+>
+> - **The turn that completes a domination ends the age** (`ashw_dominator`, `ashw_new_age`, in
+>   `ash_resolve_turn`): the age counter steps, the map is re-minted from the next seed (new terrain), every
+>   province returns to its neutral garrison, the order queue and the pact table are emptied, and the
+>   victor's fp is left as a **laurel**. The turn counter carries on.
+> - **The laurel is claimed once**, on the victor's next visit or line, whenever that is
+>   (`ash_claim_laurel`): the session's run ends in victory ("THE AGE IS YOURS", an Imperator score of 1,200),
+>   and the laurel is cleared under the lock. A run is over only by a claimed laurel; holding the map is no
+>   longer the test, since the age turns in the same resolution. The launcher now takes "over at entry"
+>   before the world opens, so a claim on entry posts. Other players are founded anew, with a notice if they
+>   saw the old age (the per-player save appends the last age seen).
+> - **Snapshot v4** appends three cells: age, laurel, last victor (3,048 → 3,072 bytes). Unlike the earlier
+>   bumps, a v3 snapshot is **upgraded in place** by `ashw_valid` rather than set aside, so running worlds
+>   keep their empires; a corrupt v3 is still refused and left untouched. t257, smoke 38 B.
+> - **One laurel cell.** If a second age ends before the first victor comes back, the second victor's laurel
+>   replaces the first, which is never claimed. Recorded rather than solved: the new age begins on an empty map
+>   and must be conquered again, which takes many turn windows, and a queue of laurels would need a snapshot
+>   section of its own.

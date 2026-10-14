@@ -221,16 +221,26 @@ enum PA {
     PA_WORLD    = 176;    # ptr → in-memory shared-world snapshot (0 = solo); main.cyr
     # locks + reads it in before each fed line and writes it back after
     PA_FP       = 184;    # this player's identity as an i64 (for planet ownership; 0 = solo/anon)
-    PA_SIZE     = 192;
+    # 1.12.0 (ADR 0032): the daily ration — saved, appended after the cargo.
+    PA_RDAY     = 192;    # UTC day the ration was last refilled
+    PA_RLEFT    = 200;    # days this run may still end today
+    PA_SIZE     = 208;
 }
 
 # Allocate a fresh ship on the freelist (pa_free releases it): day 1 at the HQ spire
 # (sector 0), starting credits/holds/fighters/shields, no planet, combat PRNG seeded
 # from `seed`. Runtime fields are unset — call pa_start next.
+#
+# 1.12.0 (audit 1.8.1 I7) — a Universe ship flies the one shared galaxy
+# (PA_UNIVERSE_SEED), but its combat PRNG is its own: `seed` (the launcher's
+# clock) seeds PA_RNG. Both used to come from the galaxy seed, so every
+# Universe ship rolled the same combat and event dice.
 fn pa_new(seed, mode, max_days): i64 {
     var st = fl_alloc(PA_SIZE);
     memset(st, 0, PA_SIZE);
-    store64(st + PA_SEED, seed);
+    var gseed = seed;
+    if (mode == DOOR_UNIVERSE) { gseed = PA_UNIVERSE_SEED; }
+    store64(st + PA_SEED, gseed);
     rng_seed(st + PA_RNG, seed);
     store64(st + PA_DAY, 1);
     store64(st + PA_MAXDAYS, max_days);
@@ -612,8 +622,9 @@ fn pa_rank(score): i64 {
 # === Save / load ===
 
 # Serialize the durable ship fields: the PADG1 header line, then 18 decimal i64
-# lines in pa_load_parse's order. Returns bytes written; `cap` is not checked
-# (the fixed layout fits PA_SAVE_CAP). Runtime fields are not saved.
+# lines in pa_load_parse's order, the two ration cells last (1.12.0; a 1.11 save
+# ends before them and loads with a fresh ration). Returns bytes written; `cap`
+# is not checked (the fixed layout fits PA_SAVE_CAP). Runtime fields are not saved.
 fn pa_save_format(st, buf, cap): i64 {
     var pos = 0;
     memcpy(buf + pos, "PADG1\n", 6); pos = pos + 6;
@@ -636,6 +647,8 @@ fn pa_save_format(st, buf, cap): i64 {
         pos = save_put_i64(buf, pos, pa_cargo(st, i));
         i = i + 1;
     }
+    pos = save_put_i64(buf, pos, load64(st + PA_RDAY));
+    pos = save_put_i64(buf, pos, load64(st + PA_RLEFT));
     return pos;
 }
 
@@ -668,6 +681,8 @@ fn pa_load_parse(buf, len): i64 {
         pa_set_cargo(st, i, save_get_i64(buf, len, cur));
         i = i + 1;
     }
+    store64(st + PA_RDAY,      save_get_i64(buf, len, cur));
+    store64(st + PA_RLEFT,     save_get_i64(buf, len, cur));
     # 1.8.1 (audit D3) — the two fields used as INDEXES must be in range, or the
     # save is rejected (the launcher sets it aside and starts fresh): PA_SECTOR
     # indexes the galaxy tables and the shared world, PA_PLANET (-1 = none) the
@@ -693,6 +708,7 @@ fn pa_render_status(st, buf, pos): i64 {
     pos = emit_int(buf, pos, load64(st + PA_DAY));
     pos = emit_cstr(buf, pos, "/");
     pos = emit_int(buf, pos, load64(st + PA_MAXDAYS));
+    pos = door_emit_ration(buf, pos, st + PA_RDAY, st + PA_RLEFT, load64(st + PA_MODE));
     pos = emit_cstr(buf, pos, "   Sector ");
     pos = emit_int(buf, pos, load64(st + PA_SECTOR));
     pos = emit_cstr(buf, pos, "   Turns ");
@@ -989,6 +1005,11 @@ fn pa_feed_main(st, line, len): i64 {
         return 0;
     }
     if (k == 110) {                                                   # n next day
+        # 1.12.0 (ADR 0032) — g_door_days game days per UTC day (Solo / Universe).
+        if (door_ration_take(st + PA_RDAY, st + PA_RLEFT, load64(st + PA_MODE)) == 0) {
+            pa_msg(st, door_ration_spent());
+            return 0;
+        }
         pa_end_day(st);
         if (load64(st + PA_OVER) != 0) { store64(st + PA_SCREEN, PSCR_OVER); return 0; }
         pa_msg(st, "A new day. Turns refilled.");

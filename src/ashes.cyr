@@ -134,6 +134,10 @@ enum ASHTerr {
 #   [pacts_base + p*ASH_PACTCELLS + 0]       pact p lo fp
 #   [pacts_base + p*ASH_PACTCELLS + 1]       pact p hi fp
 #   [pacts_base + p*ASH_PACTCELLS + 2]       pact p status (ASHPact)
+#   [ages_base + 0]                age (1 = the first; 1.12.0, snapshot v4)
+#   [ages_base + 1]                laurel: the last age's victor fp, until they
+#                                  claim it on their next visit (0 = none)
+#   [ages_base + 2]                the last age's victor fp, kept for the notice
 enum ASHWOff {
     ASHW_OFF_VERSION = 0;
     ASHW_OFF_SEED    = 1;
@@ -145,15 +149,20 @@ enum ASHWOff {
 # Snapshot format version. v1 (bite 1): map only. v2 (bite 2): appends the
 # queued-orders section. v3 (bite 3): appends the alliance/offer pact table —
 # the append-and-bump discipline PA used (PAW_VERSION 1 -> 2 added garrisons).
-enum ASHWVer { ASHW_VERSION = 3; }
+# v4 (1.12.0): appends the age cells. Unlike the earlier bumps, a v3 snapshot
+# is upgraded in place rather than set aside (ashw_valid), so a running world
+# keeps its empires across the upgrade.
+enum ASHWVer { ASHW_VERSION = 4; ASHW_AGE_CELLS = 3; }
 
 # Section base offsets + sizing (all in i64 words). The orders section
 # (norders + ASH_MAXORD records) follows the map; the pact table follows that.
 fn ashw_orders_base(): i64 { return ASHW_OFF_MAP + ASH_TERR * ASH_CELLS; }
 # Word offset of the pact table: past the order count and its ASH_MAXORD order records.
 fn ashw_pacts_base(): i64  { return ashw_orders_base() + 1 + ASH_MAXORD * ASH_ORDCELLS; }
-# Total snapshot length in i64 words (header + map + orders + pact table).
-fn ashw_word_count(): i64  { return ashw_pacts_base() + ASH_MAXPACT * ASH_PACTCELLS; }
+# Word offset of the age cells (v4): past the pact table, where a v3 snapshot ended.
+fn ashw_ages_base(): i64   { return ashw_pacts_base() + ASH_MAXPACT * ASH_PACTCELLS; }
+# Total snapshot length in i64 words (header + map + orders + pact table + age cells).
+fn ashw_word_count(): i64  { return ashw_ages_base() + ASHW_AGE_CELLS; }
 # Total snapshot length in bytes, the exact size ashw_valid requires.
 fn ashw_byte_size(): i64   { return ashw_word_count() * 8; }
 
@@ -228,13 +237,25 @@ fn ashw_new(seed): i64 {
         store64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8, ash_neutral_army(seed, t));
         t = t + 1;
     }
+    store64(w + ashw_ages_base() * 8, 1);
     return w;
 }
 
-# A snapshot is valid if it's exactly our size and the version matches.
+# A snapshot is valid if it's exactly our size and the version matches —
+# or (1.12.0) if it is a whole v3 snapshot, which is then upgraded IN PLACE:
+# the age cells are appended (age 1, no laurel) and the version set to 4. The
+# upgrade writes up to ashw_byte_size() bytes, so `buf` must hold that many
+# whatever `len` is; door_world_begin reads into a buffer of exactly that size.
 fn ashw_valid(buf, len): i64 {
-    if (len != ashw_byte_size()) { return 0; }
-    if (load64(buf + ASHW_OFF_VERSION * 8) != ASHW_VERSION) { return 0; }
+    var upgrade = 0;
+    if (len == ashw_ages_base() * 8) {
+        if (load64(buf + ASHW_OFF_VERSION * 8) == 3) { upgrade = 1; }
+    }
+    if (upgrade == 0) {
+        if (len != ashw_byte_size()) { return 0; }
+        if (load64(buf + ASHW_OFF_VERSION * 8) != ASHW_VERSION) { return 0; }
+        if (ashw_age(buf) < 1) { return 0; }
+    }
     # 1.8.1 (audit G10) — the size + version check let a corrupt order count
     # through: negative, `ashw_order_push` wrote 32 bytes BEFORE the snapshot
     # (into the session slot's neighbour); over ASH_MAXORD, the resolver read
@@ -253,6 +274,12 @@ fn ashw_valid(buf, len): i64 {
     while (p < ASH_MAXPACT) {
         if (idx_ok(ashw_pact_status(buf, p), ASH_PACT_ALLIED + 1) == 0) { return 0; }
         p = p + 1;
+    }
+    if (upgrade == 1) {
+        store64(buf + ASHW_OFF_VERSION * 8, ASHW_VERSION);
+        store64(buf + ashw_ages_base() * 8, 1);
+        store64(buf + (ashw_ages_base() + 1) * 8, 0);
+        store64(buf + (ashw_ages_base() + 2) * 8, 0);
     }
     return 1;
 }
@@ -288,6 +315,15 @@ fn ashw_set_army(w, t, v): i64 {
     store64(w + (ASHW_OFF_MAP + t * ASH_CELLS + 1) * 8, v);
     return 0;
 }
+
+# The current age (1 = the first; a v3 snapshot upgrades to 1).
+fn ashw_age(w): i64 { return load64(w + ashw_ages_base() * 8); }
+# The unclaimed laurel: the last age's victor fp until they claim it, else 0.
+fn ashw_laurel(w): i64 { return load64(w + (ashw_ages_base() + 1) * 8); }
+# Clear (or set) the unclaimed laurel.
+fn ashw_set_laurel(w, fp): i64 { store64(w + (ashw_ages_base() + 1) * 8, fp); return 0; }
+# The last age's victor fp (0 before the first age has ended); kept after the claim.
+fn ashw_last_victor(w): i64 { return load64(w + (ashw_ages_base() + 2) * 8); }
 
 # Count the provinces a given owner fp holds (the win-progress metric — the
 # whole map is the victory condition — implemented by ash_is_over below).
@@ -844,6 +880,47 @@ fn ash_resolve_turn(w): i64 {
     ash_resolve_combat(w);
     ash_resolve_growth(w);
     ashw_set_turn(w, ashw_turn(w) + 1);
+    var victor = ashw_dominator(w);
+    if (victor != 0) { ashw_new_age(w, victor); }
+    return 0;
+}
+
+# === Ages (1.12.0, audit 1.8.1 I6) ===
+#
+# Holding all twelve provinces used to end the game for good: the victor's
+# run was over on every visit, and nobody else could ever found an empire
+# (ash_spawn had no neutral province left). Now the turn that completes a
+# domination also ends the age. The map is re-minted from the next seed (a new
+# age, new terrain), orders and pacts are swept away, and the victor's fp is
+# left as a LAUREL for them to claim on their next visit (ash_claim_laurel),
+# whenever that is — so a victor who is offline when the age turns still gets
+# their win, once.
+
+# The fp holding every province, or 0 if no one does. Pure.
+fn ashw_dominator(w): i64 {
+    var fp = ashw_owner(w, 0);
+    if (fp == 0) { return 0; }
+    if (ashw_holdings(w, fp) < ASH_TERR) { return 0; }
+    return fp;
+}
+
+# End the age in `victor`'s name: age + 1, a new map seed, every province back
+# to its neutral garrison, the order queue and the pact table emptied, and the
+# laurel left for the victor. The turn counter and window carry on. Pure.
+fn ashw_new_age(w, victor): i64 {
+    var seed = ashw_seed(w) + 1;
+    store64(w + ASHW_OFF_SEED * 8, seed);
+    var t = 0;
+    while (t < ASH_TERR) {
+        ashw_set_owner(w, t, 0);
+        ashw_set_army(w, t, ash_neutral_army(seed, t));
+        t = t + 1;
+    }
+    var ob = ashw_orders_base();
+    memset(w + ob * 8, 0, (ashw_ages_base() - ob) * 8);   # the queue and the pacts
+    store64(w + ashw_ages_base() * 8, ashw_age(w) + 1);
+    ashw_set_laurel(w, victor);
+    store64(w + (ashw_ages_base() + 2) * 8, victor);
     return 0;
 }
 
@@ -882,7 +959,9 @@ enum AE {
     AE_MSG      = 32;   # ptr -> 256-byte transient message buffer
     AE_SEENTURN = 40;   # world turn this player last observed (async notice)
     AE_SEENHELD = 48;   # holdings this player last observed
-    AE_BYTES    = 64;   # struct size
+    AE_SEENAGE  = 56;   # age this player last observed (1.12.0; 0 = never)
+    AE_LAUREL   = 64;   # 1 once this session claimed the last age's laurel (runtime)
+    AE_BYTES    = 72;   # struct size
 }
 
 enum ASHScr { ASCR_MAP = 0; }
@@ -958,17 +1037,47 @@ fn ash_spawn(w, fp): i64 {
     return chosen;
 }
 
-# Entry hook (run under the world lock after the lazy turn tick): found the
-# player if needed, otherwise surface the async "what happened" notice. Sets
-# the opening message + the seen-watermark.
-fn ash_on_entry(st): i64 {
+# 1.12.0 — claim the laurel: if the last age ended in this player's name and
+# they have not claimed it, this session's run ends in victory (ash_is_over) and
+# the laurel is cleared, so it is claimed exactly once. Must run under the world
+# lock (it writes the world). Returns 1 if claimed.
+fn ash_claim_laurel(st): i64 {
     var w = load64(st + AE_WORLD);
     if (w == 0) { return 0; }
     var me = load64(st + AE_FP);
+    if (me == 0) { return 0; }
+    if (ashw_laurel(w) != me) { return 0; }
+    ashw_set_laurel(w, 0);
+    store64(st + AE_LAUREL, 1);
+    store64(st + AE_SEENTURN, ashw_turn(w));
+    store64(st + AE_SEENAGE, ashw_age(w));
+    store64(st + AE_SEENHELD, 0);
+    ash_msg_clear(st);
+    return 1;
+}
+
+# Entry hook (run under the world lock after the lazy turn tick): claim a
+# laurel, else found the player if needed, else surface the async "what
+# happened" notice. Sets the opening message + the seen-watermarks. ash_feed
+# runs it again when an age turns while the player is connected.
+fn ash_on_entry(st): i64 {
+    var w = load64(st + AE_WORLD);
+    if (w == 0) { return 0; }
+    if (ash_claim_laurel(st) == 1) { return 0; }
+    var me = load64(st + AE_FP);
+    var seenage = load64(st + AE_SEENAGE);
+    store64(st + AE_SEENAGE, ashw_age(w));
     var sp = ash_spawn(w, me);
     if (sp >= 0) {
         var m = load64(st + AE_MSG);
         var p = 0;
+        if (seenage != 0) {
+            if (seenage < ashw_age(w)) {
+                p = emit_cstr(m, p, "a new age has dawned (rival#");
+                p = emit_int(m, p, ashw_last_victor(w) & 0xFFFF);
+                p = emit_cstr(m, p, " held all twelve provinces). ");
+            }
+        }
         p = emit_cstr(m, p, "you have founded your empire in ");
         p = emit_cstr(m, p, ash_terr_name(sp));
         p = emit_cstr(m, p, " — march out and conquer the ashes.");
@@ -1080,7 +1189,21 @@ fn ash_render(st, buf, cap): i64 {
     var w = load64(st + AE_WORLD);
     var me = load64(st + AE_FP);
     var pos = 0;
-    pos = emit_cstr(buf, pos, "\r\n== ASHES OF EMPIRE ==   turn ");
+    if (load64(st + AE_LAUREL) != 0) {
+        pos = emit_cstr(buf, pos, "\r\n== ASHES OF EMPIRE ==   THE AGE IS YOURS\r\n");
+        pos = emit_cstr(buf, pos, "  You held all twelve provinces when the turn came round, and the empire's\r\n");
+        pos = emit_cstr(buf, pos, "  ashes answered to you alone. The age ends in your name; a new one begins,\r\n");
+        pos = emit_cstr(buf, pos, "  and the provinces lie open again. Standing: Imperator.\r\n");
+        pos = emit_cstr(buf, pos, "  Press Enter to leave.\r\n");
+        return pos;
+    }
+    pos = emit_cstr(buf, pos, "\r\n== ASHES OF EMPIRE ==   ");
+    if (w != 0) {
+        pos = emit_cstr(buf, pos, "age ");
+        pos = emit_int(buf, pos, ashw_age(w));
+        pos = emit_cstr(buf, pos, "   ");
+    }
+    pos = emit_cstr(buf, pos, "turn ");
     if (w != 0) { pos = emit_int(buf, pos, ashw_turn(w)); }
     pos = emit_cstr(buf, pos, "   you hold ");
     var held = 0;
@@ -1204,6 +1327,14 @@ fn ash_scan_ints(line, len, start, out, maxn): i64 {
 # under the flock); the orders/pacts it writes are seen by every player.
 # Returns 1 to leave the door, 0 to stay.
 fn ash_feed(st, line, len): i64 {
+    # 1.12.0 — a claimed laurel ends the run: any line leaves. An age that
+    # turned while the player was connected is handled before the line is: a
+    # laurel is claimed, or the player is founded anew on the new map.
+    if (load64(st + AE_LAUREL) != 0) { return 1; }
+    var aw = load64(st + AE_WORLD);
+    if (aw != 0) {
+        if (ashw_age(aw) != load64(st + AE_SEENAGE)) { ash_on_entry(st); return 0; }
+    }
     if (ash_cmd_is(line, len, "quit") == 1) { return 1; }
     if (ash_cmd_is(line, len, "bye") == 1)  { return 1; }
     if (ash_cmd_is(line, len, "exit") == 1) { return 1; }
@@ -1296,17 +1427,21 @@ fn ash_feed(st, line, len): i64 {
     return 0;
 }
 
-# Domination ends a run: holding every province wins. Otherwise open-ended
-# (you leave by quitting). Used to gate the leaderboard post (bite 5).
+# A run ends in victory when this session claims the last age's laurel
+# (1.12.0). Otherwise open-ended (you leave by quitting). Used to gate the
+# leaderboard post. Until 1.12.0 holding all twelve provinces was the test, and
+# it held on every later visit: the domination never ended and the world was
+# closed to everyone else (audit 1.8.1 I6). The age now turns in the same
+# resolution that completes it, so the laurel is the only lasting trace.
 fn ash_is_over(st): i64 {
-    var w = load64(st + AE_WORLD);
-    if (w == 0) { return 0; }
-    if (ashw_holdings(w, load64(st + AE_FP)) >= ASH_TERR) { return 1; }
+    if (load64(st + AE_LAUREL) != 0) { return 1; }
     return 0;
 }
 
-# Leaderboard score: 100 per province held (0 with no world loaded).
+# Leaderboard score: 100 per province held (0 with no world loaded); a claimed
+# laurel scores the whole map.
 fn ash_final_score(st): i64 {
+    if (load64(st + AE_LAUREL) != 0) { return ASH_TERR * 100; }
     var w = load64(st + AE_WORLD);
     if (w == 0) { return 0; }
     return ashw_holdings(w, load64(st + AE_FP)) * 100;
@@ -1325,12 +1460,15 @@ fn ash_rank(score): i64 {
 #
 # The shared map IS the player's durable state, so the per-player save is tiny
 # — just the last-seen turn/holdings so the "while you were away" notice spans
-# sessions. Header "ASHES" (door.cyr positional i64 save).
+# sessions. Header "ASHES" (door.cyr positional i64 save). 1.12.0 appends the
+# last-seen age; a 1.11 save without it reads 0 (save_get_i64 at the end of the
+# buffer), which means "never looked", so no new-age notice is owed.
 fn ash_save_format(st, buf, cap): i64 {
     memcpy(buf, "ASHES\n", 6);
     var pos = 6;
     pos = save_put_i64(buf, pos, load64(st + AE_SEENTURN));
     pos = save_put_i64(buf, pos, load64(st + AE_SEENHELD));
+    pos = save_put_i64(buf, pos, load64(st + AE_SEENAGE));
     return pos;
 }
 
@@ -1343,5 +1481,6 @@ fn ash_load_parse(buf, len): i64 {
     store64(cur, 6);
     store64(st + AE_SEENTURN, save_get_i64(buf, len, cur));
     store64(st + AE_SEENHELD, save_get_i64(buf, len, cur));
+    store64(st + AE_SEENAGE,  save_get_i64(buf, len, cur));
     return st;
 }

@@ -31,12 +31,17 @@
 # The pure weight->index map (`ol_pick_weighted`, the injected test seam)
 # is split from the CSPRNG read, exactly as wager.cyr splits wager_pick.
 #
-# === Bite 1 scope (this file, the foundation) ===
+# === Events (1.12.0) ===
 #
-# Owner/stable state + the `compete()` primitive + the daily-turn economy
-# (train / rest) + chariot form + fair-odds + the door-contract skeleton.
-# The chariot EVENT (field generation, the race screen) is bite 2; the
-# owner loop + the wager UI + the season ladder are bite 3.
+# Four events share the primitive: the chariot race (1.3.6), and since 1.12.0
+# the gladiatorial bout, the stadion foot race and the regatta. Each is one
+# descriptor block (ol_events_init) — its words, its four stat labels, the
+# weights its form puts on them, what a contest costs and pays, its venues and
+# its competitors' names. The owner hires one competitor per event (the
+# market), switches between them, and enters whichever suits the meet: the
+# twelve-meet ladder is the owner's standing, shared by the whole stable, and
+# a win in any event climbs it. The field grows with the meet, four entrants at
+# the first and eight at the last.
 #
 # Deps resolved upstream in the main.cyr / test.cyr include chain:
 #   door.cyr   — emit_*, door_key/door_parse_int, save_put/get_i64, imin/imax
@@ -56,7 +61,7 @@ enum OL {
     OL_MONEY    = 48;    # denarii on hand
     OL_TIER     = 56;    # season-ladder position (which meet)
     OL_CROWNS   = 64;    # championship crowns won (win-condition counter)
-    OL_LASTDAY  = 72;    # epoch-day of last ration refill (wall-clock reset)
+    OL_LASTDAY  = 72;    # UTC day the daily ration was last refilled (1.12.0, door_ration_take)
     OL_NCOMP    = 80;    # competitors in the stable
     OL_STABLE   = 88;    # ptr -> array of OL_NCOMP competitor blocks
     # runtime-only (not serialized):
@@ -73,7 +78,9 @@ enum OL {
     OL_BETSTAKE = 176;   # your stake on that lane
     OL_BETDELTA = 184;   # the resolved bet's signed gold delta (last race)
     OL_BETHAD   = 192;   # 1 if a wager was resolved in the last race
-    OL_SIZE     = 200;
+    OL_CROWNEV  = 200;   # the event the crown was won in (runtime; the run ends with it)
+    OL_RLEFT    = 208;   # days of the daily ration left today — saved, after the stable (1.12.0)
+    OL_SIZE     = 216;
 }
 
 # A competitor: a fixed i64 block. Stats are event-flavoured (a chariot
@@ -94,6 +101,10 @@ enum CMP {
 
 enum OLEvent {
     EV_CHARIOT  = 0;     # 1.3.6: the circus chariot race
+    EV_MUNUS    = 1;     # 1.12.0: the gladiatorial bout (a munus)
+    EV_STADION  = 2;     # 1.12.0: the stadion, the foot race
+    EV_REGATTA  = 3;     # 1.12.0: the boat crews' regatta
+    OL_NEVENTS  = 4;     # events registered; every walk and every bound stops here
 }
 
 # The four Roman circus factions.
@@ -107,8 +118,9 @@ enum OLFaction {
 enum OLScreen {
     OSCR_STABLE = 0;     # the owner's hub: roster + day/money/actions
     OSCR_OVER   = 1;     # game over (crowned or ruined)
-    OSCR_RACE   = 2;     # the Hippodrome: the field + odds, loose the gates
+    OSCR_RACE   = 2;     # the venue: the field + odds, start the contest
     OSCR_RESULT = 3;     # the finish order + your placing + purse
+    OSCR_HIRE   = 4;     # the market: hire a competitor for an event you do not field (1.12.0)
 }
 
 enum OLEcon {
@@ -122,13 +134,195 @@ enum OLEcon {
     OL_REST_COND   = 30;     # condition restored per rest
     OL_VIG_BPS     = 500;    # the book's house edge (5%), used by the wager UI (bite 3)
     OL_START_MONEY = 200;    # starting denarii
-    OL_RACE_FIELD  = 4;      # entrants per race (you + 3 rivals; tier-scaled later)
-    OL_RACE_COND   = 20;     # condition a hard race costs your team
-    OL_PURSE_WIN   = 100;    # 1st-place purse BASE — `ol_run_race` scales it by tier
+    OL_FIELD_BASE  = 4;      # entrants at the first meet (you + 3); ol_field_size grows it to 8
+    OL_PURSE_WIN   = 100;    # 1st-place purse BASE — `ol_run_race` scales it by tier and event
     OL_PURSE_2ND   = 40;
     OL_PURSE_3RD   = 20;
     OL_BET_MIN     = 5;      # minimum wager at the book
     OL_MAX_TIER    = 12;     # meets on the ladder; winning the last takes the crown
+}
+
+# === Event descriptors (1.12.0, ADR 0016) ===
+#
+# ADR 0016's promise, kept: an event is a thin descriptor over the compete()
+# primitive, not a new game. Each block below is one event's data — its words,
+# its stat labels, the weights its form puts on the four stat slots, what a
+# contest costs and pays, its venues and its competitors — and the engine, the
+# book, the ladder and the save never ask which event they are running.
+# Adding an event is its enum id, OL_NEVENTS, one block and two name tables.
+
+enum OLEvd {
+    EVD_NAME    = 0;     # cstring — the event in a sentence ("chariot race")
+    EVD_ENTER   = 8;     # cstring — the hub's [E]nter word ("race")
+    EVD_KIND    = 16;    # cstring — one competitor ("team")
+    EVD_VENUE   = 24;    # cstring — the contest screen's banner ("THE HIPPODROME")
+    EVD_START   = 32;    # cstring — what Enter does there ("loose the gates")
+    EVD_STATS   = 40;    # cstring — the four short stat labels, '|'-separated
+    EVD_LONG    = 48;    # cstring — the four long stat labels, '|'-separated
+    EVD_W0      = 56;    # form weights on stat slots 0..3 (they sum to 8)
+    EVD_W1      = 64;
+    EVD_W2      = 72;
+    EVD_W3      = 80;
+    EVD_COST    = 88;    # condition one contest costs your competitor
+    EVD_PURSE   = 96;    # purse, as a percentage of the base purse
+    EVD_HIRE    = 104;   # denarii to hire one at the market
+    EVD_FACTION = 112;   # 1 if its competitors carry a circus faction (the chariot race)
+    EVD_MEET    = 120;   # fn(tier) -> cstring, the venue of each meet on the ladder
+    EVD_CNAME   = 128;   # fn(id) -> cstring, competitor names (0 = yours, 1.. rivals)
+    EVD_CROWN   = 136;   # cstring — the crown screen's banner
+    EVD_GLORY1  = 144;   # cstring x 3 — the crown screen's lines
+    EVD_GLORY2  = 152;
+    EVD_GLORY3  = 160;
+    EVD_SIZE    = 168;
+}
+
+var g_ol_evd = 0;        # the OL_NEVENTS descriptor blocks, built once per process
+
+# Build the descriptor table (idempotent). main.cyr calls it with the door
+# registry, once per process; ol_evd calls it too, so the unit harness needs
+# no setup. The table comes from alloc() and lives as long as the process,
+# like the registry.
+fn ol_events_init(): i64 {
+    if (g_ol_evd != 0) { return 0; }
+    g_ol_evd = alloc(OL_NEVENTS * EVD_SIZE);
+    memset(g_ol_evd, 0, OL_NEVENTS * EVD_SIZE);
+    var d = g_ol_evd + EV_CHARIOT * EVD_SIZE;
+    store64(d + EVD_NAME, "chariot race");      store64(d + EVD_ENTER, "race");
+    store64(d + EVD_KIND, "team");              store64(d + EVD_VENUE, "THE HIPPODROME");
+    store64(d + EVD_START, "loose the gates");
+    store64(d + EVD_STATS, "Spd|Sta|Hnd|Nrv");  store64(d + EVD_LONG, "Speed|Stamina|Handling|Nerve");
+    store64(d + EVD_W0, 2); store64(d + EVD_W1, 2); store64(d + EVD_W2, 2); store64(d + EVD_W3, 2);
+    store64(d + EVD_COST, 20);  store64(d + EVD_PURSE, 100);  store64(d + EVD_HIRE, 150);
+    store64(d + EVD_FACTION, 1);
+    store64(d + EVD_MEET, &ol_meet_name);       store64(d + EVD_CNAME, &ol_team_name);
+    store64(d + EVD_CROWN, "-- THE TETHRIPPON CROWN --");
+    store64(d + EVD_GLORY1, "You take the Circus Maximus, and the olive crown with it.");
+    store64(d + EVD_GLORY2, "From a Veii dirt track to the greatest course in the world --");
+    store64(d + EVD_GLORY3, "your faction's name is sung across the empire.");
+
+    d = g_ol_evd + EV_MUNUS * EVD_SIZE;
+    store64(d + EVD_NAME, "gladiatorial bout"); store64(d + EVD_ENTER, "bout");
+    store64(d + EVD_KIND, "gladiator");         store64(d + EVD_VENUE, "THE ARENA");
+    store64(d + EVD_START, "sound the horn");
+    store64(d + EVD_STATS, "Str|End|Skl|Crg");  store64(d + EVD_LONG, "Strength|Endurance|Skill|Courage");
+    store64(d + EVD_W0, 2); store64(d + EVD_W1, 1); store64(d + EVD_W2, 3); store64(d + EVD_W3, 2);
+    store64(d + EVD_COST, 35);  store64(d + EVD_PURSE, 130);  store64(d + EVD_HIRE, 180);
+    store64(d + EVD_MEET, &ol_arena_name);      store64(d + EVD_CNAME, &ol_gladiator_name);
+    store64(d + EVD_CROWN, "-- THE WOODEN SWORD --");
+    store64(d + EVD_GLORY1, "You win the Flavian Amphitheatre, and the rudis: your gladiator walks free.");
+    store64(d + EVD_GLORY2, "From the boards at Fidenae to the greatest arena in the world --");
+    store64(d + EVD_GLORY3, "the crowd chants your name across the empire.");
+
+    d = g_ol_evd + EV_STADION * EVD_SIZE;
+    store64(d + EVD_NAME, "stadion");           store64(d + EVD_ENTER, "race");
+    store64(d + EVD_KIND, "runner");            store64(d + EVD_VENUE, "THE STADIUM");
+    store64(d + EVD_START, "drop the rope");
+    store64(d + EVD_STATS, "Pac|Wnd|Srt|Grt");  store64(d + EVD_LONG, "Pace|Wind|Start|Grit");
+    store64(d + EVD_W0, 4); store64(d + EVD_W1, 1); store64(d + EVD_W2, 2); store64(d + EVD_W3, 1);
+    store64(d + EVD_COST, 12);  store64(d + EVD_PURSE, 70);   store64(d + EVD_HIRE, 90);
+    store64(d + EVD_MEET, &ol_stadium_name);    store64(d + EVD_CNAME, &ol_runner_name);
+    store64(d + EVD_CROWN, "-- THE OLIVE WREATH --");
+    store64(d + EVD_GLORY1, "Your runner takes the stadion at Olympia, and the olive wreath with it.");
+    store64(d + EVD_GLORY2, "From the practice track at Elis to the oldest race in the world --");
+    store64(d + EVD_GLORY3, "the herald cries your name across the Greek world.");
+
+    d = g_ol_evd + EV_REGATTA * EVD_SIZE;
+    store64(d + EVD_NAME, "regatta");           store64(d + EVD_ENTER, "regatta");
+    store64(d + EVD_KIND, "crew");              store64(d + EVD_VENUE, "THE HARBOUR");
+    store64(d + EVD_START, "give the stroke");
+    store64(d + EVD_STATS, "Oar|Sta|Hlm|Tim");  store64(d + EVD_LONG, "Oarpower|Stamina|Helm|Timing");
+    store64(d + EVD_W0, 2); store64(d + EVD_W1, 3); store64(d + EVD_W2, 1); store64(d + EVD_W3, 2);
+    store64(d + EVD_COST, 25);  store64(d + EVD_PURSE, 110);  store64(d + EVD_HIRE, 220);
+    store64(d + EVD_MEET, &ol_harbour_name);    store64(d + EVD_CNAME, &ol_crew_name);
+    store64(d + EVD_CROWN, "-- THE NAVAL CROWN --");
+    store64(d + EVD_GLORY1, "Your crew takes the Naumachia of Augustus, and the naval crown with it.");
+    store64(d + EVD_GLORY2, "From the Tiber at Ostia to the greatest water in the world --");
+    store64(d + EVD_GLORY3, "your oarsmen's song is sung across the empire.");
+    return 0;
+}
+
+# The descriptor block of event `ev`; an id outside [0, OL_NEVENTS) reads as the
+# chariot race (the loader refuses such a save, so this is only a backstop).
+fn ol_evd(ev): i64 {
+    ol_events_init();
+    if (idx_ok(ev, OL_NEVENTS) == 0) { ev = EV_CHARIOT; }
+    return g_ol_evd + ev * EVD_SIZE;
+}
+
+# Append item `k` of the '|'-separated list `list` at buf+pos, within
+# g_door_emit_cap like every door emitter (door.cyr; all-or-nothing, as
+# emit_cstr); an index past the end appends nothing. Returns the new pos.
+fn ol_emit_item(buf, pos, list, k): i64 {
+    var i = 0;
+    var item = 0;
+    var start = 0 - 1;
+    var n = 0;
+    var c = load8(list) & 0xFF;
+    while (c != 0) {
+        if (c == 124) { item = item + 1; }
+        else {
+            if (item == k) {
+                if (start < 0) { start = i; }
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+        c = load8(list + i) & 0xFF;
+    }
+    if (n == 0) { return pos; }
+    if (pos + n > g_door_emit_cap) { return pos; }
+    memcpy(buf + pos, list + start, n);
+    return pos + n;
+}
+
+# The venue of meet `t` for event `ev` (its descriptor's name table).
+fn ol_venue(ev, t): i64 {
+    var fp = load64(ol_evd(ev) + EVD_MEET);
+    return callptr(fp, t);
+}
+
+# Competitor name `id` for event `ev` (0 = the owner's own; rivals 1..).
+fn ol_cname(ev, id): i64 {
+    var fp = load64(ol_evd(ev) + EVD_CNAME);
+    return callptr(fp, id);
+}
+
+# Entrants at meet `tier`: four at the first meet, growing to eight at the
+# last (4 + 4*tier/11 — 4, 5 from the fourth meet, 6, 7, 8 at the Games' end).
+# The roadmap's "a flat 4 entrants at every meet". Pure.
+fn ol_field_size(tier): i64 {
+    var t = iclamp(tier, 0, OL_MAX_TIER - 1);
+    return OL_FIELD_BASE + (t * (OL_FIELD_MAX - OL_FIELD_BASE)) / (OL_MAX_TIER - 1);
+}
+
+# 1 if the stable already fields a competitor for event `ev`, else 0.
+fn ol_fields_event(st, ev): i64 {
+    var n = load64(st + OL_NCOMP);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        if (load64(ol_comp(st, i) + CMP_TYPE) == ev) { found = 1; }
+        i = i + 1;
+    }
+    return found;
+}
+
+# Hire a fresh competitor for event `ev` at the market: one per event, paid in
+# denarii. Returns 0 hired (and selected) / 1 already fielded / 2 cannot afford
+# / 3 no such event / 4 the stable is full.
+fn ol_hire(st, ev): i64 {
+    if (idx_ok(ev, OL_NEVENTS) == 0)          { return 3; }
+    if (ol_fields_event(st, ev) == 1)         { return 1; }
+    var n = load64(st + OL_NCOMP);
+    if (n >= OL_STABLE_MAX)                   { return 4; }
+    var cost = load64(ol_evd(ev) + EVD_HIRE);
+    if (cost > load64(st + OL_MONEY))         { return 2; }
+    store64(st + OL_MONEY, load64(st + OL_MONEY) - cost);
+    ol_make_competitor(st, n, ev,
+      OL_STAT_START, OL_STAT_START, OL_STAT_START, OL_STAT_START, 100, FAC_BLUE, 0);
+    store64(st + OL_NCOMP, n + 1);
+    store64(st + OL_SEL, n);
+    return 0;
 }
 
 # === Competitor accessors + form ===
@@ -152,13 +346,16 @@ fn ol_make_competitor(st, i, type, s0, s1, s2, s3, cond, faction, nameid): i64 {
     return 0;
 }
 
-# A chariot team's FORM: the sum of its four stats scaled by condition.
-# This is the weight the competition draw uses and the number the book
-# prices odds from — training raises it, fatigue lowers it. Floored at 1
-# for any live team so it always has a (slim) chance. Pure.
-fn ol_chariot_form(c): i64 {
-    var raw = load64(c + CMP_SPEED) + load64(c + CMP_STAMINA)
-    + load64(c + CMP_HANDLE) + load64(c + CMP_NERVE);
+# A competitor's FORM: its four stats weighted by its event (ol_events_init;
+# the weights sum to 8, so the chariot's even 2/2/2/2 is the plain sum),
+# halved, and scaled by condition. This is the weight the competition draw
+# uses and the number the book prices odds from — training raises it,
+# fatigue lowers it. Floored at 1 for any live competitor so it always has a
+# (slim) chance. Pure.
+fn ol_form(c): i64 {
+    var d = ol_evd(load64(c + CMP_TYPE));
+    var raw = (load64(d + EVD_W0) * load64(c + CMP_SPEED) + load64(d + EVD_W1) * load64(c + CMP_STAMINA)
+      + load64(d + EVD_W2) * load64(c + CMP_HANDLE) + load64(d + EVD_W3) * load64(c + CMP_NERVE)) / 2;
     if (raw <= 0) { return 0; }
     var cond = load64(c + CMP_COND);
     if (cond < 0)   { cond = 0; }
@@ -315,10 +512,10 @@ fn ol_spend_action(st): i64 {
 }
 
 # Advance to the next day: refill the action ration, bump the day counter.
-# (1.8.1, audit hygiene H3 — this said wall-clock gating of the refill was
-# "wired in the loop bite". It never was: `[N]ext-day` refills on demand and
-# OL_LASTDAY is only round-tripped through the save. A real daily ration is
-# roadmap § 1.12.0.)
+# Pure; the `[N]ext-day` key gates it on the daily ration first (1.12.0, ADR
+# 0032), so a Solo owner gets g_door_days of them per UTC day. Until 1.12.0
+# the key refilled on demand and OL_LASTDAY was only round-tripped through the
+# save (audit 1.8.1 I5).
 fn ol_day_advance(st): i64 {
     store64(st + OL_DAY, load64(st + OL_DAY) + 1);
     store64(st + OL_ACTIONS, OL_DAY_ACTIONS);
@@ -431,11 +628,99 @@ fn ol_team_name(id): i64 {
     return "the Wreck-makers";
 }
 
-# === The chariot race event (bite 2) ===
+# 1.12.0 — the gladiatorial bout's ladder: twelve arenas, from a wooden one at
+# Fidenae to the Flavian Amphitheatre in Rome.
+fn ol_arena_name(t): i64 {
+    if (t == 0)  { return "the wooden arena at Fidenae"; }
+    if (t == 1)  { return "the old arena at Capua"; }
+    if (t == 2)  { return "the Pompeii amphitheatre"; }
+    if (t == 3)  { return "the Puteoli arena"; }
+    if (t == 4)  { return "the Verona arena"; }
+    if (t == 5)  { return "the arena at Nemausus"; }
+    if (t == 6)  { return "the arena at Arelate"; }
+    if (t == 7)  { return "the Italica amphitheatre"; }
+    if (t == 8)  { return "the Pola arena"; }
+    if (t == 9)  { return "the amphitheatre at Thysdrus"; }
+    if (t == 10) { return "the Carthage amphitheatre"; }
+    return "the Flavian Amphitheatre";
+}
+
+# Gladiators by table index (yours is 0, a free volunteer like the one Pompeii's
+# walls remember beating Hilarus; rivals draw from the rest).
+fn ol_gladiator_name(id): i64 {
+    if (id == 0) { return "Marcus Attilius"; }
+    if (id == 1) { return "Hilarus the murmillo"; }
+    if (id == 2) { return "Flamma the secutor"; }
+    if (id == 3) { return "Priscus the thraex"; }
+    if (id == 4) { return "Verus the retiarius"; }
+    if (id == 5) { return "Spiculus of Nero's school"; }
+    if (id == 6) { return "Crixus the Gaul"; }
+    return "Carpophorus the hunter";
+}
+
+# 1.12.0 — the stadion's ladder: twelve stadia, from the practice track at Elis
+# to the stadium at Olympia.
+fn ol_stadium_name(t): i64 {
+    if (t == 0)  { return "the practice track at Elis"; }
+    if (t == 1)  { return "the Argos stadium"; }
+    if (t == 2)  { return "the Epidaurus stadium"; }
+    if (t == 3)  { return "the Messene stadium"; }
+    if (t == 4)  { return "the Rhodes stadium"; }
+    if (t == 5)  { return "the Isthmian stadium at Corinth"; }
+    if (t == 6)  { return "the Nemean stadium"; }
+    if (t == 7)  { return "the Pythian stadium at Delphi"; }
+    if (t == 8)  { return "the Panathenaic stadium at Athens"; }
+    if (t == 9)  { return "the Sebasta at Neapolis"; }
+    if (t == 10) { return "the stadium of Domitian at Rome"; }
+    return "the stadium at Olympia";
+}
+
+# Runners by table index (yours is 0; rivals are Olympic victors).
+fn ol_runner_name(id): i64 {
+    if (id == 0) { return "Astylos of Croton"; }
+    if (id == 1) { return "Koroibos of Elis"; }
+    if (id == 2) { return "Leonidas of Rhodes"; }
+    if (id == 3) { return "Chionis of Sparta"; }
+    if (id == 4) { return "Phanas of Pellene"; }
+    if (id == 5) { return "Polites of Keramos"; }
+    if (id == 6) { return "Hermogenes of Xanthos"; }
+    return "Phayllos of Croton";
+}
+
+# 1.12.0 — the regatta's ladder: twelve waters, from the Tiber at Ostia to the
+# Naumachia of Augustus.
+fn ol_harbour_name(t): i64 {
+    if (t == 0)  { return "the Tiber bend at Ostia"; }
+    if (t == 1)  { return "the Misenum anchorage"; }
+    if (t == 2)  { return "the Brundisium roads"; }
+    if (t == 3)  { return "the Piraeus"; }
+    if (t == 4)  { return "the Saronic course"; }
+    if (t == 5)  { return "the harbour of Rhodes"; }
+    if (t == 6)  { return "the great harbour of Syracuse"; }
+    if (t == 7)  { return "the Actian games at Nicopolis"; }
+    if (t == 8)  { return "the Isthmian sea-course"; }
+    if (t == 9)  { return "the harbour of Alexandria"; }
+    if (t == 10) { return "the Fucine lake spectacle"; }
+    return "the Naumachia of Augustus";
+}
+
+# Crews (ships) by table index (yours is 0; rivals draw from the rest).
+fn ol_crew_name(id): i64 {
+    if (id == 0) { return "the Halcyon"; }
+    if (id == 1) { return "the Paralos"; }
+    if (id == 2) { return "the Salaminia"; }
+    if (id == 3) { return "the Argo"; }
+    if (id == 4) { return "the Isis of Alexandria"; }
+    if (id == 5) { return "the Rhodian Dolphin"; }
+    if (id == 6) { return "the Victory of Actium"; }
+    return "the Sea-Wolf";
+}
+
+# === The contest (bite 2; every event since 1.12.0) ===
 #
 # An EVENT is a field-builder + a form function + render flavour over the
-# event-agnostic compete() primitive. This is the first; gladiators /
-# athletics / boat crews are added the same way (ADR 0016).
+# event-agnostic compete() primitive. The chariot race came first; the bout,
+# the stadion and the regatta (1.12.0) are descriptor blocks above.
 
 # Ordinal string for a 1-based place (1st/2nd/3rd/Nth). Returns just the
 # suffix-less small set agora needs; places past 8 are rare (field cap 8).
@@ -450,13 +735,15 @@ fn ol_ordinal(p): i64 {
     return "8th";
 }
 
-# Generate a rival chariot into competitor block `c` from the SEEDED PRNG
+# Generate a rival for event `ev` into competitor block `c` from the SEEDED PRNG
 # (replayable — a save replays the same field). Strength scales with the
-# season tier; stats vary ±3 around the tier baseline, clamped in range.
-fn ol_gen_rival(st, c, tier, idx): i64 {
+# season tier; stats vary ±3 around the tier baseline, clamped in range. Every
+# event draws the same five numbers in the same order, so the field a save
+# replays does not depend on which event the owner entered before.
+fn ol_gen_rival(st, c, ev, tier, idx): i64 {
     var rp = st + OL_RNG;
     var base = OL_STAT_START + tier * 2;
-    store64(c + CMP_TYPE,    EV_CHARIOT);
+    store64(c + CMP_TYPE,    ev);
     store64(c + CMP_SPEED,   iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
     store64(c + CMP_STAMINA, iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
     store64(c + CMP_HANDLE,  iclamp(base + rng_range(rp, 0, 6) - 3, 1, OL_STAT_CAP));
@@ -467,24 +754,26 @@ fn ol_gen_rival(st, c, tier, idx): i64 {
     return 0;
 }
 
-# Assemble the field for the next race: lane 0 = a copy of your selected
-# team (so the race reads its current condition), lanes 1.. = generated
-# rivals. Computes each entrant's form into the forms[] scratch. Returns
-# the field size.
-fn ol_build_chariot_field(st): i64 {
-    var n = OL_RACE_FIELD;
+# Assemble the field for the next contest: lane 0 = a copy of your selected
+# competitor (so the contest reads its current condition), lanes 1.. =
+# generated rivals in its event, as many as the meet calls for
+# (ol_field_size). Computes each entrant's form into the forms[] scratch.
+# Returns the field size.
+fn ol_build_field(st): i64 {
     var tier = load64(st + OL_TIER);
+    var n = ol_field_size(tier);
     var fc = load64(st + OL_FCOMP);
     var forms = load64(st + OL_FIELD);
     memcpy(fc, ol_comp(st, load64(st + OL_SEL)), CMP_SIZE);   # lane 0 = you
+    var ev = load64(fc + CMP_TYPE);
     var i = 1;
     while (i < n) {
-        ol_gen_rival(st, fc + i * CMP_SIZE, tier, i);
+        ol_gen_rival(st, fc + i * CMP_SIZE, ev, tier, i);
         i = i + 1;
     }
     var j = 0;
     while (j < n) {
-        store64(forms + j * 8, ol_chariot_form(fc + j * CMP_SIZE));
+        store64(forms + j * 8, ol_form(fc + j * CMP_SIZE));
         j = j + 1;
     }
     store64(st + OL_FIELDN, n);
@@ -541,15 +830,17 @@ fn ol_run_race(st): i64 {
     }
     store64(st + OL_PLACE, place);
     var tier = load64(st + OL_TIER);
+    var mine = ol_comp(st, load64(st + OL_SEL));
+    var evd = ol_evd(load64(mine + CMP_TYPE));
     var purse = 0;
     if (place == 1) { purse = OL_PURSE_WIN * (tier + 1); }   # purses grow up the ladder
     if (place == 2) { purse = OL_PURSE_2ND * (tier + 1); }
     if (place == 3) { purse = OL_PURSE_3RD * (tier + 1); }
+    purse = (purse * load64(evd + EVD_PURSE)) / 100;         # and with the event's stakes
     store64(st + OL_PURSE, purse);
     store64(st + OL_MONEY, load64(st + OL_MONEY) + purse);
-    # the race tires your real stable team
-    var mine = ol_comp(st, load64(st + OL_SEL));
-    var cond = load64(mine + CMP_COND) - OL_RACE_COND;
+    # the contest tires your real competitor, by what its event costs
+    var cond = load64(mine + CMP_COND) - load64(evd + EVD_COST);
     if (cond < 0) { cond = 0; }
     store64(mine + CMP_COND, cond);
     # settle the wager (a WIN bet: the book pays if your lane wins outright;
@@ -574,13 +865,14 @@ fn ol_run_race(st): i64 {
         store64(st + OL_BETDELTA, bdelta);
     }
     ol_clear_bet(st);
-    # advancement: a win climbs the ladder; winning the final meet (the
-    # Circus Maximus) takes the tethrippon crown and ends the campaign.
+    # advancement: a win in any event climbs the ladder; winning the final
+    # meet takes that event's crown and ends the campaign.
     var crowned = 0;
     if (place == 1) {
         if (tier + 1 >= OL_MAX_TIER) {
             store64(st + OL_CROWNS, load64(st + OL_CROWNS) + 1);
             store64(st + OL_OVER, 1);
+            store64(st + OL_CROWNEV, load64(mine + CMP_TYPE));
             crowned = 1;
         } else {
             store64(st + OL_TIER, tier + 1);
@@ -619,13 +911,14 @@ fn ol_emit_odds(buf, pos, ox100): i64 {
 # === Persistence (solo save, bite 5) ===
 #
 # Positional i64 save (door.cyr save_put/get_i64), header "OLYM1". Persists
-# the owner + the whole stable; the OL_RNG cell is saved so the season's
+# the owner + the whole stable, then (1.12.0) the ration's days left — a 1.11
+# save ends before it and loads with a fresh ration. The OL_RNG cell is saved so the season's
 # rival fields stay deterministic across a reload (the ADR-0016 replayable
 # field). Runtime-only fields (screen / cursor / msg / race scratch / bet)
 # are rebuilt on load, never serialized.
 
 # Write the OLYM1 save described above into buf; returns bytes written. `cap` is unchecked: the
-# stable never exceeds OL_STABLE_MAX, which bounds a save at 1,581 bytes (21 per field).
+# stable never exceeds OL_STABLE_MAX, which bounds a save at 1,602 bytes (21 per field).
 fn ol_save_format(st, buf, cap): i64 {
     memcpy(buf, "OLYM1\n", 6);
     var pos = 6;
@@ -654,12 +947,16 @@ fn ol_save_format(st, buf, cap): i64 {
         pos = save_put_i64(buf, pos, load64(c + CMP_NAMEID));
         i = i + 1;
     }
+    pos = save_put_i64(buf, pos, load64(st + OL_RLEFT));
     return pos;
 }
 
 # Parse a saved owner. Builds a fresh state (so the runtime scratch is
 # allocated) then overwrites the persisted fields. Returns the state, or 0
 # on a bad header. The competitor count is clamped to the stable ceiling.
+# 1.12.0 — a competitor's event indexes the descriptor table, so a save naming
+# an event that does not exist is refused (0), like any other bad save; its
+# stats and condition are clamped into range, as training would keep them.
 fn ol_load_parse(buf, len): i64 {
     if (len < 6) { return 0; }
     if (memeq(buf, "OLYM1\n", 6) == 0) { return 0; }
@@ -681,18 +978,22 @@ fn ol_load_parse(buf, len): i64 {
     if (n > OL_STABLE_MAX) { n = OL_STABLE_MAX; }
     store64(st + OL_NCOMP, n);
     var i = 0;
+    var bad = 0;
     while (i < n) {
         var c = ol_comp(st, i);
         store64(c + CMP_TYPE,    save_get_i64(buf, len, cur));
-        store64(c + CMP_SPEED,   save_get_i64(buf, len, cur));
-        store64(c + CMP_STAMINA, save_get_i64(buf, len, cur));
-        store64(c + CMP_HANDLE,  save_get_i64(buf, len, cur));
-        store64(c + CMP_NERVE,   save_get_i64(buf, len, cur));
-        store64(c + CMP_COND,    save_get_i64(buf, len, cur));
+        store64(c + CMP_SPEED,   iclamp(save_get_i64(buf, len, cur), 0, OL_STAT_CAP));
+        store64(c + CMP_STAMINA, iclamp(save_get_i64(buf, len, cur), 0, OL_STAT_CAP));
+        store64(c + CMP_HANDLE,  iclamp(save_get_i64(buf, len, cur), 0, OL_STAT_CAP));
+        store64(c + CMP_NERVE,   iclamp(save_get_i64(buf, len, cur), 0, OL_STAT_CAP));
+        store64(c + CMP_COND,    iclamp(save_get_i64(buf, len, cur), 0, 100));
         store64(c + CMP_FACTION, save_get_i64(buf, len, cur));
         store64(c + CMP_NAMEID,  save_get_i64(buf, len, cur));
+        if (idx_ok(load64(c + CMP_TYPE), OL_NEVENTS) == 0) { bad = 1; }
         i = i + 1;
     }
+    if (bad == 1) { ol_free(st); return 0; }
+    store64(st + OL_RLEFT, save_get_i64(buf, len, cur));
     store64(st + OL_SCREEN, OSCR_STABLE);
     return st;
 }
@@ -731,8 +1032,201 @@ fn ol_render_msg(st, buf, pos): i64 {
     return pos;
 }
 
-# Render the owner's hub: day / money / actions + the stable roster, plus
-# the Hippodrome race + result screens (bite 2).
+# Append a competitor's display name: its circus faction first where its event
+# has factions (the chariot race: "Blue the Boreads"), else just the name.
+fn ol_emit_cname(buf, pos, c): i64 {
+    var ev = load64(c + CMP_TYPE);
+    if (load64(ol_evd(ev) + EVD_FACTION) == 1) {
+        pos = emit_cstr(buf, pos, ol_faction_name(load64(c + CMP_FACTION)));
+        pos = emit_cstr(buf, pos, " ");
+    }
+    return emit_cstr(buf, pos, ol_cname(ev, load64(c + CMP_NAMEID)));
+}
+
+# The crown screen: the crowning event's banner and lines (the chariot race's
+# are the 1.3.6 text), then the tally. Returns the new pos.
+fn ol_render_over(st, buf, pos): i64 {
+    if (load64(st + OL_CROWNS) > 0) {
+        var d = ol_evd(load64(st + OL_CROWNEV));
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, load64(d + EVD_CROWN));
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, load64(d + EVD_GLORY1));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, load64(d + EVD_GLORY2));
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, load64(d + EVD_GLORY3));
+        pos = emit_crlf(buf, pos);
+    } else {
+        pos = emit_cstr(buf, pos, "-- THE GAMES CLOSE --");
+        pos = emit_crlf(buf, pos);
+    }
+    pos = emit_cstr(buf, pos, "Crowns: ");
+    pos = emit_int(buf, pos, load64(st + OL_CROWNS));
+    pos = emit_cstr(buf, pos, "   Denarii: ");
+    pos = emit_int(buf, pos, load64(st + OL_MONEY));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Standing: ");
+    pos = emit_cstr(buf, pos, ol_rank(ol_final_score(st)));
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "Press Enter to leave.");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+# The contest screen: the venue, the field with each entrant's form bar and
+# odds, the wager line, the prompt. Returns the new pos.
+fn ol_render_race(st, buf, pos): i64 {
+    var fc = load64(st + OL_FCOMP);
+    var ev = load64(fc + CMP_TYPE);
+    var d = ol_evd(ev);
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "-- ");
+    pos = emit_cstr(buf, pos, load64(d + EVD_VENUE));
+    pos = emit_cstr(buf, pos, ": the field assembles --");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "at ");
+    pos = emit_cstr(buf, pos, ol_venue(ev, load64(st + OL_TIER)));
+    pos = emit_crlf(buf, pos);
+    var rn = load64(st + OL_FIELDN);
+    var forms = load64(st + OL_FIELD);
+    var i = 0;
+    while (i < rn) {
+        pos = emit_cstr(buf, pos, " Lane ");
+        pos = emit_int(buf, pos, i + 1);
+        pos = emit_cstr(buf, pos, "  ");
+        pos = ol_emit_cname(buf, pos, fc + i * CMP_SIZE);
+        if (i == 0) { pos = emit_cstr(buf, pos, " (you)"); }
+        pos = emit_crlf(buf, pos);
+        pos = emit_cstr(buf, pos, "   ");
+        pos = ol_emit_bar(buf, pos, load64(forms + i * 8));
+        pos = emit_cstr(buf, pos, "  pays ");
+        pos = ol_emit_odds(buf, pos, ol_fair_odds_x100(forms, rn, i));
+        pos = emit_crlf(buf, pos);
+        i = i + 1;
+    }
+    pos = emit_crlf(buf, pos);
+    var bl = load64(st + OL_BETLANE);
+    if (bl == 0) {
+        pos = emit_cstr(buf, pos, "No wager. Type '<lane> <stake>' to bet (min ");
+        pos = emit_int(buf, pos, OL_BET_MIN);
+        pos = emit_cstr(buf, pos, ").");
+    } else {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "Your wager: ");
+        pos = emit_int(buf, pos, load64(st + OL_BETSTAKE));
+        pos = emit_cstr(buf, pos, " on Lane ");
+        pos = emit_int(buf, pos, bl);
+        pos = emit_reset(buf, pos);
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "[Enter] ");
+    pos = emit_cstr(buf, pos, load64(d + EVD_START));
+    pos = emit_cstr(buf, pos, "   [x] scratch");
+    pos = emit_crlf(buf, pos);
+    pos = ol_render_msg(st, buf, pos);
+    return pos;
+}
+
+# The finish: the order, your place and purse, the wager's settlement, and a
+# win's step up the ladder. Returns the new pos.
+fn ol_render_result(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "-- THE FINISH --");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    var rn2 = load64(st + OL_FIELDN);
+    var fc2 = load64(st + OL_FCOMP);
+    var order = load64(st + OL_ORDER);
+    var p = 0;
+    while (p < rn2) {
+        var e = load64(order + p * 8);
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_cstr(buf, pos, ol_ordinal(p + 1));
+        pos = emit_cstr(buf, pos, "  ");
+        pos = ol_emit_cname(buf, pos, fc2 + e * CMP_SIZE);
+        if (e == 0) { pos = emit_cstr(buf, pos, " (you)"); }
+        pos = emit_crlf(buf, pos);
+        p = p + 1;
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "You finished ");
+    pos = emit_cstr(buf, pos, ol_ordinal(load64(st + OL_PLACE)));
+    var purse = load64(st + OL_PURSE);
+    if (purse > 0) {
+        pos = emit_cstr(buf, pos, " -- purse ");
+        pos = emit_int(buf, pos, purse);
+        pos = emit_cstr(buf, pos, " denarii.");
+    } else {
+        pos = emit_cstr(buf, pos, " -- out of the money.");
+    }
+    pos = emit_crlf(buf, pos);
+    if (load64(st + OL_BETHAD) == 1) {
+        var bd = load64(st + OL_BETDELTA);
+        if (bd > 0) {
+            pos = emit_cstr(buf, pos, "Your wager pays +");
+            pos = emit_int(buf, pos, bd);
+            pos = emit_cstr(buf, pos, " denarii.");
+        } else {
+            if (bd == 0) {
+                pos = emit_cstr(buf, pos, "Your lane won, but the odds were too short to profit.");
+            } else {
+                pos = emit_cstr(buf, pos, "Your wager loses ");
+                pos = emit_int(buf, pos, 0 - bd);
+                pos = emit_cstr(buf, pos, " denarii.");
+            }
+        }
+        pos = emit_crlf(buf, pos);
+    }
+    if (load64(st + OL_PLACE) == 1) {
+        pos = emit_sgr(buf, pos, 33);
+        pos = emit_cstr(buf, pos, "You win the meet! On to ");
+        pos = emit_cstr(buf, pos, ol_venue(load64(fc2 + CMP_TYPE), load64(st + OL_TIER)));
+        pos = emit_cstr(buf, pos, ".");
+        pos = emit_reset(buf, pos);
+        pos = emit_crlf(buf, pos);
+    }
+    pos = emit_cstr(buf, pos, "[Enter] back to the stable");
+    pos = emit_crlf(buf, pos);
+    return pos;
+}
+
+# The market (1.12.0): each event, what one competitor costs, and whether the
+# stable already fields one. Returns the new pos.
+fn ol_render_hire(st, buf, pos): i64 {
+    pos = emit_sgr(buf, pos, 36);
+    pos = emit_cstr(buf, pos, "-- THE MARKET: hire a competitor --");
+    pos = emit_reset(buf, pos);
+    pos = emit_crlf(buf, pos);
+    var ev = 0;
+    while (ev < OL_NEVENTS) {
+        var d = ol_evd(ev);
+        pos = emit_cstr(buf, pos, " ");
+        pos = emit_int(buf, pos, ev + 1);
+        pos = emit_cstr(buf, pos, "  a ");
+        pos = emit_cstr(buf, pos, load64(d + EVD_KIND));
+        pos = emit_cstr(buf, pos, " for the ");
+        pos = emit_cstr(buf, pos, load64(d + EVD_NAME));
+        pos = emit_cstr(buf, pos, " -- ");
+        if (ol_fields_event(st, ev) == 1) { pos = emit_cstr(buf, pos, "in your stable"); }
+        else {
+            pos = emit_int(buf, pos, load64(d + EVD_HIRE));
+            pos = emit_cstr(buf, pos, " denarii");
+        }
+        pos = emit_crlf(buf, pos);
+        ev = ev + 1;
+    }
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "[1-4] hire   [x] back to the stable");
+    pos = emit_crlf(buf, pos);
+    pos = ol_render_msg(st, buf, pos);
+    return pos;
+}
+
+# Render the owner's hub: day / money / actions + the stable roster, or the
+# crown, contest, finish or market screen.
 fn ol_render(st, buf, cap): i64 {
     var pos = 0;
     var screen = load64(st + OL_SCREEN);
@@ -742,158 +1236,26 @@ fn ol_render(st, buf, cap): i64 {
     pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "Day ");
     pos = emit_int(buf, pos, load64(st + OL_DAY));
+    pos = door_emit_ration(buf, pos, st + OL_LASTDAY, st + OL_RLEFT, load64(st + OL_MODE));
     pos = emit_cstr(buf, pos, "   Denarii ");
     pos = emit_int(buf, pos, load64(st + OL_MONEY));
     pos = emit_cstr(buf, pos, "   Actions ");
     pos = emit_int(buf, pos, load64(st + OL_ACTIONS));
     pos = emit_crlf(buf, pos);
 
-    if (screen == OSCR_OVER) {
-        if (load64(st + OL_CROWNS) > 0) {
-            pos = emit_sgr(buf, pos, 33);
-            pos = emit_cstr(buf, pos, "-- THE TETHRIPPON CROWN --");
-            pos = emit_reset(buf, pos);
-            pos = emit_crlf(buf, pos);
-            pos = emit_cstr(buf, pos, "You take the Circus Maximus, and the olive crown with it.");
-            pos = emit_crlf(buf, pos);
-            pos = emit_cstr(buf, pos, "From a Veii dirt track to the greatest course in the world --");
-            pos = emit_crlf(buf, pos);
-            pos = emit_cstr(buf, pos, "your faction's name is sung across the empire.");
-            pos = emit_crlf(buf, pos);
-        } else {
-            pos = emit_cstr(buf, pos, "-- THE GAMES CLOSE --");
-            pos = emit_crlf(buf, pos);
-        }
-        pos = emit_cstr(buf, pos, "Crowns: ");
-        pos = emit_int(buf, pos, load64(st + OL_CROWNS));
-        pos = emit_cstr(buf, pos, "   Denarii: ");
-        pos = emit_int(buf, pos, load64(st + OL_MONEY));
-        pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "Standing: ");
-        pos = emit_cstr(buf, pos, ol_rank(ol_final_score(st)));
-        pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "Press Enter to leave.");
-        pos = emit_crlf(buf, pos);
-        return pos;
-    }
+    if (screen == OSCR_OVER)   { return ol_render_over(st, buf, pos); }
+    if (screen == OSCR_RACE)   { return ol_render_race(st, buf, pos); }
+    if (screen == OSCR_RESULT) { return ol_render_result(st, buf, pos); }
+    if (screen == OSCR_HIRE)   { return ol_render_hire(st, buf, pos); }
 
-    if (screen == OSCR_RACE) {
-        pos = emit_sgr(buf, pos, 36);
-        pos = emit_cstr(buf, pos, "-- THE HIPPODROME: the field assembles --");
-        pos = emit_reset(buf, pos);
-        pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "at ");
-        pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
-        pos = emit_crlf(buf, pos);
-        var rn = load64(st + OL_FIELDN);
-        var fc = load64(st + OL_FCOMP);
-        var forms = load64(st + OL_FIELD);
-        var i = 0;
-        while (i < rn) {
-            var c = fc + i * CMP_SIZE;
-            pos = emit_cstr(buf, pos, " Lane ");
-            pos = emit_int(buf, pos, i + 1);
-            pos = emit_cstr(buf, pos, "  ");
-            pos = emit_cstr(buf, pos, ol_faction_name(load64(c + CMP_FACTION)));
-            pos = emit_cstr(buf, pos, " ");
-            pos = emit_cstr(buf, pos, ol_team_name(load64(c + CMP_NAMEID)));
-            if (i == 0) { pos = emit_cstr(buf, pos, " (you)"); }
-            pos = emit_crlf(buf, pos);
-            pos = emit_cstr(buf, pos, "   ");
-            pos = ol_emit_bar(buf, pos, load64(forms + i * 8));
-            pos = emit_cstr(buf, pos, "  pays ");
-            pos = ol_emit_odds(buf, pos, ol_fair_odds_x100(forms, rn, i));
-            pos = emit_crlf(buf, pos);
-            i = i + 1;
-        }
-        pos = emit_crlf(buf, pos);
-        var bl = load64(st + OL_BETLANE);
-        if (bl == 0) {
-            pos = emit_cstr(buf, pos, "No wager. Type '<lane> <stake>' to bet (min ");
-            pos = emit_int(buf, pos, OL_BET_MIN);
-            pos = emit_cstr(buf, pos, ").");
-        } else {
-            pos = emit_sgr(buf, pos, 33);
-            pos = emit_cstr(buf, pos, "Your wager: ");
-            pos = emit_int(buf, pos, load64(st + OL_BETSTAKE));
-            pos = emit_cstr(buf, pos, " on Lane ");
-            pos = emit_int(buf, pos, bl);
-            pos = emit_reset(buf, pos);
-        }
-        pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "[Enter] loose the gates   [x] scratch");
-        pos = emit_crlf(buf, pos);
-        pos = ol_render_msg(st, buf, pos);
-        return pos;
-    }
-
-    if (screen == OSCR_RESULT) {
-        pos = emit_sgr(buf, pos, 36);
-        pos = emit_cstr(buf, pos, "-- THE FINISH --");
-        pos = emit_reset(buf, pos);
-        pos = emit_crlf(buf, pos);
-        var rn2 = load64(st + OL_FIELDN);
-        var fc2 = load64(st + OL_FCOMP);
-        var order = load64(st + OL_ORDER);
-        var p = 0;
-        while (p < rn2) {
-            var e = load64(order + p * 8);
-            var c2 = fc2 + e * CMP_SIZE;
-            pos = emit_cstr(buf, pos, " ");
-            pos = emit_cstr(buf, pos, ol_ordinal(p + 1));
-            pos = emit_cstr(buf, pos, "  ");
-            pos = emit_cstr(buf, pos, ol_faction_name(load64(c2 + CMP_FACTION)));
-            pos = emit_cstr(buf, pos, " ");
-            pos = emit_cstr(buf, pos, ol_team_name(load64(c2 + CMP_NAMEID)));
-            if (e == 0) { pos = emit_cstr(buf, pos, " (you)"); }
-            pos = emit_crlf(buf, pos);
-            p = p + 1;
-        }
-        pos = emit_crlf(buf, pos);
-        pos = emit_cstr(buf, pos, "You finished ");
-        pos = emit_cstr(buf, pos, ol_ordinal(load64(st + OL_PLACE)));
-        var purse = load64(st + OL_PURSE);
-        if (purse > 0) {
-            pos = emit_cstr(buf, pos, " -- purse ");
-            pos = emit_int(buf, pos, purse);
-            pos = emit_cstr(buf, pos, " denarii.");
-        } else {
-            pos = emit_cstr(buf, pos, " -- out of the money.");
-        }
-        pos = emit_crlf(buf, pos);
-        if (load64(st + OL_BETHAD) == 1) {
-            var bd = load64(st + OL_BETDELTA);
-            if (bd > 0) {
-                pos = emit_cstr(buf, pos, "Your wager pays +");
-                pos = emit_int(buf, pos, bd);
-                pos = emit_cstr(buf, pos, " denarii.");
-            } else {
-                if (bd == 0) {
-                    pos = emit_cstr(buf, pos, "Your lane won, but the odds were too short to profit.");
-                } else {
-                    pos = emit_cstr(buf, pos, "Your wager loses ");
-                    pos = emit_int(buf, pos, 0 - bd);
-                    pos = emit_cstr(buf, pos, " denarii.");
-                }
-            }
-            pos = emit_crlf(buf, pos);
-        }
-        if (load64(st + OL_PLACE) == 1) {
-            pos = emit_sgr(buf, pos, 33);
-            pos = emit_cstr(buf, pos, "You win the meet! On to ");
-            pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
-            pos = emit_cstr(buf, pos, ".");
-            pos = emit_reset(buf, pos);
-            pos = emit_crlf(buf, pos);
-        }
-        pos = emit_cstr(buf, pos, "[Enter] back to the stable");
-        pos = emit_crlf(buf, pos);
-        return pos;
-    }
-
+    var n = load64(st + OL_NCOMP);
+    var sel = load64(st + OL_SEL);
+    var sc = ol_comp(st, sel);
+    var sev = load64(sc + CMP_TYPE);
+    var sd = ol_evd(sev);
     pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "Next meet: ");
-    pos = emit_cstr(buf, pos, ol_meet_name(load64(st + OL_TIER)));
+    pos = emit_cstr(buf, pos, ol_venue(sev, load64(st + OL_TIER)));
     pos = emit_cstr(buf, pos, " (");
     pos = emit_int(buf, pos, load64(st + OL_TIER) + 1);
     pos = emit_cstr(buf, pos, " of ");
@@ -902,58 +1264,95 @@ fn ol_render(st, buf, cap): i64 {
     pos = emit_crlf(buf, pos);
     pos = emit_cstr(buf, pos, "Your stable:");
     pos = emit_crlf(buf, pos);
-    var n = load64(st + OL_NCOMP);
-    var sel = load64(st + OL_SEL);
     var i = 0;
     while (i < n) {
         var c = ol_comp(st, i);
+        var labels = load64(ol_evd(load64(c + CMP_TYPE)) + EVD_STATS);
         if (i == sel) { pos = emit_cstr(buf, pos, " > "); }
         else          { pos = emit_cstr(buf, pos, "   "); }
-        pos = emit_cstr(buf, pos, ol_faction_name(load64(c + CMP_FACTION)));
-        pos = emit_cstr(buf, pos, " ");
-        pos = emit_cstr(buf, pos, ol_team_name(load64(c + CMP_NAMEID)));
-        pos = emit_cstr(buf, pos, "  Spd ");
-        pos = emit_int(buf, pos, load64(c + CMP_SPEED));
-        pos = emit_cstr(buf, pos, " Sta ");
-        pos = emit_int(buf, pos, load64(c + CMP_STAMINA));
-        pos = emit_cstr(buf, pos, " Hnd ");
-        pos = emit_int(buf, pos, load64(c + CMP_HANDLE));
-        pos = emit_cstr(buf, pos, " Nrv ");
-        pos = emit_int(buf, pos, load64(c + CMP_NERVE));
+        pos = ol_emit_cname(buf, pos, c);
+        var k = 0;
+        while (k < 4) {
+            if (k == 0) { pos = emit_cstr(buf, pos, "  "); }
+            else        { pos = emit_cstr(buf, pos, " "); }
+            pos = ol_emit_item(buf, pos, labels, k);
+            pos = emit_cstr(buf, pos, " ");
+            pos = emit_int(buf, pos, load64(c + CMP_SPEED + k * 8));
+            k = k + 1;
+        }
         pos = emit_cstr(buf, pos, " Cond ");
         pos = emit_int(buf, pos, load64(c + CMP_COND));
         pos = emit_crlf(buf, pos);
         i = i + 1;
     }
     pos = emit_crlf(buf, pos);
-    pos = emit_cstr(buf, pos, "[1-4] train Spd/Sta/Hnd/Nrv  [R]est  [E]nter race  [N]ext-day  [Q]uit");
+    pos = emit_cstr(buf, pos, "[1-4] train ");
+    var j = 0;
+    while (j < 4) {
+        if (j > 0) { pos = emit_cstr(buf, pos, "/"); }
+        pos = ol_emit_item(buf, pos, load64(sd + EVD_STATS), j);
+        j = j + 1;
+    }
+    pos = emit_cstr(buf, pos, "  [R]est  [E]nter ");
+    pos = emit_cstr(buf, pos, load64(sd + EVD_ENTER));
+    pos = emit_cstr(buf, pos, "  [N]ext-day  [Q]uit");
+    pos = emit_crlf(buf, pos);
+    pos = emit_cstr(buf, pos, "[H]ire at the market");
+    if (n > 1) { pos = emit_cstr(buf, pos, "  [S]witch competitor"); }
     pos = emit_crlf(buf, pos);
     pos = ol_render_msg(st, buf, pos);
     return pos;
 }
 
-# Train the selected competitor's stat at offset `stat_off`, spending an
-# action; messages the result. Shared by the four train keys.
-fn ol_do_train(st, stat_off, label): i64 {
+# Train stat slot `k` (0..3) of the selected competitor, spending an action;
+# messages the result in its event's words. Shared by the four train keys.
+fn ol_do_train(st, k): i64 {
     if (ol_spend_action(st) == 0) {
         ol_msg(st, "No training left today. [N]ext-day to rest the stable.");
         return 0;
     }
     var c = ol_comp(st, load64(st + OL_SEL));
-    var gained = ol_train(c, stat_off);
+    var labels = load64(ol_evd(load64(c + CMP_TYPE)) + EVD_LONG);
+    var gained = ol_train(c, CMP_SPEED + k * 8);
     var m = load64(st + OL_MSG);
     var p = 0;
     if (gained <= 0) {
-        p = emit_cstr(m, p, label);
+        p = ol_emit_item(m, p, labels, k);
         p = emit_cstr(m, p, " is already at its peak.");
     } else {
         p = emit_cstr(m, p, "Worked the ");
-        p = emit_cstr(m, p, label);
+        p = ol_emit_item(m, p, labels, k);
         p = emit_cstr(m, p, " hard (+");
         p = emit_int(m, p, gained);
         p = emit_cstr(m, p, ", but they tire).");
     }
     store8(m + p, 0);
+    return 0;
+}
+
+# The market (1.12.0): 1-4 hires a competitor for that event, x or a blank line
+# goes back to the stable. Returns 0.
+fn ol_feed_hire(st, k): i64 {
+    if (k == 120) { store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
+    if (k == 0)   { store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # Enter
+    var ev = k - 49;                                                   # '1' -> event 0
+    var rc = ol_hire(st, ev);
+    if (rc == 3) { ol_msg(st, "Choose 1-4, or x to go back."); return 0; }
+    if (rc == 1) { ol_msg(st, "Your stable already fields one for that event."); return 0; }
+    if (rc == 2) { ol_msg(st, "You cannot afford that one."); return 0; }
+    if (rc == 4) { ol_msg(st, "Your stable is full."); return 0; }
+    var d = ol_evd(ev);
+    var m = load64(st + OL_MSG);
+    var p = 0;
+    p = emit_cstr(m, p, "Hired ");
+    p = emit_cstr(m, p, ol_cname(ev, 0));
+    p = emit_cstr(m, p, ", a ");
+    p = emit_cstr(m, p, load64(d + EVD_KIND));
+    p = emit_cstr(m, p, " for the ");
+    p = emit_cstr(m, p, load64(d + EVD_NAME));
+    p = emit_cstr(m, p, ".");
+    store8(m + p, 0);
+    store64(st + OL_SCREEN, OSCR_STABLE);
     return 0;
 }
 
@@ -963,8 +1362,8 @@ fn ol_feed(st, line, len): i64 {
     var screen = load64(st + OL_SCREEN);
     if (screen == OSCR_OVER) { return 1; }
     var k = door_key(line, len);
-    # The Hippodrome: type "<lane> <stake>" to wager, Enter looses the
-    # gates (settling any wager), x scratches back to the hub.
+    # The contest: type "<lane> <stake>" to wager, Enter starts it (settling
+    # any wager), x scratches back to the hub.
     if (screen == OSCR_RACE) {
         if (k == 120) { ol_clear_bet(st); store64(st + OL_SCREEN, OSCR_STABLE); return 0; }   # x
         if (k == 0)   { return ol_run_race(st); }                          # blank Enter — race
@@ -981,7 +1380,7 @@ fn ol_feed(st, line, len): i64 {
         mp = emit_int(m, mp, stake);
         mp = emit_cstr(m, mp, " on Lane ");
         mp = emit_int(m, mp, lane);
-        mp = emit_cstr(m, mp, ". Enter looses the gates.");
+        mp = emit_cstr(m, mp, ". Enter starts it.");
         store8(m + mp, 0);
         return 0;
     }
@@ -990,24 +1389,35 @@ fn ol_feed(st, line, len): i64 {
         store64(st + OL_SCREEN, OSCR_STABLE);
         return 0;
     }
+    if (screen == OSCR_HIRE) { return ol_feed_hire(st, k); }
     if (k == 113) { return 1; }                                    # q
-    if (k == 49)  { return ol_do_train(st, CMP_SPEED,   "Speed"); }    # 1
-    if (k == 50)  { return ol_do_train(st, CMP_STAMINA, "Stamina"); }  # 2
-    if (k == 51)  { return ol_do_train(st, CMP_HANDLE,  "Handling"); } # 3
-    if (k == 52)  { return ol_do_train(st, CMP_NERVE,   "Nerve"); }    # 4
-    if (k == 101) {                                                # e — enter the next race
+    if (k >= 49) {
+        if (k <= 52) { return ol_do_train(st, k - 49); }           # 1-4
+    }
+    if (k == 101) {                                                # e — enter the next contest
         ol_clear_bet(st);
-        ol_build_chariot_field(st);
+        ol_build_field(st);
         store64(st + OL_SCREEN, OSCR_RACE);
+        return 0;
+    }
+    if (k == 104) { store64(st + OL_SCREEN, OSCR_HIRE); return 0; }   # h — the market
+    if (k == 115) {                                                # s — switch competitor
+        var n = load64(st + OL_NCOMP);
+        if (n <= 1) { ol_msg(st, "Your stable has one competitor. [H]ire another at the market."); return 0; }
+        store64(st + OL_SEL, (load64(st + OL_SEL) + 1) % n);
         return 0;
     }
     if (k == 114) {                                                # r — rest
         if (ol_spend_action(st) == 0) { ol_msg(st, "No actions left. [N]ext-day."); return 0; }
         ol_rest(ol_comp(st, load64(st + OL_SEL)));
-        ol_msg(st, "The team rests; condition recovers.");
+        ol_msg(st, "Your competitor rests; condition recovers.");
         return 0;
     }
     if (k == 110) {                                                # n — next day
+        if (door_ration_take(st + OL_LASTDAY, st + OL_RLEFT, load64(st + OL_MODE)) == 0) {
+            ol_msg(st, door_ration_spent());
+            return 0;
+        }
         ol_day_advance(st);
         ol_msg(st, "A new day at the Games. Actions refilled.");
         return 0;

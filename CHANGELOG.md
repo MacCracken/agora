@@ -4,6 +4,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-13 (Olympiad events + door content)
+
+The doors get their missing content. The Olympiad gains the three events its competition engine was built for:
+- the gladiatorial bout, the stadion foot race and the regatta, beside the chariot race;
+- a market to hire a competitor for each, and a race field that grows from four entrants to eight up the ladder.
+
+Elsewhere:
+- Decode/Words accepts real English words (8,636 of them) instead of only its 532 answers.
+- Smuggler's Ledger, Port Authority, The Handler and the Olympiad get the wall-clock daily ration their ADRs
+  described: a saved run advances at most `--door-days` game days per UTC day (ADR
+  [0032](docs/adr/0032-daily-ration.md)).
+- Ashes of Empire no longer closes for good when one player takes the map: the age turns, and the victor's win
+  is posted.
+- Each Port Authority Universe ship rolls its own dice.
+
+The six rows of roadmap § 1.12.0, closing audit 1.8.1 I4–I7.
+
+**274** tests (259 module + 15 serve-layer), also on aarch64 under qemu; both fuzz harnesses plain and
+`--poison=ab`; **38** example smokes (new: 38), both CI legs green; `cyrius audit` exit 0. `build/agora`
+**1,041,936 → 1,109,304 B** (about 43 KB of it the guess dictionary); `--agnos` 1,038,496 → 1,101,768 B;
+`--aarch64` 2,483,528 → 2,530,408 B. Closeout Pass run (minor bump).
+
+### Breaking
+
+- **Saved door runs are rationed by default.** A Solo or Universe run of Smuggler's Ledger, Port Authority, The
+  Handler or the Olympiad now advances at most 10 game days per UTC day: a jet, `n`, `e` or `[N]ext-day` past
+  that is refused with "That's all the days a run gets today -- it picks up again tomorrow (UTC)", and the
+  header shows "N more today". Practice runs are not rationed. **Migration:** `agora serve --door-days 0`
+  restores the old behaviour; any other number from 0 to 1000 sets the allowance (`--door-days 2` is ADR 0009's
+  original BBS rhythm). Smoke 10, which plays a whole quarter in one sitting, now runs with `--door-days 0`.
+
+### Fixed
+
+- **Ashes of Empire closed for good after a domination** (audit 1.8.1 I6). Once one player held all twelve
+  provinces their run was over on every visit, and no one else could found an empire (no neutral province
+  was left). The victor's win reached `scores ashes` only if they were connected when the turn resolved: a
+  domination found by the resolution their own entry ran was counted as "already over" and never posted. Now
+  the turn that completes a domination ends the age (ADR 0014 amendment):
+  - the map is re-minted from the next seed, with new terrain and neutral garrisons;
+  - orders and pacts are swept away;
+  - the victor's fingerprint is left as a laurel. They claim it on their next visit or line, whenever that is:
+    "THE AGE IS YOURS", an Imperator row (1,200) on the leaderboard, once;
+  - everyone else is founded in the new age, with the news if they saw the old one.
+
+  The launcher now takes "over at entry" before the world opens, so a claim on entry posts.
+- **Every Port Authority Universe ship rolled the same dice** (audit 1.8.1 I7). The launcher seeded each new
+  Universe ship with the galaxy seed (`DD_UNI_SEED`), so their combat / event PRNGs started identical. `pa_new`
+  keeps the galaxy seed for the shared map in Universe mode and seeds the ship from the launcher's clock. The
+  descriptor slot is gone (ADR 0010 / 0020 notes). Existing ships keep the PRNG cell they have.
+
+### Added
+
+- **The Olympiad's later events** (ADR 0016 amendment), each one descriptor block in `ol_events_init` with no
+  change to `compete()`, the book, the ladder or the save format:
+
+  | Event | Stats | Contest costs | Purse | Venues |
+  |---|---|---:|---:|---|
+  | the gladiatorial bout | Strength / Endurance / Skill / Courage | 35 | 130% | Fidenae → the Flavian Amphitheatre |
+  | the stadion | Pace / Wind / Start / Grit | 12 | 70% | Elis → Olympia |
+  | the regatta | Oarpower / Stamina / Helm / Timing | 25 | 110% | Ostia → the Naumachia of Augustus |
+
+  - Each event's form weights its four stats differently (they sum to 8; the chariot's even weights are the
+    old plain sum). Each has its own rivals and crown ("the wooden sword", "the olive wreath", "the naval
+    crown").
+  - **The market** (`h`) hires one competitor per event for denarii (90 to 220); `s` switches between them.
+    The twelve-meet ladder is the owner's standing, shared by the whole stable: a win in any event climbs
+    it, and a win at the last meet takes that event's crown.
+- **The field grows with the meet**: four entrants at the first meet, then 5, 6, 7 and eight at the last
+  (`ol_field_size`). It was a flat four.
+- **Decode/Words' guess dictionary** (ADR 0018 amendment): every five-letter ENABLE word plus every answer,
+  8,636 words, sorted, checked by binary search. The 532-word answer pool is unchanged word for word and in
+  order, so seeded games and the Handler's decrypt lever replay the same secrets; t258 pins it with a hash.
+  `scripts/gen-decode-guesses.py` regenerates the list and records its source, checksum and rule.
+- **The daily ration** (ADR [0032](docs/adr/0032-daily-ration.md)), in `door.cyr`:
+  - `door_ration_take` / `_peek` / `door_emit_ration`, with two cells per game: the UTC day of the last refill
+    and the days left.
+  - Gated at the one call that advances a day in each of the four doors. The Olympiad's `OL_LASTDAY`, saved
+    but never read until now, is its ration day.
+  - The cells are appended to each save, so a 1.11 save loads with a fresh ration and a 1.12 save still loads
+    in 1.11.
+  - A new UTC day refills; so does a clock that went backward.
+  - `agora serve --door-days N` (digits only, 0 to 1000, anything else exits 2) sets the allowance, and the
+    startup lines show it.
+- Tests: **t256** (Port Authority dice), **t257** (Ashes ages, the v3 upgrade, the laurel), **t258** (the guess
+  dictionary), **t259** (the Olympiad events), **t260** (the ration in all four doors and their saves), **s15**
+  (`--door-days`). **Smoke `38-door-content.py`**: all four changes over the wire, both serve models,
+  including a crafted v3 Ashes world turned and claimed.
+
+### Changed
+
+- **Ashes' world snapshot is v4** (3,048 → 3,072 bytes): it appends the age, the unclaimed laurel and the last
+  victor. A v3 snapshot is **upgraded in place** rather than set aside, so running worlds keep their empires; a
+  corrupt v3 is still refused and left untouched. The frame's header shows the age. The per-player save
+  appends the last age seen.
+- The Olympiad loader refuses a save that names an event that does not exist (an event indexes the descriptor
+  table), and clamps stats and condition into range.
+- `ol_form` replaces `ol_chariot_form`, `ol_build_field` replaces `ol_build_chariot_field`, and
+  `decode_word_index` left `src/` (only the tests asked it once the guess dictionary existed). `OL_RACE_FIELD` /
+  `OL_RACE_COND` became `OL_FIELD_BASE` and the per-event costs.
+- README: the source tree lists `decode.cyr`, `decode_words.cyr` and `descent.cyr`, and the smoke list names
+  32–37, which it had left out.
+- CLAUDE.md's allocator gate lists the Olympiad's event table among the deliberate once-per-process
+  allocations; `--door-days` is in `agora help` and the getting-started guide.
+
+### Verification
+
+- `cyrius test`: **259/259** + **15/15**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
+  `--poison=ab`. `cyrius audit` **exit 0**. `scripts/check-version-sync.sh --tag 1.12.0` OK;
+  `scripts/check-toolchain.sh` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them: **fork 25/25, poll 37/37**.
+- **Mutation-checked, 35 mutants, all caught**: the galaxy not shared, the ship's dice from the galaxy seed;
+  domination never ending the age, eleven provinces dominating, the laurel not cleared, a v3 not upgraded, a
+  corrupt order count accepted, the pacts kept, a claimed laurel not over, an online player not refounded, and
+  "over at entry" taken after the claim (smoke 38); the search missing the last word or going the wrong way,
+  the answer pool reordered, no dictionary check; the munus weights, a flat field, rivals all chariots, purse and
+  cost ignoring the event, a second hire per event, a free hire, an unknown event loaded, the crown event
+  unrecorded; no refill on a new day, Practice rationed, a lowered allowance ignored, a take that does not
+  count, each of the four gates removed, the ration cells dropped from two saves; `--door-days` taking a
+  letter.
+- **A/B against a `git archive` 1.11.1 build**: smoke 38 fails 24 checks there (§ A cannot start; every
+  § B–D change), and passes here twice running under both models.
+- Benchmarks: `benches/serve-bench.py all`, A/B with 1.11.1 in the same session, unchanged within noise
+  (BENCHMARKS.md § Serve-level — 1.12.0); `bench_telnet.bcyr` unchanged. The parser and the serve loops are
+  untouched.
+- Closeout: the dead-code floor is the same 10 test-only accessors. The tree-wide deferral lint shows the same
+  4 known false positives. The security re-scan found one new bare `alloc()`, the Olympiad's event table: once
+  per process, built with the door registry. There are no new plain store opens. `ol_emit_item` honours the
+  door emitter cap. `s13`'s 200-drive leak check passes for every door with the new events, the market and the
+  ration in place. Full build from clean, all three targets.
+
 ## [1.11.1] — 2026-10-13 (enforced module invariants)
 
 The door registry (ADR 0020) and the door-state free hook (ADR 0022) each rested on rules that only discipline

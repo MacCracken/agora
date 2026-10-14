@@ -1126,8 +1126,27 @@ fn s14_world_pointer_guard(): i64 {
     return 0;
 }
 
+# s15 — `serve --door-days` (1.12.0, ADR 0032): 0 to DOOR_DAYS_MAX in plain
+# digits, and nothing else — a typo must be refused, not read as 0 (which would
+# switch the ration off).
+fn s15_door_days_flag(): i64 {
+    var name = "s15_door_days_flag";
+    if (serve_parse_days("0") != 0)        { st_fail(name, "0"); return 1; }
+    if (serve_parse_days("10") != 10)      { st_fail(name, "10"); return 1; }
+    if (serve_parse_days("1000") != 1000)  { st_fail(name, "1000"); return 1; }
+    if (serve_parse_days("1001") >= 0)     { st_fail(name, "1001"); return 1; }
+    if (serve_parse_days("12345") >= 0)    { st_fail(name, "five digits"); return 1; }
+    if (serve_parse_days("") >= 0)         { st_fail(name, "empty"); return 1; }
+    if (serve_parse_days("x") >= 0)        { st_fail(name, "a letter"); return 1; }
+    if (serve_parse_days("3x") >= 0)       { st_fail(name, "a trailing letter"); return 1; }
+    if (serve_parse_days("-1") >= 0)       { st_fail(name, "a sign"); return 1; }
+    if (serve_parse_days(" 5") >= 0)       { st_fail(name, "a space"); return 1; }
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s14, remove the store, print the totals, and return 1 on any failure.
+# run s01..s15, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -1153,6 +1172,7 @@ fn serve_tests(): i64 {
     s12_fork_child_lifecycle();
     s13_registry_conformance();
     s14_world_pointer_guard();
+    s15_door_days_flag();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

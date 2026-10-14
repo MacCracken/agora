@@ -1,6 +1,6 @@
 # 0016 — The Olympiad: a competition primitive (one engine, many event skins) on a games-owner frame
 
-> **Status**: Accepted — shipped at **1.3.6** (`src/olympiad.cyr`: the owner/stable frame + the `compete()` primitive + the chariot-race event + the book + the 12-meet ladder to the tethrippon crown + solo save + `scores olympiad`). Later events (gladiators, athletics, boat crews) are thin descriptors on the same primitive. The pari-mutuel book required the `wager_payout` fractional helper added to `wager.cyr` (a favourite pays < 1× profit, inexpressible as an integer multiplier). Built across five bites; unit-tested t189–t197; smoke `docs/examples/17-olympiad.sh`.
+> **Status**: Accepted — **amended at 1.12.0** (the gladiatorial bout, the stadion and the regatta; the market; a growing field). Shipped at **1.3.6** (`src/olympiad.cyr`: the owner/stable frame + the `compete()` primitive + the chariot-race event + the book + the 12-meet ladder to the tethrippon crown + solo save + `scores olympiad`). Later events (gladiators, athletics, boat crews) are thin descriptors on the same primitive. The pari-mutuel book required the `wager_payout` fractional helper added to `wager.cyr` (a favourite pays < 1× profit, inexpressible as an integer multiplier). Built across five bites; unit-tested t189–t197; smoke `docs/examples/17-olympiad.sh`.
 > **Date**: 2026-06-09
 
 ## Context
@@ -67,3 +67,29 @@ This is the same "reproducible where it should be, unpredictable where money rid
 - **Season structure** — the ladder of meets and the championship/crown win condition (QUEST's twelve-master spine is the reference); whether progression is per-Olympiad (four-year cycles) is flavour to settle as the loop lands.
 - **Wall-clock vs turn-based day** — QUEST's daily ration is wall-clock (`clock_epoch_ns`, the "see you tomorrow" hook); a season ladder might prefer a turn-based "advance day." Decided with the loop bite.
 - **Cross-event form** — a single athlete competing across events (a pentathlete) vs specialised competitors per event. The primitive is agnostic (it takes forms); the descriptor decides. Settled per event as events are added.
+
+> **1.12.0 amendment — the later events, and the open questions answered.** The three events promised above
+> shipped as descriptors, and none of them touched the engine, the book, the ladder or the save format:
+>
+> - **Events.** `ol_events_init` holds one block per event: the gladiatorial bout (Strength / Endurance /
+>   Skill / Courage), the stadion foot race (Pace / Wind / Start / Grit) and the regatta (Oarpower / Stamina /
+>   Helm / Timing) beside the chariot race. A block is the event's words, its four stat labels, the weights its
+>   form puts on the four stat slots (summing to 8, so the chariot's even weights are the old plain sum), the
+>   condition one contest costs (20 / 35 / 12 / 25), its purse as a share of the base (100 / 130 / 70 / 110%),
+>   its price at the market, and two name tables: twelve venues and eight competitors. `ol_form` replaced
+>   `ol_chariot_form`; a field is all one event.
+> - **Stable and acquisition** (open question 1): the market (`h`) hires one competitor per event, for
+>   denarii; `s` switches between them; the owner enters whichever suits the meet. Competitors are
+>   specialised (open question 4): each belongs to one event.
+> - **Season structure** (open question 2): one twelve-meet ladder, the owner's standing, shared by the
+>   whole stable. A win in any event climbs it, and a win at the last meet takes that event's crown and ends
+>   the campaign, as before. Each event names its own venues along it (Veii to the Circus Maximus for the
+>   chariots, Fidenae to the Flavian Amphitheatre, Elis to Olympia, Ostia to the Naumachia of Augustus).
+> - **The field grows with the meet** (the roadmap's "a flat 4 entrants at every meet"): `ol_field_size`,
+>   four at the first meet to eight at the last. Every rival draws the same five numbers, so the field a save
+>   replays does not depend on which event was entered.
+> - **Wall-clock vs turn-based day** (open question 3): `[N]ext-day` is gated by the daily ration
+>   ([ADR 0032](0032-daily-ration.md)) in a Solo run; `OL_LASTDAY`, saved but never read until now, is the
+>   ration's day.
+> - **Loader.** A save naming an event that does not exist is refused (the event indexes the descriptor
+>   table); stats and condition are clamped into range. t259, smoke 38 D.
