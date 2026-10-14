@@ -132,9 +132,18 @@ serve()  { port_free
 stop()   { if [ -n "$SRV" ]; then kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""; sleep 0.3; fi; }
 trap 'stop; clean' EXIT
 
+# 1.12.1 — a failure also prints what failed (the script's FAIL lines, a
+# traceback, or its last lines): CI's console is often the only evidence, since
+# the smoke-log artifact needs repository rights to download.
 record() {   # name rc
     if [ "$2" -eq 0 ]; then echo "PASS  $1"; pass=$((pass + 1))
-    else echo "FAIL  $1  (exit $2 — $LOGS/$1.log)"; fail=$((fail + 1)); failed="$failed $1"; fi
+    else
+        echo "FAIL  $1  (exit $2 — $LOGS/$1.log)"; fail=$((fail + 1)); failed="$failed $1"
+        if [ -f "$LOGS/$1.log" ]; then
+            { grep -E 'FAIL|Traceback|Error|error:|assert' "$LOGS/$1.log" || tail -n 5 "$LOGS/$1.log"; } \
+                | tail -n 8 | sed 's/^/      | /'
+        fi
+    fi
 }
 
 run_one() {  # name model cmd...

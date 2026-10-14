@@ -212,7 +212,10 @@ def login(s):
     out = until(s, b"auth:", 3.0)
     nonce = re.search(rb"challenge:\s*([0-9a-f]+)", out).group(1)
     s.sendall(b"auth: " + sign(nonce) + b"\r\n")
-    return b"welcome, qix" in until(s, b"welcome", 3.0)
+    # Wait for the whole greeting: "welcome, " and the handle are separate writes,
+    # and in fork mode they can arrive as separate segments (1.12.1: CI read the
+    # first alone on a two-core runner and called a good login a failure).
+    return b"welcome, qix" in until(s, b"welcome, qix", 3.0)
 
 
 def whoami_ms(s):
@@ -364,7 +367,7 @@ def fork_checks(mud):
     until(a, b"room", 3.0)
     a.sendall(b"quit\r\n")
     check(b"back at the agora" in until(a, b"back at the agora", 4.0), "fork H: back from the MUD")
-    kid = (children_of(p.pid) or [0])[0]
+    kid = max(children_of(p.pid) or [0])
     t0 = time.time()
     p.send_signal(signal.SIGTERM)
     rc = p.wait(10)
@@ -374,7 +377,7 @@ def fork_checks(mud):
     stop(p)
     p = start("fork")
     a = connect()
-    kid = (children_of(p.pid) or [0])[0]
+    kid = max(children_of(p.pid) or [0])   # the newest child: `a`'s (start()'s probe may linger)
     p.send_signal(signal.SIGKILL)
     p.wait()
     check(gone(kid, 3.0), "fork G: a SIGKILLed parent took its child with it (no orphan)")
@@ -412,6 +415,17 @@ def real_client(mud):
         os.write(fd, b)
         pump(t)
 
+    # 1.12.1 — wait for what a step answers, not a fixed time: on a loaded two-core
+    # runner a fixed window can close before the reply, and a missing challenge
+    # crashed the nonce match. `t` is only the upper bound.
+    def send_until(b, needle, t=6.0):
+        m0 = len(out[0])
+        os.write(fd, b)
+        end = time.time() + t
+        while needle not in out[0][m0:] and time.time() < end:
+            pump(0.05)
+        pump(0.3)                       # what follows the needle on the same reply
+
     def text(b):
         return re.sub(rb"\x1b\[[0-9;]*[A-Za-z]", b"", b).decode("utf-8", "replace")
 
@@ -420,21 +434,24 @@ def real_client(mud):
 
     try:
         pump(0.5)
-        send(b"open 127.0.0.1 %d\r" % PORT, 2.0)
+        send_until(b"open 127.0.0.1 %d\r" % PORT, b"> ")
         m = len(out[0])
-        send(b"login qix\r", 1.0)
-        nonce = re.search(rb"challenge:\s*([0-9a-f]+)", out[0][m:]).group(1)
-        send(b"auth: " + sign(nonce) + b"\r", 1.2)
-        send(b"enter pub\r", 0.8)
+        send_until(b"login qix\r", b"auth:")
+        nonce = re.search(rb"challenge:\s*([0-9a-f]+)", out[0][m:])
+        if nonce is None:
+            raise RuntimeError("no challenge from `login qix`: %r" % out[0][m:][-200:])
+        send_until(b"auth: " + sign(nonce.group(1)) + b"\r", b"welcome, qix")
+        send_until(b"enter pub\r", b"> ")
         m = len(out[0])
-        send(b"read 1\r", 1.2)
+        send_until(b"read 1\r", b"> ")
         before = widest(out[0][m:])
-        send(b"descent\r", 1.5)
-        for line in (b"zaxon", b"secret", b"quit"):
-            send(line + b"\r", 1.0)
-        pump(1.0)
+        send_until(b"descent\r", b"known?")
+        send_until(b"zaxon\r", b"Passphrase")
+        send_until(b"secret\r", b"room")
+        send_until(b"quit\r", b"back at the agora")
+        pump(0.5)
         m = len(out[0])
-        send(b"read 1\r", 1.5)
+        send_until(b"read 1\r", b"> ")
         after = widest(out[0][m:])
         m = len(out[0])
         send(b"whoa", 1.0)

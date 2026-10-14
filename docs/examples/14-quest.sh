@@ -21,7 +21,8 @@ PORT=${1:-2327}
 ./build/agora serve "$PORT" --store ./bbs >/tmp/agora-quest-smoke.log 2>&1 &
 SERVER=$!
 trap 'kill "$SERVER" 2>/dev/null || true' EXIT
-sleep 0.5
+# Wait for the listener, up to 10 s (1.12.1: a fixed sleep raced a slow start on a two-core runner).
+for _ in $(seq 100); do (exec 9<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
 
 exec 3<>/dev/tcp/"$HOST"/"$PORT"
 drain() { while IFS= read -r -t "${1:-0.5}" -u 3 line; do printf '%s\n' "$(printf '%s' "$line" | tr -d '\r')"; done; }

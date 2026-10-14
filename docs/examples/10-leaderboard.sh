@@ -30,7 +30,8 @@ rm -rf "$STORE" "$KEYS"; mkdir -p "$KEYS"
 "$BIN" serve "$PORT" --store "$STORE" --door-days 0 >/tmp/agora-leaderboard-10.log 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null || true' EXIT
-sleep 1
+# Wait for the listener, up to 10 s (1.12.1: a fixed sleep raced a slow start on a two-core runner).
+for _ in $(seq 100); do (exec 9<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
 
 python3 - "$PORT" "$KEYS" <<'PY'
 import socket, sys, subprocess, tempfile, binascii, os

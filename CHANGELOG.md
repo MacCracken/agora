@@ -80,6 +80,25 @@ The roadmap is rebuilt as one forward-only file. `roadmap-future.md` is folded i
   verifiable. CLAUDE.md's allocator gate lists the fairness context among the deliberate once-per-slot
   allocations.
 
+### Fixed
+
+- **Smoke 37's login could fail a good login** (CI, poll leg, on the 1.12.1 commit). It read until it saw
+  `welcome`, then required `welcome, qix`. The server sends `welcome, ` and the handle as separate writes, and
+  in fork mode they can arrive as separate segments. On a two-core runner the handle often arrived after
+  the read stopped. The race is older than 1.12.1: pinned to two cores, a 1.12.0 build failed it in 2 runs
+  of 4. Smoke 37 now waits for the whole greeting, and passes 6 runs in 6 on two cores (4 of 5 failed before).
+  No other smoke stops at a partial match: the rest read until the line goes quiet.
+- **Fifteen shell smokes slept a fixed 0.5 or 1 s after starting the server** (07, 09–22). On two loaded cores
+  the listener was not up yet, and smoke 13 failed with "Connection refused" in the same two-core leg run. Each
+  now waits for the port, for up to 10 s. The Python smokes and `run.sh` already did.
+- **Smoke 37's real-telnet section (§ I) advanced on fixed waits**, so a late challenge crashed its nonce match
+  under load. It now waits for each step's reply (prompt, `auth:`, `welcome, qix`, `known?`, `Passphrase`, the
+  room, the return), with the old windows as upper bounds. Its fork-mode checks take the newest child process,
+  not the first (`start()`'s probe connection can still be exiting).
+- **`run.sh` prints what failed**: a failing smoke's FAIL lines, a traceback or its last lines, under the FAIL
+  row. CI's console was the only evidence of this failure, since the smoke-log artifact needs repository rights
+  to download, and it showed only a log path.
+
 ### Verification
 
 - `cyrius test`: **261/261** + **16/16**, the same under `cyrius test --aarch64`. Both fuzz harnesses plain and
