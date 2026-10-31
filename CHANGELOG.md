@@ -79,7 +79,8 @@ limitations).
 - Tree-wide `cyrius lint` over every `src/*.cyr`: **0** untracked deferrals (was 4), 0 warnings.
 - `cyrius test`: **261/261** + **17/17**. `s17` is mutation-checked: the 1.12.2 drain-first order fails it ("make-room
   drained when compacting was enough"). Both fuzz harnesses green, plain and `--poison=ab`. Example smokes:
-  fork **FORK_RESULT**, poll **POLL_RESULT**. `cyrius audit` exits 0.
+  fork **39/39**, poll **38/38** (`--skip 01`), run in a copy of the tree. `cyrius audit` exits 0. Both suites also
+  pass under `cyrius test --aarch64` (qemu-user).
 - `build/agora` **1,201,488 B**, `--agnos` 1,194,016 B, `--aarch64` 2,942,096 B: each 8 B more than 1.12.2.
 - `scripts/check-version-sync.sh --tag 1.12.3` OK. A clean build (`rm -rf build && cyrius deps && CYRIUS_DCE=1
   cyrius build`) passes.
