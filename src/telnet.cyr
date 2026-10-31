@@ -22,7 +22,7 @@
 # announce asks DO LINEMODE; a LINEMODE MODE request is answered per RFC 1184
 # § 2.2 and EDIT hands echoing to the client; SLC is validated and acknowledged
 # per § 5.5; FORWARDMASK and subnegotiations for options never agreed are
-# refused by rule, not "for now".
+# refused by rule, not as a stopgap.
 
 # === RFC 854 § 11.2 command byte values ===
 
@@ -947,7 +947,7 @@ fn telnet_handle_sb(ts): i64 {
     }
 
     # 1.10.0 — subnegotiations for any other option (STATUS, NEW-ENVIRON, …) are
-    # discarded BY RULE, not "for now": agora refuses those options (WONT / DONT),
+    # discarded BY RULE, not as a stopgap: agora refuses those options (WONT / DONT),
     # and RFC 855 allows a subnegotiation only for an option that is enabled — the
     # opt_him gate above has already returned for them. Nothing to answer.
     return 0;

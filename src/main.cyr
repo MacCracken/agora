@@ -2759,6 +2759,7 @@ var g_sess_pool   = 0;   # alloc(MAX_SESS*8): pre-allocated session slots, reuse
 enum SessCap {
     MAX_SESS    = 64;         # concurrent connections in poll mode
     SESS_TX_CAP = 131072;     # per-session non-blocking tx queue (>= POST_MAX_BYTES 64K + headers)
+    SESS_DRAIN_WAIT_US = 250000;  # 1.12.3 — agnos: the ceiling of a drain that may wait (session_drain_wait)
 }
 
 # Per-session struct offsets. One alloc(SESS_SIZE) block per pool slot, reused
@@ -3119,15 +3120,17 @@ fn sess_tx_enqueue(s, buf, len): i64 {
         # listed under poll — on agnos, never at all. Drain what the socket will
         # take now (non-blocking on Linux; one bounded send on agnos), compact
         # the queue, and only flag an overflow if there is still no room.
-        if (session_drain(s) < 0) { store64(s + SESS_TX_OVF, 1); return 1; }
-        var off = load64(s + SESS_TX_OFF);
-        tlen = load64(s + SESS_TX_LEN);
-        if (off > 0) {
-            var tx = load64(s + SESS_TX);
-            memcpy(tx, tx + off, tlen - off);   # forward copy, dst < src
-            tlen = tlen - off;
-            store64(s + SESS_TX_LEN, tlen);
-            store64(s + SESS_TX_OFF, 0);
+        #
+        # 1.12.3 — compact FIRST, and drain only if that is not enough. On agnos
+        # the sweep's drain now sends without waiting, a segment at a time
+        # (session_drain), so a queue there is usually part-sent: the Descent
+        # fills it to `descent_tx_room`, which already counts the sent prefix as
+        # free. Draining first made every such enqueue wait for a segment in
+        # flight when moving the remainder down was all it needed.
+        tlen = sess_tx_compact(s);
+        if (tlen + len > SESS_TX_CAP) {
+            if (session_drain_wait(s, SESS_DRAIN_WAIT_US) < 0) { store64(s + SESS_TX_OVF, 1); return 1; }
+            tlen = sess_tx_compact(s);
         }
         if (tlen + len > SESS_TX_CAP) {
             store64(s + SESS_TX_OVF, 1);
@@ -3139,9 +3142,33 @@ fn sess_tx_enqueue(s, buf, len): i64 {
     return 0;
 }
 
-# Flush session s's tx queue to its socket. Returns 0 = fully drained (queue
-# reset), 1 = partial (remainder kept for the next sweep), <0 = socket error or
-# a refused enqueue (caller closes).
+# Move session s's unsent tx bytes to the front of its queue, so the prefix
+# already sent is free again. Returns the queue's new length.
+fn sess_tx_compact(s): i64 {
+    var off = load64(s + SESS_TX_OFF);
+    var tlen = load64(s + SESS_TX_LEN);
+    if (off > 0) {
+        var tx = load64(s + SESS_TX);
+        memcpy(tx, tx + off, tlen - off);   # forward copy, dst < src
+        tlen = tlen - off;
+        store64(s + SESS_TX_LEN, tlen);
+        store64(s + SESS_TX_OFF, 0);
+    }
+    return tlen;
+}
+
+# Flush session s's tx queue to its socket WITHOUT WAITING: session_drain_wait
+# with no wait. Returns 0 = fully drained (queue reset), 1 = partial (remainder
+# kept for the next sweep), <0 = socket error or a refused enqueue (caller
+# closes). The sweep's drain, the greeting's, and the close path's final flush.
+fn session_drain(s): i64 {
+    return session_drain_wait(s, 0);
+}
+
+# Flush session s's tx queue to its socket. `wait_us` <= 0: never wait (every
+# drain inside the sweep); > 0: on agnos one send may wait up to that long
+# (SESS_DRAIN_WAIT_US: sess_tx_enqueue's make-room, the shutdown goodbye). Linux
+# never waits either way — its sockets are O_NONBLOCK. Returns as session_drain.
 #
 # 1.7.0 (roadmap N3, hole A) — THE OLD DOC COMMENT WAS FALSE and the code rested
 # on it. It claimed "sys_write is non-blocking on both platforms (agnos socket /
@@ -3154,21 +3181,48 @@ fn sess_tx_enqueue(s, buf, len): i64 {
 # was gone, and one slow reader stalled the shared sweep for all 64 sessions.
 # The `EWOULDBLOCK` arm below is unreachable there, so the failure was invisible.
 #
-# There is NO non-blocking send on agnos to switch to: the syscall table has
+# There was NO non-blocking send on agnos to switch to: the syscall table had
 # sock_send #48 and nothing else, no MSG_DONTWAIT and no flags argument, and
-# `sock_recv` #49's would-block return has no send-side peer. So the honest fix
-# is to BOUND the exposure rather than pretend to remove it: on agnos, attempt
+# `sock_recv` #49's would-block return had no send-side peer. So the 1.7.0 fix
+# BOUNDED the exposure rather than pretend to remove it: on agnos, attempt
 # exactly ONE send per drain and hand the remainder to the next sweep via the
-# partial path that already exists. A stalled peer can now cost the sweep one
-# send call instead of an unbounded number, and the 20 ms cadence keeps the
-# other 63 sessions moving. This is a mitigation, not a cure — recorded as such
-# rather than closed, because the real fix is a kernel-side non-blocking send.
+# partial path that already exists. A stalled peer could then cost the sweep one
+# send call (which #48 itself may hold ~8 s) instead of an unbounded number.
+# A mitigation, not a cure, because the real fix was a kernel-side
+# non-blocking send.
+#
+# 1.12.3 — the cure, on agnos >= 1.57.13. That kernel added sock_send_dl #109
+# (cyrius 6.7.11 wraps it): #48 with a caller ceiling, where a NEGATIVE ceiling
+# means no wait at all — it commits what can go out now and returns the count,
+# possibly 0 — and -1 still means the conn is gone or not ours. On such a kernel
+# the drain sends with no wait until the queue is empty or a call commits 0
+# (partial), so the sweep never waits on a slow reader. Pacing: the kernel keeps
+# ONE segment in flight per conn and sends the next only once the last is ACKed
+# (net_tcp.cyr, tcp_send_ex), so a no-wait call commits at most one segment and
+# the call after it commits 0 — a healthy client is paced at about one segment
+# per POLL_MS sweep (1,460 B / 20 ms ~ 73 KB/s at agnos' largest segment, ~27
+# KB/s at its 536-byte default; arithmetic, not measured), where #48 pushed at
+# line rate and held every other session while it did. A kernel without #109
+# keeps the 1.7.0 bound exactly: one #48 per drain. Whether #109 exists is the
+# stdlib's own probe (`_agnos_sock_send_left`, cached in `_agnos_sdl_ok` and
+# shared with every `sys_write` to a socket); `_agnos_sdl_ok == 1` after a call
+# means that call was #109. Never pass #109 a 0 ceiling: 0 means NO ceiling,
+# exactly #48.
+#
+# Two drains may still wait, each ONE send of at most SESS_DRAIN_WAIT_US,
+# measured once from entry and never re-armed by an ACK (so a trickling peer
+# cannot stretch it, as it could #48's window). sess_tx_enqueue's make-room: a
+# command printing more than SESS_TX_CAP needs the peer to take bytes NOW, and
+# agnos has no send buffer beyond the one segment in flight to absorb them, so a
+# no-wait drain there would turn a big `list` back into a dropped session (1.8.1
+# S5). And the shutdown goodbye, which would otherwise be lost behind a segment
+# still in flight.
 #
 # (Hole B) A session whose enqueue was refused returns <0 here even though the
 # socket itself is healthy, so the poll loop's existing `session_drain(s) < 0`
 # close path retires it. The final flush is best-effort and deliberately still
 # runs: the peer may yet read the "bye" already sitting in the queue.
-fn session_drain(s): i64 {
+fn session_drain_wait(s, wait_us): i64 {
     var tx_len = load64(s + SESS_TX_LEN);
     var tx_off = load64(s + SESS_TX_OFF);
     if (tx_off >= tx_len) {
@@ -3179,21 +3233,26 @@ fn session_drain(s): i64 {
     }
     var fd = load64(s + SESS_FD);
     var tx = load64(s + SESS_TX);
+    #ifdef CYRIUS_TARGET_AGNOS
+    var dl = 0 - 1;              # #109's "no wait" — never 0, which is its "no ceiling"
+    if (wait_us > 0) { dl = wait_us; }
+    #endif
     var done = 0;
     var rc = 0;
     while (done == 0) {
         if (tx_off >= tx_len) { done = 1; rc = 0; continue; }
-        # 1.8.1 (audit H5) — on agnos, ONE raw sock_send#48. Since cyrius 6.6.7
-        # the stdlib's agnos `sys_write` on a socket is `_agnos_sock_send_all`,
-        # which retries a 0 ("no progress after ~8 s") until a 30 s stall
-        # deadline that re-arms whenever any byte moves — so one zero-window
-        # peer froze the whole sweep for 30 s+, and a peer ACKing a trickle froze
-        # it indefinitely. That arrived with the 1.8.0 pin move unnoticed; the
-        # raw call restores the bound ADR 0023 documents (one send, then yield).
+        # 1.8.1 (audit H5) — on agnos, never the stdlib's `sys_write`. Since
+        # cyrius 6.6.7 its agnos socket route is `_agnos_sock_send_all`, which
+        # retries a 0 ("no progress after ~8 s") until a 30 s stall deadline that
+        # re-arms whenever any byte moves — so one zero-window peer froze the
+        # whole sweep for 30 s+, and a peer ACKing a trickle froze it
+        # indefinitely. 1.8.1 made ONE raw sock_send#48 instead; since 1.12.3 it
+        # is ONE `_agnos_sock_send_left` per call: #109 with `dl` where the
+        # kernel has it, #48 where it does not.
         #ifdef CYRIUS_TARGET_AGNOS
         var conn = _agnos_fd_conn(fd);
         var n = 0 - 1;
-        if (conn >= 0) { n = sys_sock_send(conn, tx + tx_off, tx_len - tx_off); }
+        if (conn >= 0) { n = _agnos_sock_send_left(conn, tx + tx_off, tx_len - tx_off, dl); }
         #endif
         #ifndef CYRIUS_TARGET_AGNOS
         var n = sys_write(fd, tx + tx_off, tx_len - tx_off);
@@ -3204,12 +3263,16 @@ fn session_drain(s): i64 {
         }
         if (n == 0) { done = 1; rc = 1; continue; }
         tx_off = tx_off + n;
-        # agnos only: one blocking send per drain, then yield to the sweep.
+        # agnos only: send again only after a NO-WAIT #109. A #48 (a kernel before
+        # 1.57.13) or a ceilinged #109 has had its one send; yield to the sweep.
         # `continue` re-tests the loop guard, so the flag+continue idiom is
         # required here — `break` is unreliable in a while body that declares
         # `var` (CLAUDE.md § Cyrius Conventions).
         #ifdef CYRIUS_TARGET_AGNOS
-        if (tx_off < tx_len) { done = 1; rc = 1; continue; }
+        if (tx_off < tx_len) {
+            if (_agnos_sdl_ok != 1) { done = 1; rc = 1; continue; }
+            if (dl > 0) { done = 1; rc = 1; continue; }
+        }
         #endif
     }
     if (rc == 0) {
@@ -3759,7 +3822,9 @@ fn serve_poll_shutdown(sfd, sigfd): i64 {
                 send_str(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
             }
             send_str(cfd, "\r\n(server shutting down -- goodbye)\r\n");
-            session_drain(s);
+            # 1.12.3 — on agnos a no-wait drain would lose the goodbye behind a
+            # segment still in flight; one bounded send waits for it instead.
+            session_drain_wait(s, SESS_DRAIN_WAIT_US);
             sess_save(s);
             session_door_checkpoint(s);      # 1.8.1 (D1) — keep in-game progress
             sock_close(cfd);

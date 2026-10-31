@@ -274,7 +274,7 @@ fn store_append_locked(path, buf, len, durable): i64 {
     if (fd < 0) { return fd; }
     file_lock(fd);
     #ifdef CYRIUS_TARGET_AGNOS
-    xlseek(fd, 0, 2);                  # SEEK_END — agnos AO_APPEND is a kernel TODO
+    xlseek(fd, 0, 2);                  # SEEK_END: no agnos backend honours AO_APPEND
     #endif
     var n = _io_write_full(fd, buf, len);
     if (n == len) { if (durable == 1) { if (xfsync(fd) < 0) { n = 0 - 5; } } }

@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.3] — 2026-10-30 (the agnos drain stops waiting; the deferral check reads 0)
+
+Two changes. **On agnos, the poll sweep's tx drain no longer waits on a slow reader.** agnos 1.57.13 added
+`sock_send_dl` #109, a send with a caller ceiling where a negative ceiling means no wait, and `session_drain` now
+uses it. Roadmap N3's hole A ([ADR 0023](docs/adr/0023-dual-serve-model.md)), bounded since 1.7.0, is cured on a
+kernel that has the call. A kernel before 1.57.13 keeps the 1.7.0 bound, one blocking send per drain, and Linux
+sends as before. **Four source comments are also reworded**, so the tree-wide deferral check (CLAUDE.md § Closeout
+Pass, the allocator gates' "Deferral check, TREE-WIDE") reads **0** again. 1.12.2 recorded the 4 it found under
+both the 6.7.9 and the 6.7.18 linter. All four were prose that the per-line checker reads as a deferral, and none
+was deferred work, so nothing was filed and nothing is hidden behind `#skip-lint`.
+
+**278** tests (261 module + 17 serve-layer; `s17` is new). `build/agora` 1,201,480 → **1,201,488 B**; `--agnos`
+1,194,008 → 1,194,016 B; `--aarch64` 2,942,088 → 2,942,096 B. **Not run on an agnos kernel** (see Known
+limitations).
+
+### Changed
+
+- **agnos: the poll drain sends without waiting** (`session_drain`, now `session_drain_wait(s, 0)`,
+  `src/main.cyr`). 1.12.2 made ONE raw blocking `sock_send` #48 per drain on agnos (the 1.7.0 bound, restored at
+  1.8.1 H5). A slow reader therefore cost the shared sweep one send per sweep, and #48 can hold that send ~8 s.
+  Each drain now calls the stdlib's `_agnos_sock_send_left` with a ceiling of -1. That helper sends with #109
+  where the kernel has it and with #48 where it does not; it probes `#109(conn, buf, 0, 0)` once and caches the
+  answer in `_agnos_sdl_ok`. After a #109 call the drain keeps sending until the queue is empty or a call commits
+  0, which leaves the rest for the next sweep. After a #48 call it stops, as before. A negative return still
+  closes the session (the conn is gone or not ours). The drain never passes a ceiling of 0, which #109 reads as
+  no ceiling at all (#48's own window).
+  - **Pacing.** The agnos kernel keeps one segment in flight per connection and sends the next only once the
+    last is ACKed (`tcp_send_ex`, agnos `kernel/core/net_tcp.cyr`). So a no-wait drain commits at most one
+    segment per sweep, and the call after it commits 0. A healthy client gets about 1,460 B per 20 ms sweep
+    (~73 KB/s; ~27 KB/s at agnos' 536-byte default segment). This is arithmetic from the kernel source, not a
+    measurement. #48 sent at line rate, and held every other session while it did.
+- **Two drains may still wait on agnos, bounded** (`SESS_DRAIN_WAIT_US`, 250 ms). The first is
+  `sess_tx_enqueue`'s make-room drain. A command that prints more than `SESS_TX_CAP` (128 KB) needs the peer to
+  take bytes before the command can go on. Linux absorbs that in its kernel send buffer, but agnos has none beyond
+  the one segment in flight. A no-wait make-room drain would bring back 1.8.1's S5 bug: a big `list` would drop
+  the session. The second is the shutdown goodbye (`serve_poll_shutdown`), which a no-wait drain would lose behind
+  a segment still in flight. Each makes ONE #109 send, with its ceiling measured once from entry and never re-armed
+  by an ACK. A trickling peer cannot stretch it the way it could stretch #48's 8 s window. On a kernel without
+  #109, both are the single #48 they were before.
+- **Make-room compacts before it drains** (`sess_tx_enqueue`, and the new `sess_tx_compact`). On agnos a queue is
+  now usually part-sent, and the Descent fills it up to `descent_tx_room`, which already counts the sent part as
+  free. Draining first made such an enqueue wait for a segment in flight when moving the unsent bytes down was
+  enough. On Linux the reorder saves a write; the overflow rule is unchanged (`s01`).
+- [ADR 0023](docs/adr/0023-dual-serve-model.md) amended (§ Decision, the sweep; § Consequences, the stalls that
+  remain). `session_drain_wait`'s comment records the change, the pacing and the two waits.
+- `src/account.cyr:714` — "Not yet claimed (or left broken by a crashed build)" → "Unclaimed (…)".
+- `src/arena.cyr:277` — "agnos AO_APPEND is a kernel TODO" → "no agnos backend honours AO_APPEND". The statement
+  is still true at agnos 1.57.14: its userland ABI table lists `AO_APPEND` (`0x400`) as honoured by no backend.
+  The explicit `lseek(SEEK_END)` under `flock` stays. This is an upstream gap that the code already works around,
+  not agora work, so it gets no roadmap row.
+- `src/telnet.cyr:25` and `:950` — `not "for now"` → `not as a stopgap`. Both sentences say that the refusal is
+  permanent and comes from a rule; the checker matched the very phrase they reject.
+
+### Known limitations (recorded, not fixed)
+
+- **Built for agnos, not run on agnos.** The agnos send arm compiles only under `--agnos`, and #109 exists only
+  on an agnos kernel. `cyrius test` runs on x86_64 Linux, and on aarch64 Linux under qemu-user, so no test reaches
+  the arm, and no agnos kernel run was made for this cut. What was checked: the kernel source (agnos 1.57.14:
+  `kernel/core/syscall.cyr` #109, and `tcp_send_dl` / `tcp_send_ex` in `net_tcp.cyr`), the stdlib wrapper and its
+  probe, and a clean `--agnos` build. What was not, since each needs a kernel: that the probe picks #109 on 1.57.13+
+  and #48 before it, that a zero-window peer costs the sweep nothing, the pacing figure, and the 250 ms make-room
+  wait.
+- **The Descent's write to the MUD still blocks on agnos.** `descent_mud_write` (`src/descent.cyr`) goes through
+  the stdlib's `sys_write`, whose agnos socket route retries until a 30 s stall deadline. #109 could bound it the
+  same way. It was outside this cut: the MUD is the operator's own service, and the comment there, that #48 has no
+  non-blocking form, is still true of #48.
+- **A command bigger than the queue still costs the agnos sweep.** Each time such a command fills the queue, the
+  sweep can wait up to 250 ms. The total depends on the command's size and the peer's pace, because on agnos there
+  is nowhere else to put the bytes.
+
+### Verification
+
+- Tree-wide `cyrius lint` over every `src/*.cyr`: **0** untracked deferrals (was 4), 0 warnings.
+- `cyrius test`: **261/261** + **17/17**. `s17` is mutation-checked: the 1.12.2 drain-first order fails it ("make-room
+  drained when compacting was enough"). Both fuzz harnesses green, plain and `--poison=ab`. Example smokes:
+  fork **FORK_RESULT**, poll **POLL_RESULT**. `cyrius audit` exits 0.
+- `build/agora` **1,201,488 B**, `--agnos` 1,194,016 B, `--aarch64` 2,942,096 B: each 8 B more than 1.12.2.
+- `scripts/check-version-sync.sh --tag 1.12.3` OK. A clean build (`rm -rf build && cyrius deps && CYRIUS_DCE=1
+  cyrius build`) passes.
+
 ## [1.12.2] — 2026-10-30 (toolchain cut: cyrius 6.7.18, darshana 1.7.0)
 
 cyrius **6.7.9 → 6.7.18** and darshana **1.3.0 → 1.7.0**, with the vendored `lib/` regenerated from scratch, and

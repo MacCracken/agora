@@ -711,7 +711,7 @@ fn account_index_ensure(store): i64 {
         if (strlen(entry) == ACCOUNT_FP_HEX_BYTES) {
             if (fp16_valid(entry) == 1) {
                 if (account_lookup_handle(store, entry, &hb, ACCOUNT_HANDLE_BUF) > 0) {
-                    # Not yet claimed (or left broken by a crashed build): claim it.
+                    # Unclaimed (or left broken by a crashed build): claim it.
                     # A valid claim stays — the first user listed keeps a handle.
                     if (account_claim_read(store, &hb, &cur) != 1) {
                         if (account_index_claim(store, &hb, entry, 0) != 0) { ok = 0; }

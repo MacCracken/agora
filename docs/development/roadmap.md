@@ -2,7 +2,9 @@
 
 > **Last Updated**: 2026-10-30 — 1.12.2 (cyrius 6.7.18, darshana 1.7.0) took the next free patch slot as a
 > toolchain cut. It closed § Blocked's directory-guard row (the stdlib's `dir_list_into` opens with
-> `O_DIRECTORY` since 6.7.11) and restated the DCE row. Rebuilt at 1.12.1 as the single, forward-only plan:
+> `O_DIRECTORY` since 6.7.11) and restated the DCE row. 1.12.3 took the slot after it: four reworded comments,
+> so the tree-wide deferral check reads 0, and on agnos ≥ 1.57.13 a poll drain that never waits (`sock_send_dl`
+> #109, ADR 0023 amended); nothing planned changed. Rebuilt at 1.12.1 as the single, forward-only plan:
 > [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
 > agora stands today. Next slot: **1.13.0**.
 >

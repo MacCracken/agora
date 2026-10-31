@@ -1,6 +1,7 @@
 # 0023 — The dual serve model: fork per accept, or one process polling all sessions
 
-> **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**
+> **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**; the agnos drain
+> amended at 1.12.3 (§ Decision, the sweep: a no-wait send on agnos ≥ 1.57.13)
 > **Date**: 2026-07-26 (recorded retroactively — the decision shipped at 1.5.0 / 1.6.0)
 > **Amends**: [ADR 0007](0007-fork-per-accept-concurrency.md) — see § Relationship to ADR 0007.
 
@@ -53,6 +54,30 @@ The poll model is built from four pieces:
   > stall deadline re-armed on any byte — so one zero-window peer froze the agnos sweep for 30 s+, a
   > trickling one indefinitely. `session_drain` now makes ONE raw `sock_send#48` per drain on agnos,
   > which restores the bound described here (one send, which the kernel may itself hold ~8 s).
+  >
+  > **1.12.3 amendment — hole A is cured on agnos ≥ 1.57.13.** agnos 1.57.13 added `sock_send_dl` #109
+  > (wrapped since cyrius 6.7.11): #48 with a caller ceiling, where a **negative** ceiling means no wait at
+  > all — it commits what can go out now and returns the count, possibly 0 — and -1 still means the conn is
+  > gone or not the caller's. That is the kernel-side non-blocking send this bullet said was missing. On a
+  > kernel that has it, `session_drain` sends with no wait until the queue is empty or a call commits 0
+  > (partial, kept for the next sweep), so **the sweep's drain never waits on a slow reader**. A kernel
+  > before 1.57.13 keeps the 1.7.0 bound exactly, one #48 per drain; which kernel it is comes from the
+  > stdlib's own cached probe (`_agnos_sock_send_left`). Three consequences, all recorded above `session_drain_wait`:
+  > - **Pacing.** The agnos kernel keeps one segment in flight per conn and sends the next only once the
+  >   last is ACKed (`tcp_send_ex`), so a no-wait drain moves at most one segment per sweep: about 1,460 B
+  >   per 20 ms (~73 KB/s; ~27 KB/s at agnos' 536-byte default segment). #48 sent at line rate, and held
+  >   every other session while it did. That figure is arithmetic: no agnos kernel run has measured it.
+  > - **Two drains may still wait, bounded.** A command that prints more than `SESS_TX_CAP` needs the peer
+  >   to take bytes before the command can go on. Linux absorbs that in its kernel send buffer; agnos has
+  >   none beyond the segment in flight, so a no-wait make-room drain would bring back the 1.8.1 S5 bug
+  >   (a big `list` drops the session). That drain, and the shutdown goodbye, make ONE send with a
+  >   `SESS_DRAIN_WAIT_US` (250 ms) ceiling, measured once from entry and never re-armed by an ACK, so a
+  >   trickling peer cannot stretch it as it could #48's 8 s window. A command bigger than the queue can
+  >   still cost the sweep one such wait each time the queue fills: that cost is set by the command's size
+  >   and the peer's pace, because there is nowhere else on agnos to put the bytes.
+  > - **Make-room compacts first.** An agnos queue is now usually part-sent, so `sess_tx_enqueue` reclaims
+  >   the sent prefix before it drains, and drains (and may wait) only if that is not enough (`s17`).
+  >
   > **Capacity note (audit I13):** agnos' stdlib socket table holds 8 sockets, so the real ceiling there
   > is ~8 sessions (a Descent visit uses one more), not `MAX_SESS` = 64.
 - **A per-sweep line budget** (added 1.8.1, audit H2). `process_rx` runs at most `POLL_LINE_BUDGET`
@@ -87,7 +112,11 @@ to line dispatch, or to the arena reset, or to a send-failure path, applies to b
      a sticky send failure plus a 64-child cap (`MAX_SESS` is now the operator's bound in both
      models). Two stalls remain by construction — the agnos blocking send has no non-blocking peer,
      and `descent_proxy` holds the sweep for a player's whole MUD session (since 1.8.1 it at least
-     watches the shutdown signalfd, and a failed connect is not redialled for 30 s).
+     watches the shutdown signalfd, and a failed connect is not redialled for 30 s). **Since 1.12.3**
+     the first has a peer on agnos ≥ 1.57.13 (#109 with no wait; see the sweep's amendment above),
+     and what is left of it is the bounded make-room wait, plus the Descent's write to the MUD, which
+     on agnos still goes through the stdlib's `sys_write` (a 30 s stall deadline). The second went at 1.11.0
+     ([ADR 0031](0031-descent-session-state.md): the Descent is a session state now).
   3. **A crash cost one connection.** Under poll it costs all 64.
 - **Accepted risk, recorded at 1.9.2 — a slow-but-real typist holds a slot.** Every model caps
   connections at `MAX_SESS` (64: the poll pool, and since 1.8.1 the fork child cap), and a session is
