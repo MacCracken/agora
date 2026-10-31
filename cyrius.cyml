@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agora — BBS userland for AGNOS. Telnet-served bulletin board: posts, messages, file-share. Greek ἀγορά (civic-marketplace / public-assembly) + Doja Cat 'Agora Hills' (Scarlet, 2023). Consumes kernel tcp_listen/accept (agnos 1.32.0 bite A) + ext4 (1.31.5 Phase 1-5 read; 1.33.x WRITE for posts). Companion to the MUD userland on a separate repo."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -48,8 +48,16 @@ stdlib = ["string", "fmt", "alloc", "io", "syscalls", "assert", "args", "net", "
 # 0.9.3 made the `_buf` composers return -1 for a negative `pos` (agora's
 # call sites cannot produce one — see render_motd); 1.2.0 added
 # tty_sanitize_buf. Emitted SGR bytes are unchanged (A/B-verified 1.8.0).
+#
+# 1.7.0 since agora 1.12.2 (was 1.3.0). The 1.3.0 → 1.7.0 span only ADDS:
+# tty_sgr_len / tty_sgr_strip_buf (1.4.0), tty_isatty_is_per_fd (1.6.0),
+# tty_winsize_px (1.7.0), and 1.5.0's AGNOS arm for tty_echo_off /
+# tty_flush_input / tty_isatty — none of which agora calls. The four darshana
+# functions an agora build reaches are byte-identical between the two bundles,
+# and so are the five constants above. 1.5.0's AGNOS arm needs cyrius >= 6.7.11
+# (sys_console_mode, sys_fd_kind), which the 6.7.18 pin above satisfies.
 git = "https://github.com/MacCracken/darshana.git"
-tag = "1.3.0"
+tag = "1.7.0"
 modules = ["dist/darshana.cyr"]
 
 # AGNOS first-party deps deferred until needed:

@@ -6,12 +6,11 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-10-14 — **1.12.1 (provably fair wagers) cut**, closing the 1.12.x line and the
-> 1.8.x → 1.12.x plan. Every wager and contest draw comes from a session seed whose SHA-256 the player sees
-> before betting and which is revealed afterwards; every real-stakes wager is a line in an append-only audit log
-> that `scripts/verify-wagers.py` checks. The roadmap is now one forward-only file in release arcs to 2.0
-> (`roadmap-future.md` folded in). **Replace this paragraph each release — do not append to it.** History
-> lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
+> **Last refresh**: 2026-10-30 — **1.12.2 cut** (toolchain): cyrius 6.7.9 → 6.7.18, darshana 1.3.0 → 1.7.0,
+> `lib/` regenerated, and the GitHub actions moved to their latest releases. Nothing a user sees changes; the
+> build is warning-free, and the binary grows 78,880 B, all toolchain (bayan's Unicode tables, which DCE keeps).
+> The stdlib's `O_DIRECTORY` closed roadmap § Blocked's directory-guard row. **Replace this paragraph each
+> release — do not append to it.** History lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
 
@@ -145,47 +144,55 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `1.12.1` (2026-10-14) — provably fair wagers (closes 1.12.x). Previous: `1.12.0` (2026-10-13) — Olympiad events + door content |
+| **Released** | `1.12.2` (2026-10-30) — toolchain cut (cyrius 6.7.18, darshana 1.7.0). Previous: `1.12.1` (2026-10-14) — provably fair wagers |
 | **In flight** | none — next is **1.13.0** (the terminal, beyond the width), see § In-flight slot |
-| **Toolchain pin** | cyrius `6.7.9` (`cyrius.cyml [package].cyrius`; local snapshot verified byte-identical to the tag at 1.8.0; a 1.8.1 clean `cyrius deps` regenerated an identical `lib/`) |
+| **Toolchain pin** | cyrius `6.7.18` (`cyrius.cyml [package].cyrius`; at 1.12.2 the local snapshot's 113 stdlib files and its `cycc` were verified byte-identical to the tag, and `SOURCE_COMMIT` matches it) |
 | **Source of truth** | `VERSION` at the repo root |
 
 ## Build artifacts
 
-| Artifact | Size (1.12.1) | Build line |
+| Artifact | Size (1.12.2) | Build line |
 |---|---|---|
-| `build/agora` | **1,122,600 B** (+13,296 vs 1.12.0) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
-| `build/agora-agnos` | 1,115,064 B | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
-| aarch64 | 2,531,424 B (aarch64 ELF does no DCE compaction; its segments align to 64 KB, so it grows in steps — +17,464 B of code at 1.10.1 moved the data segment one step) | `cyrius build --aarch64 …` |
+| `build/agora` | **1,201,480 B** (+78,880 vs 1.12.1, all toolchain — see below) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
+| `build/agora-agnos` | 1,194,008 B (+78,944) | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
+| aarch64 | 2,942,088 B (+410,664: aarch64 ELF does no DCE compaction, so it keeps all of 6.7.18's new stdlib code, +291,632 B; its segments align to 64 KB, so it grows in steps) | `cyrius build --aarch64 …` |
 
 The release workflow publishes all three (`agora-<ver>-x86_64-linux`, `-aarch64-linux`, `-x86_64-agnos`)
 with `SHA256SUMS` since 1.8.2.
 
 Size history worth knowing: 14.57 MB at 1.6.6 → 2.01 MB at 1.6.7 (bundled sigil dropped ~12.6 MB of
 banked `.bss` — not a DCE win) → 0.97 MB at 1.7.1 onward. `CYRIUS_DCE=1` NOP-fills dead code and keeps
-all `.bss`; the build still warns `large static data` (≈375 KB).
+all `.bss` and every literal dead code reads. 1.12.2's +78,880 B is all in the data segment (+82,976; code
+shrank 3,896 B) and all toolchain: bayan 1.11.1 added ~307 KB of Unicode tables agora never reads (roadmap
+§ Blocked, the DCE row), sigil 3.13.12 dropped a 256 KB static buffer, and the remaining ~38 KB is the rest of the
+stdlib's growth. The `large static data` warning is gone: agora's
+static arrays are now under the compiler's 128 KB threshold.
 
 ## Tests + benchmarks
 
-| Surface | Status (1.12.1) |
+| Surface | Status (1.12.2) |
 |---|---|
-| `tests/agora.tcyr` | **261** module tests (src/test.cyr until 1.8.2; 1.12.1: t261–t262) — also 261/261 under `cyrius test --aarch64` (qemu) |
+| `tests/agora.tcyr` | **261** module tests (src/test.cyr until 1.8.2; 1.12.1: t261–t262) — also 261/261 under `cyrius test --aarch64` (qemu); unchanged at 1.12.2 |
 | `tests/serve.tcyr` | **16** serve-layer tests (1.11.1: `s13` registry conformance, `s14` world-pointer guard; 1.12.0: `s15` `--door-days`; 1.12.1: `s16` the wager audit trail) (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu |
 | `fuzz/telnet_iac.fcyr` | green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2); since 1.10.0 it agrees the client options before its structured subnegotiations, checks for torn replies, and drives 656 targeted LINEMODE frames |; since 1.11.0 a sixth pass drives the Descent negotiation observer (3,000 visits in split pieces, guard band) and the return resync (invariants 24 / 25)
-| `fuzz/term_wrap.fcyr` | new at 1.10.1: the word wrap — 6,000 adversarial texts (6.1 MB) each wrapped four ways, seven invariants (nothing but whitespace dropped, breaks only at whitespace, no escape sequence split — by its own parser, chunk-size independence, rows within the width, identity when everything fits, no runaway); green plain and `--poison=ab`, in CI and release |
-| `docs/examples/` | **39** smokes (1.12.1: 39, provably fair wagers); `run.sh`: both CI legs green at 1.12.1 (**fork 25/25, poll 38/38**); CI runs it per model |
+| `fuzz/term_wrap.fcyr` | new at 1.10.1: the word wrap — 6,000 adversarial texts (6.1 MB) each wrapped four ways, seven invariants (nothing but whitespace dropped, breaks only at whitespace, no escape sequence split — by its own parser, chunk-size independence, rows within the width, identity when everything fits, no runaway); green plain and `--poison=ab`, in CI and release; 1.12.2 fixed two literal lengths in its debug-only report (the 6.7.18 linter's new check) |
+| `docs/examples/` | **39** smokes (1.12.1: 39, provably fair wagers); `run.sh`: both CI legs green at 1.12.2 on cyrius 6.7.18 (**fork 25/25, poll 38/38**); CI runs it per model |
 | `benches/bench_telnet.bcyr` · `bench_term.bcyr` | 5 parser benchmarks · 4 word-wrap benchmarks (1.10.1) — [`BENCHMARKS.md`](../../BENCHMARKS.md) |
 | `benches/serve-bench.py` | accept rate, per-session memory, world lock, reply (`read` with and without replies; 1.9.1 index), unknown-handle login + first-start time (1.9.0) — BENCHMARKS.md § Serve-level baselines |
 | `cyrius audit` | **exit 0** since 1.8.2 — fmt, lint (0 warnings), docs (every function documented), tests, bench — and a CI gate |
 
 ## In-flight slot
 
-**None.** 1.12.1 is cut and closes the 1.12.x line, and with it the 1.8.x → 1.12.x plan. The roadmap is now
-one forward-only file in release arcs: next is **1.13.0 — the terminal, beyond the width** (paging by window
-height, the Handler's teletype, colour by terminal type). See roadmap § 1.13.0.
+**None.** 1.12.2 is a toolchain cut that took the next free patch slot (roadmap rules). Next is **1.13.0 — the
+terminal, beyond the width** (paging by window height, the Handler's teletype, colour by terminal type). See
+roadmap § 1.13.0.
 
 ## Recent shipped
 
+- **1.12.2** (2026-10-30) — toolchain cut: cyrius 6.7.9 → 6.7.18, darshana 1.3.0 → 1.7.0, `lib/` regenerated, the
+  actions on their latest releases (checkout v7.0.1, upload-artifact v7.0.2, action-gh-release v3.0.3);
+  `check-toolchain.sh` covers `lib/unicode/`; the directory-guard window closed by the stdlib. No behaviour change.
+  277 tests, 39 smokes.
 - **1.12.1** (2026-10-14) — provably fair wagers: committed session seeds (SHA-256 shown before a bet, revealed
   after; `fair`, `fair reveal`, `fair seed`), an append-only fsync'd audit log of real-stakes wagers, an
   independent verifier; the roadmap rebuilt as one forward-only plan to 2.0. Closes 1.12.x. 277 tests, 39 smokes.
@@ -248,21 +255,22 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 
 | Dep | Used for | Version | Notes |
 |---|---|---|---|
-| cyrius stdlib | everything | 6.7.9 | 25 named modules (`cyrius.cyml [deps].stdlib`); `lib/` is generated, never committed |
-| **darshana** | SGR composers + egress sanitizer | **1.3.0** (git dep, frozen v1 API) | `tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_sanitize_buf`; termios / signalfd surface deliberately unused |
-| **sigil** | Ed25519 + SHA-256 + hex (auth) | 3.13.11 (bundled in the 6.7.9 stdlib) | vendored copy warns about `hash_file_into`'s static 256 KB buffer under 6.7.x — not agora's, flagged upstream |
+| cyrius stdlib | everything | 6.7.18 | 25 named modules (`cyrius.cyml [deps].stdlib`); `lib/` is generated, never committed — since 6.7.18 it has a subdirectory, `lib/unicode/`, which `check-toolchain.sh` compares too |
+| **darshana** | SGR composers + egress sanitizer | **1.7.0** (git dep, frozen v1 API) | `tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_sanitize_buf`; termios / signalfd surface deliberately unused. 1.3.0 → 1.7.0 only added functions agora does not call |
+| **sigil** | Ed25519 + SHA-256 + hex (auth) | 3.13.15 (bundled in the 6.7.18 stdlib) | 3.13.12 moved `hash_file_into`'s 256 KB banked buffer to the stack, so the build no longer warns and agora's static data fell under the compiler's 128 KB advisory |
+| **bayan** | u256 for sigil (agora calls none of it) | 1.11.1 (bundled in the 6.7.18 stdlib) | since cyrius 6.7.13 it includes `lib/unicode/` + `lib/math.cyr`; DCE drops their code but keeps ~307 KB of Unicode-table literals (cyrius issue 2026-10-29; roadmap § Blocked) |
 | bannermanor | MOTD banners | 1.0.1 | output baked into the MOTD at M2-A; the crate is not a build dep |
 | kii / sankoch | M3 inline images / M4 stored-file deltas | — | gates met, no consumer; nothing in `src/` references them |
 | agnos ext4 WRITE | AGNOS-target storage | in flight upstream | not blocking (ADR 0001) |
 
-## Source surface (1.12.1, lines)
+## Source surface (1.12.2, lines)
 
 | File | Lines | Holds |
 |---|---:|---|
-| `src/main.cyr` | 6,057 | argv dispatch + CLI verbs; both serve models (fork / poll; readiness waits, the fork child's signalfd + PDEATHSIG), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat glue; the Descent as a session state (`descent_begin` / `descent_pump` / `descent_leave`); door save lifecycle; N1 shutdown |
+| `src/main.cyr` | 6,059 | argv dispatch + CLI verbs; both serve models (fork / poll; readiness waits, the fork child's signalfd + PDEATHSIG), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat glue; the Descent as a session state (`descent_begin` / `descent_pump` / `descent_leave`); door save lifecycle; N1 shutdown |
 | `src/telnet.cyr` | 1,249 | RFC 854 IAC parser (AYT, EC / EL events), RFC 1143 Q-method, NAWS / TERMINAL-TYPE subnegotiation, RFC 1184 LINEMODE server side (MODE + echo hand-off, SLC, FORWARDMASK refused) — only for agreed options; the Descent negotiation observer + return resync (1.11.0) |
 | `src/term.cyr` | 448 | terminal-aware output (ADR 0030): display width (UTF-8, wide / zero-width, TAB stops, escape sequences) and the resumable word-wrap state machine `send_wrapped` drives |
-| `src/board.cyr` | 1,956 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading + the reply index (ADR 0027), policy modes + read gate (ADR 0028) / admins (fail closed; streamed; fingerprint entries), `flock` helpers, the directory workspace (`store_dir_scan`, FIFO-guarded), egress sanitize rule (ADR 0024) |
+| `src/board.cyr` | 1,960 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading + the reply index (ADR 0027), policy modes + read gate (ADR 0028) / admins (fail closed; streamed; fingerprint entries), `flock` helpers, the directory workspace (`store_dir_scan`, FIFO-guarded), egress sanitize rule (ADR 0024) |
 | `src/account.cyr` | 799 | fingerprint, handle validation, user dirs, keyfiles, nonce / signature parse, From-header extraction, the register lock, the handle index (ADR 0026) |
 | `src/arena.cyr` | 364 | per-command scratch arena (ADR 0021), the store file primitives: `store_write_atomic`, `store_open` / `store_read_all` / `store_lock_open` / `store_append_locked`, `store_publish` (ADR 0025) |
 | `src/door.cyr` | 915 | door framework (ADR 0009): PRNG, saves (+ remove / quarantine / play lock), world transactions, leaderboards, `emit_*` render, descriptor registry (ADR 0020), `DD_FREE` (ADR 0022), the daily ration (ADR 0032) |

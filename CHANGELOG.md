@@ -4,6 +4,134 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.2] — 2026-10-30 (toolchain cut: cyrius 6.7.18, darshana 1.7.0)
+
+cyrius **6.7.9 → 6.7.18** and darshana **1.3.0 → 1.7.0**, with the vendored `lib/` regenerated from scratch, and
+the GitHub actions moved to their latest releases. Nothing a user sees changes. No source change was needed to
+compile, and the build is now warning-free: sigil 3.13.12 retired the static 256 KB buffer behind the 6.7.x
+`hash_file_into` warning, and with it the `large static data` advisory. Two items in roadmap § Blocked were waiting
+on "the next toolchain cut": the directory guard's `stat`-then-`open` window in `store_dir_scan` is now closed by
+the stdlib (verified with a mutant), and the DCE row is restated, since the new bayan brings Unicode tables
+that DCE keeps.
+
+**277** tests (261 module + 16 serve-layer), unchanged, also on aarch64 under qemu; both fuzz harnesses plain and
+`--poison=ab`; **39** example smokes, both CI legs green; `cyrius audit` exit 0. `build/agora`
+**1,122,600 → 1,201,480 B**; `--agnos` 1,115,064 → 1,194,008 B; `--aarch64` 2,531,424 → 2,942,088 B. All of the
+growth is the toolchain's (see Known limitations).
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (`cyrius.cyml`). The local snapshot's 113 stdlib files and its `cycc` are
+  byte-identical to the tag, and its `SOURCE_COMMIT` matches `a1cf8c0`. `lib/` was re-vendored with
+  `rm -rf lib cyrius.lock && cyrius deps`, going from 55 to 63 stdlib files: `math.cyr` and the seven
+  `lib/unicode/` files are new, pulled in by bayan 1.11.1's own includes. Bundled crates moved: sigil
+  3.13.11 → 3.13.15, bayan 1.5.13 → 1.11.1.
+  - **Agora's stdlib surface**: the 89 stdlib functions agora calls, and the 444 they reach, were diffed
+    body by body between the two `lib/` trees. None was removed or renamed and no arity changed. Most of the
+    diff is the 6.7 idiom (`+=`, `loop` / `break`, `elif`). The changes that matter to agora:
+    - **`dir_list_into`** opens with `O_RDONLY | O_DIRECTORY | O_CLOEXEC` (6.7.11, the issue agora filed at
+      1.9.1). A FIFO where a directory belongs now fails at once instead of blocking.
+    - **On agnos**, `sock_bind` / `sock_listen` / `sock_accept` / `sock_connect` / `_agnos_fd_conn` refuse an fd
+      that is not a tagged socket before touching the slot table (6.7.12). Every fd agora passes them comes
+      from `tcp_socket` or `sock_accept`.
+    - **On agnos**, `sys_write` on a socket sends through `sock_send_dl` (#109, agnos 1.57.13; 6.7.11), which
+      bounds each kernel call by what is left of the stall deadline. On an older kernel it falls back to #48.
+      The deadline and its re-arm on progress are as before. Two agora writes take this path:
+      `descent_mud_write` (to the MUD) and the poll loop's pool-full refusal. `session_drain` does not: it makes
+      one raw `sock_send` (#48) per drain (audit H5, 1.8.1), and that wrapper is unchanged.
+    - **`xflock`** on Linux and macOS returns -22 for an op other than `LOCK_SH` / `LOCK_EX` / `LOCK_UN`
+      (+ `LOCK_NB`). agora's `file_lock` / `file_unlock` pass `LOCK_EX` / `LOCK_UN`.
+    - The rest are Windows, macOS and cx arms that agora does not build for.
+  - **The serve loops' wrappers**: `sys_read`, `sys_sock_send` and `sys_sock_recv` are unchanged, and so is
+    `sys_write` everywhere but the agnos socket path above. That is the 1.8.1 trap: 6.6.7 changed the
+    blocking of the agnos socket `sys_write` without notice.
+  - **Allocations**: no function on a per-line path gained one. The only new `alloc()` calls reached are
+    `_args_read_all` (once per process) and `_tls_grow` (only when a thread is created; agora creates none).
+- **darshana `1.3.0` → `1.7.0`.** The span only adds functions, and agora calls none of them:
+  - `tty_sgr_len` / `tty_sgr_strip_buf` (1.4.0);
+  - the AGNOS arm of `tty_echo_off` / `tty_flush_input` / `tty_isatty` (1.5.0);
+  - `tty_isatty_is_per_fd` (1.6.0);
+  - `tty_winsize_px` (1.7.0).
+
+  The four darshana functions an agora build reaches (`tty_sgr_buf`, `tty_sgr_reset_buf`, `tty_sanitize_buf`
+  and its helper) are byte-identical between the two bundles, and so are the five constants agora uses.
+  darshana's 20 identity digests are unchanged upstream. The signalfd trio agora deliberately does not adopt is
+  unchanged too, so the N1 rationale in `main.cyr` still holds (re-checked, noted in place). 1.5.0's AGNOS arm
+  needs cyrius ≥ 6.7.11, which the pin satisfies.
+- **GitHub actions** (`ci.yml`, `release.yml`), still pinned by commit SHA:
+  - `actions/checkout` v4.4.0 → **v7.0.1**;
+  - `actions/upload-artifact` v4.6.2 → **v7.0.2**;
+  - `softprops/action-gh-release` v2.6.2 → **v3.0.3**.
+
+  Each SHA was resolved from its tag through the GitHub API and matches the SHA darshana pins. The majors move
+  the actions to the Node 24 runtime. Their other breaking changes do not reach these workflows:
+  - checkout's are about `pull_request_target` / `workflow_run` forks and where credentials persist;
+  - upload-artifact's `archive: false` is opt-in;
+  - action-gh-release v3 is only the runtime move.
+
+  ⚠ Neither workflow has run with these pins yet: `ci.yml` first runs on the next push. The runner stays
+  `ubuntu-latest`.
+- **`scripts/check-toolchain.sh` compares `lib/` recursively.** Its `lib/*.cyr` globs never saw `lib/unicode/`,
+  so seven snapshot files went unchecked against the tag, and seven vendored ones against the snapshot. It now
+  counts 113 / 63 files where it counted 106 / 56. Mutation-checked: an appended byte in
+  `lib/unicode/casefold.cyr` exits 1, and the restored file exits 0.
+- `store_dir_scan`'s guard comment (board.cyr) records that the guard is now defence in depth.
+
+### Fixed
+
+- **`fuzz/term_wrap.fcyr` wrote a NUL byte after two labels** in its debug-only report (`fail37`):
+  `"\nin : "` and `"\nout: "` are 6 bytes, and each was written as 7. The 6.7.18 linter's new
+  literal-length check found it. Only `FUZZ_DEBUG` builds reach it.
+- **`benches/serve-bench.py` was not executable** (mode 644 since 1.8.2), so the documented
+  `benches/serve-bench.py all` (CLAUDE.md § Quick Start, P(-1) step 2, Closeout step 2) failed with "Permission
+  denied", and only `python3 benches/serve-bench.py` ran. It is mode 755 now, like the other scripts with a
+  shebang.
+
+### Closed (roadmap § Blocked)
+
+- **The directory guard's `stat`-then-`open` window** (1.9.1). `store_dir_scan` `stat`s the path, then
+  `dir_list_into` opens it, so a FIFO swapped in between was opened `O_RDONLY` and blocked the poll server.
+  6.7.11's `O_DIRECTORY` closes the window in the stdlib, so agora needs no code change. **Mutant A/B**:
+  `store_dir_scan` built without its guard, which is the window held open, run through smoke 32 with a FIFO
+  for `.users`:
+  - **on 6.7.9** it fails 3 checks: a poll `login` hangs, so a second client is never greeted, and so does a
+    fork `login`;
+  - **on 6.7.18** it passes them all.
+
+  The guard stays, as a second refusal.
+
+### Known limitations (recorded, not fixed)
+
+- **~307 KB of `build/agora` is Unicode tables that nothing reads.** bayan 1.11.1 includes `lib/unicode/`
+  (sigil includes bayan for its u256), and `CYRIUS_DCE=1` removes the functions that read the tables but keeps
+  their string literals. This is cyrius issue 2026-10-29 ("DCE keeps literals of dead code", filed by anuenue),
+  and it is roadmap § Blocked's restated DCE row. Net of sigil's dropped buffer, the binary grows 78,880 B.
+- The tree-wide deferral check reads **4** untracked deferrals, the same 4 under the 6.7.9 linter, so they
+  predate this cut. All four are prose the checker misreads: `account.cyr:714` ("Not yet claimed"),
+  `arena.cyr:277` (an agnos kernel TODO), and `telnet.cyr:25` / `:950` (each says the opposite, not "for now").
+  Not reworded here.
+
+### Verification
+
+- `cyrius test`: **261/261** + **16/16**, the same under `cyrius test --aarch64` (qemu). Both fuzz harnesses plain
+  and `--poison=ab`. `cyrius audit` **exit 0**: fmt, lint, docs, tests, bench. `scripts/check-toolchain.sh` OK
+  (113 snapshot files against the tag, 63 vendored against the snapshot, `cycc 6.7.18`).
+  `scripts/check-version-sync.sh --tag 1.12.2` OK.
+- `docs/examples/run.sh`, both CI legs as CI runs them: **fork 25/25, poll 38/38**.
+- **Full clean build** (`rm -rf build lib cyrius.lock && cyrius deps && CYRIUS_DCE=1 cyrius build`): no warnings,
+  and byte-identical to the smoke-tested binary.
+- **Where the size went**: the code segment shrank 3,896 B and the data segment grew 82,976 B. The data segment
+  gained the Unicode tables (~307 KB of literals) and lost sigil's 256 KB static buffer; the remaining ~38 KB is the
+  rest of the stdlib's growth. With that buffer gone, agora's static arrays are under the compiler's 128 KB
+  `large static data` threshold, so the advisory is gone too.
+- **Benchmarks**, A/B'd in one session against a `git archive` of 1.12.1 on 6.7.9 ([`BENCHMARKS.md`](BENCHMARKS.md)
+  § Toolchain — 1.12.2): the parser, the word wrap and the serve level are unchanged within noise. The exception
+  is fork-mode memory per child: PSS 72 → 77 KB over 12 runs each. A child's `smaps` puts it in the binary's
+  data segment: 156 KB more of it is resident as shared page cache, one copy for the whole tree, and it has one
+  more private dirty page (12 → 16 KB). Poll mode is unchanged at 12.8 KB per session.
+- **Mutants**: the directory guard (above; A/B'd on both toolchains), and `check-toolchain.sh`'s recursion
+  (above).
+
 ## [1.12.1] — 2026-10-14 (provably fair wagers)
 
 A bet can now be checked instead of trusted. Every wager and contest draw comes from a session seed whose

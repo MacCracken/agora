@@ -244,11 +244,11 @@ fn fail37(out, m, n, i, o): i64 {
     if (g_dbg != 0) {
         syscall(1, 1, "37 at i=", 8); fmt_int(i); syscall(1, 1, " o=", 3); fmt_int(o);
         syscall(1, 1, " n=", 3); fmt_int(n); syscall(1, 1, " m=", 3); fmt_int(m);
-        syscall(1, 1, "\nin : ", 7);
+        syscall(1, 1, "\nin : ", 6);
         var a = i - 12; if (a < 0) { a = 0; }
         var k = a;
         while (k < i + 12) { if (k < n) { fmt_int(load8(g_src + k) & 0xFF); syscall(1, 1, " ", 1); } k = k + 1; }
-        syscall(1, 1, "\nout: ", 7);
+        syscall(1, 1, "\nout: ", 6);
         a = o - 12; if (a < 0) { a = 0; }
         k = a;
         while (k < o + 12) { if (k < m) { fmt_int(load8(out + k) & 0xFF); syscall(1, 1, " ", 1); } k = k + 1; }

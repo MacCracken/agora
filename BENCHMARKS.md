@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-13 (1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-30 (1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -108,6 +108,62 @@ Without NAWS, `send_wrapped` takes `send_text`'s path: the same bytes at the sam
 **`list` got cheaper**: each row is composed and sent once (it was seven sends). Under fork every send is a
 `write(2)`, so a 300-post `list` went from **16.1 ms to 4.3 ms** wall (median of 40), with or without NAWS.
 Under poll the sends only fill the queue: ~23.2 ms either way, inside one 20 ms sweep.
+
+## Toolchain — 1.12.2 (cyrius 6.7.9 → 6.7.18, darshana 1.3.0 → 1.7.0)
+
+A toolchain cut with no agora code change, A/B'd in one session against a `git archive` of 1.12.1 built on its
+own 6.7.9 pin and `lib/`.
+
+**Parser and word wrap** (`bench_telnet.bcyr` · `bench_term.bcyr`). Four alternating rounds give the median,
+with the range in parentheses:
+
+| Benchmark | 1.12.1 on 6.7.9 | 1.12.2 on 6.7.18 |
+|---|---:|---:|
+| `plain_byte` | 9 ns (8–9) | 8.5 ns (8–9) |
+| `iac_untracked` | 65.5 ns (65–66) | 65.5 ns (63–66) |
+| `iac_tracked_agree` | 75.5 ns (74–76) | 75 ns (73–76) |
+| `subneg_naws` | 104.5 ns (103–105) | 104 ns (101–106) |
+| `announce_salvo` | 169 ns (167–171) | 167.5 ns (163–174) |
+| `term/frame_fits_80` | 3.00 µs (2.99–3.26) | 2.85 µs (2.84–2.91) |
+| `term/frame_wrap_40` | 4.01 µs (3.96–4.27) | 3.75 µs (3.71–3.81) |
+| `term/body4k_fits_80` | 19.9 µs (19.8–20.1) | 19.8 µs (18.9–28.4) |
+| `term/body4k_wrap_40` | 40.8 µs (40.3–41.2) | min 38.8–40.2 µs ‡ |
+
+**Unchanged within noise.** Two readings to know:
+- ‡ Another session's `qemu-aarch64` and `cycc` loaded the machine during the 6.7.18 half of these rounds (load
+  average 8.5). `body4k_wrap_40`, the longest benchmark, averaged 47–60 µs there, with windows up to 155 µs. Its
+  per-run minima (38.8–40.2 µs) match 6.7.9's (39.5–41.0). Three earlier 6.7.18 runs averaged 39.7–40.3 µs.
+- The two frame benchmarks read ~5% lower on 6.7.18 in these rounds, but not on a quiet machine. There, the
+  6.7.9 baseline taken before the pin moved read 8 / 60 / 70 / 97 / 156 ns and 2.73 / 3.60 / 18.3 / 38.0 µs.
+  `cyrius audit`'s run on 6.7.18 at the end read 8 / 60 / 71 / 100 / 157 ns and 2.78 / 3.62 / 18.5 / 37.8 µs.
+  Not claimed as a win.
+
+**Serve level** (`serve-bench.py all`, two passes per build, alternating, both binaries in `build/`):
+
+| Measure | 1.12.1 on 6.7.9 | 1.12.2 on 6.7.18 |
+|---|---:|---:|
+| fork accepts, sequential / 8 concurrent | 3,796 · 2,851 / 11,876 · 12,020 conn/s | 3,688 · 3,849 / 11,850 · 11,525 conn/s |
+| poll accepts, sequential / 8 concurrent | 8,901 · 7,888 / 13,999 · 14,890 conn/s | 9,083 · 9,468 / 14,187 · 14,749 conn/s |
+| memory per idle session, poll | 12.8 KB | 12.8 KB |
+| memory per idle session, fork PSS | **72 KB** (12 runs, 68–72) | **77 KB** (12 runs, 77–81) |
+| world lock, 1–16 writers | 510–533 · 459–481 txn/s | 488–530 · 455–482 txn/s |
+| `read 1`, 50 / 200 / 409 replies | 0.47 · 0.65 / 1.28 · 1.43 / 2.46 · 2.41 ms | 0.64 · 0.65 / 1.45 · 1.46 / 2.63 · 2.50 ms |
+| unknown-handle login, 300 / 3,000 users | 0.16 / 0.16 ms | 0.20 / 0.20 ms † |
+| first start, 300 / 3,000 users | 251 / 552 ms | 251 / 503 ms |
+
+- † **Login is machine state, not code.** In three more alternating `login` passes, both builds flip between
+  0.15–0.16 and 0.20–0.21 ms with the time of the run: 1.12.1's third pass read 0.20 and 1.12.2's first read
+  0.15–0.16. `read 1` shows the same: 1.12.1 itself reads 0.47 then 0.65 ms.
+- **Fork PSS is a real step, +5 KB per child, and it is the toolchain's.** A fork child's `smaps`, one child
+  per build and three samples each:
+  - the binary's data segment is resident 364 → 516 KB, almost all of it `Shared_Clean` (324 → 480 KB). That
+    is the 83 KB larger data segment (the Unicode-table literals DCE keeps; roadmap § Blocked), faulted in.
+    It is one page-cache copy for the whole process tree, and PSS shares it out, ~4.7 KB per process with 32
+    children;
+  - one more private dirty page in the data segment, 12 → 16 KB, which is the real per-child cost.
+
+  The code segment, the heap and the stack are unchanged. Poll mode does not see it: its sessions share one
+  process.
 
 ## Serve-level — 1.12.0 (closeout; door content only)
 

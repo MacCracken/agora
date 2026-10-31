@@ -1,9 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-14 — rebuilt at 1.12.1 as the single, forward-only plan. `roadmap-future.md` is
-> folded in: its door, terminal and chatbot backlog and the six v2.x pillars now sit in the arcs below. The
-> shipped history left with it: [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and
-> [`state.md`](state.md) says where agora stands today. Next slot: **1.13.0**.
+> **Last Updated**: 2026-10-30 — 1.12.2 (cyrius 6.7.18, darshana 1.7.0) took the next free patch slot as a
+> toolchain cut. It closed § Blocked's directory-guard row (the stdlib's `dir_list_into` opens with
+> `O_DIRECTORY` since 6.7.11) and restated the DCE row. Rebuilt at 1.12.1 as the single, forward-only plan:
+> [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
+> agora stands today. Next slot: **1.13.0**.
 >
 > **What this file is**: everything agora means to build, in order, from the next release to 2.0 and past it,
 > grouped into release arcs. **What it is not**: a history. When an item ships, delete its row (the CHANGELOG
@@ -266,8 +267,7 @@ SecureYeoman formalizing its threat-level vocabulary.
 | **macOS / Windows ports**, and `$HOME` keyfile resolution (`/proc/self/environ` today) | `lib/net.cyr` backends upstream (re-check what remains) | the next 1.x slot once unblocked |
 | **Tell a slow reader from a stalled one by delivered bytes** (fork mode): today a write with no send-buffer room for 60 s drops the client; the exact test is "did the client acknowledge anything in 60 s". | a `lib/net.cyr` primitive for unacknowledged bytes (`SIOCOUTQ` / `TCP_INFO`); found at 1.8.2 | the next 1.x slot once unblocked |
 | **Accept-loop rate limiting** per source (0.7.0 audit M4's untaken half). agnos, the target that always polls, has neither `getpeername` nor a peer address from `sock_accept`, so this would protect Linux only, and it misfires behind NAT. `MAX_SESS` and the network edge remain the operator's tools. | agnos `getpeername` and a stdlib `sock_accept_from`; ADR 0023 | 2.1.x |
-| **Close the directory guard's `stat`-then-`open` window** in `store_dir_scan` | the stdlib's `dir_list_into` opening with `O_DIRECTORY` (cyrius issue 2026-10-13, filed at 1.9.1) | the next toolchain cut |
-| **Binary strip / DCE-aware emit**: `CYRIUS_DCE=1` NOP-fills dead code but keeps its bytes and all `.bss` (the ~375 KB static-data warning) | the toolchain | the next toolchain cut |
+| **Binary strip / DCE-aware emit**: `CYRIUS_DCE=1` NOP-fills dead code but keeps its bytes, all `.bss`, and every string literal only dead code reads. Since cyrius 6.7.18 that last part is ~307 KB of Unicode tables in `build/agora`: bayan 1.11.1 includes `lib/unicode/`, and agora calls none of it (measured at 1.12.2). | the toolchain (cyrius issue 2026-10-29, "DCE keeps literals of dead code", filed by anuenue) | the next toolchain cut |
 
 ---
 

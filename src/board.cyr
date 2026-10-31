@@ -627,6 +627,10 @@ fn store_dir_scan(path): i64 {
     # 1.9.1 — never open a FIFO as a directory (store_is_dir). Linux only: agnos
     # has no FIFOs and its dir_list_into opens with AO_DIRECTORY already — and
     # its own is_dir avoids stat for directories, so this does not lean on it.
+    # 1.12.2 — defence in depth now: since cyrius 6.7.11 the POSIX dir_list_into
+    # opens with O_DIRECTORY too, so a FIFO swapped in between this stat and that
+    # open fails with ENOTDIR instead of blocking. That closes the stat-then-open
+    # window; the guard stays as a second refusal.
     #ifndef CYRIUS_TARGET_AGNOS
     if (store_is_dir(path) == 0) { return 0 - 1; }
     #endif

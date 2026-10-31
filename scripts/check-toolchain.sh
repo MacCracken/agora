@@ -16,9 +16,9 @@
 # Checks, for the pin in cyrius.cyml:
 #   1. the snapshot ~/.cyrius/versions/<pin>/ exists, and its SOURCE_COMMIT names
 #      the tag's commit and says the tree matched it;
-#   2. every snapshot lib/*.cyr is byte-identical to `git show <pin>:lib/<file>`
+#   2. every snapshot lib/**/*.cyr is byte-identical to `git show <pin>:lib/<file>`
 #      in a cyrius checkout (needs one: $CYRIUS_REPO, default ../cyrius);
-#   3. every vendored lib/*.cyr in this repo that came from the stdlib is
+#   3. every vendored lib/**/*.cyr in this repo that came from the stdlib is
 #      byte-identical to the snapshot's (a stale `cyrius deps` / `lib sync`;
 #      architecture note 002);
 #   4. the compiler `cyrius build -v` runs is the snapshot's cycc (the same file
@@ -53,30 +53,33 @@ if [ "$NOREPO" -eq 0 ]; then
     grep -q 'tree-matches-tag: yes' "$SNAP/SOURCE_COMMIT" 2>/dev/null \
         || bad "SOURCE_COMMIT does not attest 'tree-matches-tag: yes' (built from a dirty tree?)"
     n=0
-    for f in "$SNAP"/lib/*.cyr; do
-        b="$(basename "$f")"
+    # Recursive (1.12.2): cyrius 6.7.18's stdlib has a subdirectory, lib/unicode/ (bayan
+    # 1.11.1 includes it), which a `lib/*.cyr` glob never saw.
+    while IFS= read -r b; do
+        f="$SNAP/lib/$b"
         if ! git -C "$REPO" cat-file -e "$PIN:lib/$b" 2>/dev/null; then
             bad "snapshot lib/$b is not in tag $PIN"
         elif ! git -C "$REPO" show "$PIN:lib/$b" | cmp -s - "$f"; then
             bad "snapshot lib/$b differs from tag $PIN"
         fi
         n=$((n + 1))
-    done
+    done < <(cd "$SNAP/lib" && find . -name '*.cyr' | sed 's#^\./##' | sort)
     echo "toolchain: $n snapshot stdlib files compared against tag $PIN"
 fi
 
 # 3 — vendored lib/ against the snapshot
 v=0; other=""
-for f in lib/*.cyr; do
-    [ -e "$f" ] || { echo "toolchain: no vendored lib/ (run cyrius deps)" >&2; exit 2; }
-    b="$(basename "$f")"
+[ -d lib ] || { echo "toolchain: no vendored lib/ (run cyrius deps)" >&2; exit 2; }
+while IFS= read -r b; do
+    f="lib/$b"
     if [ -e "$SNAP/lib/$b" ]; then
         cmp -s "$f" "$SNAP/lib/$b" || bad "vendored lib/$b differs from the snapshot (stale cyrius deps?)"
         v=$((v + 1))
     else
         other="$other $b"
     fi
-done
+done < <(cd lib && find . -name '*.cyr' | sed 's#^\./##' | sort)
+[ "$v" -gt 0 ] || { echo "toolchain: no vendored lib/*.cyr (run cyrius deps)" >&2; exit 2; }
 echo "toolchain: $v vendored stdlib files compared against the snapshot${other:+ (not from the stdlib:$other)}"
 
 # 4 — the compiler the build actually runs, compared by identity, not by path

@@ -3554,6 +3554,8 @@ enum PollRuntime {
 #     survives fork AND execve) is handled by `shutdown_signals_child_reset`,
 #     the first call in every fork child. agora never execs, and the SIGPIPE
 #     SIG_IGN that children inherit across fork is wanted (they write sockets).
+# Re-checked at 1.12.2 (darshana 1.3.0 → 1.7.0): the signalfd trio's bodies are
+# unchanged, so all of the above still holds.
 
 enum ShutdownSig {
     SIGINFO_BYTES  = 128;     # sizeof(struct signalfd_siginfo) — one read record
