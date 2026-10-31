@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-30 (1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-30 (1.12.4: § agnos — 1.12.4, the first measurements of agora on an agnos kernel, A/B'd against 1.12.2's #48 drain and 1.12.3's Descent write. 1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -165,6 +165,36 @@ with the range in parentheses:
   The code segment, the heap and the stack are unchanged. Poll mode does not see it: its sessions share one
   process.
 
+## agnos — 1.12.4 (the poll send path on a real kernel)
+
+`scripts/agnos-smoke.py`: agnos 1.57.14 booted in QEMU (`-smp 1`, 512 MB, virtio-net on QEMU's user network)
+and driven from the host. The rates are for one reading client: a 61,243 B `read 1`, then four pipelined
+(244,972 B), timed from the send to the last byte. The bystander types one key every 0.2 s for 60 s. Under TCG
+(`-cpu max`) and under KVM (`-enable-kvm -cpu host`); 2026-10-30, same host, same kernel image.
+
+| Build | Accel | `read 1` | 4 × `read 1` | Bystander's worst echo, non-reader | Bystander's worst echo, stalled MUD |
+|---|---|---:|---:|---:|---:|
+| 1.12.4 (no-wait drain and Descent write) | TCG, 7 runs | 48–192 KB/s | 105–318 KB/s | 26–31 ms | 30 ms |
+| 1.12.4 | KVM, 2 runs | 48 KB/s | 104–107 KB/s | 30–31 ms | 28 ms |
+| 1.12.2 (one raw #48 per drain) | TCG | 673 KB/s | 1,318 KB/s | **23,833 ms** | — |
+| 1.12.2 | KVM | 2,680 KB/s | 2,859 KB/s | **23,820 ms** | — |
+| 1.12.4 with 1.12.3's `descent_mud_write` | TCG | 48 KB/s | 105 KB/s | 30 ms | **≥ 30,000 ms** (the harness's cap) |
+
+The TCG row's rates and non-reader column pool every run whose drain is 1.12.3's, which is unchanged in 1.12.4, while the harness and the other fixes were in progress. Its stalled-MUD column comes from the two runs with the 1.12.4 write.
+
+What the numbers say:
+- **The cure holds.** With #48 the non-reader's closed window held the whole sweep, for #48's ~8 s progress
+  window per send: the bystander's slow keys came at 5.6–6.4 s, 13.6–14.4 s and 37.6–38.4 s into the watch,
+  5.6 to 23.8 s each, and only 103–109 keys got through in 60 s against 280–286.
+- **The price is bulk throughput.** KVM's 48 KB/s is one 1,460 B segment per sweep at about 30 ms (`POLL_MS`
+  rounded up to the kernel's tick), because the kernel keeps one segment in flight and the no-wait call finds it
+  unACKed. Under TCG QEMU's ACK can land inside the drain, so several segments go per sweep, and TCG timing
+  varies from run to run (48 to 192 KB/s with the same drain). #48 ran 3.5–14× faster for this one reader under TCG and 56× under KVM.
+- **The Descent's write**: a stub MUD that reads 64 KB and then stops held 1.12.3's sweep for the stdlib
+  `sys_write`'s 30 s stall deadline; with the no-wait write the bystander does not notice it.
+- The non-reader was handed 1,928,178 of the 12,248,600 B it asked for in every run: that is what QEMU and the
+  host buffer before its window closes.
+
 ## Serve-level — 1.12.0 (closeout; door content only)
 
 `benches/serve-bench.py all`, the 1.12.0 build and a `git archive` of 1.11.1 in the same session, both binaries
@@ -321,6 +351,7 @@ Regenerate: `benches/serve-bench.py all` (`accept`, `memory`, `world`, `reply`, 
 cyrius bench benches/bench_telnet.bcyr      # parser (this table)
 cyrius bench benches/bench_term.bcyr        # word wrap (§ Word wrap — 1.10.1)
 benches/serve-bench.py all                  # accept rate, per-session memory, world lock, reply scan, login
+python3 scripts/agnos-smoke.py              # agora on agnos in QEMU (§ agnos — 1.12.4); AGNOS_ACCEL to pick TCG / KVM
 ```
 
 For ongoing tracking across releases, append the output to `bench-history.csv` (not yet scaffolded — earns a slot at the v1.0 close-out alongside any other ongoing perf surfaces). The cyrius repo's `scripts/bench-history.sh` is the reference auto-gen pattern for when this file outgrows hand-maintenance.

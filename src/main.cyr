@@ -964,7 +964,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     # M6-C: login <handle>. Looks up the handle, generates a 32-byte
-    # nonce via /dev/urandom, hex-encodes, sends `challenge: <64-hex>`,
+    # nonce from the kernel CSPRNG, hex-encodes, sends `challenge: <64-hex>`,
     # parks (fp, nonce_hex) in g_login_*, transitions to
     # MODE_LOGIN_AWAIT_SIG. ADR 0006 § Specifics.
     if (line_has_prefix(line, len, "login") != 0) {
@@ -3198,16 +3198,19 @@ fn session_drain(s): i64 {
 # the drain sends with no wait until the queue is empty or a call commits 0
 # (partial), so the sweep never waits on a slow reader. Pacing: the kernel keeps
 # ONE segment in flight per conn and sends the next only once the last is ACKed
-# (net_tcp.cyr, tcp_send_ex), so a no-wait call commits at most one segment and
-# the call after it commits 0 — a healthy client is paced at about one segment
-# per POLL_MS sweep (1,460 B / 20 ms ~ 73 KB/s at agnos' largest segment, ~27
-# KB/s at its 536-byte default; arithmetic, not measured), where #48 pushed at
-# line rate and held every other session while it did. A kernel without #109
-# keeps the 1.7.0 bound exactly: one #48 per drain. Whether #109 exists is the
-# stdlib's own probe (`_agnos_sock_send_left`, cached in `_agnos_sdl_ok` and
-# shared with every `sys_write` to a socket); `_agnos_sdl_ok == 1` after a call
-# means that call was #109. Never pass #109 a 0 ceiling: 0 means NO ceiling,
-# exactly #48.
+# (net_tcp.cyr, tcp_send_ex), so a no-wait call commits a segment only when the
+# one before it is ACKed already. When the ACK is not back within the drain, the
+# client gets one segment per sweep, and a sweep is POLL_MS rounded up to the
+# kernel's tick. Measured at 1.12.4 (scripts/agnos-smoke.py, agnos 1.57.14 in
+# QEMU, a 61 KB `read 1`; BENCHMARKS.md): 48 KB/s under KVM, the one-per-sweep
+# case, and 48-192 KB/s under TCG, where QEMU's ACK can land inside the drain.
+# #48 pushed the same read at 2,680 / 673 KB/s, and held every other session
+# while it did: a non-reading client stalled a bystander for 23.8 s. A kernel
+# without #109 keeps the 1.7.0 bound exactly: one #48 per drain. Whether #109
+# exists is the stdlib's own probe (`_agnos_sock_send_left`, cached in
+# `_agnos_sdl_ok` and shared with every `sys_write` to a socket);
+# `_agnos_sdl_ok == 1` after a call means that call was #109. Never pass #109 a
+# 0 ceiling: 0 means NO ceiling, exactly #48.
 #
 # Two drains may still wait, each ONE send of at most SESS_DRAIN_WAIT_US,
 # measured once from entry and never re-armed by an ACK (so a trickling peer

@@ -461,20 +461,19 @@ fn keyfile_generate(path): i64 {
     return 0;
 }
 
-# Internal: read `want` bytes from /dev/urandom into out_buf. Same
+# Internal: fill out_buf with `want` bytes from the kernel CSPRNG. Same
 # shape as nonce_random but with a caller-chosen byte count (so the
 # keygen path can share the entropy reader with the login-flow
 # nonce reader). Returns 0 on success, -1 on entropy failure.
+#
+# 1.12.4 — the stdlib's `random_bytes` (getrandom: Linux getrandom(2),
+# agnos getrandom #45), which loops over short reads and allocates
+# nothing. This used to open /dev/urandom, which agnos does not have, so
+# every login there answered "login failed (entropy)" and `keygen`
+# failed too; scripts/agnos-smoke.py found it. wager.cyr has drawn from
+# the same kernel CSPRNG since 1.3.4.
 fn nonce_random_into(out_buf, want): i64 {
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0 - 1; }
-    var got = 0;
-    while (got < want) {
-        var n = file_read(fd, out_buf + got, want - got);
-        if (n <= 0) { file_close(fd); return 0 - 1; }
-        got = got + n;
-    }
-    file_close(fd);
+    if (random_bytes(out_buf, want) != want) { return 0 - 1; }
     return 0;
 }
 
@@ -491,10 +490,9 @@ enum AccountLogin {
     LOGIN_MSG_LEN     = 76;       # 12 + 64-hex nonce
 }
 
-# Read ACCOUNT_NONCE_BYTES (=32) raw bytes from /dev/urandom into
-# out_buf. Returns 0 on success, -1 on entropy failure (open or
-# short read). Same /dev/urandom shape sigil's generate_keypair
-# uses internally.
+# Read ACCOUNT_NONCE_BYTES (=32) raw bytes from the kernel CSPRNG into
+# out_buf (nonce_random_into). Returns 0 on success, -1 on entropy
+# failure (a failed or short read).
 fn nonce_random(out_buf): i64 {
     return nonce_random_into(out_buf, ACCOUNT_NONCE_BYTES);
 }

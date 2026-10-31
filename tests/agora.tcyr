@@ -8053,6 +8053,29 @@ fn t262_wager_audit_sites(): i64 {
     return 0;
 }
 
+# t263 — the login nonce and keygen seed come from the kernel CSPRNG (1.12.4).
+# Until 1.12.4 they were read from /dev/urandom, which agnos does not have, so
+# every login there failed; scripts/agnos-smoke.py is what catches that, since
+# Linux has both. This pins the contract on any target: both reads succeed,
+# fill every byte they are asked for, and do not repeat.
+fn t263_nonce_random(): i64 {
+    var name = "t263_nonce_random";
+    var a[40];
+    var b[40];
+    memset(&a, 0, 40);
+    memset(&b, 0, 40);
+    store8((&a) + 32, 0xA5);
+    if (nonce_random(&a) != 0)            { test_fail(name, "first read failed"); return 1; }
+    if (nonce_random_into(&b, 32) != 0)   { test_fail(name, "second read failed"); return 1; }
+    if (memeq(&a, &b, 32) != 0)           { test_fail(name, "two nonces are equal"); return 1; }
+    if ((load8((&a) + 32) & 0xFF) != 0xA5) { test_fail(name, "wrote past 32 bytes"); return 1; }
+    var zero[32];
+    memset(&zero, 0, 32);
+    if (memeq(&a, &zero, 32) != 0)        { test_fail(name, "nonce left zero"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -8334,6 +8357,7 @@ fn main(): i64 {
     t260_door_ration();
     t261_wager_fair();
     t262_wager_audit_sites();
+    t263_nonce_random();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

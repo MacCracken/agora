@@ -4,6 +4,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.4] — 2026-10-30 (agora on a real agnos kernel)
+
+1.12.3 changed the agnos send path without running it on agnos. 1.12.4 runs it: the new manual harness
+`scripts/agnos-smoke.py` boots agnos 1.57.14 in QEMU, serves agora from it, and drives it from the host over QEMU's
+user network. It confirms the cure, corrects the pacing figure 1.12.3 derived by arithmetic, and found two more
+problems that 1.12.4 fixes. **Logins could never succeed on agnos**: the login nonce, like `keygen`'s seed, was read
+from `/dev/urandom`, which agnos does not have. And **the Descent's write to the MUD could hold the agnos sweep for
+30 s**: it still went through the stdlib's `sys_write`. Linux behaves as before.
+
+**279** tests (262 module, with `t263` new, + 17 serve-layer). `build/agora` 1,201,488 B, `--agnos` 1,194,016 B,
+`--aarch64` 2,942,096 B: the same sizes as 1.12.3, because segment alignment absorbs the small code change.
+
+### Fixed
+
+- **Login on agnos** (`nonce_random_into`, `src/account.cyr`). Login nonces and `keygen` seeds came from
+  `file_open("/dev/urandom")`. agnos has no `/dev`, so every `login` there answered "login failed (entropy)", and
+  every command behind a login was unreachable, including posting on an `open` board, chat and the Descent.
+  The reader is now the stdlib's `random_bytes`, which loops over getrandom (Linux getrandom(2), agnos #45) and
+  allocates nothing, so it is safe on the per-line login path. `wager.cyr` has drawn from the same CSPRNG since
+  1.3.4. `t263` pins the contract on every target: both reads succeed, fill exactly what they are asked for, and
+  differ. It fails against a reader that returns success without filling. Only the agnos harness can see the
+  original bug, since Linux has both sources. [ADR 0006](docs/adr/0006-identity-model.md) step 3 amended.
+- **agnos: the Descent's write to the MUD no longer waits** (`descent_mud_write`, `src/descent.cyr`). It called
+  the stdlib's `sys_write`, whose agnos socket route retries until a 30 s stall deadline that re-arms whenever a
+  byte moves, inside the shared sweep. Against a stub MUD that reads 64 KB and then stops, 1.12.3's write held a
+  bystander's keystroke echo for the harness's full 30 s cap. It is now ONE `_agnos_sock_send_left` with a
+  negative ceiling, as in `session_drain_wait`: #109 with no wait on agnos ≥ 1.57.13, and one #48 before that.
+  A 0 return keeps the bytes for the next sweep, as `descent_pump` already did. The same bystander's worst echo
+  is now 28–30 ms. This closes the 1.12.3 known limitation.
+
+### Added
+
+- **`scripts/agnos-smoke.py`**, a manual harness that is not in CI, modelled on bannermanor's. It needs the agnos
+  kernel and rootfs, gnoboot, OVMF and qemu, and every path can be overridden. It seeds smoke 31's 61 KB post, a
+  registered `qix` and a Descent endpoint into the image, types `agora serve` at agnsh, and checks six things:
+  `serve` (greets with this version), `read` (a 61 KB `read 1` arrives whole, and its rate is reported),
+  `make-room` (four pipelined, ~245 KB, more than the 128 KB queue, arrive whole), `bystander` (smoke 31's
+  non-reader asks for ~12 MB, and another session's echo stays under 1 s for 60 s), `dropped` (the non-reader
+  goes quiet with less than half of what it asked for), and `descent` (the stub-MUD case above). The byte counts
+  it expects come from the host binary. `AGNOS_ACCEL` picks TCG (the default, `-cpu max`, as agnos's own `-smp 1`
+  smokes use) or KVM. Each check was shown to fail on the bug it guards: 1.12.2 fails `bystander`, and 1.12.3's
+  Descent write fails `descent`.
+- [BENCHMARKS.md](BENCHMARKS.md) § agnos — 1.12.4: the first measurements of agora on agnos.
+- `CLAUDE.md` Quick Start lists the harness. Its closeout security re-scan no longer counts `/dev/urandom`
+  among the plain opens, because there is none left.
+
+### Changed
+
+- **The pacing figure, corrected** (ADR 0023 1.12.4 amendment, and `session_drain_wait`'s comment). 1.12.3 said
+  a no-wait drain moves about one segment per 20 ms sweep, ~73 KB/s, by arithmetic. Measured, one segment per
+  sweep is the case when the peer's ACK is not back within the drain, and the sweep is `POLL_MS` rounded up to the
+  kernel tick, about 30 ms: a 61 KB `read 1` runs at **48 KB/s under KVM**. Under TCG, QEMU's ACK can land inside
+  the drain, giving **48–192 KB/s** over seven runs.
+
+### Known limitations (recorded, not fixed)
+
+- **Bulk output on agnos is much slower than 1.12.2's, for a single healthy reader.** That is the price of the
+  1.12.3 cure: #48 sent the same `read 1` at 2,680 KB/s under KVM (673 under TCG), while holding every other
+  session. 48 KB/s means a 64 KB post takes about 1.3 s to arrive. A sweep that skipped its sleep while a drain
+  was still moving bytes would win most of it back; that needs its own measurement, which the harness now
+  provides.
+- **The agnos kernel never tells the host when a non-reader is dropped.** It declares a zero-window peer dead
+  after five unanswered resends (~31 s) and sends neither FIN nor RST, so a client behind QEMU's user network
+  never sees its connection close. This is kernel behaviour, reported here and not fixed in agora. `dropped`
+  therefore checks that the connection goes quiet, not for EOF.
+- **Still not exercised on a kernel**: the #48 fallback (only a current kernel is booted), the shutdown goodbye
+  (no signal reaches the guest), and the Descent's blocking connect (#47, ~8 s, bounded by the redial cooldown).
+
+### Verification
+
+- **agnos 1.57.14 under QEMU** (`scripts/agnos-smoke.py`). This tree passes all six checks under TCG and under KVM.
+  1.12.2 fails `bystander`: a worst echo of 23,833 ms under TCG and 23,820 ms under KVM, against 26–31 ms here. This
+  tree with 1.12.3's `descent_mud_write` fails `descent`: one echo hit the 30 s cap, and only 182 keys got through in
+  60 s against 286. The non-reader went quiet after 1,928,178 of the 12,248,600 B it asked for in every run. The
+  last run, on the 1.12.4 binaries, passed 6/6 under TCG.
+- `cyrius test`: **262/262** + **17/17**, and the same under `--aarch64` (qemu-user). `t263` is mutation-checked.
+  Both fuzz harnesses are green, plain and `--poison=ab`. Example smokes: poll **38/38** (`--skip 01`) and fork
+  **39/39**, run in a copy of the tree. `cyrius audit` exits 0. The tree-wide `cyrius lint` finds 0 untracked
+  deferrals and 0 warnings.
+- `build/agora` **1,201,488 B**, `--agnos` 1,194,016 B, `--aarch64` 2,942,096 B, the same as 1.12.3.
+- `scripts/check-version-sync.sh --tag 1.12.4` OK. A clean build (`rm -rf build && cyrius deps && CYRIUS_DCE=1
+  cyrius build`) passes.
+
 ## [1.12.3] — 2026-10-30 (the agnos drain stops waiting; the deferral check reads 0)
 
 Two changes. **On agnos, the poll sweep's tx drain no longer waits on a slow reader.** agnos 1.57.13 added

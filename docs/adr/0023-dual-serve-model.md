@@ -1,7 +1,8 @@
 # 0023 — The dual serve model: fork per accept, or one process polling all sessions
 
 > **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**; the agnos drain
-> amended at 1.12.3 (§ Decision, the sweep: a no-wait send on agnos ≥ 1.57.13)
+> amended at 1.12.3 (§ Decision, the sweep: a no-wait send on agnos ≥ 1.57.13) and measured on agnos at 1.12.4,
+> when the Descent's write to the MUD stopped waiting too
 > **Date**: 2026-07-26 (recorded retroactively — the decision shipped at 1.5.0 / 1.6.0)
 > **Amends**: [ADR 0007](0007-fork-per-accept-concurrency.md) — see § Relationship to ADR 0007.
 
@@ -78,6 +79,26 @@ The poll model is built from four pieces:
   > - **Make-room compacts first.** An agnos queue is now usually part-sent, so `sess_tx_enqueue` reclaims
   >   the sent prefix before it drains, and drains (and may wait) only if that is not enough (`s17`).
   >
+  > **1.12.4 amendment — measured on an agnos kernel, and the Descent's write.** `scripts/agnos-smoke.py`
+  > boots agnos 1.57.14 in QEMU and serves agora from it ([BENCHMARKS.md](../../BENCHMARKS.md) § agnos).
+  > - **The cure holds.** While a client with a 4 KB receive buffer asks for ~12 MB and reads nothing
+  >   (smoke 31's), a bystander's worst keystroke echo over 60 s is 26–31 ms. 1.12.2's raw #48 drain held
+  >   the same bystander for 23.8 s, with stalls 6–8 s apart before that, under both TCG and KVM.
+  > - **The pacing above was half right.** One segment per sweep is the case when the peer's ACK is not
+  >   back within the drain, and a sweep is `POLL_MS` rounded up to the kernel's tick, about 30 ms: a 61 KB
+  >   `read 1` ran at 48 KB/s under KVM. Under TCG, QEMU's ACK can land inside the drain, so 48–192 KB/s.
+  >   #48 sent the same read at 2,680 KB/s (KVM) and 673 KB/s (TCG). **The cure costs a single healthy
+  >   reader most of its bulk throughput on agnos**: a 64 KB post takes about 1.3 s to arrive. Recorded as a
+  >   known limitation in the CHANGELOG; not changed here.
+  > - **The Descent's write to the MUD** (`descent_mud_write`) was the stdlib's `sys_write`: a 30 s stall
+  >   deadline, re-armed on progress, inside the sweep. A MUD that stopped reading held a bystander for the
+  >   full 30 s (measured with 1.12.3's write against a stub MUD). It is now one `_agnos_sock_send_left`
+  >   with no wait, like the drain, and the same bystander's worst echo is 28–30 ms.
+  > - **What the harness cannot see**: the #48 fallback on a kernel before 1.57.13 (only a current kernel
+  >   is booted), and the shutdown goodbye (no signal reaches the guest). It also showed that the agnos
+  >   kernel declares a zero-window peer dead after five unanswered resends (~31 s) and sends it neither
+  >   FIN nor RST, so a dropped non-reader never sees its connection close.
+  >
   > **Capacity note (audit I13):** agnos' stdlib socket table holds 8 sockets, so the real ceiling there
   > is ~8 sessions (a Descent visit uses one more), not `MAX_SESS` = 64.
 - **A per-sweep line budget** (added 1.8.1, audit H2). `process_rx` runs at most `POLL_LINE_BUDGET`
@@ -114,8 +135,9 @@ to line dispatch, or to the arena reset, or to a send-failure path, applies to b
      and `descent_proxy` holds the sweep for a player's whole MUD session (since 1.8.1 it at least
      watches the shutdown signalfd, and a failed connect is not redialled for 30 s). **Since 1.12.3**
      the first has a peer on agnos ≥ 1.57.13 (#109 with no wait; see the sweep's amendment above),
-     and what is left of it is the bounded make-room wait, plus the Descent's write to the MUD, which
-     on agnos still goes through the stdlib's `sys_write` (a 30 s stall deadline). The second went at 1.11.0
+     and what is left of it is the bounded make-room wait. The Descent's write to the MUD, which went
+     through the stdlib's 30 s `sys_write` route on agnos, sends without waiting since 1.12.4; its
+     connect still blocks there (`sock_connect` #47, ~8 s, bounded by the redial cooldown). The second went at 1.11.0
      ([ADR 0031](0031-descent-session-state.md): the Descent is a session state now).
   3. **A crash cost one connection.** Under poll it costs all 64.
 - **Accepted risk, recorded at 1.9.2 — a slow-but-real typist holds a slot.** Every model caps

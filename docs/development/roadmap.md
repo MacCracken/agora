@@ -4,7 +4,8 @@
 > toolchain cut. It closed § Blocked's directory-guard row (the stdlib's `dir_list_into` opens with
 > `O_DIRECTORY` since 6.7.11) and restated the DCE row. 1.12.3 took the slot after it: four reworded comments,
 > so the tree-wide deferral check reads 0, and on agnos ≥ 1.57.13 a poll drain that never waits (`sock_send_dl`
-> #109, ADR 0023 amended); nothing planned changed. Rebuilt at 1.12.1 as the single, forward-only plan:
+> #109, ADR 0023 amended); 1.12.4 ran it on a real agnos kernel (`scripts/agnos-smoke.py`), fixing agnos logins and
+> the Descent's MUD write; nothing planned changed. Rebuilt at 1.12.1 as the single, forward-only plan:
 > [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
 > agora stands today. Next slot: **1.13.0**.
 >

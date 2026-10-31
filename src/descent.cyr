@@ -272,15 +272,29 @@ fn descent_mud_read(mfd, buf, cap): i64 {
 # One non-blocking write to the MUD: bytes written (possibly fewer than `len`, 0
 # if the socket would block), or -1 if it failed. Never `send_buf`: in poll mode
 # that enqueues to the active session's tx queue, which is the CLIENT's (the
-# 1.6.2 bug that silently broke the gateway under poll — smoke 24). On agnos the
-# send itself blocks (sock_send #48 has no non-blocking form); the MUD is the
-# operator's own service.
+# 1.6.2 bug that silently broke the gateway under poll — smoke 24).
+#
+# 1.12.4 — on agnos, never `sys_write`: its socket route there is the stdlib's
+# `_agnos_sock_send_all`, which retries until a 30 s stall deadline that re-arms
+# whenever a byte moves, so a MUD that stopped reading held the whole poll sweep.
+# It is ONE `_agnos_sock_send_left` with a NEGATIVE ceiling instead, as in
+# `session_drain_wait` (main.cyr): sock_send_dl #109 with no wait on agnos >=
+# 1.57.13 (what can go now, possibly 0, which `descent_pump` keeps for the next
+# sweep), and one sock_send #48 on an older kernel, which cannot be bounded but
+# is still one call. Never a 0 ceiling: #109 reads 0 as NO ceiling, exactly #48.
 fn descent_mud_write(mfd, buf, len): i64 {
     if (len <= 0) { return 0; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    var conn = _agnos_fd_conn(mfd);
+    if (conn < 0) { return 0 - 1; }
+    var an = _agnos_sock_send_left(conn, buf, len, 0 - 1);
+    if (an < 0) { return 0 - 1; }
+    return an;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var n = sys_write(mfd, buf, len);
     if (n >= 0) { return n; }
-    #ifndef CYRIUS_TARGET_AGNOS
     if (n == (0 - DESCENT_EAGAIN)) { return 0; }
-    #endif
     return 0 - 1;
+    #endif
 }

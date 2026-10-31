@@ -6,10 +6,11 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-10-30 — **1.12.3 cut**: on agnos ≥ 1.57.13 the poll sweep's tx drain sends with
-> `sock_send_dl` #109 and no wait, so a slow reader no longer stalls the sweep (ADR 0023's hole A, cured; built,
-> not run on an agnos kernel). Four source comments reworded, so the tree-wide deferral check reads 0. 278 tests
-> (`s17` new); each binary +8 B; dependencies unchanged.
+> **Last refresh**: 2026-10-30 — **1.12.4 cut**: agora run on a real agnos kernel for the first time
+> (`scripts/agnos-smoke.py`, agnos 1.57.14 in QEMU). The no-wait drain holds: a non-reader no longer stalls a
+> bystander, where 1.12.2 held it 23.8 s. It cost bulk throughput: a single reader gets 48 KB/s under KVM. Two
+> fixes: logins work on agnos (the nonce came from `/dev/urandom`, which agnos lacks), and the Descent's write to
+> the MUD no longer waits. 279 tests (`t263` new); sizes and dependencies unchanged.
 > **Replace this paragraph each release — do not append to it.** History lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
@@ -68,6 +69,13 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
      stdlib's private `_agnos_sdl_ok` (1 = the call just made was #109) and calls `_agnos_sock_send_left`:
      re-read both on every toolchain bump. The kernel keeps one segment in flight, so a no-wait drain moves
      one segment per sweep; only make-room and the shutdown goodbye may wait (`SESS_DRAIN_WAIT_US`).
+   - **agnos has no `/dev`** [1.12.4]: entropy is `random_bytes` (getrandom #45), never a file open of
+     `/dev/urandom`, which failed every login there until 1.12.4. Only a run on agnos shows this kind of
+     gap: `python3 scripts/agnos-smoke.py` (manual; needs the sibling agnos and gnoboot builds) before any
+     cut that touches an agnos path.
+   - **agnos drops a zero-window peer silently** [1.12.4]: after five unanswered resends (~31 s) the kernel
+     declares the conn dead and sends neither FIN nor RST, so a dropped client may never see EOF. Do not
+     write an agnos check that waits for one.
    - **Poll fairness is a per-sweep line budget** [1.8.1]: `process_rx(s, start, n, budget)` parks the
      rest of a recv in the slot. Anything new that dispatches lines must count against it.
    - **Door saves happen on every close path** [1.8.1] (`session_door_checkpoint`), a finished run
@@ -149,18 +157,18 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `1.12.3` (2026-10-30) — the agnos drain stops waiting; the deferral check reads 0. Previous: `1.12.2` (2026-10-30) — toolchain cut (cyrius 6.7.18, darshana 1.7.0) |
+| **Released** | `1.12.4` (2026-10-30) — agora on a real agnos kernel (the harness; agnos login and the Descent write fixed). Previous: `1.12.3` (2026-10-30) — the agnos drain stops waiting; the deferral check reads 0 |
 | **In flight** | none — next is **1.13.0** (the terminal, beyond the width), see § In-flight slot |
 | **Toolchain pin** | cyrius `6.7.18` (`cyrius.cyml [package].cyrius`; at 1.12.2 the local snapshot's 113 stdlib files and its `cycc` were verified byte-identical to the tag, and `SOURCE_COMMIT` matches it) |
 | **Source of truth** | `VERSION` at the repo root |
 
 ## Build artifacts
 
-| Artifact | Size (1.12.3) | Build line |
+| Artifact | Size (1.12.4) | Build line |
 |---|---|---|
-| `build/agora` | **1,201,488 B** (+8 vs 1.12.2, the agnos no-wait drain's shared half; 1.12.2 was +78,880 vs 1.12.1, all toolchain — see below) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
-| `build/agora-agnos` | 1,194,016 B (+8; 1.12.2: +78,944) | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
-| aarch64 | 2,942,096 B (+8; 1.12.2: +410,664 — aarch64 ELF does no DCE compaction, so it keeps all of 6.7.18's new stdlib code, +291,632 B; its segments align to 64 KB, so it grows in steps) | `cyrius build --aarch64 …` |
+| `build/agora` | **1,201,488 B** (as 1.12.3, which was +8 vs 1.12.2; 1.12.2 was +78,880 vs 1.12.1, all toolchain — see below) | `CYRIUS_DCE=1 cyrius build src/main.cyr build/agora` |
+| `build/agora-agnos` | 1,194,016 B (as 1.12.3; 1.12.2: +78,944) | `CYRIUS_DCE=1 cyrius build --agnos src/main.cyr build/agora-agnos` |
+| aarch64 | 2,942,096 B (as 1.12.3; 1.12.2: +410,664 — aarch64 ELF does no DCE compaction, so it keeps all of 6.7.18's new stdlib code, +291,632 B; its segments align to 64 KB, so it grows in steps) | `cyrius build --aarch64 …` |
 
 The release workflow publishes all three (`agora-<ver>-x86_64-linux`, `-aarch64-linux`, `-x86_64-agnos`)
 with `SHA256SUMS` since 1.8.2.
@@ -175,13 +183,14 @@ static arrays are now under the compiler's 128 KB threshold.
 
 ## Tests + benchmarks
 
-| Surface | Status (1.12.3) |
+| Surface | Status (1.12.4) |
 |---|---|
-| `tests/agora.tcyr` | **261** module tests (src/test.cyr until 1.8.2; 1.12.1: t261–t262) — also 261/261 under `cyrius test --aarch64` (qemu); unchanged at 1.12.2 and 1.12.3 |
+| `tests/agora.tcyr` | **262** module tests (src/test.cyr until 1.8.2; 1.12.1: t261–t262; 1.12.4: `t263` the CSPRNG nonce) — also under `cyrius test --aarch64` (qemu) |
 | `tests/serve.tcyr` | **17** serve-layer tests (1.11.1: `s13` registry conformance, `s14` world-pointer guard; 1.12.0: `s15` `--door-days`; 1.12.1: `s16` the wager audit trail; 1.12.3: `s17` make-room compacts before it drains) (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu. The agnos send arm compiles only under `--agnos` and runs only on an agnos kernel, so no test reaches it |
 | `fuzz/telnet_iac.fcyr` | green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2); since 1.10.0 it agrees the client options before its structured subnegotiations, checks for torn replies, and drives 656 targeted LINEMODE frames |; since 1.11.0 a sixth pass drives the Descent negotiation observer (3,000 visits in split pieces, guard band) and the return resync (invariants 24 / 25)
 | `fuzz/term_wrap.fcyr` | new at 1.10.1: the word wrap — 6,000 adversarial texts (6.1 MB) each wrapped four ways, seven invariants (nothing but whitespace dropped, breaks only at whitespace, no escape sequence split — by its own parser, chunk-size independence, rows within the width, identity when everything fits, no runaway); green plain and `--poison=ab`, in CI and release; 1.12.2 fixed two literal lengths in its debug-only report (the 6.7.18 linter's new check) |
-| `docs/examples/` | **39** smokes (1.12.1: 39, provably fair wagers); `run.sh`: both legs green at 1.12.3 on cyrius 6.7.18 (**fork 39/39, poll 38/38** with `--skip 01`); CI runs it per model |
+| `docs/examples/` | **39** smokes (1.12.1: 39, provably fair wagers); `run.sh`: both legs green at 1.12.4 on cyrius 6.7.18 (**fork 39/39, poll 38/38** with `--skip 01`); CI runs it per model |
+| `scripts/agnos-smoke.py` | new at 1.12.4, **manual** (not CI): agora on agnos 1.57.14 in QEMU, six checks (`serve`, `read`, `make-room`, `bystander`, `dropped`, `descent`), 6/6 under TCG and KVM; 1.12.2 fails `bystander`, 1.12.3's Descent write fails `descent`. Needs `../agnos/build/{agnos,rootfs}`, `../gnoboot/build/BOOTX64.EFI`, OVMF, qemu, openssl. Measurements: BENCHMARKS.md § agnos — 1.12.4 |
 | `benches/bench_telnet.bcyr` · `bench_term.bcyr` | 5 parser benchmarks · 4 word-wrap benchmarks (1.10.1) — [`BENCHMARKS.md`](../../BENCHMARKS.md) |
 | `benches/serve-bench.py` | accept rate, per-session memory, world lock, reply (`read` with and without replies; 1.9.1 index), unknown-handle login + first-start time (1.9.0) — BENCHMARKS.md § Serve-level baselines |
 | `cyrius audit` | **exit 0** since 1.8.2 — fmt, lint (0 warnings), docs (every function documented), tests, bench — and a CI gate |
@@ -189,12 +198,16 @@ static arrays are now under the compiler's 128 KB threshold.
 
 ## In-flight slot
 
-**None.** 1.12.2 (a toolchain cut) and 1.12.3 (the agnos no-wait drain, and comments) each took the next free patch slot (roadmap rules). Next is **1.13.0 — the
+**None.** 1.12.2 (a toolchain cut), 1.12.3 (the agnos no-wait drain, and comments) and 1.12.4 (agora on a real agnos kernel) each took the next free patch slot (roadmap rules). Next is **1.13.0 — the
 terminal, beyond the width** (paging by window height, the Handler's teletype, colour by terminal type). See
 roadmap § 1.13.0.
 
 ## Recent shipped
 
+- **1.12.4** (2026-10-30) — `scripts/agnos-smoke.py` runs agora on agnos 1.57.14 in QEMU: the no-wait drain
+  verified (1.12.2 stalled a bystander 23.8 s), the pacing measured (48 KB/s under KVM, not 73), logins fixed on
+  agnos (`random_bytes`, not `/dev/urandom`), and the Descent's write to the MUD no longer waits. 279 tests,
+  39 smokes.
 - **1.12.3** (2026-10-30) — on agnos ≥ 1.57.13 the poll drain sends with `sock_send_dl` #109 and no wait (one
   segment per sweep); make-room and the shutdown goodbye make one send bounded at 250 ms; make-room compacts first.
   Four comments reworded (`account.cyr`, `arena.cyr`, two in `telnet.cyr`), so the tree-wide deferral check reads
@@ -273,15 +286,15 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | kii / sankoch | M3 inline images / M4 stored-file deltas | — | gates met, no consumer; nothing in `src/` references them |
 | agnos ext4 WRITE | AGNOS-target storage | in flight upstream | not blocking (ADR 0001) |
 
-## Source surface (1.12.3, lines; `main.cyr` and `serve.tcyr` grew, the rest as at 1.12.2)
+## Source surface (1.12.4, lines)
 
 | File | Lines | Holds |
 |---|---:|---|
-| `src/main.cyr` | 6,124 | argv dispatch + CLI verbs; both serve models (fork / poll; readiness waits, the fork child's signalfd + PDEATHSIG), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat glue; the Descent as a session state (`descent_begin` / `descent_pump` / `descent_leave`); door save lifecycle; N1 shutdown |
+| `src/main.cyr` | 6,127 | argv dispatch + CLI verbs; both serve models (fork / poll; readiness waits, the fork child's signalfd + PDEATHSIG), session pool + context swap; `process_rx` line dispatch + the poll line budget; login flow; send path (`send_buf` / `send_text` / `send_wrapped` / `write_text`); door / chat glue; the Descent as a session state (`descent_begin` / `descent_pump` / `descent_leave`); door save lifecycle; N1 shutdown |
 | `src/telnet.cyr` | 1,249 | RFC 854 IAC parser (AYT, EC / EL events), RFC 1143 Q-method, NAWS / TERMINAL-TYPE subnegotiation, RFC 1184 LINEMODE server side (MODE + echo hand-off, SLC, FORWARDMASK refused) — only for agreed options; the Descent negotiation observer + return resync (1.11.0) |
 | `src/term.cyr` | 448 | terminal-aware output (ADR 0030): display width (UTF-8, wide / zero-width, TAB stops, escape sequences) and the resumable word-wrap state machine `send_wrapped` drives |
 | `src/board.cyr` | 1,960 | post storage + RFC-822 headers (PostHeaders ABI), boards, threading + the reply index (ADR 0027), policy modes + read gate (ADR 0028) / admins (fail closed; streamed; fingerprint entries), `flock` helpers, the directory workspace (`store_dir_scan`, FIFO-guarded), egress sanitize rule (ADR 0024) |
-| `src/account.cyr` | 799 | fingerprint, handle validation, user dirs, keyfiles, nonce / signature parse, From-header extraction, the register lock, the handle index (ADR 0026) |
+| `src/account.cyr` | 797 | fingerprint, handle validation, user dirs, keyfiles, nonce / signature parse, From-header extraction, the register lock, the handle index (ADR 0026) |
 | `src/arena.cyr` | 364 | per-command scratch arena (ADR 0021), the store file primitives: `store_write_atomic`, `store_open` / `store_read_all` / `store_lock_open` / `store_append_locked`, `store_publish` (ADR 0025) |
 | `src/door.cyr` | 915 | door framework (ADR 0009): PRNG, saves (+ remove / quarantine / play lock), world transactions, leaderboards, `emit_*` render, descriptor registry (ADR 0020), `DD_FREE` (ADR 0022), the daily ration (ADR 0032) |
 | `src/smuggler.cyr` · `src/port_authority.cyr` · `src/handler.cyr` | 1,355 · 1,703 · 1,453 | the three 1.1.0 doors + their 1.2.0 Universe layers |
@@ -290,8 +303,8 @@ distribution channel for the rest of AGNOS, at which point downstream verificati
 | `src/wager.cyr` | 566 | shared wagering primitive (ADR 0013) + provably fair draws, the audit record (ADR 0033) |
 | `src/chat.cyr` | 451 | chat area ring transcript (ADR 0011) |
 | `src/eliza.cyr` · `src/parry.cyr` · `src/jabberwacky.cyr` | 911 · 529 · 565 | the three chatbots (ADR 0012, 0015) |
-| `src/descent.cyr` | 286 | Descent MUD gateway (ADR 0017 / 0031): endpoint parsing + non-blocking dial / connect check / one read / one write — the pump lives in `main.cyr` |
-| `tests/agora.tcyr` · `tests/serve.tcyr` | 8,351 · 1,342 | the module suite · the serve-layer suite (includes `main.cyr`) |
+| `src/descent.cyr` | 300 | Descent MUD gateway (ADR 0017 / 0031): endpoint parsing + non-blocking dial / connect check / one read / one write — the pump lives in `main.cyr` |
+| `tests/agora.tcyr` · `tests/serve.tcyr` | 8,375 · 1,342 | the module suite · the serve-layer suite (includes `main.cyr`) |
 
 ## Cross-references
 
