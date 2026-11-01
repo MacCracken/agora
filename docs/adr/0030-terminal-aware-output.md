@@ -1,6 +1,6 @@
 # 0030 — Terminal-aware output: wrap to the window the client reports
 
-> **Status**: Accepted
+> **Status**: Accepted — amended at 1.13.0: the rows and the terminal type have a consumer ([ADR 0034](0034-output-gate.md))
 > **Date**: 2026-10-13 — 1.10.1
 
 ## Context
@@ -76,7 +76,8 @@ exactly the bytes it got before.**
 
 - **Rows** (NAWS height) and **TERMINAL-TYPE** still have no consumer. Paging (`--More--`) would change the
   input model mid-output, and colour by terminal type would need the greeting delayed until the type is known.
-  Both are planned in `roadmap.md` § 1.13.0.
+  Both are planned in `roadmap.md` § 1.13.0. *(1.13.0: both shipped, [ADR 0034](0034-output-gate.md). A page
+  counts rows after this ADR's wrap, so it needs a reported width as well as a height.)*
 - **The Descent link** forwards the client's NAWS updates to the MUD, so a window resized during a visit is
   not seen by agora until the client next reports. Folded into roadmap § 1.11.0's "re-assert options on
   return".

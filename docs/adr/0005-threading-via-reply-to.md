@@ -1,6 +1,7 @@
 # 0005 — Threading via `Reply-To` header (same-board, ID-only)
 
-> **Status**: Accepted — reply enumeration (p) superseded by [0027](0027-reply-index.md) (1.9.1)
+> **Status**: Accepted — reply enumeration (p) superseded by [0027](0027-reply-index.md) (1.9.1); cross-board
+> threading (β) added by [0035](0035-cross-board-replies.md) (1.13.1), on the path this ADR left for it
 > **Date**: 2026-05-23
 
 ## Context
@@ -37,7 +38,8 @@ Reply enumeration candidates:
 Specifics:
 
 - **Reply relationship**: each reply post has a header line `Reply-To: <integer>\r\n` in its RFC-822 header block (ADR 0003). The value is the integer ID of the parent post in the same board.
-- **Cross-board threading is not in scope.** Cross-board replies are rare in BBS practice (boards are themed; cross-board conversation is a sign the boards are mis-scoped). Adding it later is a non-breaking change — `Reply-To` becomes `Reply-To: <board>/<id>` for cross-board, plain `<id>` continues to mean same-board. The parser changes; existing posts stay valid.
+- **Cross-board threading is not in scope.** *(1.13.1: added by [ADR 0035](0035-cross-board-replies.md),
+  exactly as below — `Reply-To: <board>/<id>`, plain `<id>` unchanged.)* Cross-board replies are rare in BBS practice (boards are themed; cross-board conversation is a sign the boards are mis-scoped). Adding it later is a non-breaking change — `Reply-To` becomes `Reply-To: <board>/<id>` for cross-board, plain `<id>` continues to mean same-board. The parser changes; existing posts stay valid.
 - **Deep threading (`References` chain) is not in scope.** Single-parent `Reply-To` is sufficient for the BBS flat-thread shape. Tree-view rendering can be reconstructed by transitively following `Reply-To` if a future bite needs it.
 - **Reply enumeration scans the board's directory on every `read`.** For each post in the board, parse the header for `Reply-To: <id>` and accumulate matches. O(n) in the board's post count per read; negligible at v1.0 scale (boards with < 1000 posts read in well under 100 ms on any modern disk).
 - **`Re:` subject prefix** per RFC 5322 § 3.6.5: when composing a reply, if the parent's Subject starts with `Re: ` (case-insensitive) the reply subject keeps it as-is; otherwise prepend `Re: `. **Never doubled.** "Re: Re: foo" is a sign the parser is broken.

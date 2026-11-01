@@ -40,6 +40,10 @@
 #              arrive whole: the make-room drain may wait (one send, at most
 #              SESS_DRAIN_WAIT_US = 250 ms) instead of dropping a session whose
 #              command outgrew the queue (1.8.1 S5)
+#   page       (1.13.0, ADR 0034) after an 80x10 window report, `help` stops
+#              at `--More--` with the rest held in the queue (the drain stops at
+#              the output gate's hold), and Enter turns the pages until every
+#              line has arrived once and the prompt follows
 #   bystander  while a client with a 4 KB receive buffer asks for ~12 MB and
 #              reads NOTHING, another session's keystroke echo stays prompt
 #              (< 1 s) for SMOKE_STALL_SECS. This is the check that needs the
@@ -47,10 +51,16 @@
 #              closes, and a raw sock_send #48 per drain (agora 1.12.2) then
 #              holds the shared sweep for #48's ~8 s progress window, per sweep
 #   dropped    the non-reader stops being served (its queue overflowed) having
-#              been handed less than half of what it asked for. EOF is reported
-#              but not required: agnos declares a zero-window peer dead after 5
-#              unanswered resends (~31 s) and sends no FIN or RST, so the host
-#              behind QEMU's user network may never see the close
+#              been handed less than half of what it asked for. How it ended is
+#              reported but not required: agnos gives up on the closed conn's
+#              held FIN slot after 5 resends (~47 s) and then answers nothing the
+#              peer sends with a RST (agnos issue 2026-10-31), so the host behind
+#              QEMU's user network sees no EOF
+#   xreply     (1.13.1, ADR 0035; needs openssl) a logged-in client posts on pub,
+#              replies to it from tech with `reply pub/1`, and pub's `read 1`
+#              lists `tech/1`: a cross-board reply takes both boards' flock#59
+#              locks at once on the agnos kernel, and pub's index is built on
+#              its ext2 store
 #   descent    (needs openssl, for the login signature) a logged-in client
 #              steps into the Descent, whose endpoint (<store>/.descent) is a
 #              stub MUD on the host that reads 64 KB and then stops reading;
@@ -92,6 +102,8 @@ ECHO_SLOW_MS = 1000    # smoke 31's bound for a bystander's echo
 MUD_READS = 65536      # what the stub MUD reads before it stops reading
 FLOOD = 8 * 1048576    # what the Descent client types at it
 MUD_BANNER = b"stub MUD ready"
+MORE = b"--More-- (Enter; q to stop)"
+NAWS_80x10 = bytes([255, 251, 31, 255, 250, 31, 0, 80, 0, 10, 255, 240])
 PKCS8 = bytes.fromhex("302e020100300506032b657004220420")   # Ed25519 seed -> DER (smoke 37)
 HAVE_OPENSSL = shutil.which("openssl") is not None
 
@@ -438,6 +450,23 @@ try:
           "%d of %d B in %.2f s (%.0f KB/s), more than the 128 KB queue"
           % (len(four), len(H_FOUR), four_s, len(four) / four_s / 1024 if four_s > 0 else 0))
 
+    # The page stop: the poll drain sends up to the gate's hold and no further.
+    pg = connect(HP)
+    grab(pg, 3.0)
+    pg.sendall(NAWS_80x10 + b"help\r\n")
+    seen = until(pg, MORE, 20.0)
+    stopped = seen.endswith(MORE) and b"close the session" not in seen
+    turns = 0
+    while turns < 10 and seen.endswith(MORE):
+        pg.sendall(b"\r\n")
+        more, _ = grab(pg, 3.0)
+        seen += more
+        turns += 1
+    check("page", stopped and seen.count(b"close the session") == 1 and seen.endswith(b"\r\n> "),
+          "stopped at --More--: %s; %d turns; the last line %d time(s); prompt last: %s"
+          % (stopped, turns, seen.count(b"close the session"), seen.endswith(b"\r\n> ")))
+    pg.close()
+
     # The non-reader first, then a bystander that types one key at a time.
     a = socket.socket()
     a.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -455,10 +484,13 @@ try:
 
     # Read what QEMU and the host buffered for the non-reader. A session agora
     # still served would keep sending once the window reopens; a dropped one
-    # goes quiet. EOF is reported, not required: the agnos kernel declares a
-    # zero-window peer dead after TCP_RTO_RETRIES (5) unanswered resends of its
-    # held segment (~31 s of backoff) and sends neither FIN nor RST, so QEMU's
-    # user network, and the host behind it, may never see the close.
+    # goes quiet. EOF is reported, not required. agora's close leaves the agnos
+    # kernel a held FIN slot, which the persist cap does not cover, so it is
+    # given up on after TCP_RTO_RETRIES (5) resends (1+2+4+8+16+16 s, ~47 s)
+    # with its data and FIN undelivered; after that the kernel drops whatever
+    # the peer sends without a RST (agnos issue 2026-10-31, "a segment for no
+    # connection gets no RST"). So QEMU's user network, and the host behind it,
+    # never see the close.
     got, _ = grab(a, 8.0)
     eof = "no EOF"
     try:
@@ -512,6 +544,35 @@ try:
                 check("descent", worst < ECHO_SLOW_MS and mud.got >= MUD_READS, detail)
                 v.close()
         d.close()
+
+    if HAVE_OPENSSL:
+        x = connect(HP)
+        grab(x, 3.0)
+        x.sendall(b"login qix\r\n")
+        out = until(x, b"auth:", 20.0)
+        m = re.search(rb"challenge:\s*([0-9a-f]+)", out)
+        ok = False
+        detail = "login failed"
+        if m:
+            x.sendall(b"auth: " + sign(m.group(1)) + b"\r\n")
+            if b"welcome, qix" in until(x, b"welcome, qix", 20.0):
+                steps = [b"enter pub", b"post", b"orig", b"the parent", b".", b"enter tech",
+                         b"reply pub/1", b"from tech", b"."]
+                for st in steps:
+                    x.sendall(st + b"\r\n")
+                    if st == b".":
+                        until(x, b"posted as #", 30.0)
+                    else:
+                        grab(x, 1.0)
+                x.sendall(b"enter pub\r\n")
+                grab(x, 1.0)
+                x.sendall(b"read 1\r\n")
+                out = until(x, b"Replies:", 20.0) + until(x, b"> ", 3.0)
+                line = [l for l in out.split(b"\r\n") if l.startswith(b"Replies: ")]
+                ok = bool(line) and line[0] == b"Replies: tech/1"
+                detail = "pub's read 1: %r" % (line[0] if line else out[-80:])
+        check("xreply", ok, detail)
+        x.close()
 
     p("serial log:", SER)
     rc = 0 if all(ok for _, ok in results) else 1

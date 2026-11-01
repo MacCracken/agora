@@ -87,12 +87,25 @@ The in-session commands (mirroring `help`):
 | `enter <name>` | switch to a named board | ✅ existing only |
 | `leave` | return to main | ✅ |
 | `list` | list post IDs in the current board | ✅ |
-| `read <id>` | print a post (with replies) | ✅ |
+| `read <id>` | print a post (with replies); `read <board>/<id>` reads one on another board | ✅ |
 | `post` | compose; terminate with `.` on a line by itself | ❌ |
-| `reply <id>` | compose a reply (auto-prefixes `Re:`) | ❌ |
+| `reply <id>` | compose a reply (auto-prefixes `Re:`); `reply <board>/<id>` replies here to a post on another board | ❌ |
 | `login <handle>` | start a sigil Ed25519 challenge/response | ✅ |
 | `whoami` | print bound identity or `anonymous` | ✅ |
+| `more [on\|off]` | stop long output a screenful at a time (`--More--`; on by default) | ✅ |
 | `quit` | close the session | ✅ |
+
+Replies can cross boards since 1.13.1 ([ADR 0035](../adr/0035-cross-board-replies.md)). On `tech`, `reply pub/1` writes
+a reply on `tech` whose parent is `pub`'s post 1. `read` shows a reply's parent (`Reply-To: pub/1`) and a post's
+replies (`Replies: 2, tech/5`) as you would type them from the board you are on. A reply on a members-only board is
+listed only to readers who could open that board.
+
+Since 1.13.0 ([ADR 0034](../adr/0034-output-gate.md)) output that does not fit the window stops at
+`--More-- (Enter; q to stop)`. Enter (or any key but `q`) shows the next screenful; `q` drops the rest. It needs a
+client that reports its window (telnet's NAWS) of 5 rows or more. `more off` turns it off for the session, which
+a script that reports a window and pipelines commands should do first. Two other things follow the terminal you
+connect with: a terminal that names itself `DUMB` or `UNKNOWN` gets no colour, and the Handler's cables come over
+at 2400 baud (any key skips to the end).
 
 Anonymous sessions trying to `post` or `reply` get `auth required — run 'login <handle>' first`. Anonymous `enter <newname>` on a board that doesn't exist gets `auth required to create new boards` (0.8.3, audit M4). Connect, run `boards` / `list` / `read 1` to confirm read paths work, then come back authenticated.
 
@@ -182,6 +195,24 @@ newcomer is not an admin. A line that is a handle still works, but carries that 
 a `known` board as `members only` in `boards` and cannot enter it.
 
 Anonymous sessions cannot create new boards over telnet (0.8.3, audit M4) — `enter <newname>` returns `auth required to create new boards`.
+
+### Raw boards (ANSI art)
+
+Every board sanitizes what it shows ([ADR 0024](../adr/0024-egress-text-sanitization.md)): an escape sequence in a
+post reaches the reader as `?`. An operator can make a board carry ANSI art instead (1.13.1,
+[ADR 0036](../adr/0036-raw-boards.md)):
+
+```sh
+./build/agora raw set art on --store ./bbs     # writes art/.raw
+./build/agora raw get art --store ./bbs        # art: on
+```
+
+On a raw board a post body keeps its ESC bytes. Reading it sends colour (SGR), cursor moves, positioning and
+erase as written. Everything else is still neutralized: window titles, the clipboard (OSC 52), any query the
+terminal would answer, and mode switches. A terminal that names itself `DUMB` gets the art's text without its
+escapes. Art must be UTF-8, so convert CP437 art before posting it. `agora post` stores its stdin body as it is,
+so `agora post --board art --as qix --key ~/.agora/key < logo.ans` works for UTF-8 art. `raw set art off` turns the board back into an
+ordinary one.
 
 ---
 

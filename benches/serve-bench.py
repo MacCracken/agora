@@ -42,6 +42,18 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.environ.get("AGORA_BIN", os.path.join(ROOT, "build", "agora"))
 PORT = 34850
+# 1.13.0 (ADR 0034) — the greeting waits for the terminal type: a client that
+# says nothing is greeted after GREET_RAW_MS (250 ms), a deliberate wait. A real
+# telnet client answers the DO at once, so every connection here declines the
+# type (IAC WONT TERMINAL-TYPE) as it connects, and the numbers stay the cost of
+# the accept path, comparable with the closeouts before 1.13.0.
+DECLINE = bytes([255, 252, 24])
+
+
+def dial(timeout):
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=timeout)
+    s.sendall(DECLINE)
+    return s
 
 
 def no_thp():
@@ -79,7 +91,7 @@ def stop(p):
 
 def greet_once():
     """connect, read until the first prompt, close."""
-    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+    s = dial(10)
     buf = b""
     while b"> " not in buf:
         d = s.recv(65536)
@@ -159,7 +171,7 @@ def bench_memory(store, runs):
                 base = kb(p.pid, "VmRSS:")
                 socks = []
                 for _ in range(n):
-                    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+                    s = dial(10)
                     buf = b""
                     while b"> " not in buf:
                         buf += s.recv(65536)
@@ -220,7 +232,7 @@ def bench_reply(store, runs):
         for _ in range(runs):
             p = start("fork", rstore)
             try:
-                s = socket.create_connection(("127.0.0.1", PORT), timeout=30)
+                s = dial(30)
                 buf = b""
                 while b"> " not in buf:
                     buf += s.recv(65536)
@@ -266,7 +278,7 @@ def bench_login(store, runs):
             p = start("fork", lstore)
             starts.append((time.time() - t0) * 1000)
             try:
-                s = socket.create_connection(("127.0.0.1", PORT), timeout=30)
+                s = dial(30)
                 buf = b""
                 while b"> " not in buf:
                     buf += s.recv(65536)

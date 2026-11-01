@@ -4,6 +4,210 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-10-31 (the protocol, beyond one board)
+
+1.13.1 lifts two limits that date from M5:
+
+- **A reply can name a parent on another board.** `reply tech/7` writes `Reply-To: tech/7`
+  ([ADR 0035](docs/adr/0035-cross-board-replies.md)). Until now `Reply-To:` reached only the reply's own board.
+- **An operator can flag a board raw**, for ANSI art ([ADR 0036](docs/adr/0036-raw-boards.md)). Until now every
+  post's escape sequences were neutralized. Now the art's colour and cursor moves reach the reader, and nothing
+  else does.
+
+This closes the 1.13.x arc.
+
+**289** tests (266 module, with `t265`–`t267` new, + 23 serve-layer, with `s22`–`s23` new). `build/agora`
+1,231,328 B (+17,120), `--agnos` 1,223,856 B (+17,120), `--aarch64` 2,943,264 B (+736).
+
+### Added
+
+- **Cross-board replies** (`reply_ref_parse`, `reply_index_add_ref`, `reply_index_read_x`, `src/board.cyr`).
+  - **References.** A reference is `<id>` (this board, as before) or `<board>/<id>`, with `main` for the flat
+    root. One parser reads headers, index records and what users type. A board name has to pass
+    `board_ref_name_ok` before it can reach a path.
+  - **Commands.**
+    - `reply <board>/<id>` writes the reply on the current board. It requires read access to the parent's board,
+      because the parent's subject is copied into the reply's.
+    - `read <board>/<id>` follows a reference, gated by that board's read policy.
+    - The CLI takes `agora post --reply-to <board>/<id>`.
+  - **What `read` shows.** A reply shows its parent as `Reply-To: <ref>`. `Replies:` lists this board's replies,
+    then other boards' sorted by board and id, every one written as the reader would type it from their board. A
+    reply on a board the session may not read is not listed.
+  - **The index.**
+    - A reply to another board's post records itself in the parent board's index as `<board>/<child>`, before it
+      is published. It takes both boards' locks in name order, so two writers crossing the same two boards cannot
+      deadlock.
+    - Each listed child is verified on its own board, so a ghost, a forgery or a record naming a missing board is
+      never shown.
+    - A rebuild also reads every other board's posts, so a rebuilt index is still complete.
+  - [ADR 0005](docs/adr/0005-threading-via-reply-to.md), [ADR 0008](docs/adr/0008-post-headers-struct.md)
+    (`PH_REPLY_BOARD`) and [ADR 0027](docs/adr/0027-reply-index.md) amended.
+- **Raw boards** (`agora raw get|set <board> on|off`, `<board>/.raw`; `send_art`, `art_csi_len`).
+  - **Ingress.** A post body composed on a raw board keeps ESC. Every other C0 byte, DEL and IAC are dropped as
+    before, and subjects never keep ESC.
+  - **Egress.** Reading lets through only a CSI of digits and `;` that ends in `m`, `A`–`G`, `H`, `f`, `J`, `K`,
+    `s` or `u`: colour, cursor moves, positioning, erase, and cursor save and restore. Everything else is still
+    neutralized as before: OSC (titles, OSC 52), DCS, the CSIs a terminal answers (DSR, DA, window reports), mode
+    switches, and C1. An OSC therefore arrives as text.
+  - The body is not wrapped, and an SGR reset follows it. A DUMB or UNKNOWN terminal gets the art without its
+    escapes. [ADR 0024](docs/adr/0024-egress-text-sanitization.md) amended.
+- **Smoke 41** (`docs/examples/41-cross-board.py`), both serve models. Against a 1.13.0 build it fails 28 of its 34
+  checks. The agnos harness gains `xreply`, its first check that posts: a post on pub, a reply to it from tech
+  (two `flock#59` locks at once), and pub's `read 1` listing `tech/1`.
+- **Tests.** `t265` (references: parser, header round trip, ordering), `t266` (the cross-board index: records,
+  verification, ghosts and forgeries, a rebuild that finds replies from `pub` and to `main`), `t267` (the art
+  whitelist, the `.raw` flag, a FIFO refused), `s22` (the session flow: `reply` and `read` both ways, members-only
+  filtering, one `read` within the per-command arena), `s23` (a raw board end to end, an ordinary board unchanged,
+  a DUMB reader).
+
+### Changed
+
+- **`t238`'s build check** compares a rebuild on 5 posts with one on 6, so it still catches any per-post arena use.
+  A build now lists the other boards, which costs per board.
+- `read` and `reply` take their argument through the reference parser, so trailing junk (`read 5x`) is now a usage
+  error rather than post 5.
+- CLAUDE.md § Security Hardening item 6: a reference's board is parsed only by `reply_ref_parse`.
+
+### Known limitations (recorded, not fixed)
+
+- **A rebuild reads every post in the store.** It happens once per fresh board, at the next `serve` or reply (ADR
+  0035 § Consequences).
+- **Only a complete index lists cross-board replies.** The fallback scan for a board whose index is not built yet
+  sees that board's replies only.
+- **CP437 ANSI art shows `?`** for its high bytes, as all non-UTF-8 text does in agora. Art has to be UTF-8.
+
+### Verification
+
+- `cyrius test`: **266/266** + **23/23**, and the same under `--aarch64` (qemu-user). The new tests were
+  mutation-checked: 14 mutants, all killed. They covered the parent board's record, cross-child verification, the
+  rebuild's scan of other boards, the reference parser's board check, the header's board, the art whitelist, the
+  members-only filter, the read and reply gates, references relative to the reader, ESC kept on ordinary boards,
+  `send_art` skipped or sent to a DUMB terminal, and per-post arena use in a build. Both fuzz harnesses are green,
+  plain and `--poison=ab`.
+- Example smokes on the final tree, run in a copy of it: fork **40/40** and poll **40/40** (`--skip 01`, 02–41).
+  Smoke 41 failed in the first poll run: its fork section's commit came after the 0.8 s it waited, because a
+  board's first reply builds that board's index, which ends with a sync(2) that a loaded host can make slow. It
+  now waits for `posted as #`, and it passed in both legs through `run.sh` and twice pinned to two cores.
+- `cyrius audit` exits 0, and the tree-wide `cyrius lint` finds 0 untracked deferrals and 0 warnings.
+- Benchmarks: BENCHMARKS.md § Serve-level — 1.13.1. `read` is unchanged within noise against 1.13.0.
+- **agnos 1.57.14 under KVM** (`scripts/agnos-smoke.py`): **8/8** on the 1.13.1 binaries, the new `xreply` check
+  included.
+- `scripts/check-version-sync.sh --tag 1.13.1` OK. A clean build (`rm -rf build && cyrius deps && CYRIUS_DCE=1
+  cyrius build`) passes, as do `--agnos` and `--aarch64`.
+
+## [1.13.0] — 2026-10-31 (the terminal, beyond the width: the output gate)
+
+agora has stored the client's window height (NAWS) and its terminal type (RFC 1091 TERMINAL-TYPE) since M1, and
+until now used neither. 1.13.0 consumes both, shipping roadmap § 1.13.0's three items on one mechanism, the
+**output gate** ([ADR 0034](docs/adr/0034-output-gate.md)):
+
+- long output stops a screenful at a time at `--More--`;
+- The Handler's cables come over at 2400 baud, and a key skips;
+- a terminal that names itself `DUMB` or `UNKNOWN` gets no colour, so the greeting now waits for the type.
+
+Under poll one process serves every session, so no command may wait inside itself. A command still prints
+everything it has, and the gate decides how much of the session's tx queue the drain may send. Both serve models
+use it.
+
+**284** tests (263 module, with `t264` new, + 21 serve-layer, with `s18`–`s21` new). `build/agora` 1,214,208 B
+(+12,720), `--agnos` 1,206,736 B (+12,720), `--aarch64` 2,942,528 B (+432; its segments align to 64 KB).
+
+### Added
+
+- **Page stops** (`gate_send` / `gate_stop` / `gate_next` / `gate_quit`, `src/main.cyr`).
+  - **When.** A command-mode command's output stops after NAWS rows − 1 rows, at `--More-- (Enter; q to stop)`
+    (`--More--` in a window too narrow for that). It needs a reported width as well as a height, because rows are
+    counted after ADR 0030's wrap, and a window of at least 5 rows.
+  - **What the reader sees.** The command prompt is held behind the last page. Any key but `q` or `n` shows the
+    next screenful, and `q` drops the rest and prompts again. The prompt is wiped with CR, spaces, CR, so it works
+    on any terminal.
+  - **Scope.** Paging covers every command, not only `list` and `read`: `help` is 20 rows, so it pages too.
+  - **Input.** A client in LINEMODE EDIT sends whole lines, so its line's end decides. Each decided key counts
+    against the poll line budget (1.8.1 H2), so a pipelined run of keys turns one page per sweep.
+- **`more [on|off]`**: this session's page stop; `more` alone says which. A script that reports a window and
+  pipelines commands should send `more off` first: after a stop, its next line is a key.
+- **The Handler's 2400-baud teletype** (`gate_begin_type` / `gate_tick`; `g_door_type_from`, `src/door.cyr`).
+  - **Rate.** Reading a cable releases it at 240 characters a second (2400 baud, ten bits a character), on the
+    sweep's clock under poll and on the child's wait under fork.
+  - **Skip.** Any key skips to the end, and the key never reaches the door.
+  - **Scripts.** Only a client that reported a window is paced. A script gets its frames whole, as before.
+  - Deferred since 1.1.0. [ADR 0009](docs/adr/0009-door-games-subsystem.md) amended.
+- **Colour by terminal type** (`term_type_plain`, `session_colour`).
+  - **Who.** A terminal that names itself `DUMB` or `UNKNOWN`, in any case.
+  - **Effect.** It gets no SGR: `emit_sgr` and `render_motd` write none, and an operator's `--motd` file goes out
+    with its escapes stripped (`term_strip_esc`). Every other type, and no type at all, keeps its colour.
+- **Smoke 40** (`docs/examples/40-terminal-pacing.py`), both serve models, with § F on a real inetutils `telnet` in
+  an 80x12 pty. Against a 1.12.4 build it fails 17 of its 32 checks.
+- **Serve tests**: `s18`–`s21` (the page stop under poll and fork, the deferred greeting, the teletype), and module
+  test `t264` (`term_page_stop`, `term_type_plain`, `term_strip_esc`). The agnos harness gains a `page` check.
+
+### Changed
+
+- **The greeting waits for the terminal type** (`greet_settle`). At accept only the option salvo goes out. The MOTD
+  and the first prompt follow at whichever of these comes first:
+  - the client declines TERMINAL-TYPE (WONT);
+  - it names its type, two round trips after our DO;
+  - it types its first byte;
+  - a deadline passes: 250 ms for a client that has sent nothing at all (`GREET_RAW_MS`), 1 s for one that is
+    negotiating (`GREET_TYPE_MS`).
+
+  **A raw client (netcat, a script) now sees its first prompt 250 ms after connecting** unless it types first. A
+  real telnet client is greeted as soon as its type arrives. Even a client that declines at once costs the server
+  one more wake: poll's sequential accept rate is about 23 % lower (8,675–9,027 → 6,186–7,094 conn/s) and fork's
+  about 5 % (BENCHMARKS.md § Serve-level — 1.13.0). `benches/serve-bench.py` and smoke 37's § F now decline the
+  type as they connect, so they measure that and not the 250 ms wait.
+- **The drain sends up to the gate's hold** (`sess_tx_limit`; [ADR 0023](docs/adr/0023-dual-serve-model.md)
+  amended):
+  - The poll wait asks for POLLOUT only for bytes the gate releases. A held queue on a writable socket would
+    otherwise wake it forever.
+  - Telnet replies go in ahead of a hold (`send_proto`), so negotiation never waits behind a page.
+  - A queue that must make room lifts the hold instead of dropping the session.
+  - Shutdown drops held output before the goodbye (`gate_drop`).
+  - A fork child writes the socket directly, as before, unless the gate is on.
+- The session slot grows from 400 to 456 bytes: the gate's fields, the session's settings, and the greeting's
+  deadline. The spare at offset 272 became `SESS_GATE`.
+- [ADR 0030](docs/adr/0030-terminal-aware-output.md) amended: the rows and the terminal type have their consumer.
+
+### Fixed (docs)
+
+- **The agnos zero-window note was wrong** (1.12.4's CHANGELOG, `state.md`, ADR 0023, the harness). It said agnos
+  declares a zero-window peer dead "after five unanswered resends (~31 s)". The kernel source says otherwise:
+  - The resends are answered.
+  - agora's close turns the connection into a held FIN slot, which the kernel's persist cap does not cover, so it
+    is given up on after five resends, about 47 s.
+  - After that every segment from the peer is dropped **without the RST that RFC 9293 § 3.10.7.1 requires**. That
+    is why the host never sees the close.
+
+  Filed upstream as agnos issue `2026-10-31-a-segment-for-no-connection-gets-no-rst.md`, with two measurements from
+  the harness: the dropped non-reader got no EOF in 120 s after sending, and a connection to a guest port with no
+  listener ended only after 86 s.
+
+### Known limitations (recorded, not fixed)
+
+- **Paging gives way to room.** A command whose output is larger than the 128 KB tx queue is paged until the queue
+  fills, then sent unpaged (a `list` of thousands of posts). Removing that limit would mean commands that resume
+  across sweeps (ADR 0034 § Alternatives).
+- **The bulk-throughput follow-up from 1.12.4 is still open**: a single reader's rate on agnos under KVM is 48 KB/s.
+
+### Verification
+
+- `cyrius test`: **263/263** + **21/21**, and the same under `--aarch64` (qemu-user). The new tests were
+  mutation-checked: 15 mutants of the gate, the greeting, the colour switch, the teletype clock and the page-end
+  rule, all killed. One survivor on the first pass (the fork model's per-send flush) led to a new `s19` check.
+  Both fuzz harnesses are green, plain and `--poison=ab`.
+- Example smokes on the final tree, run in a copy of it: poll **39/39** and fork **39/39** (`--skip 01`, 02–40).
+  Smoke 37's § F failed on the first run (200 silent connections took 50 s, the greeting's wait) until its client
+  declined the type.
+- **agnos 1.57.14 under KVM** (`scripts/agnos-smoke.py`): **7/7** on the 1.13.0 binaries, the new `page` check
+  included (it stops at `--More--`, takes 2 turns, and every line arrives once). A worst bystander echo of 31 ms; a
+  61 KB `read 1` at 52 KB/s, as at 1.12.4.
+- `cyrius audit` exits 0, and the tree-wide `cyrius lint` finds 0 untracked deferrals and 0 warnings. The first
+  audit run failed on 23 long lines in the new tests, which were reflowed.
+- Benchmarks: BENCHMARKS.md § Serve-level — 1.13.0 (A/B against 1.12.4). `scripts/check-toolchain.sh` OK (cyrius
+  6.7.18 verified against its tag).
+- `scripts/check-version-sync.sh --tag 1.13.0` OK. A clean build (`rm -rf build && cyrius deps && CYRIUS_DCE=1
+  cyrius build`) passes, as do `--agnos` and `--aarch64`.
+
 ## [1.12.4] — 2026-10-30 (agora on a real agnos kernel)
 
 1.12.3 changed the agnos send path without running it on agnos. 1.12.4 runs it: the new manual harness

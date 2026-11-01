@@ -51,10 +51,13 @@ fn st_pair(out): i64 {
     return 0;
 }
 
-# A fresh session slot on `fd`, made the active session (globals loaded).
+# A fresh session slot on `fd`, made the active session (globals loaded). It
+# stands for a session past its greeting (1.13.0: the greeting waits for the
+# terminal type, and a first typed byte would otherwise send it — s20 tests that).
 fn st_session(fd): i64 {
     var s = session_alloc();
     session_reset(s, fd);
+    store64(s + SESS_GREETED, 1);
     sess_load(s);
     return s;
 }
@@ -506,6 +509,9 @@ fn s09_wrap_to_naws(): i64 {
     post_headers_set_subject(ph, "a subject long enough to need a second row");
     if (post_new(g_store_buf, "wrap", ph, body, bl) != 1) { st_fail(name, "post_new"); return 1; }
     var s = st_session(load64(fds));
+    # 1.13.0 — this test is about the width; a 24-row report would also page the
+    # longer replies (s19 covers that), so this session has `more off`.
+    store64(s + SESS_PREFS, PREF_NO_MORE);
     st_feed(s, "enter wrap\r\n", 0);
 
     st_tx_reset(s);
@@ -1297,8 +1303,589 @@ fn s17_tx_compact_before_drain(): i64 {
     return 0;
 }
 
+# Agree NAWS and report a window `cols` x `rows` over the wire (RFC 1073).
+fn st_naws_rc(s, cols, rows): i64 {
+    var nb[16];
+    memcpy(&nb, "\xff\xfb\x1f\xff\xfa\x1f", 6);
+    store8((&nb) + 6, 0);
+    store8((&nb) + 7, cols);
+    store8((&nb) + 8, 0);
+    store8((&nb) + 9, rows);
+    store8((&nb) + 10, 255);
+    store8((&nb) + 11, 240);
+    return st_feedn(s, &nb, 12);
+}
+
+# LFs in s's queue between byte offsets [from, to).
+fn st_tx_lfs(s, from, to): i64 {
+    var tx = load64(s + SESS_TX);
+    var c = 0;
+    var i = from;
+    while (i < to) {
+        if ((load8(tx + i) & 0xFF) == 10) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Occurrences of `needle` in buf[0..n).
+fn st_buf_count(buf, n, needle): i64 {
+    var nl = strlen(needle);
+    var c = 0;
+    var i = 0;
+    while (i + nl <= n) {
+        if (memeq(buf + i, needle, nl) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Drain s (poll) and read what reached the peer `b` into buf; returns the count.
+fn st_drain_read(s, b, buf, cap): i64 {
+    sess_load(s);
+    session_drain(s);
+    sess_save(s);
+    var got = 0;
+    var going = 1;
+    while (going == 1) {
+        var k = st_recv_some(b, buf + got, cap - got, 50);
+        if (k <= 0) { going = 0; continue; }
+        got = got + k;
+        if (got >= cap) { going = 0; }
+    }
+    return got;
+}
+
+# s18 — the page stop, poll model (1.13.0, ADR 0034). In a 10-row window a
+# command's 9th row ends a page: the drain sends that much and `--More--`, and
+# holds the rest. A key turns the page; `q` drops the rest and prompts again; the
+# command prompt comes after the last page; `more off` stops nothing; a client in
+# LINEMODE EDIT decides at the end of its line; a telnet reply goes AHEAD of the
+# hold; and a queue that must make room lifts the hold instead of dropping the
+# session.
+fn s18_page_stop_poll(): i64 {
+    var name = "s18_page_stop_poll";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    var a = load64(fds);
+    var b = load64(fds + 8);
+    sock_set_nonblocking(a);
+    sock_set_nonblocking(b);
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(a);
+    st_naws_rc(s, 80, 10);
+    var rb = alloc(65536);
+    st_drain_read(s, b, rb, 65536);
+
+    st_feed(s, "help\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_PAGED)        { st_fail(name, "help did not stop at a page"); return 1; }
+    # The echoed CR LF, then nine rows of the command.
+    if (st_tx_lfs(s, load64(s + SESS_TX_OFF), load64(s + SESS_TX_HOLD)) != 10) {
+        st_fail(name, "the first page is not nine rows");
+        return 1;
+    }
+    var n = st_drain_read(s, b, rb, 65536);
+    if (n < 30)                                     { st_fail(name, "nothing sent before the stop"); return 1; }
+    if (memeq(rb + n - 27, "--More-- (Enter; q to stop)", 27) != 1) {
+        st_fail(name, "the stop is not --More--");
+        return 1;
+    }
+    if (st_buf_count(rb, n, "\r\n> ") != 0) {
+        st_fail(name, "the command prompt went out before the last page");
+        return 1;
+    }
+
+    # A key turns the page, until the help is out and the prompt follows it.
+    var all = alloc(65536);
+    memcpy(all, rb, n);
+    var total = n;
+    var turns = 0;
+    while (load64(s + SESS_GATE) == GATE_PAGED) {
+        st_feed(s, " ", 0);
+        var k = st_drain_read(s, b, rb, 65536);
+        memcpy(all + total, rb, k);
+        total = total + k;
+        turns = turns + 1;
+        if (turns > 10) { st_fail(name, "the pages never end"); return 1; }
+    }
+    if (turns < 2)                                  { st_fail(name, "help fit in two pages of nine rows"); return 1; }
+    if (st_buf_count(all, total, "close the session") != 1) {
+        st_fail(name, "the last help line is missing or doubled");
+        return 1;
+    }
+    if (memeq(all + total - 2, "> ", 2) != 1)        { st_fail(name, "no prompt after the last page"); return 1; }
+
+    # Keys count against the poll budget: two pipelined keys turn one page per
+    # sweep, and the second waits parked for the next.
+    st_feed(s, "help\r\n", 0);
+    st_drain_read(s, b, rb, 65536);
+    if (load64(s + SESS_GATE) != GATE_PAGED)        { st_fail(name, "no held page to turn"); return 1; }
+    st_feed(s, "  ", 1);
+    if (load64(s + SESS_RX_OFF) >= load64(s + SESS_RX_LEN)) {
+        st_fail(name, "a second key ran in the same sweep");
+        return 1;
+    }
+    st_resume(s, 1);
+    st_drain_read(s, b, rb, 65536);
+    if (load64(s + SESS_GATE) != GATE_OFF) { st_feed(s, "q", 0); }
+    st_drain_read(s, b, rb, 65536);
+
+    # q stops: the rest of the help is dropped and the prompt comes back.
+    st_feed(s, "help\r\n", 0);
+    st_drain_read(s, b, rb, 65536);
+    st_feed(s, "q", 0);
+    if (load64(s + SESS_GATE) != GATE_OFF)          { st_fail(name, "q did not open the gate"); return 1; }
+    n = st_drain_read(s, b, rb, 65536);
+    if (st_buf_count(rb, n, "close the session") != 0) { st_fail(name, "q did not drop the rest"); return 1; }
+    if (memeq(rb + n - 2, "> ", 2) != 1)             { st_fail(name, "no prompt after q"); return 1; }
+
+    # LINEMODE EDIT: the client sends whole lines, so the line's end decides.
+    var ts = load64(s + SESS_TS);
+    store64(ts + TS_LM_MODE, LM_EDIT);
+    st_feed(s, "help\r\n", 0);
+    st_drain_read(s, b, rb, 65536);
+    st_feed(s, "q", 0);
+    if (load64(s + SESS_GATE) != GATE_PAGED) {
+        st_fail(name, "LINEMODE: a key decided before its line ended");
+        return 1;
+    }
+    st_feed(s, "\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_OFF)          { st_fail(name, "LINEMODE: q Enter did not stop"); return 1; }
+    n = st_drain_read(s, b, rb, 65536);
+    if (st_buf_count(rb, n, "close the session") != 0) {
+        st_fail(name, "LINEMODE: q Enter did not drop the rest");
+        return 1;
+    }
+    store64(ts + TS_LM_MODE, 0);
+
+    # A telnet reply is not held: DO SGA while stopped is answered at once.
+    st_feed(s, "help\r\n", 0);
+    st_drain_read(s, b, rb, 65536);
+    st_feed(s, "\xff\xfd\x03", 0);
+    if (load64(s + SESS_GATE) != GATE_PAGED)        { st_fail(name, "a telnet command turned the page"); return 1; }
+    n = st_drain_read(s, b, rb, 65536);
+    if (st_buf_count(rb, n, "\xff\xfb\x03") != 1) {
+        st_fail(name, "the WILL SGA reply waited behind the hold");
+        return 1;
+    }
+    st_feed(s, "q", 0);
+    st_drain_read(s, b, rb, 65536);
+
+    # A queue that must make room gives up the stop, not the session.
+    st_feed(s, "help\r\n", 0);
+    var big = alloc(8192);
+    memset(big, 65, 8192);
+    var j = 0;
+    while (j < 20) {
+        sess_load(s);
+        send_buf(a, big, 8192);
+        sess_save(s);
+        j = j + 1;
+    }
+    if (load64(s + SESS_TX_OVF) != 0)               { st_fail(name, "make-room dropped a held session"); return 1; }
+    if (load64(s + SESS_GATE) != GATE_OFF)          { st_fail(name, "make-room kept the hold"); return 1; }
+    var drained = 0;
+    var spins = 0;
+    while (spins < 200) {
+        drained = drained + st_drain_read(s, b, rb, 65536);
+        if (load64(s + SESS_TX_LEN) == 0) { spins = 200; }
+        spins = spins + 1;
+    }
+
+    # more off: no stop at all.
+    st_feed(s, "more off\r\n", 0);
+    st_drain_read(s, b, rb, 65536);
+    st_feed(s, "help\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_OFF)          { st_fail(name, "more off still stopped"); return 1; }
+    n = st_drain_read(s, b, rb, 65536);
+    if (st_buf_count(rb, n, "--More-- (Enter") != 0) { st_fail(name, "more off sent --More--"); return 1; }
+    if (st_buf_count(rb, n, "close the session") != 1) { st_fail(name, "more off lost help"); return 1; }
+    file_close(a);
+    file_close(b);
+    st_pass(name);
+    return 0;
+}
+
+# s19 — the page stop, fork model (1.13.0, ADR 0034). The fork child writes its
+# socket itself; while a page is stopped it queues, and a key writes the next
+# page. Nothing is lost or doubled, and the prompt comes last.
+fn s19_page_stop_fork(): i64 {
+    var name = "s19_page_stop_fork";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    var a = load64(fds);
+    var b = load64(fds + 8);
+    sock_set_nonblocking(b);
+    g_serve_mode = SERVE_FORK;
+    var s = st_session(a);
+    st_naws_rc(s, 80, 10);
+    var rb = alloc(65536);
+    st_recv_some(b, rb, 65536, 50);
+    st_feed(s, "help\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_PAGED) {
+        st_fail(name, "help did not stop at a page");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    var n = st_recv_some(b, rb, 65536, 100);
+    if (n < 27) {
+        st_fail(name, "the first page was not written");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    if (memeq(rb + n - 27, "--More-- (Enter; q to stop)", 27) != 1) {
+        st_fail(name, "the page does not end at --More--");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    var all = alloc(65536);
+    memcpy(all, rb, n);
+    var total = n;
+    var turns = 0;
+    while (load64(s + SESS_GATE) == GATE_PAGED) {
+        st_feed(s, "\r\n", 0);
+        var k = st_recv_some(b, rb, 65536, 100);
+        if (k > 0) { memcpy(all + total, rb, k); total = total + k; }
+        turns = turns + 1;
+        if (turns > 10) { st_fail(name, "the pages never end"); g_serve_mode = SERVE_POLL; return 1; }
+    }
+    if (st_buf_count(all, total, "close the session") != 1) {
+        st_fail(name, "the last help line is missing or doubled");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    if (memeq(all + total - 2, "> ", 2) != 1) {
+        st_fail(name, "no prompt after the last page");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    if (load64(s + SESS_TX_LEN) != 0) {
+        st_fail(name, "bytes left queued after the last page");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    if (load64(s + SESS_TX_OVF) != 0) {
+        st_fail(name, "a write failed");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    # While a command's rows are counted, what the gate releases is written at
+    # once, not at the command's end: a long `list` reaches the reader as it runs.
+    sess_load(s);
+    gate_begin_command(s);
+    send_buf(a, "row\r\n", 5);
+    if (load64(s + SESS_TX_LEN) != 0) {
+        st_fail(name, "a counted row waited in the queue");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    gate_end_command(s, MODE_COMMAND);
+    sess_save(s);
+    n = st_recv_some(b, rb, 65536, 100);
+    if (st_buf_count(rb, n, "row") != 1) {
+        st_fail(name, "a counted row was not written");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    # With the gate open again the child writes directly, as before 1.13.0.
+    st_feed(s, "whoami\r\n", 0);
+    if (load64(s + SESS_TX_LEN) != 0) {
+        st_fail(name, "an ungated reply was queued");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    n = st_recv_some(b, rb, 65536, 100);
+    if (st_buf_count(rb, n, "anonymous") != 1) {
+        st_fail(name, "an ungated reply was lost");
+        g_serve_mode = SERVE_POLL;
+        return 1;
+    }
+    g_serve_mode = SERVE_POLL;
+    file_close(a);
+    file_close(b);
+    st_pass(name);
+    return 0;
+}
+
+# s20 — the greeting waits for the terminal type (1.13.0, ADR 0034). At connect
+# only the option salvo goes out. A client that says nothing is greeted at
+# GREET_RAW_MS, in colour; one that agrees TERMINAL-TYPE gets until its type
+# arrives (GREET_TYPE_MS at most) and a DUMB one gets no SGR, in the greeting or
+# a door frame; a WONT is greeted at once; and a client that types first is
+# greeted at its first byte, ahead of the echo.
+fn s20_greeting_waits_for_type(): i64 {
+    var name = "s20_greeting_waits_for_type";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    g_serve_mode = SERVE_POLL;
+    var s = session_alloc();
+    session_reset(s, load64(fds));
+    sess_load(s);
+    session_greet(s);
+    if (st_tx_count(s, "Type anything") != 0)        { st_fail(name, "the MOTD went out with the salvo"); return 1; }
+    var t0 = clock_now_ms();
+    if (greet_settle(s, t0) != 0)                    { st_fail(name, "greeted a silent client at once"); return 1; }
+    if (greet_settle(s, t0 + GREET_RAW_MS + 5) != 1) {
+        st_fail(name, "a silent client was not greeted at GREET_RAW_MS");
+        return 1;
+    }
+    if (st_tx_count(s, "Type anything") != 1)        { st_fail(name, "no MOTD"); return 1; }
+    if (st_tx_count(s, "\x1b[") < 1)                 { st_fail(name, "an unnamed terminal lost its colour"); return 1; }
+
+    # WILL TTYPE, then IS DUMB.
+    session_reset(s, load64(fds));
+    sess_load(s);
+    session_greet(s);
+    t0 = clock_now_ms();
+    st_tx_reset(s);
+    st_feedn(s, "\xff\xfb\x18", 3);
+    if (st_tx_count(s, "\xff\xfa\x18\x01\xff\xf0") != 1) { st_fail(name, "no SEND for the type"); return 1; }
+    if (greet_settle(s, t0 + GREET_RAW_MS + 5) != 0) {
+        st_fail(name, "a negotiating client was greeted at GREET_RAW_MS");
+        return 1;
+    }
+    st_feedn(s, "\xff\xfa\x18\x00DUMB\xff\xf0", 10);
+    if (greet_settle(s, clock_now_ms()) != 1)        { st_fail(name, "the type arrived and no greeting"); return 1; }
+    if (st_tx_count(s, "Type anything") != 1)        { st_fail(name, "no MOTD for DUMB"); return 1; }
+    if (st_tx_count(s, "\x1b") != 0)                 { st_fail(name, "SGR sent to a DUMB terminal"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "play smuggler practice\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_DOOR)          { st_fail(name, "door did not open"); return 1; }
+    if (st_tx_count(s, "\x1b") != 0) {
+        st_fail(name, "a door frame sent SGR to a DUMB terminal");
+        return 1;
+    }
+    sess_load(s);
+    session_door_free(s);
+    store64(s + SESS_MODE, MODE_COMMAND);
+
+    # The deadline for a client that answered and never named its type.
+    session_reset(s, load64(fds));
+    sess_load(s);
+    session_greet(s);
+    t0 = clock_now_ms();
+    st_feedn(s, "\xff\xfb\x18", 3);
+    if (greet_settle(s, t0 + GREET_TYPE_MS + 5) != 1) { st_fail(name, "no greeting at GREET_TYPE_MS"); return 1; }
+
+    # WONT TTYPE: nothing to wait for.
+    session_reset(s, load64(fds));
+    sess_load(s);
+    session_greet(s);
+    st_feedn(s, "\xff\xfc\x18", 3);
+    if (greet_settle(s, clock_now_ms()) != 1)        { st_fail(name, "WONT TERMINAL-TYPE still waited"); return 1; }
+
+    # A client that types first.
+    session_reset(s, load64(fds));
+    sess_load(s);
+    session_greet(s);
+    st_tx_reset(s);
+    st_feed(s, "w", 0);
+    if (load64(s + SESS_GREETED) != 1)               { st_fail(name, "a typed byte did not greet"); return 1; }
+    var tx = load64(s + SESS_TX);
+    var tl = load64(s + SESS_TX_LEN);
+    if ((load8(tx + tl - 1) & 0xFF) != 119) {
+        st_fail(name, "the echo did not follow the greeting");
+        return 1;
+    }
+    if (st_tx_count(s, "Type anything") != 1)        { st_fail(name, "no MOTD before the echo"); return 1; }
+    file_close(load64(fds));
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
+# s21 — the Handler's teletype (1.13.0, ADR 0034). Reading a cable with a window
+# reported holds the cable and releases it at TYPE_CPS on the clock; a key skips
+# to its end and is not a command. A client that never reported a window (a
+# script) gets the frame whole.
+fn s21_handler_teletype(): i64 {
+    var name = "s21_handler_teletype";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(load64(fds));
+    store64(s + SESS_PREFS, PREF_NO_MORE);
+    st_feed(s, "play handler practice\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_DOOR)          { st_fail(name, "the Handler did not open"); return 1; }
+    st_feed(s, "c\r\n", 0);
+    st_tx_reset(s);
+    st_feed(s, "1\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_OFF)           { st_fail(name, "paced a client with no window"); return 1; }
+    if (st_tx_count(s, "[N]ext") != 1)               { st_fail(name, "no cable frame"); return 1; }
+    st_feed(s, "x\r\n", 0);
+
+    st_naws_rc(s, 80, 24);
+    st_tx_reset(s);
+    st_feed(s, "1\r\n", 0);
+    if (load64(s + SESS_GATE) != GATE_TYPE)          { st_fail(name, "the cable was not slow-printed"); return 1; }
+    var hold = load64(s + SESS_TX_HOLD);
+    var tlen = load64(s + SESS_TX_LEN);
+    if (tlen - hold < 100)                           { st_fail(name, "too little of the cable held"); return 1; }
+    var t = load64(s + SESS_GATE_MS);
+    sess_load(s);
+    gate_tick(s, t + 1000);
+    if (load64(s + SESS_TX_HOLD) != hold + TYPE_CPS) {
+        st_fail(name, "a second did not release TYPE_CPS characters");
+        return 1;
+    }
+    st_feed(s, " ", 0);
+    if (load64(s + SESS_GATE) != GATE_OFF)           { st_fail(name, "a key did not skip"); return 1; }
+    if (load64(s + SESS_MODE) != MODE_DOOR)          { st_fail(name, "the skip key reached the door"); return 1; }
+    if (sess_tx_limit(s) != load64(s + SESS_TX_LEN)) { st_fail(name, "the skip left bytes held"); return 1; }
+    sess_load(s);
+    session_door_free(s);
+    store64(s + SESS_MODE, MODE_COMMAND);
+    file_close(load64(fds));
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
+# s22 — cross-board replies over the session (1.13.1, ADR 0035). On board xb,
+# `reply xa/1` writes a reply here that names xa's post; `read xa/1` lists it as
+# a plain id (it is on the reader's board), `read 1` on xa lists it as `xb/1`,
+# and `read xb/1` shows its parent as `Reply-To: 1`. A reply on a members-only
+# board is not listed to a reader who cannot open that board, and `read` /
+# `reply` into it are refused for them.
+fn s22_cross_board_session(): i64 {
+    var name = "s22_cross_board_session";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    g_serve_mode = SERVE_POLL;
+    board_ensure(g_store_buf, "xa");
+    board_ensure(g_store_buf, "xb");
+    board_ensure(g_store_buf, "xc");
+    var ph = post_headers_new();
+    post_headers_set_subject(ph, "orig");
+    if (post_new(g_store_buf, "xa", ph, "hello there\r\n", 13) != 1) { st_fail(name, "post_new xa"); return 1; }
+    var s = st_session(load64(fds));
+    st_login(s, "0123456789abcdef", "qix");
+    st_feed(s, "enter xb\r\n", 0);
+    st_tx_reset(s);
+    st_feed(s, "reply xa/1\r\n", 0);
+    if (load64(s + SESS_MODE) != MODE_POSTING) { st_fail(name, "reply xa/1 did not start a reply"); return 1; }
+    if (st_tx_count(s, "Subject: Re: orig") != 1) { st_fail(name, "the parent's subject was not derived"); return 1; }
+    st_feed(s, "a cross reply\r\n", 0);
+    st_tx_reset(s);
+    st_feed(s, ".\r\n", 0);
+    if (st_tx_count(s, "posted as #1") != 1) { st_fail(name, "the reply was not posted on xb"); return 1; }
+    var fb = alloc(4096);
+    var fl = post_read(g_store_buf, "xb", 1, fb, 4096);
+    if (st_buf_count(fb, fl, "Reply-To: xa/1\r\n") != 1) { st_fail(name, "no Reply-To: xa/1 in the reply"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read xa/1\r\n", 0);
+    if (st_tx_count(s, "hello there") != 1) { st_fail(name, "read xa/1 from xb"); return 1; }
+    if (st_tx_count(s, "Replies: 1\r\n") != 1) {
+        st_fail(name, "the reply on the reader's board is not a plain id");
+        return 1;
+    }
+    st_feed(s, "enter xa\r\n", 0);
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    # The arena is a budget (CLAUDE.md): one `read`, cross-board list included,
+    # must fit it, or it falls back to bare alloc() that is never reclaimed.
+    if (g_cmd_arena_off >= CMD_ARENA_BYTES) {
+        st_fail(name, "one read overran the per-command arena");
+        return 1;
+    }
+    if (st_tx_count(s, "Replies: xb/1\r\n") != 1) { st_fail(name, "xa/1 does not list xb/1"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read xb/1\r\n", 0);
+    if (st_tx_count(s, "Reply-To: 1\r\n") != 1) { st_fail(name, "read xb/1 does not show its parent as 1"); return 1; }
+    if (st_tx_count(s, "a cross reply") != 1) { st_fail(name, "read xb/1 from xa"); return 1; }
+
+    # A members-only board's reply, written behind the session.
+    var pp = alloc(PATH_MAX_BYTES);
+    board_policy_path(g_store_buf, "xc", pp);
+    file_write_all(pp, "known\n", 6);
+    var ph2 = post_headers_new();
+    post_headers_set_reply_to(ph2, 1);
+    post_headers_set_reply_board(ph2, "xa");
+    if (post_new(g_store_buf, "xc", ph2, "members\r\n", 9) != 1) { st_fail(name, "post_new xc"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    if (st_tx_count(s, "xc/1") != 0) { st_fail(name, "a members-only reply was listed to a non-member"); return 1; }
+    if (st_tx_count(s, "Replies: xb/1\r\n") != 1) { st_fail(name, "the readable cross reply went missing"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read xc/1\r\n", 0);
+    if (st_tx_count(s, "members only") != 1) { st_fail(name, "read xc/1 was not refused"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "reply xc/1\r\n", 0);
+    if (st_tx_count(s, "members only") != 1) { st_fail(name, "reply xc/1 was not refused"); return 1; }
+    if (load64(s + SESS_MODE) != MODE_COMMAND) { st_fail(name, "a refused reply left command mode"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read nope/1\r\n", 0);
+    if (st_tx_count(s, "post not found") != 1) { st_fail(name, "a missing board was not 'post not found'"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read ../1\r\n", 0);
+    if (st_tx_count(s, "usage: read") != 1) { st_fail(name, "a bad reference was not refused"); return 1; }
+    file_close(load64(fds));
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
+# s23 — raw boards (1.13.1, ADR 0036). On a board with `.raw`, a composed body
+# keeps ESC; reading it sends the colour sequence whole and turns an OSC into
+# text ("?]0;..."), never a live one. On an ordinary board the same body loses
+# its ESC at ingress, as before. A DUMB terminal reading the art gets no escape
+# byte at all.
+fn s23_raw_board(): i64 {
+    var name = "s23_raw_board";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    g_serve_mode = SERVE_POLL;
+    board_ensure(g_store_buf, "rart");
+    board_ensure(g_store_buf, "rplain");
+    var rp = alloc(PATH_MAX_BYTES);
+    board_raw_path(g_store_buf, "rart", rp);
+    file_write_all(rp, "on\n", 3);
+    var s = st_session(load64(fds));
+    st_login(s, "0123456789abcdef", "qix");
+    var body = "\x1b[31mred\x1b[0m and \x1b]0;title\x07 x\r\n";
+    st_feed(s, "enter rart\r\n", 0);
+    st_feed(s, "post\r\n", 0);
+    st_feed(s, "art\r\n", 0);
+    st_feed(s, body, 0);
+    st_feed(s, ".\r\n", 0);
+    var fb = alloc(4096);
+    var fl = post_read(g_store_buf, "rart", 1, fb, 4096);
+    if (st_buf_count(fb, fl, "\x1b[31mred") != 1) { st_fail(name, "the raw board's body lost its ESC"); return 1; }
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    if (st_tx_count(s, "\x1b[31mred\x1b[0m") != 1) { st_fail(name, "the art's colour did not go out"); return 1; }
+    if (st_tx_count(s, "\x1b]") != 0) { st_fail(name, "an OSC went out live"); return 1; }
+    # (The OSC's BEL never reached the post: C0 other than TAB / CR / LF is dropped
+    # at ingress on every board.)
+    if (st_tx_count(s, "?]0;title x") != 1) { st_fail(name, "the OSC was not neutralized to text"); return 1; }
+
+    st_feed(s, "enter rplain\r\n", 0);
+    st_feed(s, "post\r\n", 0);
+    st_feed(s, "plain\r\n", 0);
+    st_feed(s, body, 0);
+    st_feed(s, ".\r\n", 0);
+    fl = post_read(g_store_buf, "rplain", 1, fb, 4096);
+    if (st_buf_count(fb, fl, "\x1b") != 0) { st_fail(name, "an ordinary board kept ESC"); return 1; }
+
+    # A DUMB terminal reads the art without a single escape byte.
+    var ts = load64(s + SESS_TS);
+    st_feedn(s, "\xff\xfb\x18", 3);
+    st_feedn(s, "\xff\xfa\x18\x00DUMB\xff\xf0", 10);
+    if (session_colour(s) != 0) { st_fail(name, "the type did not take"); return 1; }
+    st_feed(s, "enter rart\r\n", 0);
+    st_tx_reset(s);
+    st_feed(s, "read 1\r\n", 0);
+    if (st_tx_count(s, "\x1b") != 0) { st_fail(name, "a DUMB terminal got an escape byte"); return 1; }
+    if (st_tx_count(s, "red and") != 1) { st_fail(name, "a DUMB terminal lost the art's text"); return 1; }
+    if (ts == 0) { st_fail(name, "no telnet state"); return 1; }
+    file_close(load64(fds));
+    file_close(load64(fds + 8));
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s17, remove the store, print the totals, and return 1 on any failure.
+# run s01..s23, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -1327,6 +1914,12 @@ fn serve_tests(): i64 {
     s15_door_days_flag();
     s16_wager_audit_trail();
     s17_tx_compact_before_drain();
+    s18_page_stop_poll();
+    s19_page_stop_fork();
+    s20_greeting_waits_for_type();
+    s21_handler_teletype();
+    s22_cross_board_session();
+    s23_raw_board();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

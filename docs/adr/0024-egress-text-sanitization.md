@@ -1,6 +1,7 @@
 # 0024 — Stored text is sanitized at egress, in UTF-8 mode
 
-> **Status**: Accepted
+> **Status**: Accepted — amended at 1.13.1: a raw board's art may send colour, cursor moves and erase
+> ([ADR 0036](0036-raw-boards.md)), and nothing else this ADR neutralizes
 > **Date**: 2026-10-12 — 1.8.0
 
 ## Context

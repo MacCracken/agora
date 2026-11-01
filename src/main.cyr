@@ -104,6 +104,7 @@ var g_store_buf = "./agora-data";
 # session pool around every dispatch (ADR 0023) — under fork they were private
 # by address space, under poll they are private by the context swap.
 var g_reply_to          = 0;           # 0 = regular post, >0 = parent id
+var g_reply_board       = 0;           # 1.13.1 — slot buffer: the parent's board ("" = current)
 var g_reply_subject     = 0;           # alloc'd lazily on first use
 var g_reply_subject_len = 0;
 
@@ -214,12 +215,13 @@ fn print_help(): i64 {
     println("                 default ./agora-data/, same as the CLI verbs;");
     println("                 --door-days caps the game days a saved door run");
     println("                 advances per UTC day — default 10, 0 = no cap)");
-    println("  post [--store <path>] [--board <name>] [--subject <text>] [--reply-to <id>]");
+    println("  post [--store <path>] [--board <name>] [--subject <text>] [--reply-to <[board/]id>]");
     println("                 read stdin → new post → print assigned ID");
     println("                 (default store ./agora-data/, board 'main';");
     println("                 named boards live at <store>/<name>/. Subject");
     println("                 is written as an RFC-822 header per ADR 0003;");
-    println("                 --reply-to writes a Reply-To header per ADR 0005.)");
+    println("                 --reply-to writes a Reply-To header per ADR 0005;");
+    println("                 <board>/<id> names a parent on another board, ADR 0035.)");
     println("  list [--store <path>] [--board <name>]");
     println("                 list post IDs in the chosen board");
     println("  read <id> [--store <path>] [--board <name>]");
@@ -238,6 +240,9 @@ fn print_help(): i64 {
     println("                 reads, logged-in users post (default); known = members");
     println("                 only, login to read and post; anon = anyone posts,");
     println("                 anonymous included; admin = only .admins post");
+    println("  raw get|set <board> [on|off] [--store <path>]");
+    println("                 a raw board carries ANSI art: posts keep their colour and");
+    println("                 cursor moves (ADR 0036)");
     println("  admins list <board> [--store <path>]");
     println("  admins add|rm <board> <handle|fingerprint> [--store <path>]");
     println("                 edit a board's .admins; add writes the key's fingerprint");
@@ -258,8 +263,10 @@ fn send_buf(cfd, buf, len): i64 {
     # Poll multiplex (1.6.0): never block the shared loop on one client's socket —
     # queue the bytes on the active session's tx buffer; the poll loop drains it
     # non-blocking (session_drain). Fork/serial: blocking write as before.
+    # 1.13.0 (ADR 0034) — through the output gate: a command's rows are counted
+    # for a page stop, and a hold keeps what follows it queued.
     if (g_serve_mode == SERVE_POLL) {
-        return sess_tx_enqueue(g_active_sess, buf, len);
+        return gate_send(g_active_sess, buf, len);
     }
     # 1.8.1 (audit H19 / P10) — a failed fork-mode send is STICKY, as the poll
     # queue's overflow already is (1.7.0, N3-B). Each write to a client that has
@@ -270,6 +277,16 @@ fn send_buf(cfd, buf, len): i64 {
     # refused at once and process_rx closes the connection.
     if (g_active_sess != 0) {
         if (load64(g_active_sess + SESS_TX_OVF) != 0) { return 1; }
+        # 1.13.0 (ADR 0034) — while the gate is on, or held bytes are still
+        # queued, the fork child queues too and writes what the gate releases.
+        var gs = g_active_sess;
+        var gated = 0;
+        if (load64(gs + SESS_GATE) != GATE_OFF) { gated = 1; }
+        if (load64(gs + SESS_TX_LEN) > load64(gs + SESS_TX_OFF)) { gated = 1; }
+        if (gated == 1) {
+            if (gate_send(gs, buf, len) != 0) { return 1; }
+            return gate_flush(gs);
+        }
     }
     # A short write is a failure too (1.8.2). The socket is blocking, so Linux
     # returns fewer bytes than asked only when SO_SNDTIMEO expired — or a socket
@@ -439,6 +456,59 @@ fn send_wrapped(cfd, buf, len, col0, hang, flags): i64 {
     return rc;
 }
 
+# 1.13.1 (ADR 0036) — a raw board's post body: send_text's treatment (sanitize,
+# NVT newlines, IAC doubled) except that each CSI art_csi_len allows goes out
+# whole. Any other ESC is neutralized like every control: its sequence's ESC
+# becomes '?', and the bytes after it are text. Not wrapped — art is drawn for
+# the columns it was made for, and its cursor moves are invisible to the wrap.
+# Output is batched in a stack buffer, so a body thick with colour is not one
+# write(2) per sequence under fork.
+fn send_art(cfd, buf, len): i64 {
+    var san[512];
+    var out[2304];
+    var cr[8];
+    store64(&cr, 0);
+    var o = 0;
+    var rc = 0;
+    var i = 0;
+    while (i < len) {
+        if (o > 1200) {
+            if (send_buf(cfd, &out, o) != 0) { rc = 1; i = len; continue; }
+            o = 0;
+        }
+        if ((load8(buf + i) & 0xFF) == 27) {
+            var k = art_csi_len(buf, i, len);
+            if (k > 0) {
+                o = o + text_nvt_end((&out) + o, &cr);
+                memcpy((&out) + o, buf + i, k);
+                o = o + k;
+                i = i + k;
+                continue;
+            }
+            var sn1 = text_sanitize(&san, buf + i, 1);
+            o = o + text_nvt_iac((&out) + o, &san, sn1, &cr);
+            i = i + 1;
+            continue;
+        }
+        var e = text_chunk_end(buf, i, len, 500);
+        var j = i;
+        var scanning = 1;
+        while (scanning == 1) {
+            if (j >= e) { scanning = 0; continue; }
+            if ((load8(buf + j) & 0xFF) == 27) { scanning = 0; continue; }
+            j = j + 1;
+        }
+        var sn = text_sanitize(&san, buf + i, j - i);
+        if (sn > 0) { o = o + text_nvt_iac((&out) + o, &san, sn, &cr); }
+        i = j;
+    }
+    if (rc == 0) {
+        o = o + text_nvt_end((&out) + o, &cr);
+        if (o > 0) { if (send_buf(cfd, &out, o) != 0) { rc = 1; } }
+    }
+    return rc;
+}
+
 # The CLI viewers' twin of `send_text` (1.8.0): `agora read` / `agora list`
 # print other people's posts into the OPERATOR's terminal, and did so raw.
 # Same rule, same chunking, written to `fd` with no IAC pass (stdout is not a
@@ -538,6 +608,65 @@ fn line_parse_int(line, off, line_len): i64 {
     return n;
 }
 
+# 1.13.1 (ADR 0035) — the reference argument of `read` / `reply`: `line[off..len)`
+# after leading spaces, as reply_ref_parse reads it (`<id>` or `<board>/<id>`).
+# Writes the board (or "") into `board_out` (>= BOARD_NAME_MAX + 1 bytes); returns
+# the id, or 0 when there is no valid reference.
+fn session_ref_arg(line, off, len, board_out): i64 {
+    store8(board_out, 0);
+    var i = off;
+    var skipping = 1;
+    while (skipping == 1) {
+        if (i >= len) { skipping = 0; continue; }
+        if ((load8(line + i) & 0xFF) != 32) { skipping = 0; continue; }
+        i = i + 1;
+    }
+    if (i >= len) { return 0; }
+    return reply_ref_parse(line + i, len - i, board_out);
+}
+
+# A reference as the reader on board `here` would type it: `<id>` for a post on
+# `here`, `<board>/<id>` for one elsewhere. Writes it to `out` (>= 64 bytes) and
+# returns its length.
+fn session_ref_text(out, board, id, here): i64 {
+    var p = 0;
+    if (streq(board, here) == 0) {
+        var bl = strlen(board);
+        memcpy(out, board, bl);
+        store8(out + bl, 47);                    # '/'
+        p = bl + 1;
+    }
+    return p + fmt_int_buf(id, out + p);
+}
+
+# Keep, in place, the `n` XRef entries on boards this session may read (a reply on
+# a members-only board is not listed to a reader who could not open it). The
+# policy is looked up once per run of the same board. Returns the count kept.
+fn session_xrefs_readable(xs, n): i64 {
+    var kept = 0;
+    var last_ok = 0;
+    var last = 0;
+    var i = 0;
+    while (i < n) {
+        var e = xs + i * XREF_SIZE;
+        var ok = last_ok;
+        if (last == 0) { ok = board_can_read(g_store_buf, e + XREF_BOARD, g_session_fp); }
+        else {
+            if (streq(e + XREF_BOARD, last + XREF_BOARD) == 0) {
+                ok = board_can_read(g_store_buf, e + XREF_BOARD, g_session_fp);
+            }
+        }
+        last = e;
+        last_ok = ok;
+        if (ok == 1) {
+            if (kept != i) { memcpy(xs + kept * XREF_SIZE, e, XREF_SIZE); }
+            kept = kept + 1;
+        }
+        i = i + 1;
+    }
+    return kept;
+}
+
 # Execute a typed command line. Returns the new session mode
 # (MODE_COMMAND or MODE_POSTING_SUBJECT) and writes side-effect bytes
 # to cfd. Quit-style commands set *quit_out = 1 and return MODE_COMMAND.
@@ -564,11 +693,12 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_help_line(cfd, "  enter <name>    switch to a named board (auto-creates)\r\n");
         send_help_line(cfd, "  leave           return to main\r\n");
         send_help_line(cfd, "  list            list post IDs in the current board\r\n");
-        send_help_line(cfd, "  read <id>       read a post by ID (with reply list)\r\n");
+        send_help_line(cfd, "  read <id>       read a post by ID, or <board>/<id> (with reply list)\r\n");
         send_help_line(cfd, "  post            compose a new post; end with '.' on a line by itself\r\n");
-        send_help_line(cfd, "  reply <id>      compose a reply to <id>; auto Re: subject\r\n");
+        send_help_line(cfd, "  reply <id>      compose a reply to <id>, or <board>/<id>; auto Re: subject\r\n");
         send_help_line(cfd, "  login <handle>  start a challenge/response login (sigil Ed25519)\r\n");
         send_help_line(cfd, "  whoami          print bound identity (handle + fingerprint) or 'anonymous'\r\n");
+        send_help_line(cfd, "  more [on|off]   stop long output a screenful at a time (--More--)\r\n");
         # 1.11.1 — the door list comes from the registry.
         var play[256];
         var pl = door_names_into(&play, "  play <game>     door: ", " | ", 200);
@@ -783,17 +913,31 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
     }
 
     if (line_has_prefix(line, len, "read") != 0) {
-        if (board_can_read(g_store_buf, current_board, g_session_fp) == 0) {
+        # 1.13.1 (ADR 0035) — `read <id>` on this board, or `read <board>/<id>`
+        # (what a cross-board `Replies:` entry says): the gate is the board the
+        # post is on.
+        var tb = cmd_alloc(BOARD_NAME_MAX + 8);
+        var id = session_ref_arg(line, 4, len, tb);
+        var rboard = current_board;
+        if ((load8(tb) & 0xFF) != 0) {
+            if (streq(tb, current_board) == 0) { rboard = tb; }
+        }
+        if (board_can_read(g_store_buf, rboard, g_session_fp) == 0) {
             send_str(cfd, "members only — run 'login <handle>' first\r\n");
             return MODE_COMMAND;
         }
-        var id = line_parse_int(line, 4, len);
-        if (id < 0) {
-            send_str(cfd, "usage: read <id>\r\n");
+        if (id <= 0) {
+            send_str(cfd, "usage: read <id> | read <board>/<id>\r\n");
             return MODE_COMMAND;
         }
+        if (rboard != current_board) {
+            if (board_exists(g_store_buf, rboard) == 0) {
+                send_str(cfd, "post not found\r\n");
+                return MODE_COMMAND;
+            }
+        }
         var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
-        var flen = post_read(g_store_buf, current_board, id, fbuf, POST_MAX_BYTES + 1024);
+        var flen = post_read(g_store_buf, rboard, id, fbuf, POST_MAX_BYTES + 1024);
         if (flen <= 0) {
             send_str(cfd, "post not found\r\n");
             return MODE_COMMAND;
@@ -827,6 +971,20 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             store8(subj + 10 + slen, 10);
             send_wrapped(cfd, subj, slen + 11, 0, 9, 0);
         }
+        # 1.13.1 (ADR 0035) — a reply names its parent, as a reference this reader
+        # can `read` from where they are: a plain id on this board, `<board>/<id>`
+        # on another.
+        var prb = cmd_alloc(BOARD_NAME_MAX + 8);
+        var ppid = post_reply_ref(fbuf, flen, prb);
+        if (ppid > 0) {
+            var pbd = prb;
+            if ((load8(prb) & 0xFF) == 0) { pbd = rboard; }
+            var pref[64];
+            var prl = session_ref_text(&pref, pbd, ppid, current_board);
+            send_str(cfd, "Reply-To: ");
+            send_buf(cfd, &pref, prl);
+            send_str(cfd, "\r\n");
+        }
         send_str(cfd, "\r\n");
 
         var body_off = post_body_offset(fbuf, flen);
@@ -837,7 +995,21 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if ((load8(fbuf + body_off + body_len - 1) & 0xFF) == 10) { ends_lf = 1; }
             # 1.10.1 (ADR 0030) — wrapped to the client's window; an indented
             # line (a list item, a code block) keeps its indent when it wraps.
-            send_wrapped(cfd, fbuf + body_off, body_len, 0, 0, TW_AUTO);
+            # 1.13.1 (ADR 0036) — a raw board's art goes out with its colour and
+            # cursor moves (send_art), unless this terminal takes no colour: then
+            # its escapes are dropped and the rest is an ordinary post.
+            var art = board_is_raw(g_store_buf, rboard);
+            if (art == 1) {
+                if (g_emit_colour == 1) { send_art(cfd, fbuf + body_off, body_len); }
+                else {
+                    var plain = term_strip_esc(fbuf + body_off, fbuf + body_off, body_len);
+                    send_wrapped(cfd, fbuf + body_off, plain, 0, 0, TW_AUTO);
+                }
+                # The art's own colour must not run into the rest of the reply.
+                if (g_emit_colour == 1) { send_str(cfd, "\x1b[0m"); }
+            } else {
+                send_wrapped(cfd, fbuf + body_off, body_len, 0, 0, TW_AUTO);
+            }
             if (ends_lf == 0) { send_str(cfd, "\r\n"); }
         }
 
@@ -847,9 +1019,15 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         # 1.9.1 — the line is composed in 2 KB pieces rather than sent id by id:
         # under fork every send_buf is a write(2), and a 409-reply thread cost ~800
         # of them (~5.6 ms) — more than finding the replies. Same bytes on the wire.
+        # 1.13.1 (ADR 0035) — and the replies on other boards, each as a reference
+        # from the reader's board, listed only where this session may read.
         var rbuf = cmd_alloc(DIRENT_ID_MAX * 8);
-        var rcount = replies_to(g_store_buf, current_board, id, rbuf, DIRENT_ID_MAX);
-        if (rcount > 0) {
+        var xrefs = cmd_alloc(XREPLY_MAX * XREF_SIZE);
+        var xn[8];
+        var rcount = replies_to_x(g_store_buf, rboard, id, rbuf, DIRENT_ID_MAX, xrefs, XREPLY_MAX, &xn);
+        var xcount = session_xrefs_readable(xrefs, load64(&xn));
+        var rtotal = rcount + xcount;
+        if (rtotal > 0) {
             var rline[2048];
             memcpy(&rline, "\r\nReplies: ", 11);
             var rlp = 11;
@@ -861,17 +1039,22 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             if (rhang > rwidth / 2) { rhang = rwidth / 2; }
             var rcol = 9;
             var ri = 0;
-            while (ri < rcount) {
+            while (ri < rtotal) {
                 if (rlp > 2000) { send_buf(cfd, &rline, rlp); rlp = 0; }
-                var rid[24];
-                var ridn = fmt_int_buf(load64(rbuf + ri * 8), &rid);
+                var rid[64];
+                var ridn = 0;
+                if (ri < rcount) { ridn = session_ref_text(&rid, rboard, load64(rbuf + ri * 8), current_board); }
+                else {
+                    var xe = xrefs + (ri - rcount) * XREF_SIZE;
+                    ridn = session_ref_text(&rid, xe + XREF_BOARD, load64(xe + XREF_ID), current_board);
+                }
                 if (ri > 0) {
                     store8((&rline) + rlp, 44);          # ','
                     rlp = rlp + 1;
                     rcol = rcol + 1;
                     # ' ' + the id, and the ',' that will follow it unless it is last.
                     var rneed = 1 + ridn;
-                    if (ri + 1 < rcount) { rneed = rneed + 1; }
+                    if (ri + 1 < rtotal) { rneed = rneed + 1; }
                     var rbreak = 0;
                     if (rwidth > 0) { if (rcol + rneed > rwidth) { rbreak = 1; } }
                     if (rbreak == 1) {
@@ -912,6 +1095,8 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             return MODE_COMMAND;
         }
+        # 1.13.1 (ADR 0036) — on a raw board the body keeps ESC (process_rx).
+        if (g_active_sess != 0) { store64(g_active_sess + SESS_POST_RAW, board_is_raw(g_store_buf, current_board)); }
         send_str(cfd, "Subject: ");
         return MODE_POSTING_SUBJECT;
     }
@@ -932,16 +1117,40 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             return MODE_COMMAND;
         }
-        var parent_id = line_parse_int(line, 5, len);
-        if (parent_id < 0) {
-            send_str(cfd, "usage: reply <id>\r\n");
+        # 1.13.1 (ADR 0035) — `reply <id>` on this board, or `reply <board>/<id>`
+        # to a post on another: the reply is written HERE, naming its parent's
+        # board, and the parent's board must be one this session may read (its
+        # subject is copied into the reply's).
+        var rb = cmd_alloc(BOARD_NAME_MAX + 8);
+        var parent_id = session_ref_arg(line, 5, len, rb);
+        if (parent_id <= 0) {
+            send_str(cfd, "usage: reply <id> | reply <board>/<id>\r\n");
             return MODE_COMMAND;
         }
+        var pboard = current_board;
+        if ((load8(rb) & 0xFF) != 0) {
+            if (streq(rb, current_board) == 0) { pboard = rb; }
+        }
+        if (pboard != current_board) {
+            if (board_exists(g_store_buf, pboard) == 0) {
+                send_str(cfd, "reply: parent post not found\r\n");
+                return MODE_COMMAND;
+            }
+            if (board_can_read(g_store_buf, pboard, g_session_fp) == 0) {
+                send_str(cfd, "members only — run 'login <handle>' first\r\n");
+                return MODE_COMMAND;
+            }
+        }
         var fbuf = cmd_alloc(POST_MAX_BYTES + 1024);
-        var flen = post_read(g_store_buf, current_board, parent_id, fbuf, POST_MAX_BYTES + 1024);
+        var flen = post_read(g_store_buf, pboard, parent_id, fbuf, POST_MAX_BYTES + 1024);
         if (flen <= 0) {
             send_str(cfd, "reply: parent post not found\r\n");
             return MODE_COMMAND;
+        }
+        store8(g_reply_board, 0);
+        if (pboard != current_board) {
+            var pbl = strlen(pboard);
+            memcpy(g_reply_board, pboard, pbl + 1);
         }
         # Build the derived Re: subject.
         var parent_sub = cmd_alloc(SUBJECT_MAX_BYTES);
@@ -960,6 +1169,7 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
         send_text(cfd, derived, dlen);
         send_str(cfd, "\r\n");
         send_str(cfd, "Compose reply. End with '.' on a line by itself.\r\n");
+        if (g_active_sess != 0) { store64(g_active_sess + SESS_POST_RAW, board_is_raw(g_store_buf, current_board)); }
         return MODE_POSTING;
     }
 
@@ -1024,6 +1234,30 @@ fn session_execute(cfd, line, line_len, current_board, quit_out): i64 {
             }
             send_str(cfd, g_session_fp);
             send_str(cfd, "\r\n");
+        }
+        return MODE_COMMAND;
+    }
+
+    # 1.13.0 (ADR 0034): `more`, `more on`, `more off` — this session's page stop.
+    if (line_has_prefix(line, len, "more") != 0) {
+        var ms = g_active_sess;
+        if (ms != 0) {
+            var mprefs = load64(ms + SESS_PREFS);
+            if (len == 7) { if (memeq(line, "more on", 7) == 1) { mprefs = mprefs & (0 - 1 - PREF_NO_MORE); } }
+            if (len == 8) { if (memeq(line, "more off", 8) == 1) { mprefs = mprefs | PREF_NO_MORE; } }
+            store64(ms + SESS_PREFS, mprefs);
+            if ((mprefs & PREF_NO_MORE) != 0) { send_str(cfd, "more: off (output is not stopped)\r\n"); }
+            else {
+                var mrows = gate_page_rows(ms);
+                if (mrows > 0) {
+                    var mb[24];
+                    send_str(cfd, "more: on (a stop every ");
+                    send_buf(cfd, &mb, fmt_int_buf(mrows, &mb));
+                    send_str(cfd, " rows)\r\n");
+                } else {
+                    send_str(cfd, "more: on (no stops until your client reports a window of 5 rows or more)\r\n");
+                }
+            }
         }
         return MODE_COMMAND;
     }
@@ -1986,6 +2220,7 @@ fn door_send_frame(cfd): i64 {
     # this enforces the invariant against future row-count growth.
     var buf = cmd_alloc(DOOR_FRAME_CAP + DOOR_FRAME_GUARD);
     g_door_emit_cap = DOOR_FRAME_CAP;
+    g_door_type_from = 0 - 1;
     var n = 0;
     var d = door_desc_for(g_door_game);
     if (d != 0) {
@@ -1994,10 +2229,25 @@ fn door_send_frame(cfd): i64 {
     }
     g_door_emit_cap = DOOR_EMIT_UNBOUNDED;             # [D3] restore the default for non-frame emit users
     if (n > DOOR_FRAME_CAP) { n = DOOR_FRAME_CAP; }    # [D3] clamp any overshoot — never send past the cap
+    var tf = g_door_type_from;
+    g_door_type_from = 0 - 1;
     # 1.10.1 (ADR 0030) — wrapped to the client's window; an indented line keeps
     # its indent on its continuation rows. Frames are rendered by agora with
     # their own SGR colour, so they go out raw (escape sequences take no column).
-    if (n > 0) { send_wrapped(cfd, buf, n, 0, 0, TW_RAW | TW_AUTO); }
+    # 1.13.0 (ADR 0034) — a frame that marked a teletype part (the Handler's
+    # cable) sends what comes before the mark whole and slow-prints the rest. The
+    # mark sits at a line start, so the second part's wrap starts at column 0.
+    if (n > 0) {
+        var typed = 0;
+        if (tf >= 0) { if (tf < n) { if (g_active_sess != 0) { typed = 1; } } }
+        if (typed == 1) {
+            if (tf > 0) { send_wrapped(cfd, buf, tf, 0, 0, TW_RAW | TW_AUTO); }
+            gate_begin_type(g_active_sess);
+            send_wrapped(cfd, buf + tf, n - tf, 0, 0, TW_RAW | TW_AUTO);
+        } else {
+            send_wrapped(cfd, buf, n, 0, 0, TW_RAW | TW_AUTO);
+        }
+    }
     return 0;
 }
 
@@ -2616,6 +2866,8 @@ fn session_finalize_post(cfd, current_board, subject, body, body_len): i64 {
     if (g_reply_to > 0) {
         post_headers_set_subject(ph, g_reply_subject);
         post_headers_set_reply_to(ph, g_reply_to);
+        # 1.13.1 (ADR 0035) — a parent on another board.
+        if (g_reply_board != 0) { post_headers_set_reply_board(ph, g_reply_board); }
         id = post_new(g_store_buf, current_board, ph, body, body_len);
     } else {
         post_headers_set_subject(ph, subject);
@@ -2670,7 +2922,7 @@ fn render_motd(buf): i64 {
     # opening SGR sticks for all five lines, closed by reset after
     # line 5. (Some terminals reset SGR on \n — most don't; the
     # explicit close-after-line-5 keeps the spec.)
-    pos = tty_sgr_buf(buf, pos, TTY_FG_CYAN);
+    if (g_emit_colour == 1) { pos = tty_sgr_buf(buf, pos, TTY_FG_CYAN); }
     pos = motd_emit_cstr(buf, pos, " \x23\x23\x23   \x23\x23\x23\x23  ");
     pos = motd_emit_cstr(buf, pos, "\x23\x23\x23  \x23\x23\x23\x23   \x23\x23\x23 \r\n");
     pos = motd_emit_cstr(buf, pos, "\x23   \x23 \x23     \x23   \x23 \x23   \x23 \x23   \x23\r\n");
@@ -2678,7 +2930,7 @@ fn render_motd(buf): i64 {
     pos = motd_emit_cstr(buf, pos, "\x23\x23\x23\x23  \x23\x23\x23\x23\x23\r\n");
     pos = motd_emit_cstr(buf, pos, "\x23   \x23 \x23   \x23 \x23   \x23 \x23  \x23  \x23   \x23\r\n");
     pos = motd_emit_cstr(buf, pos, "\x23   \x23  \x23\x23\x23\x23  \x23\x23\x23  \x23   \x23 \x23   \x23\r\n");
-    pos = tty_sgr_reset_buf(buf, pos);
+    if (g_emit_colour == 1) { pos = tty_sgr_reset_buf(buf, pos); }
 
     # Blank line between banner and metadata.
     pos = motd_emit_cstr(buf, pos, "\r\n");
@@ -2687,7 +2939,7 @@ fn render_motd(buf): i64 {
     # one 149-column line that every terminal narrower than that broke mid-word.
     # The greeting goes out before the client can report its window (NAWS), so
     # it cannot use the real width; 80 is the classic terminal's.
-    pos = tty_sgr_buf(buf, pos, TTY_FG_YELLOW);
+    if (g_emit_colour == 1) { pos = tty_sgr_buf(buf, pos, TTY_FG_YELLOW); }
     if (pos >= 0) {
         var tag[256];
         var tl = motd_emit_cstr(&tag, 0, "  agora ");
@@ -2702,7 +2954,7 @@ fn render_motd(buf): i64 {
             pos = pos + wk;
         }
     }
-    pos = tty_sgr_reset_buf(buf, pos);
+    if (g_emit_colour == 1) { pos = tty_sgr_reset_buf(buf, pos); }
 
     # Default-color prompt + closing blank line.
     pos = motd_emit_cstr(buf, pos, "  Type anything; Ctrl+] then 'quit' to exit.\r\n\r\n");
@@ -2801,7 +3053,7 @@ enum SessOff {
     SESS_CHAT_BOT          = 248;
     SESS_COUCH             = 256;   # 1.11.1 — couch states by game id (was SESS_ELIZA)
     SESS_FAIR              = 264;   # 1.12.1 — the wager fairness context (wager.cyr WF_SIZE); SESS_PARRY until 1.11.1
-    SESS_SPARE_272         = 272;   # (SESS_JABBER until 1.11.1)
+    SESS_GATE              = 272;   # 1.13.0 — the output gate (GATE_*, ADR 0034); SESS_JABBER until 1.11.1
     SESS_REPLY_TO          = 280;
     SESS_REPLY_SUBJECT     = 288;
     SESS_REPLY_SUBJECT_LEN = 296;
@@ -2833,7 +3085,41 @@ enum SessOff {
     SESS_DESC_PHASE        = 376;
     SESS_DESC_DEADLINE     = 384;
     SESS_DESC_LAST_MS      = 392;
-    SESS_SIZE              = 400;
+    # 1.13.0 (ADR 0034) — the output gate. Under GATE_PAGED / GATE_TYPE the drain
+    # stops at SESS_TX_HOLD, an offset into the tx queue; the bytes after it are
+    # held. GATE_COUNT counts the rows a command prints (SESS_PAGE_LEFT left on
+    # the page); GATE_TYPE releases on the teletype's clock (SESS_GATE_MS). While
+    # held, a client in LINEMODE EDIT sends whole lines, so the line's first key
+    # waits in SESS_GATE_KEY (-1: none yet) until its end decides.
+    SESS_TX_HOLD           = 400;
+    SESS_PAGE_LEFT         = 408;
+    SESS_GATE_MS           = 416;
+    SESS_GATE_KEY          = 424;
+    SESS_PREFS             = 432;   # 1.13.0 — the session's own settings (PREF_*: `more off`)
+    # 1.13.0 — the greeting waits for the terminal type (greet_settle): its
+    # deadline, and whether the client has sent anything at all yet.
+    SESS_GREET_DUE         = 440;
+    SESS_HEARD             = 448;
+    # 1.13.1 (ADR 0035) — a reply's parent board when it is another
+    # (BOARD_NAME_MAX + 1 bytes; "" = the current board), beside SESS_REPLY_TO.
+    SESS_REPLY_BOARD       = 456;
+    SESS_POST_RAW          = 464;   # 1.13.1 (ADR 0036) — composing on a raw board: ESC is kept
+    SESS_SIZE              = 472;
+}
+
+# 1.13.0 (ADR 0034) — the output gate's states, the session settings, and the
+# pacing figures.
+enum Gate {
+    GATE_OFF   = 0;          # every queued byte may go
+    GATE_COUNT = 1;          # a command is printing: its rows are counted for a page
+    GATE_PAGED = 2;          # stopped at --More--: the rest waits for a key
+    GATE_TYPE  = 3;          # the teletype: the hold advances with the clock
+    PREF_NO_MORE = 1;        # `more off`: never stop at a page
+    PAGE_MIN_ROWS = 5;       # a window shorter than this is not paged
+    TYPE_CPS     = 240;      # 2400 baud: 10 bits a character on the wire (start + 8 + stop)
+    TYPE_TICK_MS = 50;       # how often the teletype releases
+    GREET_RAW_MS  = 250;     # a client that has said nothing by then is not negotiating
+    GREET_TYPE_MS = 1000;    # the longest a negotiating client's greeting waits for its type
 }
 
 # Build the pool once (at serve_poll start): MAX_SESS slots, each with its per-conn
@@ -2867,6 +3153,7 @@ fn session_alloc(): i64 {
     # ~1 MB since 1.7.1).
     store64(s + SESS_UNI_WORLD,      alloc(DOOR_WORLD_CAP));
     store64(s + SESS_REPLY_SUBJECT,  alloc(SUBJECT_MAX_BYTES + 8));
+    store64(s + SESS_REPLY_BOARD,    alloc(BOARD_NAME_MAX + 8));
     var couch = alloc((GAME_LAST + 1) * 8);
     memset(couch, 0, (GAME_LAST + 1) * 8);
     store64(s + SESS_COUCH, couch);
@@ -2909,6 +3196,14 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_RX_OFF, 0);
     store64(s + SESS_RX_LEN, 0);
     store64(s + SESS_DESC_PHASE, DESC_NONE);
+    store64(s + SESS_GATE, GATE_OFF);
+    store64(s + SESS_TX_HOLD, 0);
+    store64(s + SESS_PAGE_LEFT, 0);
+    store64(s + SESS_GATE_MS, 0);
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    store64(s + SESS_PREFS, 0);
+    store64(s + SESS_GREET_DUE, 0);
+    store64(s + SESS_HEARD, 0);
     telnet_state_reset(load64(s + SESS_TS));
     store64(s + SESS_LINE_POS, 0);
     store64(s + SESS_POST_POS, 0);
@@ -2941,6 +3236,8 @@ fn session_reset(s, cfd): i64 {
     store64(s + SESS_REPLY_TO, 0);
     store8(load64(s + SESS_REPLY_SUBJECT), 0);
     store64(s + SESS_REPLY_SUBJECT_LEN, 0);
+    store8(load64(s + SESS_REPLY_BOARD), 0);
+    store64(s + SESS_POST_RAW, 0);
     # 1.12.1 — a new connection gets new seeds (a close path has revealed the old).
     wager_fair_reset(load64(s + SESS_FAIR));
     return 0;
@@ -3029,8 +3326,22 @@ fn sess_load(s): i64 {
     g_reply_to          = load64(s + SESS_REPLY_TO);
     g_reply_subject     = load64(s + SESS_REPLY_SUBJECT);
     g_reply_subject_len = load64(s + SESS_REPLY_SUBJECT_LEN);
+    g_reply_board       = load64(s + SESS_REPLY_BOARD);
     g_active_sess = s;
+    g_emit_colour = session_colour(s);    # 1.13.0 (ADR 0034)
     return 0;
+}
+
+# 1.13.0 (ADR 0034) — 1 if session s's terminal takes colour, 0 if it named
+# itself DUMB or UNKNOWN (RFC 1091 TERMINAL-TYPE, term_type_plain). A terminal
+# that has not named itself keeps the colour it always had.
+fn session_colour(s): i64 {
+    var ts = load64(s + SESS_TS);
+    if (ts == 0) { return 1; }
+    var tl = telnet_term_type_len(ts);
+    if (tl <= 0) { return 1; }
+    if (term_type_plain(telnet_term_type(ts), tl) == 1) { return 0; }
+    return 1;
 }
 
 # The inverse of sess_load: store the deep g_* session globals back into slot `s`.
@@ -3051,6 +3362,7 @@ fn sess_save(s): i64 {
     store64(s + SESS_REPLY_TO,          g_reply_to);
     store64(s + SESS_REPLY_SUBJECT,     g_reply_subject);
     store64(s + SESS_REPLY_SUBJECT_LEN, g_reply_subject_len);
+    store64(s + SESS_REPLY_BOARD,       g_reply_board);
     return 0;
 }
 
@@ -3129,7 +3441,16 @@ fn sess_tx_enqueue(s, buf, len): i64 {
         # flight when moving the remainder down was all it needed.
         tlen = sess_tx_compact(s);
         if (tlen + len > SESS_TX_CAP) {
-            if (session_drain_wait(s, SESS_DRAIN_WAIT_US) < 0) { store64(s + SESS_TX_OVF, 1); return 1; }
+            # 1.13.0 (ADR 0034) — a drain stops at a hold, so a held queue could
+            # never make room: the gate gives way, and the rest is not paced or
+            # paged. A page stop that has to choose between dropping the session
+            # and dropping the stop drops the stop.
+            gate_lift(s);
+            if (g_serve_mode == SERVE_POLL) {
+                if (session_drain_wait(s, SESS_DRAIN_WAIT_US) < 0) { store64(s + SESS_TX_OVF, 1); return 1; }
+            } else {
+                if (gate_flush(s) != 0) { return 1; }
+            }
             tlen = sess_tx_compact(s);
         }
         if (tlen + len > SESS_TX_CAP) {
@@ -3153,8 +3474,324 @@ fn sess_tx_compact(s): i64 {
         tlen = tlen - off;
         store64(s + SESS_TX_LEN, tlen);
         store64(s + SESS_TX_OFF, 0);
+        if (gate_holds(s) == 1) { store64(s + SESS_TX_HOLD, load64(s + SESS_TX_HOLD) - off); }
     }
     return tlen;
+}
+
+# === 1.13.0 — the output gate (ADR 0034) ======================================
+#
+# Two features stop output and take a key to go on: a page stop (`--More--` by
+# the NAWS height), and the Handler's teletype (cables at 2400 baud; a key
+# skips). The third 1.13.0 item, the greeting's wait for the terminal type,
+# defers the greeting itself instead (greet_settle). Under poll a command
+# cannot wait inside itself: one process serves every session.
+# So a command still prints all it has, and the gate decides how much of it the
+# drain may send. The tx queue is the store: a hold is an offset into it
+# (SESS_TX_HOLD), and the bytes after the hold wait there.
+#
+# Both serve models use it. Under poll the sweep's drain stops at the hold.
+# Under fork, send_buf writes the socket directly while the gate is off and the
+# queue empty, exactly as before; while the gate is on, it queues and writes what
+# the gate releases (gate_flush). The fork child is its own process, so it could
+# have blocked in place for the key instead, but it would then read the socket
+# from inside a command, behind the bytes process_rx has not run yet.
+#
+# Telnet replies are not content: send_proto puts them AHEAD of a hold, or a
+# client's negotiation would wait behind a page nobody has turned.
+
+# 1 if s's queue is held: the drain may send only up to SESS_TX_HOLD.
+fn gate_holds(s): i64 {
+    var g = load64(s + SESS_GATE);
+    if (g == GATE_PAGED) { return 1; }
+    if (g == GATE_TYPE)  { return 1; }
+    return 0;
+}
+
+# How far into s's queue the drain may send: its end, or the hold.
+fn sess_tx_limit(s): i64 {
+    var tlen = load64(s + SESS_TX_LEN);
+    if (gate_holds(s) == 1) {
+        var h = load64(s + SESS_TX_HOLD);
+        if (h < tlen) { return h; }
+    }
+    return tlen;
+}
+
+# Insert buf[0..k) into s's queue at offset `at` (from the queue's start, at or
+# after SESS_TX_OFF), moving what follows up. Returns 0, or 1 if it does not
+# fit even after compacting — the caller lifts the gate instead.
+fn sess_tx_insert(s, at, buf, k): i64 {
+    if (k <= 0) { return 0; }
+    var off = load64(s + SESS_TX_OFF);
+    var tlen = sess_tx_compact(s);
+    at = at - off;
+    if (at < 0) { at = 0; }
+    if (at > tlen) { at = tlen; }
+    if (tlen + k > SESS_TX_CAP) { return 1; }
+    var tx = load64(s + SESS_TX);
+    var j = tlen;
+    while (j > at) {             # backward copy: dst > src
+        j = j - 1;
+        store8(tx + j + k, load8(tx + j));
+    }
+    memcpy(tx + at, buf, k);
+    store64(s + SESS_TX_LEN, tlen + k);
+    return 0;
+}
+
+# Open the gate: everything queued may go. A fork child writes it now.
+fn gate_lift(s): i64 {
+    if (s == 0) { return 0; }
+    store64(s + SESS_GATE, GATE_OFF);
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    return 0;
+}
+
+# Drop what s holds (the rest of a page, the rest of a cable) and open the gate:
+# a session closing gets its goodbye, not the remainder.
+fn gate_drop(s): i64 {
+    if (gate_holds(s) == 1) { store64(s + SESS_TX_LEN, load64(s + SESS_TX_HOLD)); }
+    return gate_lift(s);
+}
+
+# Fork model: write what the gate releases (SESS_TX_OFF up to the limit) and
+# reset the queue once it is empty. A short write is a failure and sticky, as
+# send_buf's own (1.8.2). Poll: nothing — the sweep's drain sends it. Returns 0,
+# or 1 on a failed write.
+fn gate_flush(s): i64 {
+    if (g_serve_mode == SERVE_POLL) { return 0; }
+    if (load64(s + SESS_TX_OVF) != 0) { return 1; }
+    var off = load64(s + SESS_TX_OFF);
+    var lim = sess_tx_limit(s);
+    if (lim > off) {
+        var want = lim - off;
+        var n = sys_write(load64(s + SESS_FD), load64(s + SESS_TX) + off, want);
+        if (n != want) { store64(s + SESS_TX_OVF, 1); return 1; }
+        off = lim;
+    }
+    if (off >= load64(s + SESS_TX_LEN)) {
+        store64(s + SESS_TX_LEN, 0);
+        store64(s + SESS_TX_OFF, 0);
+        store64(s + SESS_TX_HOLD, 0);
+    } else {
+        store64(s + SESS_TX_OFF, off);
+    }
+    return 0;
+}
+
+# The page stop's prompt for the active session's window: the long form when it
+# fits the wrap width, `--More--` alone when it does not. Writes it to `out`
+# (>= 32 bytes) and returns its length.
+fn gate_prompt(out): i64 {
+    var p = "--More-- (Enter; q to stop)";
+    var w = session_wrap_width();
+    if (w > 0) { if (w < strlen(p)) { p = "--More--"; } }
+    var n = strlen(p);
+    memcpy(out, p, n);
+    return n;
+}
+
+# The bytes that wipe a prompt `n` columns wide off its row: CR, n spaces, CR —
+# plain, so they work on any terminal. Writes them to `out` (>= n + 2 bytes).
+fn gate_erase(out, n): i64 {
+    store8(out, 13);
+    memset(out + 1, 32, n);
+    store8(out + n + 1, 13);
+    return n + 2;
+}
+
+# Stop the page at the end of s's queue: append the prompt, hold there, and
+# queue the prompt's erase as the first held bytes, so whatever the page goes
+# on with starts on a clean row. Returns 0, or 1 if the queue refused.
+fn gate_stop(s): i64 {
+    var pr[40];
+    var er[48];
+    var pn = gate_prompt(&pr);
+    var en = gate_erase(&er, pn);
+    if (sess_tx_enqueue(s, &pr, pn) != 0) { return 1; }
+    store64(s + SESS_TX_HOLD, load64(s + SESS_TX_LEN));
+    store64(s + SESS_GATE, GATE_PAGED);
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    return sess_tx_enqueue(s, &er, en);
+}
+
+# Queue a command's output on s while its rows are counted (GATE_COUNT): when
+# the page is full, the next byte stops it (gate_stop), and the rest of `buf`
+# and everything after it is held. Otherwise as sess_tx_enqueue.
+fn gate_send(s, buf, len): i64 {
+    if (s == 0) { return 1; }
+    if (load64(s + SESS_GATE) != GATE_COUNT) { return sess_tx_enqueue(s, buf, len); }
+    var left = load64(s + SESS_PAGE_LEFT);
+    var cut = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (cut < 0) {
+            if (left <= 0) { cut = i; }
+            else { if ((load8(buf + i) & 0xFF) == 10) { left = left - 1; } }
+        }
+        i = i + 1;
+    }
+    store64(s + SESS_PAGE_LEFT, left);
+    if (cut < 0) { return sess_tx_enqueue(s, buf, len); }
+    if (cut > 0) { if (sess_tx_enqueue(s, buf, cut) != 0) { return 1; } }
+    if (gate_stop(s) != 0) { return 1; }
+    return sess_tx_enqueue(s, buf + cut, len - cut);
+}
+
+# The rows a page holds in the active session's window: NAWS height - 1 (the
+# last row is the prompt's), or 0 when the session is not paged — `more off`,
+# no window reported, or one shorter than PAGE_MIN_ROWS.
+fn gate_page_rows(s): i64 {
+    if ((load64(s + SESS_PREFS) & PREF_NO_MORE) != 0) { return 0; }
+    var ts = load64(s + SESS_TS);
+    if (ts == 0) { return 0; }
+    if (telnet_term_cols(ts) <= 0) { return 0; }
+    var rows = telnet_term_rows(ts);
+    if (rows < PAGE_MIN_ROWS) { return 0; }
+    return rows - 1;
+}
+
+# A command is about to run in command mode: count its rows for a page.
+fn gate_begin_command(s): i64 {
+    if (load64(s + SESS_GATE) != GATE_OFF) { return 0; }
+    var rows = gate_page_rows(s);
+    if (rows <= 0) { return 0; }
+    store64(s + SESS_PAGE_LEFT, rows);
+    store64(s + SESS_GATE, GATE_COUNT);
+    return 0;
+}
+
+# The command returned with session mode `mode`. A page it did not fill needs
+# no gate; a page it stopped stays stopped — unless the command left command
+# mode (a door, chat, the Descent, a login), where nothing would turn it.
+fn gate_end_command(s, mode): i64 {
+    var g = load64(s + SESS_GATE);
+    if (g == GATE_COUNT) { store64(s + SESS_GATE, GATE_OFF); }
+    if (g == GATE_PAGED) {
+        if (mode != MODE_COMMAND) { gate_lift(s); }
+    }
+    return gate_flush(s);
+}
+
+# The key at a page stop said go on: release the next page of what is held,
+# stopping again where it fills (term_page_stop), or all of it.
+fn gate_next(s): i64 {
+    var hold = load64(s + SESS_TX_HOLD);
+    var tlen = load64(s + SESS_TX_LEN);
+    var rows = gate_page_rows(s);
+    var at = 0 - 1;
+    if (rows > 0) { at = term_page_stop(load64(s + SESS_TX), hold, tlen, rows); }
+    if (at < 0) { gate_lift(s); return gate_flush(s); }
+    var pr[40];
+    var er[48];
+    var pn = gate_prompt(&pr);
+    var en = gate_erase(&er, pn);
+    # The first insert compacts the queue, so `at` moves down by what had been
+    # sent; the prompt then goes in front of the erase.
+    var off = load64(s + SESS_TX_OFF);
+    if (sess_tx_insert(s, at, &er, en) != 0) { gate_lift(s); return gate_flush(s); }
+    at = at - off;
+    if (sess_tx_insert(s, at, &pr, pn) != 0) { gate_lift(s); return gate_flush(s); }
+    store64(s + SESS_TX_HOLD, at + pn);
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    return gate_flush(s);
+}
+
+# The key at a page stop said stop: drop what is held (the rest of the output
+# and the prompt queued after it), wipe the --More-- prompt, and prompt again.
+fn gate_quit(s, cfd, board): i64 {
+    var pr[40];
+    var er[48];
+    var pn = gate_prompt(&pr);
+    var en = gate_erase(&er, pn);
+    store64(s + SESS_TX_LEN, load64(s + SESS_TX_HOLD));
+    gate_lift(s);
+    sess_tx_enqueue(s, &er, en);
+    send_prompt(cfd, board);
+    return gate_flush(s);
+}
+
+# Telnet protocol bytes (replies the parser queued): ahead of any hold, so the
+# client's negotiation never waits behind held output. Otherwise send_buf.
+fn send_proto(cfd, buf, len): i64 {
+    var s = g_active_sess;
+    if (s != 0) {
+        if (gate_holds(s) == 1) {
+            var h = load64(s + SESS_TX_HOLD);
+            var off = load64(s + SESS_TX_OFF);
+            if (sess_tx_insert(s, h, buf, len) != 0) { gate_lift(s); return send_buf(cfd, buf, len); }
+            store64(s + SESS_TX_HOLD, h - off + len);
+            return gate_flush(s);
+        }
+    }
+    return send_buf(cfd, buf, len);
+}
+
+# Start the teletype at the end of s's queue: what is queued from here on is
+# released at TYPE_CPS. Only for a person at a terminal — a client that has
+# reported its window (NAWS); a script that never does gets its frames whole.
+fn gate_begin_type(s): i64 {
+    var ts = load64(s + SESS_TS);
+    if (ts == 0) { return 0; }
+    if (telnet_term_cols(ts) <= 0) { return 0; }
+    if (load64(s + SESS_GATE) != GATE_OFF) { return 0; }
+    store64(s + SESS_TX_HOLD, load64(s + SESS_TX_LEN));
+    store64(s + SESS_GATE_MS, clock_now_ms());
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    store64(s + SESS_GATE, GATE_TYPE);
+    return 0;
+}
+
+# The teletype's clock: release the characters due since the last release, and
+# open the gate once everything queued is out. Returns 1 while still typing.
+fn gate_tick(s, now): i64 {
+    if (load64(s + SESS_GATE) != GATE_TYPE) { return 0; }
+    var last = load64(s + SESS_GATE_MS);
+    if (now < last) { store64(s + SESS_GATE_MS, now); return 1; }
+    var due = ((now - last) * TYPE_CPS) / 1000;
+    if (due > 0) {
+        store64(s + SESS_GATE_MS, last + (due * 1000) / TYPE_CPS);
+        store64(s + SESS_TX_HOLD, load64(s + SESS_TX_HOLD) + due);
+    }
+    if (load64(s + SESS_TX_HOLD) >= load64(s + SESS_TX_LEN)) { gate_lift(s); gate_flush(s); return 0; }
+    gate_flush(s);
+    return 1;
+}
+
+# A key arrived while s is held. At a page stop q / Q / n / N stop the output
+# and anything else turns the page; on the teletype any key skips to the end.
+# A client in LINEMODE EDIT sends whole lines, so its line's first key is kept
+# and the line's end decides; a character-mode client decides on the key. The
+# key is never echoed, and the LF of a CR LF pair is absorbed by the caller.
+# Returns 1 when the key was decided (the caller sets last_cr on a CR).
+fn gate_key(s, cfd, board, b): i64 {
+    var ts = load64(s + SESS_TS);
+    var lined = 0;
+    if ((telnet_linemode_mask(ts) & LM_EDIT) != 0) { lined = 1; }
+    var key = b;
+    if (lined == 1) {
+        var eol = 0;
+        if (b == 13) { eol = 1; }
+        if (b == 10) { eol = 1; }
+        if (eol == 0) {
+            if (load64(s + SESS_GATE_KEY) < 0) {
+                if (b != 32) { store64(s + SESS_GATE_KEY, b); }
+            }
+            return 0;
+        }
+        key = load64(s + SESS_GATE_KEY);
+    }
+    store64(s + SESS_GATE_KEY, 0 - 1);
+    if (load64(s + SESS_GATE) == GATE_TYPE) { gate_lift(s); gate_flush(s); return 1; }
+    var stop = 0;
+    if (key == 113) { stop = 1; }       # q
+    if (key == 81)  { stop = 1; }       # Q
+    if (key == 110) { stop = 1; }       # n
+    if (key == 78)  { stop = 1; }       # N
+    if (stop == 1) { gate_quit(s, cfd, board); }
+    else           { gate_next(s); }
+    return 1;
 }
 
 # Flush session s's tx queue to its socket WITHOUT WAITING: session_drain_wait
@@ -3226,11 +3863,18 @@ fn session_drain(s): i64 {
 # close path retires it. The final flush is best-effort and deliberately still
 # runs: the peer may yet read the "bye" already sitting in the queue.
 fn session_drain_wait(s, wait_us): i64 {
-    var tx_len = load64(s + SESS_TX_LEN);
+    # 1.13.0 (ADR 0034) — send up to the gate's limit: the queue's end, or a
+    # hold. Bytes after a hold stay queued, and the queue resets only once its
+    # end has gone.
+    var tx_end = load64(s + SESS_TX_LEN);
+    var tx_len = sess_tx_limit(s);
     var tx_off = load64(s + SESS_TX_OFF);
     if (tx_off >= tx_len) {
-        store64(s + SESS_TX_LEN, 0);
-        store64(s + SESS_TX_OFF, 0);
+        if (tx_off >= tx_end) {
+            store64(s + SESS_TX_LEN, 0);
+            store64(s + SESS_TX_OFF, 0);
+            store64(s + SESS_TX_HOLD, 0);
+        }
         if (load64(s + SESS_TX_OVF) != 0) { return 0 - 1; }
         return 0;
     }
@@ -3279,8 +3923,13 @@ fn session_drain_wait(s, wait_us): i64 {
         #endif
     }
     if (rc == 0) {
-        store64(s + SESS_TX_LEN, 0);
-        store64(s + SESS_TX_OFF, 0);
+        if (tx_off >= tx_end) {
+            store64(s + SESS_TX_LEN, 0);
+            store64(s + SESS_TX_OFF, 0);
+            store64(s + SESS_TX_HOLD, 0);
+        } else {
+            store64(s + SESS_TX_OFF, tx_off);
+        }
     } else {
         store64(s + SESS_TX_OFF, tx_off);
     }
@@ -3772,6 +4421,8 @@ fn fork_child_wait(s): i64 {
     if (g_child_sigfd >= 0) { nf = poll_fd_put(&pfds, nf, g_child_sigfd, POLL_IN); }
     var ms = RECV_TIMEOUT_SECS * 1000;
     if (load64(s + SESS_MODE) == MODE_CHAT) { ms = CHAT_POLL_SECS * 1000; }
+    ms = session_timer_ms(s, clock_now_ms(), ms);   # 1.13.0 — the greeting / teletype timers
+    if (ms < 0) { ms = 0; }
     var pr = syscall(7, &pfds, nf, ms);
     if (pr <= 0) { return 0; }
     if (nf == 2) {
@@ -3788,6 +4439,7 @@ fn fork_child_wait(s): i64 {
 # The caller's close path then checkpoints the door and closes the socket.
 fn fork_child_goodbye(s): i64 {
     var cfd = load64(s + SESS_FD);
+    gate_drop(s);                    # 1.13.0 — the goodbye, not a held page
     if (load64(s + SESS_MODE) == MODE_DESCENT) {
         send_str(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
     }
@@ -3821,6 +4473,7 @@ fn serve_poll_shutdown(sfd, sigfd): i64 {
             # in poll mode — without it the notice would land on whichever
             # session happened to be dispatched last.
             sess_load(s);
+            gate_drop(s);                    # 1.13.0 — the goodbye, not a held page
             if (load64(s + SESS_MODE) == MODE_DESCENT) {
                 send_str(cfd, "\r\n(the agora is closing — leaving the Descent)\r\n");
             }
@@ -3889,8 +4542,11 @@ fn serve_poll_wait(sfd, sigfd): i64 {
                 }
                 if (mev != 0) { nf = poll_fd_put(fds, nf, load64(s + SESS_MUD_FD), mev); }
             }
-            if (load64(s + SESS_TX_LEN) > load64(s + SESS_TX_OFF)) { ev = ev | POLL_OUT; }
+            # 1.13.0 (ADR 0034) — POLLOUT only for bytes the gate releases: a held
+            # queue on a writable socket would wake the wait at once, forever.
+            if (sess_tx_limit(s) > load64(s + SESS_TX_OFF)) { ev = ev | POLL_OUT; }
             if (ev != 0) { nf = poll_fd_put(fds, nf, load64(s + SESS_FD), ev); }
+            due = session_timer_ms(s, now, due);
             if (due < wait) { wait = due; }
         }
         i = i + 1;
@@ -4025,6 +4681,13 @@ fn serve_poll(sfd): i64 {
                                 }
                             } } }
                 }
+                # 1.13.0 (ADR 0034) — the session's timers: a greeting waiting
+                # for the terminal type, and the teletype's clock.
+                if (close_it == 0) {
+                    var tnow = clock_now_ms();
+                    greet_settle(s, tnow);
+                    gate_tick(s, tnow);
+                }
                 # 3) flush queued output
                 if (close_it == 0) {
                     if (session_drain(s) < 0) { close_it = 1; }
@@ -4080,17 +4743,81 @@ fn session_greet(s): i64 {
         send_buf(cfd, telnet_tx_buf(ts), tx_len_ann);
         telnet_tx_consume(ts);
     }
-    # MOTD: operator file (--motd) if present, else the default render.
+    # 1.13.0 (ADR 0034) — the MOTD and the first prompt wait for the terminal
+    # type (greet_settle), because the greeting carries most of agora's colour
+    # and a terminal that names itself DUMB is to get none.
+    store64(s + SESS_GREET_DUE, clock_now_ms() + GREET_RAW_MS);
+    return 0;
+}
+
+# The rest of the greeting: the MOTD and the first prompt, once (SESS_GREETED).
+fn session_greet_body(s): i64 {
+    if (load64(s + SESS_GREETED) != 0) { return 0; }
+    var cfd = load64(s + SESS_FD);
+    store64(s + SESS_GREETED, 1);
+    g_emit_colour = session_colour(s);
+    # MOTD: operator file (--motd) if present, else the default render. An
+    # operator's file carries its own escapes; a terminal that takes no colour
+    # gets it without them (term_strip_esc).
     if (g_motd_buf != 0) {
-        send_buf(cfd, g_motd_buf, g_motd_len);
+        if (g_emit_colour == 1) { send_buf(cfd, g_motd_buf, g_motd_len); }
+        else {
+            var plain = cmd_alloc(g_motd_len + 1);
+            send_buf(cfd, plain, term_strip_esc(plain, g_motd_buf, g_motd_len));
+        }
     } else {
         var motd = cmd_alloc(1024);
         var motd_len = render_motd(motd);
         send_buf(cfd, motd, motd_len);
     }
     send_prompt(cfd, load64(s + SESS_CURBOARD));
-    store64(s + SESS_GREETED, 1);
     return 0;
+}
+
+# 1.13.0 (ADR 0034) — when the greeting the terminal type is waited for goes
+# out: once the client has refused TERMINAL-TYPE (WONT) or named its type (SB
+# IS, RFC 1091 — which needs its WILL, our SEND, then its IS: two round trips),
+# or at the deadline. A client that has sent nothing at all by GREET_RAW_MS is
+# not negotiating (a script, netcat) and is greeted then; one that has answered
+# anything gets until GREET_TYPE_MS for its type. A client that types first is
+# greeted at its first byte (process_rx). The deadline, or -1 once greeted.
+fn greet_deadline(s): i64 {
+    if (load64(s + SESS_GREETED) != 0) { return 0 - 1; }
+    var due = load64(s + SESS_GREET_DUE);
+    if (load64(s + SESS_HEARD) != 0) { due = due - GREET_RAW_MS + GREET_TYPE_MS; }
+    return due;
+}
+
+# 1 if session s has a timer of its own running: a greeting still waiting, or
+# the teletype.
+fn session_timer_pending(s): i64 {
+    if (greet_deadline(s) >= 0) { return 1; }
+    if (load64(s + SESS_GATE) == GATE_TYPE) { return 1; }
+    return 0;
+}
+
+# A wait of at most `ms` cut to session s's next timer (session_timer_pending).
+fn session_timer_ms(s, now, ms): i64 {
+    var gd = greet_deadline(s);
+    if (gd >= 0) { if (gd - now < ms) { ms = gd - now; } }
+    if (load64(s + SESS_GATE) == GATE_TYPE) { if (TYPE_TICK_MS < ms) { ms = TYPE_TICK_MS; } }
+    return ms;
+}
+
+# Send the greeting if it is time (greet_deadline). Returns 1 if it went out.
+fn greet_settle(s, now): i64 {
+    var due = greet_deadline(s);
+    if (due < 0) { return 0; }
+    var ready = 0;
+    var ts = load64(s + SESS_TS);
+    var tt = opt_him(ts, OPT_TERMINAL_TYPE);
+    if (tt == Q_NO) { ready = 1; }
+    if (tt == Q_YES) { if (telnet_term_type_len(ts) > 0) { ready = 1; } }
+    if (now >= due) { ready = 1; }
+    if (ready == 0) { return 0; }
+    cmd_scratch_reset();
+    session_greet_body(s);
+    return 1;
 }
 
 # Handle an n<=0 read on session `s`. In MODE_CHAT an EWOULDBLOCK (the short
@@ -4172,6 +4899,7 @@ fn process_rx(s, start, n, budget): i64 {
     var lines = 0;
     var park = 0 - 1;
     var i = start;
+    if (n > start) { store64(s + SESS_HEARD, 1); }   # 1.13.0 — greet_settle: the client is talking
     while (i < n) {
         if (load64(quit) != 0) { i = n; continue; }
         # 1.8.1 (audit H19) — a session whose output has failed (sticky, both
@@ -4187,6 +4915,7 @@ fn process_rx(s, start, n, budget): i64 {
         # in the buffer until the next byte — or for good, if the SB ended the recv.
         if (ev == EV_SB) {
             telnet_handle_sb(ts);
+            g_emit_colour = session_colour(s);   # 1.13.0 — the type may just have arrived
         }
 
         # Drain any IAC responses queued by the state machine
@@ -4204,9 +4933,10 @@ fn process_rx(s, start, n, budget): i64 {
         # slot: exactly the "slow-reader defense" its own comment claims but did
         # not implement. Setting quit and leaving the loop makes process_rx
         # return 1, which both serve models already turn into a close.
+        # 1.13.0 (ADR 0034) — send_proto: ahead of any held output.
         var tx_len = telnet_tx_len(ts);
         if (tx_len > 0) {
-            var txr = send_buf(cfd, telnet_tx_buf(ts), tx_len);
+            var txr = send_proto(cfd, telnet_tx_buf(ts), tx_len);
             telnet_tx_consume(ts);
             if (txr != 0) { store64(quit, 1); i = n; continue; }
         }
@@ -4226,6 +4956,26 @@ fn process_rx(s, start, n, budget): i64 {
 
         if (ev == EV_DATA) {
             var db = telnet_data_byte(ts) & 0xFF;
+            # 1.13.0 (ADR 0034) — while output is held (a page stop, the
+            # teletype) a key belongs to the gate: never echoed, never a command.
+            # The LF of the CR LF that decided it is absorbed here or below.
+            if (gate_holds(s) == 1) {
+                var gabsorb = 0;
+                if (db == 10) { if (last_cr != 0) { gabsorb = 1; } }
+                if (input_byte_ok(db) == 0) { gabsorb = 1; }
+                last_cr = 0;
+                if (gabsorb == 0) {
+                    store64(s + SESS_LAST_MS, clock_now_ms());
+                    # A decided key counts against the poll budget (1.8.1 H2): each
+                    # turns a page, which scans and moves up to SESS_TX_CAP held
+                    # bytes, so a pipelined run of keys goes one per sweep.
+                    if (gate_key(s, cfd, current_board, db) == 1) { lines = lines + 1; }
+                    if (db == 13) { last_cr = 1; }
+                    if (load64(s + SESS_TX_OVF) != 0) { store64(quit, 1); i = n; continue; }
+                }
+                i = i + 1;
+                continue;
+            }
             var erase = 0;
             if (db == 8)   { erase = 1; }
             if (db == 127) { erase = 1; }
@@ -4241,9 +4991,17 @@ fn process_rx(s, start, n, budget): i64 {
             # M5-H input filter (widened at 1.6.4 / 1.6.5): drop C0 except
             # TAB/CR/LF, DEL and IAC silently before they reach the line
             # buffer or get echoed. See input_byte_ok for the reasoning.
+            # 1.13.1 (ADR 0036) — except ESC in a post body on a raw board: the
+            # operator chose art there, and egress (send_art) keeps only its CSI.
             if (input_byte_ok(db) == 0) {
-                i = i + 1;
-                continue;
+                var keep_esc = 0;
+                if (db == 27) {
+                    if (mode == MODE_POSTING) { if (load64(s + SESS_POST_RAW) != 0) { keep_esc = 1; } }
+                }
+                if (keep_esc == 0) {
+                    i = i + 1;
+                    continue;
+                }
             }
             # 1.6.4 (audit M3) — THIS is what counts as activity: a byte that
             # survived the telnet layer AND the input filter. Protocol-only
@@ -4255,6 +5013,9 @@ fn process_rx(s, start, n, budget): i64 {
             # now move only on a byte the session actually keeps.
             store64(s + SESS_LAST_MS, clock_now_ms());
             g_chat_idle = 0;
+            # 1.13.0 — a client that types before the greeting went out is not
+            # waiting for negotiation: greet it now, ahead of its first echo.
+            if (load64(s + SESS_GREETED) == 0) { session_greet_body(s); }
             # === EOL detection: CR is canonical; LF after CR is
             # silently absorbed (consumed-here, NOT passed on to
             # the printable-byte branch — would otherwise land at
@@ -4291,7 +5052,10 @@ fn process_rx(s, start, n, budget): i64 {
                 }
                 # Mode-aware line dispatch.
                 if (mode == MODE_COMMAND) {
+                    # 1.13.0 (ADR 0034) — the command's rows are counted for a page.
+                    gate_begin_command(s);
                     mode = session_execute(cfd, line, line_pos, current_board, quit);
+                    gate_end_command(s, mode);
                     line_pos = 0;
                     # 1.11.0 (ADR 0031) — into the Descent: whatever else this
                     # recv holds was typed for the MUD (1.6.5, audit L4: a client
@@ -4625,12 +5389,28 @@ fn handle_client(cfd): i64 {
             sess_save(s);
             continue;
         }
+        # 1.13.0 (ADR 0034) — a wait that ended for the greeting or the teletype
+        # is a timer, not a silent client.
+        if (w == 0) {
+            if (session_timer_pending(s) == 1) {
+                var fnow = clock_now_ms();
+                greet_settle(s, fnow);
+                gate_tick(s, fnow);
+                if (load64(s + SESS_TX_OVF) != 0) { done = 1; }
+                sess_save(s);
+                continue;
+            }
+        }
         var n = 0 - EWOULDBLOCK_ERR;
         if (w == 1) { n = sys_read(cfd, load64(s + SESS_RXBUF), RECV_BUF_BYTES); }
         if (n <= 0) {
             done = session_rx_idle(s, n);
         } else {
             done = process_rx(s, 0, n, 0);
+            if (done == 0) {
+                greet_settle(s, clock_now_ms());
+                gate_tick(s, clock_now_ms());
+            }
             # 1.8.1 (audit P4) — the 1.6.4 M3 rule, fork side: protocol chatter
             # is not activity. SO_RCVTIMEO restarts on ANY received byte, so an
             # IAC NOP every 20 s held a fork child forever while a silent one was
@@ -5300,7 +6080,8 @@ fn parse_subject_flag(): i64 {
 
 # M5-F: walk argv looking for --reply-to <id>. Returns the parsed
 # parent ID (positive integer), or 0 if absent / unparseable.
-fn parse_reply_to_flag(): i64 {
+fn parse_reply_to_flag(board_out): i64 {
+    store8(board_out, 0);
     args_init();
     var n = argc();
     var i = 2;
@@ -5308,9 +6089,10 @@ fn parse_reply_to_flag(): i64 {
         var arg = argv(i);
         if (streq(arg, "--reply-to") != 0) {
             if (i + 1 < n) {
-                var v = atoi(argv(i + 1));
-                if (v > 0) { return v; }
-                return 0;
+                # 1.13.1 (ADR 0035) — `<id>`, or `<board>/<id>` for a parent on
+                # another board.
+                var v = argv(i + 1);
+                return reply_ref_parse(v, strlen(v), board_out);
             }
             return 0;
         }
@@ -5361,7 +6143,12 @@ fn cmd_post(): i64 {
             return 2;
         }
     }
-    var reply_to = parse_reply_to_flag();
+    var reply_board = alloc(BOARD_NAME_MAX + 8);
+    var reply_to = parse_reply_to_flag(reply_board);
+    var parent_board = board;
+    if ((load8(reply_board) & 0xFF) != 0) {
+        if (streq(reply_board, board) == 0) { parent_board = reply_board; }
+    }
     # M6-E: resolve identity. --as alone is insufficient — we need
     # the matching key to prove ownership of the handle.
     var as_handle = parse_as_flag();
@@ -5424,7 +6211,7 @@ fn cmd_post(): i64 {
     if (reply_to > 0) {
         # 1.8.1 (audit storage I5) — the parent must exist, as on the wire.
         var pfbuf = alloc(POST_MAX_BYTES + 1024);
-        var pflen = post_read(store, board, reply_to, pfbuf, POST_MAX_BYTES + 1024);
+        var pflen = post_read(store, parent_board, reply_to, pfbuf, POST_MAX_BYTES + 1024);
         if (pflen <= 0) {
             println("agora post: --reply-to names a post that does not exist on that board");
             return 1;
@@ -5461,7 +6248,10 @@ fn cmd_post(): i64 {
     # 0.9.0 ABI (ADR 0008): PostHeaders struct.
     var ph = post_headers_new();
     post_headers_set_subject(ph, subject);
-    if (reply_to > 0) { post_headers_set_reply_to(ph, reply_to); }
+    if (reply_to > 0) {
+        post_headers_set_reply_to(ph, reply_to);
+        if (parent_board != board) { post_headers_set_reply_board(ph, parent_board); }
+    }
     if (from_handle != 0) { post_headers_set_from(ph, from_handle, from_fp); }
     var id = post_new(store, board, ph, body, total);
     if (id < 0) {
@@ -5851,6 +6641,56 @@ fn cmd_policy(): i64 {
     return 2;
 }
 
+# 1.13.1 (ADR 0036) — `agora raw get <board>` / `agora raw set <board> on|off`:
+# whether the board carries ANSI art (`<board>/.raw`). Exit 0, 1 (no such board /
+# write failed), 2 (usage).
+fn cmd_raw(): i64 {
+    var store = parse_store(DEFAULT_STORE);
+    var sub = nth_positional(0);
+    var board = nth_positional(1);
+    if (sub == 0) { println("agora raw: usage: raw get <board> | raw set <board> on|off"); return 2; }
+    if (cli_board_ok("raw", board) == 0) {
+        if (board == 0) { println("agora raw: missing <board>"); }
+        return 2;
+    }
+    var path = alloc(PATH_MAX_BYTES);
+    board_raw_path(store, board, path);
+    if (streq(sub, "get") != 0) {
+        if (streq(board, "main") == 0) {
+            if (board_exists(store, board) == 0) { println("agora raw: no such board"); return 1; }
+        }
+        print(board, strlen(board));
+        if (board_is_raw(store, board) == 1) { println(": on (ANSI art: posts keep their colour and cursor moves)"); }
+        else { println(": off"); }
+        return 0;
+    }
+    if (streq(sub, "set") != 0) {
+        var word = nth_positional(2);
+        var on = 0 - 1;
+        if (word != 0) {
+            if (streq(word, "on") != 0)  { on = 1; }
+            if (streq(word, "off") != 0) { on = 0; }
+        }
+        if (on < 0) { println("agora raw: usage: raw set <board> on|off"); return 2; }
+        if (board_ensure(store, board) != 0) { println("agora raw: could not create the board"); return 1; }
+        var lk = store_lock_acquire(store, board);
+        if (lk < 0) { println("agora raw: could not lock the board"); return 1; }
+        var wr = 0;
+        if (on == 1) { wr = store_write_atomic(path, "on\n", 3); }
+        else {
+            xunlink(path);
+            if (store_name_exists(path) == 1) { wr = 1; }
+        }
+        store_lock_release(lk);
+        if (wr != 0) { println("agora raw: write failed"); return 1; }
+        print(board, strlen(board));
+        if (on == 1) { println(": on"); } else { println(": off"); }
+        return 0;
+    }
+    println("agora raw: usage: raw get <board> | raw set <board> on|off");
+    return 2;
+}
+
 # Resolve an `agora admins` target — a fingerprint or a handle — into fp_out
 # (ACCOUNT_FP_BUF_BYTES, "" when a handle is not registered) and handle_out
 # (ACCOUNT_HANDLE_BUF, "" when a fingerprint has no handle). Returns 1, or 0 when
@@ -6102,6 +6942,7 @@ fn main(): i64 {
     if (streq(verb, "keygen")   != 0) { return cmd_keygen(); }
     if (streq(verb, "register") != 0) { return cmd_register(); }
     if (streq(verb, "policy")   != 0) { return cmd_policy(); }
+    if (streq(verb, "raw")      != 0) { return cmd_raw(); }
     if (streq(verb, "admins")   != 0) { return cmd_admins(); }
     if (streq(verb, "worldbench") != 0) { return cmd_worldbench(); }
     if (streq(verb, "worldread") != 0) { return cmd_worldread(); }

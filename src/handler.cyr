@@ -5,7 +5,7 @@
 # traffic, cross-reference the paperwork, and find the mole before the
 # network burns. From a user-supplied v1.0 design spec; adapted to
 # agora (in-process, sigil identity instead of DOS drop files, flat
-# files instead of SQLite, instant render instead of teletype cps).
+# files instead of SQLite; the teletype came at 1.13.0, ADR 0034).
 #
 # THIS FILE — bite 5: the PURE core. The data model (agents, cities,
 # the cable Registry), deterministic generation (agent init, mole
@@ -1079,6 +1079,9 @@ fn th_render(st, buf, cap): i64 {
     }
     if (screen == HSCR_READ) {
         var ri = th_nth_today(st, load64(st + TH_CURSOR));
+        # 1.13.0 (ADR 0034) — the cable comes over the wire: from here the frame
+        # is slow-printed at 2400 baud, and a key skips to its end.
+        g_door_type_from = pos;
         if (ri >= 0) {
             pos = th_render_cable(st, buf, pos, th_cable_at(st, ri));
             pos = th_render_decrypt_line(st, buf, pos, ri);

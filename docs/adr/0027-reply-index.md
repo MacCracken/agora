@@ -1,6 +1,7 @@
 # 0027 — The reply index: one verified record file per parent
 
-> **Status**: Accepted
+> **Status**: Accepted — amended at 1.13.1: a record may name the child's board (`<board>/<child>`, a reply on
+> another board), and a build also reads every other board's posts ([ADR 0035](0035-cross-board-replies.md))
 > **Date**: 2026-10-13 — 1.9.1. Amends [0005](0005-threading-via-reply-to.md) § Decision (reply enumeration
 > (p) scan-on-read → an index) and answers its § Alternatives (C) / (r).
 

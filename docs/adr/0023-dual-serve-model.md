@@ -2,7 +2,8 @@
 
 > **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**; the agnos drain
 > amended at 1.12.3 (§ Decision, the sweep: a no-wait send on agnos ≥ 1.57.13) and measured on agnos at 1.12.4,
-> when the Descent's write to the MUD stopped waiting too
+> when the Descent's write to the MUD stopped waiting too; at 1.13.0 the drain sends only up to the output gate's
+> hold ([ADR 0034](0034-output-gate.md))
 > **Date**: 2026-07-26 (recorded retroactively — the decision shipped at 1.5.0 / 1.6.0)
 > **Amends**: [ADR 0007](0007-fork-per-accept-concurrency.md) — see § Relationship to ADR 0007.
 
@@ -98,6 +99,10 @@ The poll model is built from four pieces:
   >   is booted), and the shutdown goodbye (no signal reaches the guest). It also showed that the agnos
   >   kernel declares a zero-window peer dead after five unanswered resends (~31 s) and sends it neither
   >   FIN nor RST, so a dropped non-reader never sees its connection close.
+  >   *(Corrected at 1.13.0, from the kernel source: the resends are answered. agora's close turns the conn
+  >   into a held FIN slot, which the persist cap does not cover, so the kernel gives up on it after five
+  >   resends, about 47 s; it then drops every later segment from the peer without the RST RFC 9293
+  >   § 3.10.7.1 requires. Filed as agnos issue 2026-10-31.)*
   >
   > **Capacity note (audit I13):** agnos' stdlib socket table holds 8 sockets, so the real ceiling there
   > is ~8 sessions (a Descent visit uses one more), not `MAX_SESS` = 64.

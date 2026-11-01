@@ -168,8 +168,9 @@ fn board_path(store, board, out_buf): i64 {
 #     keyboard reprogramming on old VT terminals) executes in the
 #     viewer's terminal when another user reads it. The classic
 #     "embed ESC sequences in chat to wreck the viewer's session"
-#     attack. We strip at ingress; future operator config may add
-#     an opt-in flag for raw-mode posts.
+#     attack. We strip at ingress. (1.13.1, ADR 0036: on a raw board —
+#     the operator's opt-in, `agora raw set <board> on` — process_rx keeps
+#     ESC while composing, and egress lets through art's CSI only.)
 #
 # Passthrough is TAB, CR, LF, printable ASCII and the high bytes
 # 128-254. Everything else in C0, plus DEL and IAC, is dropped — see
@@ -297,6 +298,7 @@ fn header_text_cstr_ok(s): i64 {
 enum TextEgress {
     TEXT_KEEP_CR   = 0x2000;   # tty_sanitize_buf `keep` bit 13 = CR (darshana names only TAB / LF)
     TEXT_CHUNK_MAX = 504;      # input bytes per egress pass; callers size their buffers from it
+    ART_CSI_MAX    = 32;       # 1.13.1 (ADR 0036) — the longest CSI a raw board's art may send
 }
 
 # The C0 bytes kept: TAB, LF and CR. CR LF is the NVT newline (RFC 854) every
@@ -386,6 +388,70 @@ fn text_nvt_end(out, crp): i64 {
         store64(crp, 0);
         store8(out, 0);
         return 1;
+    }
+    return 0;
+}
+
+# === 1.13.1 — raw boards: ANSI art, by the operator's choice (ADR 0036) ===
+#
+# A board whose directory holds a `.raw` file carries ANSI art. Composing there
+# keeps ESC (process_rx), and reading lets through one class of escape sequence
+# the egress rule (ADR 0024) otherwise neutralizes: a CSI that colours, moves the
+# cursor or erases. Everything else still goes — OSC (titles, OSC 52 clipboard
+# writes), DCS, every CSI that makes the terminal answer (DSR `n`, DA `c`, window
+# reports `t`) or switches a mode (`h` / `l`: mouse reporting, bracketed paste,
+# the alternate screen), C1 controls and the other C0 bytes — and IAC is still
+# doubled. Art must be UTF-8, as all of agora's text is: CP437 bytes show as '?'.
+
+# `<board path>/.raw` into out_buf; returns its length.
+fn board_raw_path(store, board, out_buf): i64 {
+    var pos = board_path(store, board, out_buf);
+    store8(out_buf + pos, 47); pos = pos + 1;          # '/'
+    memcpy(out_buf + pos, ".raw", 4); pos = pos + 4;
+    store8(out_buf + pos, 0);
+    return pos;
+}
+
+# 1 if `board` is a raw board: its `.raw` is a regular file agora can read
+# (store_open: no symlink, never a FIFO). Its contents do not matter.
+fn board_is_raw(store, board): i64 {
+    var path[512];   # PATH_MAX_BYTES
+    board_raw_path(store, board, &path);
+    var b[16];
+    if (store_read_all(&path, &b, 16) < 0) { return 0; }
+    return 1;
+}
+
+# The final bytes of the CSI sequences a raw board's art may use: SGR (m), cursor
+# up / down / forward / back / next line / previous line / column (A-G), position
+# (H, f), erase in display / line (J, K), save / restore the cursor (s, u).
+fn art_csi_final_ok(c): i64 {
+    if (c >= 65) { if (c <= 71) { return 1; } }        # A-G
+    if (c == 72)  { return 1; }                        # H
+    if (c == 74)  { return 1; }                        # J
+    if (c == 75)  { return 1; }                        # K
+    if (c == 102) { return 1; }                        # f
+    if (c == 109) { return 1; }                        # m
+    if (c == 115) { return 1; }                        # s
+    if (c == 117) { return 1; }                        # u
+    return 0;
+}
+
+# The length of the art sequence at buf[i] (buf[i] == ESC) within buf[i..e): ESC
+# '[', parameters of digits and ';' only (no private marker, no intermediate
+# byte), and a final byte art_csi_final_ok allows — at most ART_CSI_MAX bytes in
+# all. 0 when the sequence is not one of those; the caller neutralizes the ESC.
+fn art_csi_len(buf, i, e): i64 {
+    if (i + 2 >= e) { return 0; }
+    if ((load8(buf + i + 1) & 0xFF) != 91) { return 0; }
+    var j = i + 2;
+    while (j < e) {
+        if (j - i >= ART_CSI_MAX) { return 0; }
+        var c = load8(buf + j) & 0xFF;
+        if (c >= 48) { if (c <= 57) { j = j + 1; continue; } }   # 0-9
+        if (c == 59) { j = j + 1; continue; }                     # ';'
+        if (art_csi_final_ok(c) == 1) { return j + 1 - i; }
+        return 0;
     }
     return 0;
 }
@@ -926,7 +992,8 @@ enum PH {
     PH_REPLY_TO    = 8;     # i64 parent ID (or 0 for non-reply)
     PH_FROM_HANDLE = 16;    # cstring ptr (or 0 for anonymous)
     PH_FROM_FP     = 24;    # cstring ptr (or 0 for anonymous, paired with FROM_HANDLE)
-    PH_SIZE        = 32;
+    PH_REPLY_BOARD = 32;    # 1.13.1 (ADR 0035) — cstring: the parent's board, or 0 / "" for this board
+    PH_SIZE        = 40;
 }
 
 # Allocate a fresh zero-initialized PostHeaders block. All fields
@@ -946,6 +1013,13 @@ fn post_headers_set_subject(ph, subject_cstr): i64 {
 # Set the Reply-To parent id (0 = not a reply).
 fn post_headers_set_reply_to(ph, parent_id): i64 {
     store64(ph + PH_REPLY_TO, parent_id);
+    return 0;
+}
+
+# 1.13.1 (ADR 0035) — the parent's board when it is not the reply's own (0 or ""
+# = the same board). The formatter then writes `Reply-To: <board>/<id>`.
+fn post_headers_set_reply_board(ph, board_cstr): i64 {
+    store64(ph + PH_REPLY_BOARD, board_cstr);
     return 0;
 }
 
@@ -969,6 +1043,7 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
     var reply_to    = load64(ph + PH_REPLY_TO);
     var from_handle = load64(ph + PH_FROM_HANDLE);
     var from_fp     = load64(ph + PH_FROM_FP);
+    var reply_board = load64(ph + PH_REPLY_BOARD);
 
     var pos = 0;
     var slen = 0;
@@ -976,9 +1051,9 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
     if (slen > SUBJECT_MAX_BYTES) { slen = SUBJECT_MAX_BYTES; }
 
     # Worst-case header overhead: Subject 9+slen+2, Date 6+20+2,
-    # Reply-To 10+24+2 (24 = max digits of int64), From 6+32+1+16+2,
-    # blank 2. ~140 + slen.
-    if (pos + 9 + slen + 140 + body_len > out_cap) { return 0 - 1; }
+    # Reply-To 10+33+24+2 (a board, '/', 24 = max digits of int64), From
+    # 6+32+1+16+2, blank 2. ~175 + slen.
+    if (pos + 9 + slen + 175 + body_len > out_cap) { return 0 - 1; }
 
     # "Subject: <subject>\r\n"
     memcpy(out_buf + pos, "Subject: ", 9); pos = pos + 9;
@@ -995,6 +1070,15 @@ fn post_format(ph, body, body_len, out_buf, out_cap): i64 {
     # "Reply-To: <id>\r\n"  (M5-F / ADR 0005, only if reply_to > 0)
     if (reply_to > 0) {
         memcpy(out_buf + pos, "Reply-To: ", 10); pos = pos + 10;
+        # 1.13.1 (ADR 0035) — a parent on another board: `<board>/<id>`.
+        if (reply_board != 0) {
+            var rbl = strlen(reply_board);
+            if (rbl > BOARD_NAME_MAX) { rbl = 0; }
+            if (rbl > 0) {
+                memcpy(out_buf + pos, reply_board, rbl); pos = pos + rbl;
+                store8(out_buf + pos, 47); pos = pos + 1;            # '/'
+            }
+        }
         var idbuf[24];
         var idlen = fmt_int_buf(reply_to, &idbuf);
         memcpy(out_buf + pos, &idbuf, idlen); pos = pos + idlen;
@@ -1053,8 +1137,40 @@ fn post_new(store, board, ph, body, body_len): i64 {
     var flen = post_format(ph, body, body_len, fbuf, fcap);
     if (flen < 0) { return 0 - 1; }
 
-    var lock_fd = store_lock_acquire(store, board);
-    if (lock_fd < 0) { return 0 - 1; }
+    # 1.13.1 (ADR 0035) — a reply to a post on another board records itself in
+    # THAT board's index, so it needs that board's lock as well as its own. Two
+    # writers replying across the same two boards in opposite directions would
+    # deadlock if each took its own board first; both locks are taken in name
+    # order instead.
+    var parent = load64(ph + PH_REPLY_TO);
+    var pboard = board;
+    var cross = 0;
+    if (parent > 0) {
+        var prb = load64(ph + PH_REPLY_BOARD);
+        if (prb != 0) {
+            if ((load8(prb) & 0xFF) != 0) {
+                if (streq(prb, board) == 0) {
+                    if (board_ref_name_ok(prb) == 0) { return 0 - 1; }
+                    pboard = prb;
+                    cross = 1;
+                }
+            }
+        }
+    }
+    var lock_fd = 0 - 1;
+    var lock2_fd = 0 - 1;
+    if (cross == 1) {
+        var first = board;
+        var second = pboard;
+        if (board_name_cmp(pboard, board) < 0) { first = pboard; second = board; }
+        lock_fd = store_lock_acquire(store, first);
+        if (lock_fd < 0) { return 0 - 1; }
+        lock2_fd = store_lock_acquire(store, second);
+        if (lock2_fd < 0) { store_lock_release(lock_fd); return 0 - 1; }
+    } else {
+        lock_fd = store_lock_acquire(store, board);
+        if (lock_fd < 0) { return 0 - 1; }
+    }
 
     var id = post_max_id(store, board) + 1;
     var path_buf = cmd_alloc(PATH_MAX_BYTES);
@@ -1064,21 +1180,28 @@ fn post_new(store, board, ph, body, body_len): i64 {
     # in between leaves a ghost record, which `read` verifies away, never a reply
     # missing from a complete index. A board that predates the index gets it built
     # here, once. If the record cannot be written, the index is marked incomplete
-    # (reads scan again) rather than left silently wrong.
-    var parent = load64(ph + PH_REPLY_TO);
+    # (reads scan again) rather than left silently wrong. Since 1.13.1 the record
+    # goes in the PARENT's board, naming this board when it is another.
     if (parent > 0) {
-        reply_index_ensure(store, board);
-        if (reply_index_add(store, board, parent, id, 1) != 0) {
+        reply_index_ensure(store, pboard);
+        var child_board = 0;
+        if (cross == 1) { child_board = board; }
+        if (reply_index_add_ref(store, pboard, parent, child_board, id, 1) != 0) {
             var mk = cmd_alloc(PATH_MAX_BYTES);
-            reply_index_marker(store, board, mk);
+            reply_index_marker(store, pboard, mk);
             xunlink(mk);
-            if (store_name_exists(mk) == 1) { store_lock_release(lock_fd); return 0 - 1; }
+            if (store_name_exists(mk) == 1) {
+                if (lock2_fd >= 0) { store_lock_release(lock2_fd); }
+                store_lock_release(lock_fd);
+                return 0 - 1;
+            }
         }
     }
 
     var dir = cmd_alloc(PATH_MAX_BYTES);
     board_path(store, board, dir);
     var prc = store_publish(dir, path_buf, fbuf, flen, 1);   # crash-safe, exclusive (arena.cyr)
+    if (lock2_fd >= 0) { store_lock_release(lock2_fd); }
     store_lock_release(lock_fd);
     if (prc != 0) { return 0 - 1; }
     return id;
@@ -1111,6 +1234,96 @@ fn post_reply_to(buf, len): i64 {
     var id = atoi(&raw);
     if (id <= 0) { return 0; }
     return id;
+}
+
+# === 1.13.1 — references across boards (ADR 0035) ===
+#
+# A reply's `Reply-To:` names its parent: `<id>` on the reply's own board (ADR
+# 0005, every post before 1.13.1), or `<board>/<id>` on another — `main` is the
+# flat root. The same shape is what a user types (`reply tech/7`, `read tech/7`)
+# and what an index record holds for a reply that lives on another board.
+
+# Byte order of two NUL-terminated board names: -1, 0 or 1. post_new takes two
+# board locks in this order.
+fn board_name_cmp(a, b): i64 {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i) & 0xFF;
+        var cb = load8(b + i) & 0xFF;
+        if (ca < cb) { return 0 - 1; }
+        if (ca > cb) { return 1; }
+        if (ca == 0) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if `name` may stand in a reference: a valid board name, or "main".
+fn board_ref_name_ok(name): i64 {
+    if (streq(name, "main") != 0) { return 1; }
+    return board_name_valid(name);
+}
+
+# Parse a reference `s[0..n)`: `<id>`, or `<board>/<id>`. Writes the board into
+# `board_out` (>= BOARD_NAME_MAX + 1 bytes; "" when none was given) and returns the
+# id (1 to 18 digits, > 0), or 0 when `s` is not a reference. A board must pass
+# board_ref_name_ok before it is copied, so nothing a post or a user wrote ever
+# reaches a path unchecked.
+fn reply_ref_parse(s, n, board_out): i64 {
+    store8(board_out, 0);
+    if (n <= 0) { return 0; }
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (slash < 0) { if ((load8(s + i) & 0xFF) == 47) { slash = i; } }
+        i = i + 1;
+    }
+    var ds = 0;
+    if (slash >= 0) {
+        if (slash < 1) { return 0; }
+        if (slash > BOARD_NAME_MAX) { return 0; }
+        memcpy(board_out, s, slash);
+        store8(board_out + slash, 0);
+        if (board_ref_name_ok(board_out) == 0) { store8(board_out, 0); return 0; }
+        ds = slash + 1;
+    }
+    var nd = n - ds;
+    if (nd < 1) { store8(board_out, 0); return 0; }
+    if (nd > 18) { store8(board_out, 0); return 0; }
+    var id = 0;
+    i = ds;
+    while (i < n) {
+        var c = load8(s + i) & 0xFF;
+        if (c < 48) { store8(board_out, 0); return 0; }
+        if (c > 57) { store8(board_out, 0); return 0; }
+        id = id * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (id <= 0) { store8(board_out, 0); return 0; }
+    return id;
+}
+
+# The parent a post's `Reply-To:` names: its id, with its board in `board_out`
+# ("" for the post's own board). 0 when the post is not a reply.
+fn post_reply_ref(buf, len, board_out): i64 {
+    store8(board_out, 0);
+    var raw[64];
+    var n = header_get(buf, len, "Reply-To", &raw, 64);
+    if (n <= 0) { return 0; }
+    if (n >= 64) { return 0; }
+    return reply_ref_parse(&raw, n, board_out);
+}
+
+# 1 if a post on `post_board` whose `Reply-To:` is (`ref_board`, `ref_id`) replies
+# to `target_id` on `target_board`. An empty ref_board means the post's own board,
+# so `tech/7` written on tech is the same parent as `7`.
+fn reply_ref_is(ref_board, ref_id, post_board, target_board, target_id): i64 {
+    if (ref_id != target_id) { return 0; }
+    if (ref_id <= 0) { return 0; }
+    var rb = ref_board;
+    if ((load8(ref_board) & 0xFF) == 0) { rb = post_board; }
+    if (streq(rb, target_board) != 0) { return 1; }
+    return 0;
 }
 
 # === Reply index (1.9.1, ADR 0027) ===
@@ -1180,16 +1393,35 @@ fn reply_index_complete(store, board): i64 {
 # before the post exists; 0 inside a build, which syncs once at the end. Returns
 # 0 or -1. Stack buffers only: the build calls this once per reply.
 fn reply_index_add(store, board, parent_id, child_id, durable): i64 {
+    return reply_index_add_ref(store, board, parent_id, 0, child_id, durable);
+}
+
+# reply_index_add for a child that may live on another board (1.13.1, ADR 0035):
+# `child_board` 0 or "" writes "\n<child>\n" as before; otherwise
+# "\n<child_board>/<child>\n". The caller holds `board`'s lock — the parent's.
+fn reply_index_add_ref(store, board, parent_id, child_board, child_id, durable): i64 {
     var dir[512];   # PATH_MAX_BYTES
     reply_index_dir(store, board, &dir);
     if (store_ensure(&dir) != 0) { return 0 - 1; }
     var path[512];
     reply_index_path(store, board, parent_id, &path);
-    var rec[32];
+    var rec[64];
     store8(&rec, 10);
-    var n = fmt_int_buf(child_id, (&rec) + 1);
-    store8((&rec) + 1 + n, 10);
-    if (store_append_locked(&path, &rec, n + 2, durable) != n + 2) { return 0 - 1; }
+    var p = 1;
+    if (child_board != 0) {
+        var cbl = strlen(child_board);
+        if (cbl > BOARD_NAME_MAX) { return 0 - 1; }
+        if (cbl > 0) {
+            memcpy((&rec) + p, child_board, cbl);
+            p = p + cbl;
+            store8((&rec) + p, 47);              # '/'
+            p = p + 1;
+        }
+    }
+    p = p + fmt_int_buf(child_id, (&rec) + p);
+    store8((&rec) + p, 10);
+    p = p + 1;
+    if (store_append_locked(&path, &rec, p, durable) != p) { return 0 - 1; }
     if (durable == 1) { store_dir_sync(&dir); }
     return 0;
 }
@@ -1219,18 +1451,29 @@ fn reply_index_ensure(store, board): i64 {
     }
     sort_i64_asc(g_dir_ids, c);
     var head[2048];   # POST_HEAD_SCAN
+    var rb[40];       # BOARD_NAME_MAX + 1
     var ok = 1;
     i = 0;
     while (i < c) {
         var cid = load64(g_dir_ids + i * 8);
         var hl = post_read(store, board, cid, &head, POST_HEAD_SCAN);
         if (hl > 0) {
-            var parent = post_reply_to(&head, hl);
+            var parent = post_reply_ref(&head, hl, &rb);
             if (parent > 0) {
-                if (reply_index_add(store, board, parent, cid, 0) != 0) { ok = 0; }
+                if (reply_ref_is(&rb, parent, board, board, parent) == 1) {
+                    if (reply_index_add(store, board, parent, cid, 0) != 0) { ok = 0; }
+                }
             }
         }
         i = i + 1;
+    }
+    # 1.13.1 (ADR 0035) — replies on other boards to this board's posts. post_new
+    # records each one here as it is written, so a complete index holds them; a
+    # rebuild must find them too, or `.complete` would vouch for an index that
+    # misses them. Other boards' posts are read without their locks: a published
+    # post is immutable and whole.
+    if (ok == 1) {
+        if (reply_index_ensure_incoming(store, board) != 0) { ok = 0; }
     }
     if (ok == 0) { return 0 - 1; }
     sys_sync();        # every record on disk before the marker that vouches for them
@@ -1239,6 +1482,60 @@ fn reply_index_ensure(store, board): i64 {
     if (store_publish(&dir, &mk, "complete\n", 9, 1) != 0) {
         if (store_name_exists(&mk) == 0) { return 0 - 1; }
     }
+    return 0;
+}
+
+# Index into `board`'s reply index every reply on ANOTHER board that names one of
+# `board`'s posts (the caller holds `board`'s lock, inside reply_index_ensure).
+# Reads every other board's posts once: a rebuild is rare (a board's first index,
+# or after an operator deletes `.replies/`), and it is the only way a rebuilt
+# index can be complete. Returns 0, or -1 if a record could not be written.
+fn reply_index_ensure_incoming(store, board): i64 {
+    var names = cmd_alloc(1025 * 8);
+    var nb = boards_list(store, names, 1024);
+    if (streq(board, "main") == 0) {
+        store64(names + nb * 8, "main");
+        nb = nb + 1;
+    }
+    var head[2048];   # POST_HEAD_SCAN
+    var rb[40];       # BOARD_NAME_MAX + 1
+    var bpath[512];   # PATH_MAX_BYTES
+    var ok = 1;
+    var k = 0;
+    while (k < nb) {
+        var other = load64(names + k * 8);
+        if (streq(other, board) == 0) {
+            board_path(store, other, &bpath);
+            var n = store_dir_scan(&bpath);
+            var c = 0;
+            var i = 0;
+            while (i < n) {
+                var id = parse_post_id(store_dir_name(i));
+                if (id > 0) {
+                    store64(g_dir_ids + c * 8, id);
+                    c = c + 1;
+                }
+                i = i + 1;
+            }
+            sort_i64_asc(g_dir_ids, c);
+            i = 0;
+            while (i < c) {
+                var cid = load64(g_dir_ids + i * 8);
+                var hl = post_read(store, other, cid, &head, POST_HEAD_SCAN);
+                if (hl > 0) {
+                    var parent = post_reply_ref(&head, hl, &rb);
+                    if (parent > 0) {
+                        if (reply_ref_is(&rb, parent, other, board, parent) == 1) {
+                            if (reply_index_add_ref(store, board, parent, other, cid, 0) != 0) { ok = 0; }
+                        }
+                    }
+                }
+                i = i + 1;
+            }
+        }
+        k = k + 1;
+    }
+    if (ok == 0) { return 0 - 1; }
     return 0;
 }
 
@@ -1268,11 +1565,31 @@ fn reply_index_prepare(store): i64 {
     return 0;
 }
 
+# 1.13.1 (ADR 0035) — a reply that lives on another board, as `read` lists it:
+# its board (NUL-terminated) and its id.
+enum XRef {
+    XREF_BOARD = 0;          # BOARD_NAME_MAX + 1 bytes, padded to 40
+    XREF_ID    = 40;
+    XREF_SIZE  = 48;
+    XREPLY_MAX = 512;        # cross-board records parsed per parent (oldest first)
+}
+
 # `parent`'s replies from a COMPLETE index into out_ids: ascending, without
 # duplicates, each verified against its own Reply-To; up to max_ids. Returns the
 # count, or -1 when the index cannot answer (not complete, or unreadable) — the
 # caller then scans.
 fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
+    var xn[8];
+    return reply_index_read_x(store, board, parent_id, out_ids, max_ids, 0, 0, &xn);
+}
+
+# reply_index_read, and also the replies that live on other boards (1.13.1, ADR
+# 0035): up to `xmax` XRef entries into `xout`, sorted by board then id, without
+# duplicates, each verified against its own `Reply-To:` — which must name this
+# board — and their count into `*xn_out`. A record is "<id>" (this board) or
+# "<board>/<id>"; anything else, a torn record included, is dropped.
+fn reply_index_read_x(store, board, parent_id, out_ids, max_ids, xout, xmax, xn_out): i64 {
+    store64(xn_out, 0);
     if (reply_index_complete(store, board) == 0) { return 0 - 1; }
     var path[512];   # PATH_MAX_BYTES
     reply_index_path(store, board, parent_id, &path);
@@ -1283,29 +1600,40 @@ fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
         return 0 - 1;
     }
     var ids = cmd_alloc(REPLY_INDEX_IDS * 8);
+    var xs = 0;
+    if (xmax > 0) { xs = cmd_alloc(XREPLY_MAX * XREF_SIZE); }
+    var rbd[40];      # BOARD_NAME_MAX + 1
     var c = 0;
-    var cur = 0;
-    var digits = 0;
+    var xc = 0;
+    var rs = 0;
     var i = 0;
     while (i <= n) {
-        var ch = 10;
-        if (i < n) { ch = load8(buf + i) & 0xFF; }
-        if (ch >= 48) {
-            if (ch <= 57) {
-                if (digits < 18) { cur = cur * 10 + (ch - 48); }
-                digits = digits + 1;
-                i = i + 1;
-                continue;
+        var at_end = 0;
+        if (i == n) { at_end = 1; }
+        else { if ((load8(buf + i) & 0xFF) == 10) { at_end = 1; } }
+        if (at_end == 1) {
+            if (i > rs) {
+                var rid = reply_ref_parse(buf + rs, i - rs, &rbd);
+                if (rid > 0) {
+                    var local = 0;
+                    if ((load8(&rbd) & 0xFF) == 0) { local = 1; }
+                    else { if (streq(&rbd, board) != 0) { local = 1; } }
+                    if (local == 1) {
+                        if (c < REPLY_INDEX_IDS) { store64(ids + c * 8, rid); c = c + 1; }
+                    } else {
+                        if (xs != 0) {
+                            if (xc < XREPLY_MAX) {
+                                var e = xs + xc * XREF_SIZE;
+                                memcpy(e + XREF_BOARD, &rbd, strlen(&rbd) + 1);
+                                store64(e + XREF_ID, rid);
+                                xc = xc + 1;
+                            }
+                        }
+                    }
+                }
             }
+            rs = i + 1;
         }
-        # any other byte ends a record (a garbled one is dropped by verification)
-        if (digits > 0) {
-            if (digits <= 18) {
-                if (c < REPLY_INDEX_IDS) { store64(ids + c * 8, cur); c = c + 1; }
-            }
-        }
-        cur = 0;
-        digits = 0;
         i = i + 1;
     }
     sort_i64_asc(ids, c);
@@ -1320,7 +1648,8 @@ fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
             if (cid != prev) {
                 var hl = post_read(store, board, cid, &head, POST_HEAD_SCAN);
                 if (hl > 0) {
-                    if (post_reply_to(&head, hl) == parent_id) {
+                    var pid = post_reply_ref(&head, hl, &rbd);
+                    if (reply_ref_is(&rbd, pid, board, board, parent_id) == 1) {
                         store64(out_ids + out * 8, cid);
                         out = out + 1;
                     }
@@ -1330,7 +1659,62 @@ fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
         prev = cid;
         k = k + 1;
     }
+    if (xc > 0) { xref_sort(xs, xc); }
+    var xo = 0;
+    k = 0;
+    while (k < xc) {
+        var e2 = xs + k * XREF_SIZE;
+        var dup = 0;
+        if (k > 0) { if (xref_cmp(e2, e2 - XREF_SIZE) == 0) { dup = 1; } }
+        if (dup == 0) {
+            if (xo < xmax) {
+                var xb = e2 + XREF_BOARD;
+                var xid = load64(e2 + XREF_ID);
+                var xhl = post_read(store, xb, xid, &head, POST_HEAD_SCAN);
+                if (xhl > 0) {
+                    var xpid = post_reply_ref(&head, xhl, &rbd);
+                    if (reply_ref_is(&rbd, xpid, xb, board, parent_id) == 1) {
+                        memcpy(xout + xo * XREF_SIZE, e2, XREF_SIZE);
+                        xo = xo + 1;
+                    }
+                }
+            }
+        }
+        k = k + 1;
+    }
+    store64(xn_out, xo);
     return out;
+}
+
+# Order of two XRef entries: by board name, then id. -1, 0 or 1.
+fn xref_cmp(a, b): i64 {
+    var bc = board_name_cmp(a + XREF_BOARD, b + XREF_BOARD);
+    if (bc != 0) { return bc; }
+    var ia = load64(a + XREF_ID);
+    var ib = load64(b + XREF_ID);
+    if (ia < ib) { return 0 - 1; }
+    if (ia > ib) { return 1; }
+    return 0;
+}
+
+# Sort `n` XRef entries in place (insertion sort: n <= XREPLY_MAX).
+fn xref_sort(xs, n): i64 {
+    var tmp[48];      # XREF_SIZE
+    var i = 1;
+    while (i < n) {
+        memcpy(&tmp, xs + i * XREF_SIZE, XREF_SIZE);
+        var j = i;
+        var moving = 1;
+        while (moving == 1) {
+            if (j <= 0) { moving = 0; continue; }
+            if (xref_cmp(xs + (j - 1) * XREF_SIZE, &tmp) <= 0) { moving = 0; continue; }
+            memcpy(xs + j * XREF_SIZE, xs + (j - 1) * XREF_SIZE, XREF_SIZE);
+            j = j - 1;
+        }
+        memcpy(xs + j * XREF_SIZE, &tmp, XREF_SIZE);
+        i = i + 1;
+    }
+    return 0;
 }
 
 # Find every reply (in `board`) whose Reply-To header equals
@@ -1345,13 +1729,23 @@ fn reply_index_read(store, board, parent_id, out_ids, max_ids): i64 {
 # terminator is not inside the scan simply has no Reply-To here (header_get
 # finds no body offset), which is the right answer for a hand-made file.
 fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
+    var xn[8];
+    return replies_to_x(store, board, parent_id, out_ids, max_ids, 0, 0, &xn);
+}
+
+# replies_to, and the replies on other boards (1.13.1, ADR 0035) as reply_index_read_x
+# lists them. Only a complete index knows those: the scan, for a board whose index
+# is not built yet, finds this board's replies alone (`*xn_out` 0).
+fn replies_to_x(store, board, parent_id, out_ids, max_ids, xout, xmax, xn_out): i64 {
     # 1.9.1 — the reply index answers when it is complete (ADR 0027); the scan
     # below is for a board whose index has not been built yet.
-    var ri = reply_index_read(store, board, parent_id, out_ids, max_ids);
+    var ri = reply_index_read_x(store, board, parent_id, out_ids, max_ids, xout, xmax, xn_out);
     if (ri >= 0) { return ri; }
+    store64(xn_out, 0);
     var ids = cmd_alloc(DIRENT_ID_MAX * 8);
     var count = post_list(store, board, ids, DIRENT_ID_MAX);
     var fbuf = cmd_alloc(POST_HEAD_SCAN);
+    var srb[40];      # BOARD_NAME_MAX + 1
     var out_count = 0;
     var i = 0;
     while (i < count) {
@@ -1359,7 +1753,8 @@ fn replies_to(store, board, parent_id, out_ids, max_ids): i64 {
         var id = load64(ids + i * 8);
         var flen = post_read(store, board, id, fbuf, POST_HEAD_SCAN);
         if (flen > 0) {
-            if (post_reply_to(fbuf, flen) == parent_id) {
+            var spid = post_reply_ref(fbuf, flen, &srb);
+            if (reply_ref_is(&srb, spid, board, board, parent_id) == 1) {
                 store64(out_ids + out_count * 8, id);
                 out_count = out_count + 1;
             }

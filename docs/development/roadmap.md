@@ -1,13 +1,10 @@
 # agora — Roadmap
 
-> **Last Updated**: 2026-10-30 — 1.12.2 (cyrius 6.7.18, darshana 1.7.0) took the next free patch slot as a
-> toolchain cut. It closed § Blocked's directory-guard row (the stdlib's `dir_list_into` opens with
-> `O_DIRECTORY` since 6.7.11) and restated the DCE row. 1.12.3 took the slot after it: four reworded comments,
-> so the tree-wide deferral check reads 0, and on agnos ≥ 1.57.13 a poll drain that never waits (`sock_send_dl`
-> #109, ADR 0023 amended); 1.12.4 ran it on a real agnos kernel (`scripts/agnos-smoke.py`), fixing agnos logins and
-> the Descent's MUD write; nothing planned changed. Rebuilt at 1.12.1 as the single, forward-only plan:
-> [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
-> agora stands today. Next slot: **1.13.0**.
+> **Last Updated**: 2026-10-31 — 1.13.1 shipped its slot as planned (cross-board replies, ADR 0035; raw boards
+> for ANSI art, ADR 0036), and with it the 1.13.x arc, so that arc is gone. 1.13.0 (the output gate, ADR 0034) and
+> the patch cuts before it (1.12.2–1.12.4) changed nothing planned. Rebuilt at 1.12.1 as the single, forward-only
+> plan: [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
+> agora stands today. Next slot: **1.14.0**.
 >
 > **What this file is**: everything agora means to build, in order, from the next release to 2.0 and past it,
 > grouped into release arcs. **What it is not**: a history. When an item ships, delete its row (the CHANGELOG
@@ -37,7 +34,6 @@ formats and upgrades in place.
 
 | Arc | Slots | Theme | Delivers |
 |---|---|---|---|
-| **1.13.x** | 1.13.0 – 1.13.1 | The terminal and the protocol | paging by window height, the Handler's teletype, colour by terminal type; cross-board replies, opt-in ANSI-art posts |
 | **1.14.x** | 1.14.0 – 1.14.3 | Door depth | QUEST async PvP, The Handler v2, Port Authority's endgame, shared worlds on a clock |
 | **1.15.x** | 1.15.0 – 1.15.1 | Bots and media | ALICE, Racter, MegaHAL; inline images (kii), stored-file deltas (sankoch) |
 | **1.16.x** | 1.16.0 – 1.16.2 | The road to 2.0 | content hashes and signed posts (additive), wide fingerprints, the migration tool and the 2.0 pre-flight |
@@ -46,30 +42,6 @@ formats and upgrades in place.
 | **2.2.x** | — | Federation by interest (pillar 4) | topics, `Origin:`, inter-board doors |
 | **2.3.x** | — | Offline-first (pillar 6) | the outbox, sync on connect, sneakernet |
 | **2.4.x** | — | Self-distribution (pillar 5) | the network carries the system that runs it |
-
----
-
-## 1.13.x — the terminal and the protocol
-
-1.10.x made agora a conformant telnet server and fitted its output to the window's width. Nothing yet uses what
-else it negotiates (the window height, the terminal type), and two protocol limits date from M5.
-
-### 1.13.0 — the terminal, beyond the width
-
-All three items park output across poll sweeps and take a key to continue, so they share one mechanism.
-
-| Item | Source | Effort |
-|---|---|---:|
-| **Paging by window height** (NAWS rows): a `--More--` stop on a long `list` or `read`. It changes the input model in the middle of output (a key continues or quits), and under poll it means parking a command's output across sweeps. | [ADR 0030](../adr/0030-terminal-aware-output.md) § Consequences (rows unconsumed) | medium |
-| **The Handler's 2400-baud teletype**: slow-printed cables with a spacebar skip. Deferred since 1.1.0 for want of output pacing and a mid-print key, which paging builds. | [ADR 0009](../adr/0009-door-games-subsystem.md) § Specifics ("instant render at 1.1.0") | small |
-| **Colour by terminal type** (TERMINAL-TYPE, RFC 1091): no SGR for a terminal that names itself `DUMB` or `UNKNOWN`. The greeting carries most of agora's colour and goes out before the type can arrive, so the greeting waits until negotiation settles, as many BBSes do. | ADR 0030 § Consequences (TERMINAL-TYPE unconsumed) | medium |
-
-### 1.13.1 — the protocol, beyond one board
-
-| Item | Source | Effort |
-|---|---|---:|
-| **Cross-board replies**: `Reply-To:` reaches only the same board today. A reply names its parent's board, and the reply index ([ADR 0027](../adr/0027-reply-index.md)) records it where the parent lives. | [ADR 0005](../adr/0005-threading-via-reply-to.md) | medium |
-| **Operator opt-in raw-mode posts** (ESC / ANSI art) on a board flagged for it, an explicit exception to egress sanitizing. | [ADR 0024](../adr/0024-egress-text-sanitization.md) § Consequences | medium |
 
 ---
 

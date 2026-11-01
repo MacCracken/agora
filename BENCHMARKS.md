@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-30 (1.12.4: § agnos — 1.12.4, the first measurements of agora on an agnos kernel, A/B'd against 1.12.2's #48 drain and 1.12.3's Descent write. 1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-31 (1.13.1: § Serve-level — 1.13.1, `read` A/B'd against 1.13.0 — unchanged. 1.13.0: § Serve-level — 1.13.0, the closeout A/B against 1.12.4 — poll's sequential accepts about 23 % lower because the greeting now waits for the client's first answer; the bench declines the terminal type as it connects; everything else unchanged. 1.12.4: § agnos — 1.12.4, the first measurements of agora on an agnos kernel, A/B'd against 1.12.2's #48 drain and 1.12.3's Descent write. 1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -194,6 +194,51 @@ What the numbers say:
   `sys_write`'s 30 s stall deadline; with the no-wait write the bystander does not notice it.
 - The non-reader was handed 1,928,178 of the 12,248,600 B it asked for in every run: that is what QEMU and the
   host buffer before its window closes.
+
+## Serve-level — 1.13.1 (the reply path)
+
+`benches/serve-bench.py reply`, the 1.13.1 build and the 1.13.0 tree, both binaries on the same filesystem, two
+runs each, alternating. `read` now also reads the cross-board part of the index and looks up the read policy of
+each other board a reply is on (ADR 0035). The bench has no cross-board replies, so this measures what every
+same-board `read` pays for that.
+
+| `read` (fork) | 1.13.0 | 1.13.1 |
+|---|---:|---:|
+| `read 1` with 50 / 200 / 409 replies | 0.52–0.53 / 1.31–1.36 / 2.49–2.55 ms | 0.48–0.50 / 1.32 / 2.51–2.55 ms |
+| `read 2` (no replies), 500 / 2,000 / 4,096 posts | 0.18–0.19 ms | 0.17–0.18 ms |
+
+Unchanged within noise.
+
+## Serve-level — 1.13.0 (closeout; the greeting waits for the terminal type)
+
+`benches/serve-bench.py all`, the 1.13.0 build and a `git archive` of 1.12.4, both binaries copied to the same
+filesystem, three runs each, alternating builds. Since 1.13.0 every bench connection declines TERMINAL-TYPE as it
+connects (`IAC WONT TERMINAL-TYPE`), as a real telnet client answers the DO. Without that, a client that says
+nothing waits `GREET_RAW_MS` (250 ms) for its greeting by design (ADR 0034), and the accept rate would measure the
+wait. Both builds ran the same client.
+
+| Measure | 1.12.4 | 1.13.0 |
+|---|---:|---:|
+| fork accepts, sequential / 8 concurrent | 3,458–3,598 / 9,343–9,457 conn/s | 3,041–3,429 / 7,960–9,023 conn/s |
+| poll accepts, sequential / 8 concurrent | 8,675–9,027 / 10,600–11,619 conn/s | 6,186–7,094 / 9,419–10,676 conn/s |
+| memory per idle session, poll / fork PSS | 12.8 / 65–69 KB | 12.7–12.8 / 65–69 KB |
+| world lock, 1–16 writers | 440–515 txn/s | 467–514 txn/s (two 1-writer runs at 62 and 33) |
+| `read` 1 with 50 / 200 / 409 replies (fork) | 0.47–0.51 / 1.27–1.35 / 2.44–2.68 ms | 0.47–0.55 / 1.29–1.35 / 2.48–2.51 ms |
+| unknown-handle login, 300 / 3,000 users (fork) | 0.16–0.18 / 0.16–0.17 ms | 0.16 / 0.16–0.17 ms |
+
+**Poll's sequential accept rate is about 23 % lower, and that is the design, not a regression to chase.** At 1.12.4
+the MOTD and the prompt went out in the same sweep as the accept. Now they wait for the client's first answer, so
+even a client that declines at once costs the server one more wake, roughly 40 µs a connection on this host. Fork's
+sequential rate is about 5 % lower, for the same reason. The concurrent rates hide most of it. A client that says
+nothing at all is greeted 250 ms after connecting (smoke 40 measures 250–252 ms).
+
+Everything else is unchanged within noise. The slot grew 56 bytes, which the per-session figures cannot see, and
+fork PSS moves in its usual 4 KB step. The two slow 1-writer world-lock runs are the fsync stall seen at 1.11.0
+and 1.12.0; the world lock's code did not change.
+
+`bench_telnet.bcyr`, the same session: 9 / 67 / 76 / 107 / 171 ns (`plain_byte` / `iac_untracked` /
+`iac_tracked_agree` / `subneg_naws` / `announce_salvo`; 1.12.4: 9 / 68 / 78 / 109 / 175). `bench_term.bcyr`: 3.0 /
+3.9 / 19.9 / 40.9 µs (1.12.4: 3.1 / 4.0 / 20.4 / 41.2). Unchanged.
 
 ## Serve-level — 1.12.0 (closeout; door content only)
 

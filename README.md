@@ -43,10 +43,13 @@ agora binary (~874 KB static ELF at 1.3.7)
 │                           + dual serve model (ADR 0023): fork-per-accept
 │                             (ADR 0007) and poll multiplex, AGORA_SERVE
 │                           + clean shutdown via signalfd (SIGINT/SIGTERM)
+│                           + the output gate (ADR 0034): --More-- stops,
+│                             the Handler's teletype, a type-aware greeting
 ├── src/telnet.cyr          RFC 854 IAC + RFC 1143 Q-method + RFC 1073 NAWS
 │                           + RFC 1091 TT + RFC 1184 LINEMODE
 ├── src/term.cyr            display width + word wrap to the client's
 │                           window (NAWS) for every text egress (ADR 0030)
+│                           + page ends, plain terminal types (ADR 0034)
 ├── src/board.cyr           post storage + threading + flock + board layout
 │                           + per-board policy (ADRs 0002 / 0003 / 0004 / 0005)
 │                           + PostHeaders struct (ADR 0008)

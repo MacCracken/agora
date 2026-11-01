@@ -6699,9 +6699,10 @@ fn t238_reply_index(): i64 {
     cmd_alloc(8);
     var before = g_cmd_arena_off;
     if (reply_index_ensure(root, "zax") != 0)  { test_fail(name, "build"); return 1; }
-    # One 16-byte Str for its one directory scan (store_dir_scan's path_str);
-    # nothing per post — a per-reply allocation would exceed it.
-    if (g_cmd_arena_off - before > 16)         { test_fail(name, "the build took arena memory per post"); return 1; }
+    # Nothing per post. Since 1.13.1 the build also lists the other boards
+    # (replies from them, ADR 0035), which costs per BOARD; so the check is that
+    # a rebuild over one more post below costs exactly what this one did.
+    var build_cost = g_cmd_arena_off - before;
     if (reply_index_complete(root, "zax") != 1) { test_fail(name, "no .complete"); return 1; }
     if (t238_expect(root, 1, w, 2) == 0)       { test_fail(name, "index: replies to 1"); return 1; }
     if (t238_expect(root, 2, w5, 1) == 0)      { test_fail(name, "index: replies to 2"); return 1; }
@@ -6714,7 +6715,10 @@ fn t238_reply_index(): i64 {
     xunlink(mk);
     if (t238_expect(root, 1, w, 3) == 0)       { test_fail(name, "no scan once .complete is gone"); return 1; }
     # Rebuilt over the old records: duplicates, removed at read.
+    cmd_alloc(8);
+    var before2 = g_cmd_arena_off;
     if (reply_index_ensure(root, "zax") != 0)  { test_fail(name, "rebuild"); return 1; }
+    if (g_cmd_arena_off - before2 != build_cost) { test_fail(name, "the build took arena memory per post"); return 1; }
     if (t238_expect(root, 1, w, 3) == 0)       { test_fail(name, "duplicates after a rebuild"); return 1; }
     # Ghosts: post 3 (not a reply to 1), post 99 (no such post), and a torn record.
     reply_index_add(root, "zax", 1, 3, 0);
@@ -8076,6 +8080,257 @@ fn t263_nonce_random(): i64 {
     return 0;
 }
 
+# t264 — the 1.13.0 terminal helpers (ADR 0034): where a page ends, which
+# terminal types take no colour, and an escape-free copy of an operator MOTD.
+fn t264_term_pages_and_plain(): i64 {
+    var name = "t264_term_pages_and_plain";
+    var txt = "a\r\nb\r\nc\r\nd\r\n> ";
+    var tl = strlen(txt);
+    # Two rows a page: the stop is after "b\r\n", where "c" starts.
+    if (term_page_stop(txt, 0, tl, 2) != 6)  { test_fail(name, "two-row stop"); return 1; }
+    # Three rows: "d" follows the third LF, and another LF ends it.
+    if (term_page_stop(txt, 0, tl, 3) != 9)  { test_fail(name, "three-row stop"); return 1; }
+    # Four rows: only the prompt follows, which never stops a page alone.
+    if (term_page_stop(txt, 0, tl, 4) != 0 - 1) { test_fail(name, "stopped before a trailing prompt"); return 1; }
+    if (term_page_stop(txt, 0, tl, 9) != 0 - 1) { test_fail(name, "stopped where the rest fits"); return 1; }
+    if (term_page_stop(txt, 3, tl, 2) != 9)  { test_fail(name, "a stop counted from an offset"); return 1; }
+    if (term_page_stop(txt, 0, tl, 0) != 0 - 1) { test_fail(name, "a zero-row page"); return 1; }
+    if (term_type_plain("DUMB", 4) != 1)     { test_fail(name, "DUMB"); return 1; }
+    if (term_type_plain("dumb", 4) != 1)     { test_fail(name, "dumb"); return 1; }
+    if (term_type_plain("Unknown", 7) != 1)  { test_fail(name, "Unknown"); return 1; }
+    if (term_type_plain("XTERM-256COLOR", 14) != 0) { test_fail(name, "xterm lost colour"); return 1; }
+    if (term_type_plain("DUMBER", 6) != 0)   { test_fail(name, "a prefix matched"); return 1; }
+    if (term_type_plain("DUM", 3) != 0)      { test_fail(name, "a short name matched"); return 1; }
+    if (term_type_plain("", 0) != 0)         { test_fail(name, "no name lost colour"); return 1; }
+    var m = "\x1b[36mAGORA\x1b[0m \x1bc!\x1b[";
+    var out[32];
+    var n = term_strip_esc(&out, m, strlen(m));
+    if (n != 7)                              { test_fail(name, "strip length"); return 1; }
+    if (memeq(&out, "AGORA !", 7) != 1)      { test_fail(name, "strip bytes"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# t265 — 1.13.1 (ADR 0035): a reference is `<id>` or `<board>/<id>`; anything
+# else is refused before a board name can reach a path. A cross-board parent is
+# written `Reply-To: <board>/<id>`, and the same-board reader keeps seeing it as
+# no same-board parent.
+fn t265_reply_refs(): i64 {
+    var name = "t265_reply_refs";
+    var b[48];
+    if (reply_ref_parse("7", 1, &b) != 7)              { test_fail(name, "a plain id"); return 1; }
+    if ((load8(&b) & 0xFF) != 0)                        { test_fail(name, "a plain id named a board"); return 1; }
+    if (reply_ref_parse("tech/12", 7, &b) != 12)       { test_fail(name, "board/id"); return 1; }
+    if (streq(&b, "tech") == 0)                         { test_fail(name, "board/id's board"); return 1; }
+    if (reply_ref_parse("main/3", 6, &b) != 3)         { test_fail(name, "main/id"); return 1; }
+    var bad = 0;
+    if (reply_ref_parse("Tech/7", 6, &b) != 0)          { bad = 1; }
+    if (reply_ref_parse("../x/7", 6, &b) != 0)          { bad = 1; }
+    if (reply_ref_parse(".lock/7", 7, &b) != 0)         { bad = 1; }
+    if (reply_ref_parse("tech/", 5, &b) != 0)           { bad = 1; }
+    if (reply_ref_parse("/7", 2, &b) != 0)              { bad = 1; }
+    if (reply_ref_parse("tech/7x", 7, &b) != 0)         { bad = 1; }
+    if (reply_ref_parse("tech/0", 6, &b) != 0)          { bad = 1; }
+    if (reply_ref_parse("a/b/7", 5, &b) != 0)           { bad = 1; }
+    if (reply_ref_parse("1234567890123456789", 19, &b) != 0) { bad = 1; }
+    if (reply_ref_parse("abcdefghijklmnopqrstuvwxyz0123456/7", 35, &b) != 0) { bad = 1; }
+    if (bad == 1) {
+        test_fail(name, "a malformed reference was accepted");
+        return 1;
+    }
+    if ((load8(&b) & 0xFF) != 0) {
+        test_fail(name, "a refused reference left a board");
+        return 1;
+    }
+    # The header round trip.
+    var ph = alloc(64);
+    memset(ph, 0, 64);
+    post_headers_set_subject(ph, "Re: x");
+    post_headers_set_reply_to(ph, 7);
+    post_headers_set_reply_board(ph, "tech");
+    var out = alloc(512);
+    var n = post_format(ph, "body\r\n", 6, out, 512);
+    if (n <= 0)                                         { test_fail(name, "post_format"); return 1; }
+    var found = 0;
+    var i = 0;
+    while (i + 16 <= n) {
+        if (memeq(out + i, "Reply-To: tech/7", 16) == 1) { found = 1; }
+        i = i + 1;
+    }
+    if (found == 0)                                     { test_fail(name, "no Reply-To: tech/7"); return 1; }
+    if (post_reply_to(out, n) != 0) {
+        test_fail(name, "a cross-board parent read as same-board");
+        return 1;
+    }
+    if (post_reply_ref(out, n, &b) != 7)                { test_fail(name, "post_reply_ref id"); return 1; }
+    if (streq(&b, "tech") == 0)                         { test_fail(name, "post_reply_ref board"); return 1; }
+    if (reply_ref_is(&b, 7, "pub", "tech", 7) != 1)     { test_fail(name, "tech/7 from pub is tech's 7"); return 1; }
+    if (reply_ref_is(&b, 7, "pub", "pub", 7) != 0)      { test_fail(name, "tech/7 from pub is not pub's 7"); return 1; }
+    store8(&b, 0);
+    if (reply_ref_is(&b, 7, "pub", "pub", 7) != 1)      { test_fail(name, "a plain 7 is its own board's"); return 1; }
+    if (board_name_cmp("abc", "abd") >= 0)              { test_fail(name, "board order"); return 1; }
+    if (board_name_cmp("ab", "abc") >= 0)               { test_fail(name, "a prefix sorts first"); return 1; }
+    if (board_name_cmp("main", "main") != 0)            { test_fail(name, "equal boards"); return 1; }
+    test_pass(name);
+    return 0;
+}
+
+# Write <root>/<board>/<id>.txt (or <root>/<id>.txt for main) with a raw Reply-To.
+fn t266_post(root, board, id, reply): i64 {
+    var p = alloc(PATH_MAX_BYTES);
+    build_post_path(root, board, id, p);
+    var b = alloc(128);
+    var n = 0;
+    memcpy(b, "Subject: s\r\n", 12); n = 12;
+    if (reply != 0) {
+        memcpy(b + n, "Reply-To: ", 10); n = n + 10;
+        var rl = strlen(reply);
+        memcpy(b + n, reply, rl); n = n + rl;
+        memcpy(b + n, "\r\n", 2); n = n + 2;
+    }
+    memcpy(b + n, "\r\nbody\r\n", 8); n = n + 8;
+    file_write_all(p, b, n);
+    return 0;
+}
+
+# t266 — 1.13.1 (ADR 0035): a reply on another board is recorded in the PARENT's
+# index, listed with its board, and verified against its own header; ghosts and
+# forgeries are dropped; a rebuild finds replies from every other board, `main`
+# included; and a same-board reply is unchanged.
+fn t266_cross_board_index(): i64 {
+    var name = "t266_cross_board_index";
+    var root = "/tmp/agora-t266-store";
+    t_rmtree(root);
+    board_ensure(root, "pub");
+    board_ensure(root, "tech");
+    t266_post(root, "tech", 1, 0);
+    t266_post(root, "main", 1, 0);
+    reply_index_prepare(root);
+    # A reply on pub to tech/1, through post_new.
+    var ph = alloc(64);
+    memset(ph, 0, 64);
+    post_headers_set_reply_to(ph, 1);
+    post_headers_set_reply_board(ph, "tech");
+    if (post_new(root, "pub", ph, "cross", 5) != 1)     { test_fail(name, "post_new cross"); return 1; }
+    # A same-board reply on tech to tech/1.
+    memset(ph, 0, 64);
+    post_headers_set_reply_to(ph, 1);
+    if (post_new(root, "tech", ph, "local", 5) != 2)    { test_fail(name, "post_new local"); return 1; }
+    # A reply on tech to main/1.
+    memset(ph, 0, 64);
+    post_headers_set_reply_to(ph, 1);
+    post_headers_set_reply_board(ph, "main");
+    if (post_new(root, "tech", ph, "to main", 7) != 3)  { test_fail(name, "post_new to main"); return 1; }
+    var ids = alloc(32 * 8);
+    var xs = alloc(XREPLY_MAX * XREF_SIZE);
+    var xn = alloc(8);
+    var c = replies_to_x(root, "tech", 1, ids, 32, xs, XREPLY_MAX, xn);
+    if (c != 1)                                          { test_fail(name, "tech/1's same-board replies"); return 1; }
+    if (load64(ids) != 2)                                { test_fail(name, "tech/1's same-board reply"); return 1; }
+    if (load64(xn) != 1)                                 { test_fail(name, "tech/1's cross-board replies"); return 1; }
+    if (streq(xs + XREF_BOARD, "pub") == 0)              { test_fail(name, "the cross reply's board"); return 1; }
+    if (load64(xs + XREF_ID) != 1)                       { test_fail(name, "the cross reply's id"); return 1; }
+    if (replies_to(root, "tech", 1, ids, 32) != 1) {
+        test_fail(name, "replies_to lists same-board only");
+        return 1;
+    }
+    c = replies_to_x(root, "main", 1, ids, 32, xs, XREPLY_MAX, xn);
+    if (c != 0) {
+        test_fail(name, "main/1 has no same-board replies");
+        return 1;
+    }
+    if (load64(xn) != 1)                                 { test_fail(name, "main/1's reply from tech"); return 1; }
+    if (streq(xs + XREF_BOARD, "tech") == 0)             { test_fail(name, "main/1's reply board"); return 1; }
+    if (load64(xs + XREF_ID) != 3)                       { test_fail(name, "main/1's reply id"); return 1; }
+    # Ghosts and forgeries: no such board, no such post, a post that replies to
+    # something else, a duplicate, and a torn record.
+    t266_post(root, "pub", 2, "tech/9");
+    var rp = alloc(PATH_MAX_BYTES);
+    reply_index_path(root, "tech", 1, rp);
+    var forged = "\nzzz/1\n\npub/5\n\npub/2\n\npub/1\n\npu";
+    store_append_locked(rp, forged, strlen(forged), 0);
+    c = replies_to_x(root, "tech", 1, ids, 32, xs, XREPLY_MAX, xn);
+    if (load64(xn) != 1) {
+        test_fail(name, "a ghost or forged cross record was listed");
+        return 1;
+    }
+    # A rebuild finds the cross replies from pub and the one to main from tech.
+    var dir = alloc(PATH_MAX_BYTES);
+    reply_index_dir(root, "tech", dir);
+    t_rmtree(dir);
+    reply_index_dir(root, "main", dir);
+    t_rmtree(dir);
+    if (reply_index_ensure(root, "tech") != 0)           { test_fail(name, "rebuild tech"); return 1; }
+    if (reply_index_ensure(root, "main") != 0)           { test_fail(name, "rebuild main"); return 1; }
+    c = replies_to_x(root, "tech", 1, ids, 32, xs, XREPLY_MAX, xn);
+    if (c != 1)                                          { test_fail(name, "rebuilt: same-board reply"); return 1; }
+    if (load64(xn) != 1) {
+        test_fail(name, "rebuilt: the cross reply from pub");
+        return 1;
+    }
+    c = replies_to_x(root, "main", 1, ids, 32, xs, XREPLY_MAX, xn);
+    if (load64(xn) != 1) {
+        test_fail(name, "rebuilt: main's reply from tech");
+        return 1;
+    }
+    t_rmtree(root);
+    test_pass(name);
+    return 0;
+}
+
+# t267 — 1.13.1 (ADR 0036): which escape sequences a raw board's art may send
+# (colour, cursor moves, erase), which it may not (anything that makes the
+# terminal answer or switches a mode, OSC, a private marker, an overlong one),
+# and the `.raw` flag (a regular file; a FIFO is refused).
+fn t267_art_csi(): i64 {
+    var name = "t267_art_csi";
+    var ok = "\x1b[1;33m";
+    if (art_csi_len(ok, 0, strlen(ok)) != 7)               { test_fail(name, "SGR"); return 1; }
+    var cl = "\x1b[2J";
+    if (art_csi_len(cl, 0, strlen(cl)) != 4)               { test_fail(name, "erase"); return 1; }
+    var po = "\x1b[10;20Hx";
+    if (art_csi_len(po, 0, strlen(po)) != 8)               { test_fail(name, "position"); return 1; }
+    var bare = "\x1b[m";
+    if (art_csi_len(bare, 0, strlen(bare)) != 3)           { test_fail(name, "a bare SGR"); return 1; }
+    var bad = 0;
+    var b1 = "\x1b[?25l";
+    if (art_csi_len(b1, 0, strlen(b1)) != 0)               { bad = 1; }
+    var b2 = "\x1b[6n";
+    if (art_csi_len(b2, 0, strlen(b2)) != 0)               { bad = 2; }
+    var b3 = "\x1b[21t";
+    if (art_csi_len(b3, 0, strlen(b3)) != 0)               { bad = 3; }
+    var b4 = "\x1b]52;c;eA==\x07";
+    if (art_csi_len(b4, 0, strlen(b4)) != 0)               { bad = 4; }
+    var b5 = "\x1b[1;2;3";
+    if (art_csi_len(b5, 0, strlen(b5)) != 0)               { bad = 5; }
+    var b6 = "\x1b[1111111111111111111111111111111111m";
+    if (art_csi_len(b6, 0, strlen(b6)) != 0)               { bad = 6; }
+    var b7 = "\x1b[ m";
+    if (art_csi_len(b7, 0, strlen(b7)) != 0)               { bad = 7; }
+    var b8 = "\x1bc";
+    if (art_csi_len(b8, 0, strlen(b8)) != 0)               { bad = 8; }
+    if (bad != 0) {
+        test_fail(name, "a forbidden sequence was allowed");
+        return 1;
+    }
+    var root = "/tmp/agora-t267-store";
+    t_rmtree(root);
+    board_ensure(root, "art");
+    if (board_is_raw(root, "art") != 0)                    { test_fail(name, "raw without .raw"); return 1; }
+    var p = alloc(PATH_MAX_BYTES);
+    board_raw_path(root, "art", p);
+    file_write_all(p, "on\n", 3);
+    if (board_is_raw(root, "art") != 1)                    { test_fail(name, "a .raw file"); return 1; }
+    xunlink(p);
+    sys_mknodat(0 - 100, p, 0x1000 | 0x1A4, 0);
+    var fifo = board_is_raw(root, "art");
+    xunlink(p);
+    if (fifo != 0)                                         { test_fail(name, "a FIFO .raw counted"); return 1; }
+    t_rmtree(root);
+    test_pass(name);
+    return 0;
+}
+
 # Run every test in order, print the totals, and return 1 if any test failed.
 fn main(): i64 {
     alloc_init();
@@ -8358,6 +8613,10 @@ fn main(): i64 {
     t261_wager_fair();
     t262_wager_audit_sites();
     t263_nonce_random();
+    t264_term_pages_and_plain();
+    t265_reply_refs();
+    t266_cross_board_index();
+    t267_art_csi();
 
     syscall(1, 1, "------------------------------------------------------\n", 55);
     syscall(1, 1, "tests: ", 7);

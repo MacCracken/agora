@@ -324,6 +324,10 @@ def accept_pace():
         t0 = time.time()
         for _ in range(200):
             s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+            # 1.13.0 (ADR 0034): the greeting waits for the terminal type, 250 ms
+            # for a client that says nothing. This measures the accept path, so
+            # the client declines the type at once, as a telnet client answers.
+            s.sendall(bytes([255, 252, 24]))
             until(s, b"> ", 3.0)
             s.close()
         el = time.time() - t0

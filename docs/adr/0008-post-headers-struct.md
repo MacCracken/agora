@@ -1,6 +1,7 @@
 # 0008 — Post header parameters as a struct (pre-1.0 ABI shape)
 
-> **Status**: Accepted
+> **Status**: Accepted — 1.13.1 added a field, `PH_REPLY_BOARD` (the parent's board, [ADR 0035](0035-cross-board-replies.md)),
+> the additive way this ADR provides for
 > **Date**: 2026-05-23
 
 ## Context

@@ -112,7 +112,7 @@ Every project runs a security audit pass before release — see [first-party-sta
 3. **Syscall review** — `lib/net.cyr` socket calls and `lib/fs.cyr` writes audited per release
 4. **Pointer validation** — no raw pointer dereference of telnet bytes without bounds
 5. **No command injection** — no `sys_system()` with post content; post bodies are inert data
-6. **No path traversal** — board names / thread IDs / handles validated before any path is built, no `../` escape into the post tree
+6. **No path traversal** — board names / thread IDs / handles validated before any path is built, no `../` escape into the post tree. That includes the board half of a `<board>/<id>` reference (a `Reply-To:` value, a reply-index record, a typed `read` / `reply` — 1.13.1): it is parsed only by `reply_ref_parse`, which refuses a board `board_ref_name_ok` rejects
 7. **Store opens refuse what is not a store file** — every store file goes through `store_open` (`store_read_all`, `store_lock_open`, `store_append_locked`): no final symlink, never blocks on a FIFO, regular files only. A plain `file_open` / `file_read_all` on a store path is a bug — a FIFO there hangs the whole poll server ([ADR 0025](docs/adr/0025-store-io-regular-files-and-publish.md)). Directories are listed only through `store_dir_scan`, which refuses a non-directory first (the stdlib's `dir_list_into` blocked on a FIFO until it gained `O_DIRECTORY` in cyrius 6.7.11, 1.9.1; since 1.12.2 the guard is defence in depth)
 8. **Known CVE review** — track BSD telnetd CVEs (CVE-2020-10188, CVE-2011-4862) and verify equivalent defenses
 9. **Document findings** — all issues in `docs/audit/YYYY-MM-DD-audit.md`

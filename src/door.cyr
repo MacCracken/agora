@@ -406,6 +406,14 @@ fn door_play_unlock(fd): i64 {
 # and restores DOOR_EMIT_UNBOUNDED after; direct callers / unit tests render
 # into their own large buffers and are unaffected at the default.
 var g_door_emit_cap = 2000000000;   # = DOOR_EMIT_UNBOUNDED; effectively no bound
+# 1.13.0 (ADR 0034) — 0 for a terminal that takes no colour (it named itself
+# DUMB or UNKNOWN, RFC 1091): emit_sgr then writes nothing. main.cyr sets it for
+# the session being served (sess_load) and render_motd reads it too.
+var g_emit_colour = 1;
+# 1.13.0 (ADR 0034) — where a frame's teletype part starts (an offset into the
+# frame buffer), or -1 for none. A renderer sets it at a line start; main.cyr's
+# door_send_frame clears it before each render and slow-prints from there.
+var g_door_type_from = 0 - 1;
 
 # Append NUL-terminated s at pos, unless it would pass g_door_emit_cap ([D3]); returns the new pos.
 fn emit_cstr(buf, pos, s): i64 {
@@ -442,6 +450,7 @@ fn emit_int(buf, pos, val): i64 {
 #     16-byte over-estimate, so a frame AT the D3 cap may now keep a colour
 #     change it used to drop. No frame reaches the cap (door_send_frame).
 fn emit_sgr(buf, pos, code): i64 {
+    if (g_emit_colour == 0) { return pos; }
     var tmp[8];
     var n = tty_sgr_buf(&tmp, 0, code);     # <= 6 bytes, or -1 if code is outside [0, 999]
     if (n < 0) { return pos; }
