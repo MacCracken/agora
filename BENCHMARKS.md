@@ -1,6 +1,6 @@
 # agora — Benchmarks
 
-> **Last Updated**: 2026-10-31 (1.13.1: § Serve-level — 1.13.1, `read` A/B'd against 1.13.0 — unchanged. 1.13.0: § Serve-level — 1.13.0, the closeout A/B against 1.12.4 — poll's sequential accepts about 23 % lower because the greeting now waits for the client's first answer; the bench declines the terminal type as it connects; everything else unchanged. 1.12.4: § agnos — 1.12.4, the first measurements of agora on an agnos kernel, A/B'd against 1.12.2's #48 drain and 1.12.3's Descent write. 1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
+> **Last Updated**: 2026-10-31 (1.13.2: § agnos — 1.13.2, the yielding sweep — `read` 49 → 276–415 KB/s under KVM, 1,021 under TCG. 1.13.1: § Serve-level — 1.13.1, `read` A/B'd against 1.13.0 — unchanged. 1.13.0: § Serve-level — 1.13.0, the closeout A/B against 1.12.4 — poll's sequential accepts about 23 % lower because the greeting now waits for the client's first answer; the bench declines the terminal type as it connects; everything else unchanged. 1.12.4: § agnos — 1.12.4, the first measurements of agora on an agnos kernel, A/B'd against 1.12.2's #48 drain and 1.12.3's Descent write. 1.12.2: § Toolchain — 1.12.2, cyrius 6.7.9 → 6.7.18 A/B'd against 1.12.1 — parser, wrap and serve level unchanged within noise, except fork PSS per child 72 → 77 KB, all toolchain (a larger data segment). 1.12.0: § Serve-level — 1.12.0, the closeout A/B against 1.11.1 — unchanged. 1.11.0: § Serve-level — 1.11.0, the readiness wait. 1.10.1: § Word wrap — `benches/bench_term.bcyr` and `read` / `list` end to end. 1.10.0: § Parser. 2026-10-12: 1.8.1 re-run, six runs, A/B'd same-day against the 1.8.0 tree: unchanged except `subneg_naws`, whose bench body changed — see §. Prior: 1.8.0 re-run on cyrius **6.7.9**, A/B against the 1.7.1 tree on cyrius 6.6.2 — within noise of each other) | **Host**: Linux x86_64 (workstation; benched on Cyrius 6.0.1 at the 0.9.2 baseline, 6.4.78 at 1.6.1, 6.5.33 at 1.6.7) | **Regen**: `cyrius bench benches/bench_telnet.bcyr`
 
 Top-level performance baseline for the agora telnet protocol layer. Numbers measured with `lib/bench.cyr`'s `bench_run_batch` (10 rounds × 10,000 iterations per measurement; per-iteration averages with min/max bracketing). Each `work_*` function in [`benches/bench_telnet.bcyr`](benches/bench_telnet.bcyr) resets only the parser fields it touches between iterations — the `TelnetState` itself is allocated once outside the timed region.
 
@@ -164,6 +164,24 @@ with the range in parentheses:
 
   The code segment, the heap and the stack are unchanged. Poll mode does not see it: its sessions share one
   process.
+
+## agnos — 1.13.2 (the sweep yields while output moves)
+
+`scripts/agnos-smoke.py`, agnos 1.57.14 in QEMU, the same harness and the same measurements as § agnos — 1.12.4.
+The 1.13.1 figures are a run of the 1.13.1 binaries earlier the same session.
+
+| Measure | 1.13.1 (sleeps `POLL_MS`) | 1.13.2 (yields while moving) |
+|---|---:|---:|
+| `read 1` (61 KB), KVM | 49 KB/s | 276–415 KB/s (three runs) |
+| 4 × `read 1` (245 KB), KVM | 109 KB/s | 475–717 KB/s |
+| `read 1`, TCG | 48–192 KB/s (1.12.4) | 1,021 KB/s |
+| 4 × `read 1`, TCG | 105–318 KB/s (1.12.4) | 1,532 KB/s |
+| a bystander's worst echo while a client reads nothing (KVM) | 31 ms | 30–31 ms |
+
+The blocking #48 send of 1.12.2 moved the same `read` at 2,680 KB/s under KVM, and held a bystander 23.8 s. What
+is left between 1.13.2 and that is the kernel's: one segment in flight, and a ring-3 wake per segment where #48's
+in-kernel wait is woken by the ACK itself. Filed with agnos
+(`docs/development/issues/2026-10-31-tcp-send-keeps-one-segment-in-flight.md`).
 
 ## agnos — 1.12.4 (the poll send path on a real kernel)
 

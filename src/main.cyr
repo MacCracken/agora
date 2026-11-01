@@ -3794,6 +3794,47 @@ fn gate_key(s, cfd, board, b): i64 {
     return 1;
 }
 
+# 1.13.2 — the last time any session's drain sent bytes (clock ms). Read by
+# poll_tx_moving; set in session_drain_wait on both targets, used on agnos.
+var g_tx_progress_ms = 0;
+
+# 1 when the poll sweep should yield rather than sleep (agnos, 1.13.2): a session
+# has output the gate releases and some drain sent bytes in the last TX_MOVING_MS.
+#
+# Why. The agnos kernel keeps ONE segment in flight per connection and sends the
+# next only once the last is ACKed (net_tcp.cyr, tcp_send_ex), and agnos has no
+# readiness wait for "writable" — its epoll_wait is a poll, readable only, eight
+# watches. Filed with agnos, asking for a send window or a real wait:
+#   docs/development/issues/2026-10-31-tcp-send-keeps-one-segment-in-flight.md
+# So a no-wait drain
+# (1.12.3) moves one segment per sweep, and a sweep that sleeps POLL_MS (~30 ms
+# with the tick) capped a single reader at 48 KB/s under KVM (1.12.4). A yield
+# parks the CPU until the next interrupt, and the ACK that frees the next segment
+# is a NIC interrupt, so the sweep comes back when there is something to send.
+# The progress window keeps a stalled reader (a zero window: nothing moves) from
+# holding the loop awake: once nothing has moved for TX_MOVING_MS the sweep
+# sleeps as before.
+fn poll_tx_moving(now): i64 {
+    if (g_sess_pool == 0) { return 0; }
+    var i = 0;
+    while (i < MAX_SESS) {
+        var s = load64(g_sess_pool + i * 8);
+        if (load64(s + SESS_ACTIVE) != 0) {
+            if (sess_tx_moving(s, now) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if session s has output the gate releases while some drain has sent within
+# TX_MOVING_MS (poll_tx_moving's test, per session).
+fn sess_tx_moving(s, now): i64 {
+    if (now - g_tx_progress_ms >= TX_MOVING_MS) { return 0; }
+    if (sess_tx_limit(s) > load64(s + SESS_TX_OFF)) { return 1; }
+    return 0;
+}
+
 # Flush session s's tx queue to its socket WITHOUT WAITING: session_drain_wait
 # with no wait. Returns 0 = fully drained (queue reset), 1 = partial (remainder
 # kept for the next sweep), <0 = socket error or a refused enqueue (caller
@@ -3842,7 +3883,11 @@ fn session_drain(s): i64 {
 # QEMU, a 61 KB `read 1`; BENCHMARKS.md): 48 KB/s under KVM, the one-per-sweep
 # case, and 48-192 KB/s under TCG, where QEMU's ACK can land inside the drain.
 # #48 pushed the same read at 2,680 / 673 KB/s, and held every other session
-# while it did: a non-reading client stalled a bystander for 23.8 s. A kernel
+# while it did: a non-reading client stalled a bystander for 23.8 s. Since 1.13.2
+# the agnos sweep yields instead of sleeping while output is moving
+# (poll_tx_moving), so the next segment goes on the ACK's interrupt: 276-415 KB/s
+# for that read under KVM. The rest of the gap is the kernel's (one segment in flight,
+# no wait for "writable"), filed with agnos. A kernel
 # without #109 keeps the 1.7.0 bound exactly: one #48 per drain. Whether #109
 # exists is the stdlib's own probe (`_agnos_sock_send_left`, cached in
 # `_agnos_sdl_ok` and shared with every `sys_write` to a socket);
@@ -3910,6 +3955,7 @@ fn session_drain_wait(s, wait_us): i64 {
         }
         if (n == 0) { done = 1; rc = 1; continue; }
         tx_off = tx_off + n;
+        if (n > 0) { g_tx_progress_ms = clock_now_ms(); }   # 1.13.2 — poll_tx_moving
         # agnos only: send again only after a NO-WAIT #109. A #48 (a kernel before
         # 1.57.13) or a ceilinged #109 has had its one send; yield to the sweep.
         # `continue` re-tests the loop guard, so the flag+continue idiom is
@@ -4222,6 +4268,7 @@ enum PollRuntime {
     POLL_LINE_BUDGET = 1;      # 1.8.1 (H2) — counted lines per session per sweep
     POLL_MS      = 20;         # sweep cadence on agnos (no poll(2)); Linux waits on readiness
     POLL_WAIT_MAX_MS = 1000;   # 1.11.0 — the longest readiness wait (timers are re-checked)
+    TX_MOVING_MS = 100;        # 1.13.2 — agnos: a drain that sent within this long keeps the sweep yielding
     POLL_FDS_MAX = 130;        # 1.11.0 — listener + signalfd + a client and a MUD socket per slot
     POLL_IN      = 1;          # poll(2) events (Linux / macOS, cross-arch identical)
     POLL_OUT     = 4;
@@ -4713,9 +4760,14 @@ fn serve_poll(sfd): i64 {
         # not a rate limit, so a lone scripted client still runs at full speed.
         # 1.11.0 (ADR 0031) — on Linux a readiness wait (serve_poll_wait), not a
         # fixed 20 ms sleep; agnos has no poll(2) and keeps the paced sweep.
+        # 1.13.2 — on agnos, while output is moving the sweep YIELDS instead
+        # (poll_tx_moving): a yield parks the CPU until the next interrupt, and the
+        # peer's ACK is one, so the next segment goes when the last is taken
+        # instead of at the next 20 ms sleep's end.
         if (parked == 0) {
             #ifdef CYRIUS_TARGET_AGNOS
-            sys_sleep_ms(POLL_MS);
+            if (poll_tx_moving(clock_now_ms()) == 1) { sys_sched_yield(); }
+            else { sys_sleep_ms(POLL_MS); }
             #endif
             #ifndef CYRIUS_TARGET_AGNOS
             serve_poll_wait(sfd, sigfd);

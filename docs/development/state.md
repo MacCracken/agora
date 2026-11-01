@@ -6,11 +6,10 @@ type: state
 
 # agora — State Snapshot
 
-> **Last refresh**: 2026-10-31 — **1.13.1 cut**: roadmap § 1.13.1 shipped, closing the 1.13.x arc. Replies
-> cross boards (`reply tech/7`, `Reply-To: <board>/<id>`, recorded in the parent board's index; ADR 0035), and an
-> operator can flag a board raw for ANSI art, whose colour and cursor moves reach the reader and nothing else does
-> (`agora raw set <board> on`; ADR 0036). 289 tests (`t265`–`t267`, `s22`–`s23`), smoke 41. 1.13.0 (the output
-> gate) is in the same uncommitted tree.
+> **Last refresh**: 2026-10-31 — **1.13.2 cut**: 1.12.4's agnos throughput follow-up. The agnos poll sweep
+> yields instead of sleeping while output is moving, so a single reader's `read` rose from 49 to 276–415 KB/s under
+> KVM, with no spinning for a stalled reader. The kernel's half (one segment in flight, no wait for "writable") is
+> filed with agnos. 290 tests (`s24`).
 > **Replace this paragraph each release — do not append to it.** History lives in [`CHANGELOG.md`](../../CHANGELOG.md) and git.
 
 Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd), CLAUDE.md holds **durable rules**; this file holds **volatile state**. If a claim drifts within a minor's worth of work, it belongs here, not in CLAUDE.md.
@@ -64,6 +63,10 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
    - **The stdlib can change a primitive's blocking behaviour under you** [1.8.1]: cyrius 6.6.7 made the
      agnos socket `sys_write` retry for up to 30 s, which silently broke `session_drain`'s bound at the
      1.8.0 pin move. On a toolchain bump, re-read the bodies of the syscall wrappers the serve loops use.
+   - **On agnos the sweep yields only while output MOVES** [1.13.2]: `poll_tx_moving` is true while a session
+     has releasable output and some drain sent within `TX_MOVING_MS`; otherwise it sleeps `POLL_MS`. Never yield
+     on "has output" alone: a stalled reader's queue is never empty, and the loop would wake on every interrupt
+     for as long as it stays connected.
    - **On agnos, "no wait" is a NEGATIVE ceiling** [1.12.3]: `sock_send_dl` #109 reads a 0 ceiling as NO
      ceiling (exactly #48, ~8 s per stall), so `session_drain_wait` passes -1, never 0. It also reads the
      stdlib's private `_agnos_sdl_ok` (1 = the call just made was #109) and calls `_agnos_sock_send_left`:
@@ -168,7 +171,7 @@ Per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnos
 
 | Field | Value |
 |---|---|
-| **Released** | `1.13.1` (2026-10-31) — the protocol, beyond one board: cross-board replies, raw boards for ANSI art. Previous: `1.13.0` (2026-10-31) — the output gate |
+| **Released** | `1.13.2` (2026-10-31) — agnos: the sweep yields while output moves (49 → 276–415 KB/s). Previous: `1.13.1` (2026-10-31) — cross-board replies, raw boards |
 | **In flight** | none — next is **1.14.0** (QUEST async PvP), see § In-flight slot |
 | **Toolchain pin** | cyrius `6.7.18` (`cyrius.cyml [package].cyrius`; at 1.12.2 the local snapshot's 113 stdlib files and its `cycc` were verified byte-identical to the tag, and `SOURCE_COMMIT` matches it) |
 | **Source of truth** | `VERSION` at the repo root |
@@ -197,7 +200,7 @@ static arrays are now under the compiler's 128 KB threshold.
 | Surface | Status (1.13.1) |
 |---|---|
 | `tests/agora.tcyr` | **266** module tests (src/test.cyr until 1.8.2; 1.12.1: t261–t262; 1.12.4: `t263` the CSPRNG nonce; 1.13.0: `t264` page ends, plain types, escape stripping; 1.13.1: `t265`–`t267` references, the cross-board index, the art whitelist) — also under `cyrius test --aarch64` (qemu) |
-| `tests/serve.tcyr` | **23** serve-layer tests (1.13.1: `s22` cross-board replies over the session, `s23` a raw board — 14 mutants, all killed) (1.11.1: `s13` registry conformance, `s14` world-pointer guard; 1.12.0: `s15` `--door-days`; 1.12.1: `s16` the wager audit trail; 1.12.3: `s17` make-room compacts before it drains; 1.13.0: `s18`–`s21` the page stop under poll and fork, the deferred greeting, the teletype — 15 mutants, all killed) (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu. The agnos send arm compiles only under `--agnos` and runs only on an agnos kernel, so no test reaches it |
+| `tests/serve.tcyr` | **24** serve-layer tests (1.13.2: `s24` the agnos sweep's moving rule; 1.13.1: `s22` cross-board replies over the session, `s23` a raw board — 14 mutants, all killed) (1.11.1: `s13` registry conformance, `s14` world-pointer guard; 1.12.0: `s15` `--door-days`; 1.12.1: `s16` the wager audit trail; 1.12.3: `s17` make-room compacts before it drains; 1.13.0: `s18`–`s21` the page stop under poll and fork, the deferred greeting, the teletype — 15 mutants, all killed) (src/main.cyr over a socketpair; new at 1.8.2, mutation-checked) — also under qemu. The agnos send arm compiles only under `--agnos` and runs only on an agnos kernel, so no test reaches it |
 | `fuzz/telnet_iac.fcyr` | green plain, `--poison` and `--poison=ab` (CI runs plain + `ab` since 1.8.2); since 1.10.0 it agrees the client options before its structured subnegotiations, checks for torn replies, and drives 656 targeted LINEMODE frames |; since 1.11.0 a sixth pass drives the Descent negotiation observer (3,000 visits in split pieces, guard band) and the return resync (invariants 24 / 25)
 | `fuzz/term_wrap.fcyr` | new at 1.10.1: the word wrap — 6,000 adversarial texts (6.1 MB) each wrapped four ways, seven invariants (nothing but whitespace dropped, breaks only at whitespace, no escape sequence split — by its own parser, chunk-size independence, rows within the width, identity when everything fits, no runaway); green plain and `--poison=ab`, in CI and release; 1.12.2 fixed two literal lengths in its debug-only report (the 6.7.18 linter's new check) |
 | `docs/examples/` | **41** smokes (1.13.0: `40-terminal-pacing.py`, the output gate; 1.13.1: `41-cross-board.py`); `run.sh`: both legs green at 1.13.0 on cyrius 6.7.18 (**fork 39/39, poll 39/39** with `--skip 01`); CI runs it per model |
@@ -209,12 +212,16 @@ static arrays are now under the compiler's 128 KB threshold.
 
 ## In-flight slot
 
-**None.** 1.13.0 and 1.13.1 shipped their slots as planned, closing the 1.13.x arc. Next is **1.14.0 — QUEST
-async PvP**, the first of the 1.14.x door-depth arc. See roadmap § 1.14.0. Open follow-up from 1.12.4: a single
-reader's bulk rate on agnos (48 KB/s under KVM).
+**None.** 1.13.0 and 1.13.1 shipped their slots as planned, closing the 1.13.x arc, and 1.13.2 took a patch slot
+for 1.12.4's agnos throughput follow-up. Next is **1.14.0 — QUEST async PvP**, the first of the 1.14.x door-depth
+arc. See roadmap § 1.14.0. Waiting on agnos: a send window or a blocking `epoll_wait` with `EPOLLOUT` (agnos issue
+2026-10-31) would let the agnos sweep wait on readiness and lift the rest of the throughput gap.
 
 ## Recent shipped
 
+- **1.13.2** (2026-10-31) — agnos: the poll sweep yields (`sched_yield` #44) instead of sleeping while a drain is
+  moving bytes (`poll_tx_moving`), so the next segment goes on the ACK's interrupt: `read` 49 → 276–415 KB/s under KVM.
+  The kernel's half filed with agnos. 290 tests.
 - **1.13.1** (2026-10-31) — cross-board replies (ADR 0035: `<board>/<id>` references for `reply`, `read` and
   `--reply-to`; records in the parent board's index under both locks; readers see only what they may open) and
   raw boards (ADR 0036: `agora raw set`, a CSI whitelist for ANSI art). 289 tests, 41 smokes.

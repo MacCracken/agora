@@ -3,7 +3,7 @@
 > **Status**: Accepted — **amended by [ADR 0031](0031-descent-session-state.md) (1.11.0)**; the agnos drain
 > amended at 1.12.3 (§ Decision, the sweep: a no-wait send on agnos ≥ 1.57.13) and measured on agnos at 1.12.4,
 > when the Descent's write to the MUD stopped waiting too; at 1.13.0 the drain sends only up to the output gate's
-> hold ([ADR 0034](0034-output-gate.md))
+> hold ([ADR 0034](0034-output-gate.md)); at 1.13.2 the agnos sweep yields instead of sleeping while output moves
 > **Date**: 2026-07-26 (recorded retroactively — the decision shipped at 1.5.0 / 1.6.0)
 > **Amends**: [ADR 0007](0007-fork-per-accept-concurrency.md) — see § Relationship to ADR 0007.
 
@@ -103,6 +103,26 @@ The poll model is built from four pieces:
   >   into a held FIN slot, which the persist cap does not cover, so the kernel gives up on it after five
   >   resends, about 47 s; it then drops every later segment from the peer without the RST RFC 9293
   >   § 3.10.7.1 requires. Filed as agnos issue 2026-10-31.)*
+  >
+  > **1.13.2 amendment — the sweep yields while output is moving (agnos).** The 1.12.4 limitation had two
+  > halves. One was agora's: the sweep slept `POLL_MS` (about 30 ms with the tick) even while a drain was
+  > moving bytes, so a reader got one segment per sleep. The other is the kernel's: one segment in flight per
+  > connection, and no readiness wait in ring 3 for "writable" (`epoll_wait` #21 is a poll, readable only,
+  > eight watches).
+  > - **agora's half.** While some session has output the gate releases and a drain sent within
+  >   `TX_MOVING_MS` (100 ms; `poll_tx_moving`), the sweep calls `sched_yield` #44 instead of sleeping. A
+  >   yield parks the CPU until the next interrupt, and the ACK that frees the next segment is one (the
+  >   virtio-net RX MSI-X), so the next segment goes when the last is taken. A stalled reader makes no
+  >   progress, so after `TX_MOVING_MS` the sweep sleeps as before and nothing spins. Measured under KVM: a
+  >   61 KB `read 1` at 276–415 KB/s (was 49), four pipelined at 475–717 KB/s (was 109), and a bystander's
+  >   worst echo unchanged at 30–31 ms; under TCG 1,021 / 1,532 KB/s. The sweep still never waits in a send.
+  > - **The kernel's half**, filed with agnos (`docs/development/issues/2026-10-31-tcp-send-keeps-one-segment-in-flight.md`):
+  >   a send window (more than one segment in flight) or a blocking `epoll_wait` with `EPOLLOUT`. Either would
+  >   let a non-blocking server approach #48's 2,680 KB/s; with the second, the agnos sweep can wait on
+  >   readiness as the Linux one does.
+  > - **Not taken: a short ceiling on #109 for a moving session.** An in-kernel wait of a few ms for the ACK
+  >   would recover most of the rest, at the cost of holding the sweep that long per moving session per sweep.
+  >   That is the trade 1.12.3 removed, and it would grow with the number of readers.
   >
   > **Capacity note (audit I13):** agnos' stdlib socket table holds 8 sockets, so the real ceiling there
   > is ~8 sessions (a Descent visit uses one more), not `MAX_SESS` = 64.

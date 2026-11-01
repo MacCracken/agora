@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.2] — 2026-10-31 (agnos: the sweep yields while output moves)
+
+The follow-up 1.12.4 recorded. On agnos a single reader's bulk rate was 48 KB/s under KVM against 2,680 KB/s for
+the blocking send 1.12.3 replaced. Half of that gap was agora's and is fixed here: the poll sweep slept ~30 ms even
+while it was sending. The other half is the agnos kernel's (one segment in flight, and no way for ring 3 to wait
+for "writable"). It is filed upstream as
+`agnos/docs/development/issues/2026-10-31-tcp-send-keeps-one-segment-in-flight.md`. Linux is unchanged.
+
+**290** tests (266 module + 24 serve-layer, with `s24` new). `build/agora` 1,231,344 B, `--agnos` 1,223,872 B, `--aarch64` 2,943,280 B (+16 each).
+
+### Fixed
+
+- **agnos: the sweep yields instead of sleeping while output is moving** (`poll_tx_moving`, `sess_tx_moving`,
+  `src/main.cyr`).
+  - **Why it was slow.** The agnos kernel keeps one segment in flight per connection, so a no-wait drain moves
+    one segment per sweep. The sweep slept `POLL_MS` between passes, about 30 ms with the 100 Hz tick, which
+    capped one reader at about 48 KB/s.
+  - **The change.** Now, while a session has output the gate releases and some drain sent within `TX_MOVING_MS`
+    (100 ms), the sweep calls `sched_yield` #44. That parks the CPU until the next interrupt, and the ACK that
+    frees the next segment is one (virtio-net RX MSI-X).
+  - **No spinning.** A stalled reader makes no progress, so the sweep goes back to sleeping after 100 ms.
+  - **Unchanged:** the sweep still never waits in a send (1.12.3), and a bystander's echo is unchanged.
+  - **Measured on agnos 1.57.14 under KVM:** a 61 KB `read 1` at **276–415 KB/s** (was 49), four pipelined at
+    **475–717 KB/s** (was 109). Under TCG: 1,021 and 1,532 KB/s (1.12.4: 48–192 and 105–318). BENCHMARKS.md
+    § agnos — 1.13.2.
+
+### Added
+
+- **`s24`**: the moving rule, per session. Output the gate releases plus recent progress means moving. No output,
+  a held page, or no progress for `TX_MOVING_MS` means the sweep sleeps. Three mutants, all killed.
+
+### Known limitations (recorded, not fixed)
+
+- **agnos bulk throughput is still well short of the blocking send's** (276–415 vs 2,680 KB/s, KVM). Each segment
+  still costs a round trip plus a ring-3 wake, where #48's in-kernel wait is woken by the ACK itself. The cure is
+  the kernel's: a send window, or a blocking `epoll_wait` with `EPOLLOUT` (the agnos issue above). With the second,
+  agora's agnos sweep would wait on readiness as its Linux sweep does.
+- **Not taken: a short ceiling on #109 for a moving session.** It would recover most of the rest, but hold the
+  sweep that long per moving reader per pass. That is the trade 1.12.3 removed ([ADR 0023](docs/adr/0023-dual-serve-model.md)
+  § 1.13.2).
+
+### Verification
+
+- **agnos 1.57.14** (`scripts/agnos-smoke.py`): **8/8** on the 1.13.2 binaries under KVM, and 8/8 under TCG on the
+  same code. Three KVM runs gave a `read` of 276–415 KB/s and four pipelined 475–717 KB/s. The run before the
+  change, on the 1.13.1 binaries the same session, gave 49 and 109. A bystander's worst echo stayed at 30–31 ms,
+  and the stalled non-reader still went quiet, so nothing spun on it. One KVM run reported 7/8 because VERSION was
+  bumped to 1.13.2 while it was testing the 1.13.1 binary, and its `serve` check reads VERSION at start. Every
+  other check in that run passed.
+- `cyrius test`: **266/266** + **24/24**, and the same under `--aarch64` (qemu-user). `s24` is mutation-checked:
+  three mutants (no progress window, no progress mark, the queue's length instead of the gate's limit), all
+  killed. Both fuzz harnesses are green, plain and `--poison=ab`.
+- Example smokes on the final tree, in a copy of it: fork **40/40**. Poll passed 39 of 40: smoke 32 (store
+  hardening) failed once. The fork leg's passing run overwrote its log, so which check failed is not known.
+  Five reruns of 32 in the poll leg passed, two of them pinned to two cores. On Linux, 1.13.2 changes only one
+  clock read per drain that sends.
+- `cyrius audit` exits 0, and the tree-wide `cyrius lint` finds 0 untracked deferrals and 0 warnings.
+- `scripts/check-version-sync.sh --tag 1.13.2` OK. `build/agora`, `--agnos` and `--aarch64` build clean.
+
 ## [1.13.1] — 2026-10-31 (the protocol, beyond one board)
 
 1.13.1 lifts two limits that date from M5:

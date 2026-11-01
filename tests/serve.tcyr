@@ -1884,8 +1884,48 @@ fn s23_raw_board(): i64 {
     return 0;
 }
 
+# s24 — agnos's sweep yields while output is moving (1.13.2). The rule, per
+# session: output the gate releases, and a drain that sent within TX_MOVING_MS.
+# No pending output, a held page, or no recent progress (a stalled reader) means
+# the sweep sleeps as before. (The yield itself is agnos-only; the rule is not.)
+fn s24_tx_moving(): i64 {
+    var name = "s24_tx_moving";
+    var fds = alloc(16);
+    if (st_pair(fds) != 0) { st_fail(name, "socketpair"); return 1; }
+    var a = load64(fds);
+    var b = load64(fds + 8);
+    sock_set_nonblocking(a);
+    sock_set_nonblocking(b);
+    g_serve_mode = SERVE_POLL;
+    var s = st_session(a);
+    g_tx_progress_ms = 0;
+    var now = clock_now_ms();
+    sess_tx_enqueue(s, "0123456789", 10);
+    if (sess_tx_moving(s, now) != 0) { st_fail(name, "moving before anything was sent"); return 1; }
+    session_drain(s);
+    if (now - g_tx_progress_ms > 1000) { st_fail(name, "a drain that sent did not mark progress"); return 1; }
+    now = clock_now_ms();
+    if (sess_tx_moving(s, now) != 0) { st_fail(name, "moving with nothing left to send"); return 1; }
+    sess_tx_enqueue(s, "abcdefghij", 10);
+    if (sess_tx_moving(s, now) != 1) { st_fail(name, "not moving with output and recent progress"); return 1; }
+    if (sess_tx_moving(s, g_tx_progress_ms + TX_MOVING_MS) != 0) {
+        st_fail(name, "still moving after TX_MOVING_MS with no progress");
+        return 1;
+    }
+    # A held page: nothing the gate releases.
+    store64(s + SESS_TX_HOLD, load64(s + SESS_TX_OFF));
+    store64(s + SESS_GATE, GATE_PAGED);
+    if (sess_tx_moving(s, now) != 0) { st_fail(name, "moving on a held page"); return 1; }
+    gate_lift(s);
+    st_tx_reset(s);
+    file_close(a);
+    file_close(b);
+    st_pass(name);
+    return 0;
+}
+
 # Entry point: make a per-pid scratch store under /tmp, register the doors,
-# run s01..s23, remove the store, print the totals, and return 1 on any failure.
+# run s01..s24, remove the store, print the totals, and return 1 on any failure.
 fn serve_tests(): i64 {
     alloc_init();
     syscall(1, 1, "agora serve-layer tests (src/main.cyr)\n", 39);
@@ -1920,6 +1960,7 @@ fn serve_tests(): i64 {
     s21_handler_teletype();
     s22_cross_board_session();
     s23_raw_board();
+    s24_tx_moving();
 
     st_rmtree(root);
     syscall(1, 1, "tests: ", 7);

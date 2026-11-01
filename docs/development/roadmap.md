@@ -1,8 +1,9 @@
 # agora — Roadmap
 
 > **Last Updated**: 2026-10-31 — 1.13.1 shipped its slot as planned (cross-board replies, ADR 0035; raw boards
-> for ANSI art, ADR 0036), and with it the 1.13.x arc, so that arc is gone. 1.13.0 (the output gate, ADR 0034) and
-> the patch cuts before it (1.12.2–1.12.4) changed nothing planned. Rebuilt at 1.12.1 as the single, forward-only
+> for ANSI art, ADR 0036), and with it the 1.13.x arc, so that arc is gone. 1.13.2 took the next patch slot for
+> 1.12.4's agnos throughput follow-up (the sweep yields while output moves; the kernel's half filed with agnos).
+> 1.13.0 (the output gate, ADR 0034) and the patch cuts around it changed nothing planned. Rebuilt at 1.12.1 as the single, forward-only
 > plan: [`CHANGELOG.md`](../../CHANGELOG.md) is the record of what is done, and [`state.md`](state.md) says where
 > agora stands today. Next slot: **1.14.0**.
 >
